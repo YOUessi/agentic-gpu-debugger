@@ -1,0 +1,50 @@
+# Agentic GPU Debugger
+
+面向 CUDA 故障的证据驱动诊断工具。Python 负责 Agent/CLI/证据与验证编排，CUDA C++ 负责真实 kernel 和可信 host harness。
+
+当前仅实现 T01 环境诊断。尚未实现源码诊断、模型补丁、隔离执行或修复验证。
+
+## 独立环境
+
+使用 Conda 同时固定 Python 和原生 CUDA 开发工具，环境内的 Python 依赖用 pip 锁定。不叠加 venv，不复用其他项目的 PyTorch 环境。Conda **不是**安全沙箱；候选代码只能在后续的 Docker 隔离后端执行。
+
+首次创建（已存在环境时不要重复创建或覆盖）：
+
+```bash
+conda env create --prefix /home/you/conda_env/agentic-gpu-debugger -f environment.yml
+conda activate /home/you/conda_env/agentic-gpu-debugger
+python -I -m pip install -r requirements.lock
+python -I -m pip install --no-deps -e .
+```
+
+`environment.yml` 固定 CUDA 12.8 Update 1 的必需组件，未包含不需要的 Nsight GUI/数学库。实际安装的原生包 URL/SHA256 已保存到 `environment.lock.txt`；精确复现时用 `conda create --prefix /absolute/new/prefix --file environment.lock.txt` 替代上面的 YAML 创建命令，再安装 Python 依赖与本包。该 lock 仅适用于 Linux x86_64。
+
+本机 shell 的 `PYTHONPATH` 包含 ROS Python 3.10 路径，因此使用 `python -I` 排除外部 Python 路径和用户 site-packages，不改动 ROS 或全局配置。依赖安装也使用该模式。
+
+## 环境诊断
+
+```bash
+python -I -m gpu_agent env --json
+python -I -m gpu_agent env --cuda-root /usr --json
+```
+
+也提供 `gpu-agent env` 控制台入口。默认 CUDA root 为当前 Python 环境 prefix；可以用 `--cuda-root`、`--cuda-bin` 或 `GPU_AGENT_CUDA_ROOT` / `GPU_AGENT_CUDA_BIN` 指定绝对路径，CLI 参数优先。不根据 torch/CUDA runtime 版本推断 NVCC。
+
+退出码：0 = 元数据符合基线，1 = 未就绪，2 = 配置无效。输出包含实际路径、工具版本、GPU/Driver/SM、原始探测结果和 reason codes。未知版本保留 null。
+
+`ready=true` 仅表示 `readiness_scope=metadata_only`，`execution_verified` 始终为 false。真实编译运行在 T02 验收；容器与 Sanitizer 执行能力在 T03 验收。版本查询不能证明头文件/链接器/GPU 执行路径已经可用。
+
+当前元数据门禁限定 Linux x86_64、NVCC 12.8.x、Sanitizer 2025.1.x、GCC 6–14 和目标 SM 8.9。Driver 570.124.06 是本项目采用的保守基线，不是 CUDA 12.x minor compatibility 的最低要求。依据：[CUDA 12.8.1 安装指南](https://docs.nvidia.com/cuda/archive/12.8.1/cuda-installation-guide-linux/index.html)、[Release Notes](https://docs.nvidia.com/cuda/archive/12.8.1/cuda-toolkit-release-notes/index.html)。当前版本只执行操作者指定的版本查询程序，不接受模型工具调用。
+
+## 验证
+
+```bash
+python -I -m pytest tests/unit -q
+python -I -m ruff check src tests
+python -I -m mypy src/gpu_agent
+python -I -m pip check
+```
+
+已注册 `gpu`、`container`、`live_llm`、`release` 标记。`--require-live` 将带这些标记的 skipped 测试变为失败；收集阶段 skip 也失败，防止缺少必需环境时假通过。完整的发布覆盖计数门禁留待 T12；目前单元测试通过不代表 GPU/模型功能通过。
+
+本次真实验证与安装调整见 [T01 验证记录](docs/t01-validation.md)。设计与依赖顺序见 [V2 规格](PROJECT_SPEC_CN_V2.md) 和 [实施计划](IMPLEMENTATION_PLAN_CN_V2.md)。不按开发天数安排任务。
