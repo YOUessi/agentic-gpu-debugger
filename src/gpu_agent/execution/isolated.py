@@ -47,7 +47,7 @@ from gpu_agent.execution.models import (
     WorkspaceHandle,
     WorkspaceRequest,
 )
-from gpu_agent.execution.process import ProcessCapture
+from gpu_agent.execution.process import ProcessCapture, ProcessExecutor
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
 
 LOCK_PATH = Path(__file__).resolve().parents[3] / "containers/toolchain.lock.json"
@@ -98,9 +98,17 @@ class _Envelope(BaseModel):
 
 class IsolatedGPUBackend(LocalBackend):
     def __init__(self, store: RunStore, public_source_root: Path, workspace_root: Path) -> None:
-        super().__init__(Settings(), store, public_source_root, workspace_root)
+        # Deliberately do not relax LocalBackend's public-only exact-hash trust gate.
+        self.settings, self.store = Settings(), store
+        self.repo_root = public_source_root.absolute()
+        self.workspace_root = workspace_root.absolute()
+        reject_symlinks(self.repo_root)
+        reject_symlinks(self.workspace_root)
+        self.workspace_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self._workspaces: dict[str, _Workspace] = {}
+        self._executor = ProcessExecutor()
         self.policy = IsolationPolicy()
-        self.evidence = EvidenceRepository(store)
+        self.evidence = EvidenceRepository(store, evaluator=store.visibility == "evaluator")
         self._owner = new_id()
         self._image: str | None = None
         self._base: str | None = None
@@ -141,7 +149,9 @@ class IsolatedGPUBackend(LocalBackend):
             for name, data in snapshots.items():
                 self._write_snapshot(directory / name, data)
                 refs.append(
-                    self.store.put(request.run_id, f"sources/{handle.id}/{name}", data, "public")
+                    self.store.put(
+                        request.run_id, f"sources/{handle.id}/{name}", data, self.store.visibility
+                    )
                 )
             self._workspaces[handle.id] = _Workspace(
                 handle=handle,
@@ -387,9 +397,19 @@ class IsolatedGPUBackend(LocalBackend):
                 state, "build", capture, payload, stdout, stderr, request_id
             ),
         )
-        bundle = self.evidence.public_view(state.handle.run_id)
+        bundle = self.evidence.view(state.handle.run_id)
         self.evidence.save(state.handle.run_id, bundle.model_copy(update={"build_result": result}))
         return result
+
+    def _put(self, state: _Workspace, name: str, data: bytes) -> ArtifactRef:
+        return self.store.put(state.handle.run_id, name, data, self.store.visibility)
+
+    def _input(self, state: _Workspace, ref: ArtifactRef) -> bytes:
+        if ref.run_id != state.handle.run_id or ref.visibility != self.store.visibility:
+            raise ValueError("input belongs to another run or store")
+        if ref.byte_count > 32 * 1024 * 1024:
+            raise ValueError("input exceeds process limit")
+        return self.store.read(ref)
 
     def _binary(self, state: _Workspace) -> ArtifactRef:
         self._check_snapshot(state)
@@ -425,7 +445,7 @@ class IsolatedGPUBackend(LocalBackend):
                 state, "run", capture, payload, stdout, stderr, request_id
             ),
         )
-        bundle = self.evidence.public_view(state.handle.run_id)
+        bundle = self.evidence.view(state.handle.run_id)
         self.evidence.save(
             state.handle.run_id, bundle.model_copy(update={"execution_result": result})
         )
@@ -467,7 +487,7 @@ class IsolatedGPUBackend(LocalBackend):
         result = parsed.model_copy(
             update={"findings": findings, "tool_result": tool_result, "program_output_ref": stdout}
         )
-        bundle = self.evidence.public_view(state.handle.run_id)
+        bundle = self.evidence.view(state.handle.run_id)
         self.evidence.save(
             state.handle.run_id,
             bundle.model_copy(

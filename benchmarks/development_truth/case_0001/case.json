@@ -1,0 +1,14 @@
+{
+  "oracle": "vector-add-cpu-v1",
+  "atol": 0.00001,
+  "rtol": 0.00001,
+  "private_seed": 172934807,
+  "boundary_sizes": [1, 31, 32, 33, 255, 256, 257, 1023, 1024, 1025],
+  "random_cases": 3,
+  "source_hashes": {
+    "kernel.cu": "ffd7d13a5614ae650e94172ad164756546c0ff4a305d1a354ee4333c2e44bfeb",
+    "vector_io.cpp": "a86f1e64fc67880eca0c97c5e56d4df46f1e49ca7d4f70cce4436efd691c5ea3",
+    "vector_api.h": "49c25fd434fe26a9799a1ce86798d5b5c043b32a3d27475a37f5e31b52c4e2b7",
+    "json.hpp": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63"
+  }
+}
