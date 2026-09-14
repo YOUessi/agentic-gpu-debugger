@@ -6,7 +6,7 @@ import selectors
 import signal
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from threading import Event
@@ -20,9 +20,9 @@ class ProcessCapture:
     stdout: bytes
     stderr: bytes
     timed_out: bool
-    elapsed_ms: float
-    started_at: datetime
-    finished_at: datetime
+    elapsed_ms: float = 0
+    started_at: datetime = field(default_factory=now)
+    finished_at: datetime = field(default_factory=now)
     truncated: bool = False
     cancelled: bool = False
     tool_error: str | None = None

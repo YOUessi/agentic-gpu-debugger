@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "base_tag": "nvidia/cuda:12.8.1-devel-ubuntu22.04",
+  "base_repo_digest": "nvidia/cuda@sha256:a99a1860ba8e2916e5c3e73b72ec4c4301653a84586e05bfc9a2aa2d58027e97",
+  "base_image_id": "sha256:892341855b05029f404cd7e242fa46bb6116b511ef2ac42fe2487e267d27f7b4",
+  "image_id": "sha256:56a54c44a1e16fb7129da3f1b7f7969bfc81e3a3501831fb520b85a8b744184a",
+  "local_build_tag": "gpu-agent-cuda:t03",
+  "platform": "linux/amd64",
+  "cuda_nvcc": "12.8.93",
+  "compute_sanitizer": "2025.1.0.0 (build 35583870)",
+  "target_arch": "sm_89",
+  "dockerfile_sha256": "9e998db3103f1174ee05ca69e7f38aabf7d57853b9af723d7363c057bb358d9b",
+  "runner_sha256": "8ee6b8f2ff8593a93e442818a076cab108f24c1544ff70c344518e1790eeae29",
+  "provenance": "Docker pull + image inspect for official RepoDigest; successful local docker build + image inspect for derived image ID; sha256sum for build inputs. Recorded 2026-09-15."
+}

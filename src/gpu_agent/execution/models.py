@@ -1,5 +1,6 @@
 """Typed local execution requests contain no commands or compiler flags."""
 
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
@@ -74,11 +75,48 @@ class ExecutionResult(ExecutionModel):
     tool_result: ToolResult[ExecutionPayload]
 
 
+class SanitizerTool(StrEnum):
+    MEMCHECK = "memcheck"
+    RACECHECK = "racecheck"
+    INITCHECK = "initcheck"
+    SYNCCHECK = "synccheck"
+
+
+class SourceLocation(ExecutionModel):
+    path: str
+    line: int | None = Field(default=None, ge=1)
+    function: str | None = None
+
+
+class Finding(ExecutionModel):
+    tool: SanitizerTool
+    category: str
+    kernel: str | None = None
+    source_location: SourceLocation | None = None
+    raw_ref: ArtifactRef | None = None
+
+
+CheckOutcome = Literal["CLEAN", "FINDING", "TOOL_ERROR", "UNSUPPORTED"]
+
+
 class SanitizerPayload(ExecutionModel):
-    status: Literal["UNSUPPORTED"] = "UNSUPPORTED"
+    status: str = "UNSUPPORTED"
     tool: str
+    findings: list[Finding] = Field(default_factory=list)
+    completed: bool = False
+    parser_version: str = "memcheck-1"
+    check_outcome: CheckOutcome = "UNSUPPORTED"
+    binary_ref: ArtifactRef | None = None
+    stdin_ref: ArtifactRef | None = None
+    program_output_ref: ArtifactRef | None = None
+    program_stderr_ref: ArtifactRef | None = None
 
 
 class SanitizerResult(ExecutionModel):
-    status: Literal["UNSUPPORTED"] = "UNSUPPORTED"
-    tool_result: ToolResult[SanitizerPayload]
+    status: str = "UNSUPPORTED"
+    tool_result: ToolResult[SanitizerPayload] | None = None
+    findings: list[Finding] = Field(default_factory=list)
+    completed: bool = False
+    parser_version: str = "memcheck-1"
+    check_outcome: CheckOutcome = "UNSUPPORTED"
+    program_output_ref: ArtifactRef | None = None
