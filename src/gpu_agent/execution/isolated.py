@@ -112,6 +112,7 @@ class IsolatedGPUBackend(LocalBackend):
         self._owner = new_id()
         self._image: str | None = None
         self._base: str | None = None
+        self._versions: dict[str, str] = {}
         if LOCK_PATH.exists():
             try:
                 lock = json.loads(read_regular(LOCK_PATH, 65536))
@@ -130,6 +131,11 @@ class IsolatedGPUBackend(LocalBackend):
                     and re.fullmatch(r"nvidia/cuda@sha256:[a-f0-9]{64}", base)
                 ):
                     self._image, self._base = image, base
+                    self._versions = {
+                        key: lock[key]
+                        for key in ("cuda_nvcc", "compute_sanitizer", "target_arch")
+                        if isinstance(lock.get(key), str)
+                    }
             except (OSError, ValueError):
                 pass  # A missing/stale lock is typed CONTAINER_UNAVAILABLE at execution time.
 
@@ -175,6 +181,7 @@ class IsolatedGPUBackend(LocalBackend):
                 request.run_id,
                 EvidenceBundle(
                     environment={
+                        **self._versions,
                         "backend": "IsolatedGPUBackend",
                         "image_id": self._image or "unavailable",
                         "base_repo_digest": self._base or "unavailable",
@@ -337,7 +344,7 @@ class IsolatedGPUBackend(LocalBackend):
                         len(output) + len(error) > LOG_LIMIT
                         or len(sanitizer) > LOG_LIMIT
                         or len(binary) > BINARY_LIMIT
-                        or (operation != "build" and binary)
+                        or (operation not in {"build", "build_standalone"} and binary)
                     ):
                         raise ValueError("export limit")
                     capture = replace(

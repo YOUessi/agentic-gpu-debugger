@@ -5,6 +5,7 @@ import json
 
 from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.agent.provider import Invocation
+from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.patching import PatchCandidate
 from gpu_agent.store import RunStore
 from gpu_agent.verification.models import VerificationResult
@@ -24,6 +25,24 @@ def render_report(store: RunStore, run_id: str) -> str:
         f"Diagnosis: {diagnosis.diagnostic_outcome}",
         f"Root cause: {diagnosis.root_cause or 'Not established'}",
     ]
+    bundle = EvidenceRepository(store).public_view(run_id)
+    lines.append(f"Run schema version: {manifest.schema_version}")
+    lines.append(
+        "Scope: recorded public source snapshots and at most one candidate; not a universal proof"
+    )
+    lines.extend(f"Source SHA256: {ref.sha256}" for ref in bundle.source_snapshot)
+    if not bundle.source_snapshot:
+        lines.append("Source SHA256: unavailable")
+    lines.append("Recorded toolchain provenance (not a fresh runtime capability check):")
+    for key in (
+        "backend",
+        "image_id",
+        "base_repo_digest",
+        "cuda_nvcc",
+        "compute_sanitizer",
+        "target_arch",
+    ):
+        lines.append(f"- {key}: {bundle.environment.get(key) or 'unavailable'}")
     for title, claims in [
         ("Observed facts", diagnosis.observed_facts),
         ("Tool findings", diagnosis.tool_findings),
@@ -62,8 +81,14 @@ def render_report(store: RunStore, run_id: str) -> str:
     )
     if not verifications:
         lines.append("Verification: NOT_RUN")
+        lines.append("Input-set SHA256: unavailable")
     for result in verifications:
         lines.append(f"Verification: {result.verdict.value} ({result.reason_code})")
+        lines.append(f"Scope: candidate {result.candidate_hash}")
+        lines.append(f"Input-set SHA256: {result.suite_hash or 'unavailable'}")
+        lines.append("Binary SHA256: " + (", ".join(result.binary_hashes) or "unavailable"))
+        lines.append(f"Public passed count: {result.public_passed_count}")
+        lines.append(f"Private passed count: {result.private_passed_count}")
         lines.extend(f"- {name}: {status}" for name, status in result.required_checks.items())
         lines.append(f"Not run count: {result.not_run_count}")
     usage = [r for r in manifest.artifact_refs if r.name == "agent/usage-summary.json"]

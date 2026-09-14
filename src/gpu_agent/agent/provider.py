@@ -6,11 +6,12 @@ import os
 import time
 from collections.abc import Callable
 from datetime import datetime
+from threading import Event
 from typing import Any, Literal, Protocol, TypeVar
 from urllib.parse import urlsplit
 
 import openai
-from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator
+from pydantic import BaseModel, Field, SecretStr, ValidationError, field_validator, model_validator
 
 from gpu_agent.agent.models import (
     AgentAction,
@@ -106,6 +107,166 @@ class Invocation(ExecutionModel):
     store_false_sent: bool = True
 
 
+class WorkerRequest(ExecutionModel):
+    endpoint: str
+    model: str
+    api_key: SecretStr = Field(repr=False, exclude=True)
+    kind: CallKind
+    payload: dict[str, object]
+    client_request_id: str
+    timeout_seconds: float = Field(gt=0, le=60)
+    attempt: int = Field(ge=0, le=1)
+
+
+class ResponseMetadata(ExecutionModel):
+    response_id: str | None = Field(default=None, max_length=1024)
+    provider_request_id: str | None = Field(default=None, max_length=1024)
+    response_model: str | None = Field(default=None, max_length=1024)
+    usage: Usage | None = None
+    http_status: int | None = None
+
+
+class SDKResult(ExecutionModel):
+    value: dict[str, object] | None = None
+    metadata: ResponseMetadata = Field(default_factory=ResponseMetadata)
+    error_code: (
+        Literal[
+            "LLM_TIMEOUT",
+            "LLM_CONNECTION_ERROR",
+            "LLM_INVALID_REQUEST",
+            "LLM_AUTHENTICATION_FAILED",
+            "LLM_PERMISSION_DENIED",
+            "LLM_MODEL_OR_ENDPOINT_NOT_FOUND",
+            "LLM_PROVIDER_ERROR",
+            "LLM_RATE_LIMITED",
+            "LLM_INVALID_OUTPUT",
+            "LLM_REFUSED",
+            "LLM_INCOMPLETE",
+            "LLM_WORKER_ERROR",
+        ]
+        | None
+    ) = None
+    state: Literal["COMPLETED", "FAILED", "UNCERTAIN"] = "COMPLETED"
+    retryable: bool = False
+
+    @model_validator(mode="after")
+    def consistent_envelope(self) -> "SDKResult":
+        if self.error_code is None:
+            if self.state != "COMPLETED" or self.value is None:
+                raise ValueError("incomplete worker result")
+        else:
+            uncertain = self.error_code in {
+                "LLM_TIMEOUT",
+                "LLM_CONNECTION_ERROR",
+                "LLM_WORKER_ERROR",
+            }
+            if self.value is not None or self.state != ("UNCERTAIN" if uncertain else "FAILED"):
+                raise ValueError("inconsistent worker result")
+        return self
+
+
+class ResponsesPort(Protocol):
+    def call(self, request: WorkerRequest) -> SDKResult: ...
+
+
+def invoke_sdk(
+    request: WorkerRequest, client_factory: Callable[..., Any] = openai.OpenAI
+) -> SDKResult:
+    """Official SDK wire contract; production invokes this only in the killable worker."""
+    for namespace in ("openai", "httpx2", "httpcore2"):
+        for name in [
+            namespace,
+            *(n for n in logging.Logger.manager.loggerDict if n.startswith(namespace + ".")),
+        ]:
+            logging.getLogger(name).disabled = True
+            logging.getLogger(name).setLevel(logging.CRITICAL + 1)
+    output_models: dict[CallKind, type[BaseModel]] = {
+        "plan": AgentActionOutput,
+        "diagnose": DiagnosisResult,
+        "patch": PatchOutput,
+    }
+    output_model = output_models[request.kind]
+    metadata: dict[str, object] = {}
+    client = None
+    value: dict[str, object] | None = None
+    error: ProviderError | None = None
+    try:
+        client = client_factory(
+            api_key=request.api_key.get_secret_value(),
+            base_url=request.endpoint,
+            timeout=request.timeout_seconds,
+            max_retries=0,
+        )
+        raw = client.responses.with_raw_response.parse(
+            model=request.model,
+            instructions=PROMPTS[request.kind]
+            + (
+                "\nPrevious output failed schema/scope validation; correct its format."
+                if request.attempt
+                else ""
+            ),
+            input=json.dumps({"untrusted_data": request.payload}, ensure_ascii=False),
+            text_format=output_model,
+            store=False,
+            max_output_tokens=4096,
+            timeout=request.timeout_seconds,
+            extra_headers={"X-Client-Request-Id": request.client_request_id},
+        )
+        metadata["provider_request_id"] = raw.request_id
+        envelope = json.loads(raw.content)
+        metadata.update(OpenAIResponsesProvider._metadata(envelope))
+        if any(
+            c.get("type") == "refusal"
+            for item in envelope.get("output", [])
+            for c in item.get("content", [])
+        ):
+            raise ProviderError("LLM_REFUSED", state="FAILED")
+        if (
+            envelope.get("status") != "completed"
+            or envelope.get("error")
+            or envelope.get("incomplete_details")
+        ):
+            raise ProviderError("LLM_INCOMPLETE", state="FAILED")
+        value = output_model.model_validate(getattr(raw.parse(), "output_parsed", None)).model_dump(
+            mode="json"
+        )
+    except openai.APITimeoutError:
+        error = ProviderError("LLM_TIMEOUT", state="UNCERTAIN")
+    except openai.APIConnectionError:
+        error = ProviderError("LLM_CONNECTION_ERROR", state="UNCERTAIN")
+    except openai.APIStatusError as exc:
+        codes = {
+            400: "LLM_INVALID_REQUEST",
+            401: "LLM_AUTHENTICATION_FAILED",
+            403: "LLM_PERMISSION_DENIED",
+            404: "LLM_MODEL_OR_ENDPOINT_NOT_FOUND",
+            422: "LLM_INVALID_REQUEST",
+            429: "LLM_RATE_LIMITED",
+        }
+        error = ProviderError(
+            codes.get(exc.status_code, "LLM_PROVIDER_ERROR"),
+            state="FAILED",
+            retryable=exc.status_code in {409, 429} or exc.status_code >= 500,
+        )
+        metadata.update(provider_request_id=exc.request_id, http_status=exc.status_code)
+    except (ValidationError, json.JSONDecodeError):
+        error = ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
+    except ProviderError as exc:
+        error = exc
+    finally:
+        if client is not None:
+            client.close()
+    return SDKResult.model_validate(
+        dict(
+            value=value,
+            metadata=metadata,
+            error_code=error.code if error else None,
+            state=error.state if error else "COMPLETED",
+            retryable=error.retryable if error else False,
+        )
+    )
+
+
 class LLMProvider(Protocol):
     gate: LLMCallGate
     provider_name: str
@@ -127,12 +288,16 @@ class OpenAIResponsesProvider:
         store: RunStore,
         run_id: str,
         *,
-        client_factory: Callable[..., Any] = openai.OpenAI,
+        port: ResponsesPort | None = None,
+        cancel: Event | None = None,
         diff_validator: Callable[[str], object] | None = None,
     ) -> None:
         self.settings, self.gate, self.store, self.run_id = settings, gate, store, run_id
         self.model_name = settings.model
-        self._factory, self._diff_validator = client_factory, diff_validator
+        from gpu_agent.agent.provider_process import ProviderProcessPort
+
+        self._port = port if port is not None else ProviderProcessPort(cancel=cancel)
+        self._cancel, self._diff_validator = cancel, diff_validator
 
     def ensure_available(self) -> None:
         s = self.settings
@@ -193,6 +358,8 @@ class OpenAIResponsesProvider:
         validate: Callable[[Output], object] | None = None,
     ) -> Output:
         self.ensure_available()
+        if self._cancel is not None and self._cancel.is_set():
+            raise ProviderError("LLM_CANCELLED")
         # OPENAI_LOG/debug host settings must not turn requests or headers into artifacts.
         for namespace in ("openai", "httpx2", "httpcore2"):
             names = [
@@ -227,84 +394,43 @@ class OpenAIResponsesProvider:
             )
             self._save(invocation)
             started = time.monotonic()
-            response = None
             metadata: dict[str, object] = {}
             error: ProviderError | None = None
-            client = None
             try:
                 assert self.settings.api_key is not None
-                client = self._factory(
-                    api_key=self.settings.api_key.get_secret_value(),
-                    base_url=self.settings.endpoint,
-                    timeout=timeout,
-                    max_retries=0,
+                result = self._port.call(
+                    WorkerRequest(
+                        endpoint=self.settings.endpoint or "",
+                        model=self.settings.model or "",
+                        api_key=self.settings.api_key,
+                        kind=kind,
+                        payload=payload,
+                        client_request_id=invocation.client_request_id,
+                        timeout_seconds=self.gate.timeout(timeout),
+                        attempt=attempt,
+                    )
                 )
-                raw = client.responses.with_raw_response.parse(
-                    model=self.settings.model,
-                    instructions=PROMPTS[kind]
-                    + (
-                        "\nPrevious output failed schema/scope validation; correct its format."
-                        if attempt
-                        else ""
-                    ),
-                    input=json.dumps({"untrusted_data": payload}, ensure_ascii=False),
-                    text_format=output_model,
-                    store=False,
-                    max_output_tokens=4096,
-                    timeout=timeout,
-                    extra_headers={"X-Client-Request-Id": invocation.client_request_id},
-                )
-                # SDK structured parsing can raise before returning the Response. Retain
-                # only allowlisted metadata from the successful HTTP envelope first.
-                metadata["provider_request_id"] = raw.request_id
-                envelope = json.loads(raw.content)
-                metadata.update(self._metadata(envelope))
-                if any(
-                    c.get("type") == "refusal"
-                    for item in envelope.get("output", [])
-                    for c in item.get("content", [])
-                ):
-                    raise ProviderError("LLM_REFUSED", state="FAILED")
-                if (
-                    envelope.get("status") != "completed"
-                    or envelope.get("error")
-                    or envelope.get("incomplete_details")
-                ):
-                    raise ProviderError("LLM_INCOMPLETE", state="FAILED")
-                response = raw.parse()
-                value = output_model.model_validate(getattr(response, "output_parsed", None))
+                metadata = result.metadata.model_dump()
+                metadata["usage"] = result.metadata.usage
+                if result.error_code is not None:
+                    raise ProviderError(
+                        result.error_code, state=result.state, retryable=result.retryable
+                    )
+                if result.state != "COMPLETED":
+                    raise ProviderError("LLM_WORKER_ERROR", state="UNCERTAIN")
+                value = output_model.model_validate(result.value)
                 if validate is not None:
                     validate(value)
-            except openai.APITimeoutError:
-                error = ProviderError("LLM_TIMEOUT", state="UNCERTAIN")
-            except openai.APIConnectionError:
-                error = ProviderError("LLM_CONNECTION_ERROR", state="UNCERTAIN")
-            except openai.APIStatusError as exc:
-                codes = {
-                    400: "LLM_INVALID_REQUEST",
-                    401: "LLM_AUTHENTICATION_FAILED",
-                    403: "LLM_PERMISSION_DENIED",
-                    404: "LLM_MODEL_OR_ENDPOINT_NOT_FOUND",
-                    422: "LLM_INVALID_REQUEST",
-                    429: "LLM_RATE_LIMITED",
-                }
-                error = ProviderError(
-                    codes.get(exc.status_code, "LLM_PROVIDER_ERROR"),
-                    state="FAILED",
-                    retryable=exc.status_code in {409, 429} or exc.status_code >= 500,
-                )
-                metadata.update(provider_request_id=exc.request_id, http_status=exc.status_code)
             except (ValidationError, json.JSONDecodeError):
                 error = ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
             except ProviderError as exc:
                 error = exc
-            finally:
-                if client is not None:
-                    client.close()
             terminal = invocation.model_copy(
                 update={
                     **metadata,
-                    "state": error.state if error else "COMPLETED",
+                    "state": ("FAILED" if error.state == "NOT_STARTED" else error.state)
+                    if error
+                    else "COMPLETED",
                     "finished_at": now(),
                     "elapsed_ms": (time.monotonic() - started) * 1000,
                     "error_code": error.code if error else None,
@@ -314,7 +440,7 @@ class OpenAIResponsesProvider:
             self._save(terminal)
             if error is None:
                 return value
-            if error.code != "LLM_INVALID_OUTPUT" or attempt:
+            if error.code != "LLM_INVALID_OUTPUT" or error.state != "FAILED" or attempt:
                 raise error
             previous = invocation.invocation_id
         raise AssertionError("bounded request loop")

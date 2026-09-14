@@ -24,6 +24,9 @@ def test_standalone_compiles_in_container_with_fixed_arguments(store, tmp_path, 
             trust_level="UNTRUSTED",
         )
     )
+    environment = backend.evidence.public_view(run.id).environment
+    assert environment["cuda_nvcc"] == "12.8.93"
+    assert environment["target_arch"] == "sm_89"
     calls = []
 
     def execute(path, operation, timeout, **kwargs):
@@ -143,3 +146,55 @@ def test_stale_runner_lock_fails_closed(store, tmp_path, monkeypatch):
     backend = isolated.IsolatedGPUBackend(store, tmp_path, tmp_path / "tasks")
     assert backend._image is None
     assert not backend.availability().ready
+
+
+@pytest.mark.parametrize(
+    "operation,accepted", [("build_standalone", True), ("run", False), ("memcheck", False)]
+)
+def test_standalone_binary_passes_real_host_export_decoder(
+    store, tmp_path, monkeypatch, operation, accepted
+):
+    import base64
+    import json
+
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+    from gpu_agent.execution.process import ProcessCapture
+
+    root = tmp_path / "source"
+    root.mkdir()
+    data = b"int main() { return 0; }\n"
+    (root / "kernel.cu").write_bytes(data)
+    backend = IsolatedGPUBackend(store, root, tmp_path / "tasks")
+    run = store.create_run("standalone-export")
+    handle = backend.prepare(
+        WorkspaceRequest(
+            run_id=run.id, source_manifest={"kernel.cu": hashlib.sha256(data).hexdigest()}
+        )
+    )
+    operation_id = None
+
+    def execute(argv, *args, **kwargs):
+        nonlocal operation_id
+        if argv[1] == "create":
+            operation_id = argv[argv.index("--name") + 1].removeprefix("gpu-agent-")
+        if argv[1] == "inspect":
+            return ProcessCapture(0, operation_id.encode(), b"", False)
+        if argv[1] == "start":
+            envelope = dict(
+                exit_code=0,
+                stdout="",
+                stderr="",
+                sanitizer="",
+                truncated=False,
+                binary=base64.b64encode(b"compiled binary").decode(),
+            )
+            return ProcessCapture(0, json.dumps(envelope).encode(), b"", False)
+        return ProcessCapture(0, b"", b"", False)
+
+    monkeypatch.setattr(backend._executor, "execute", execute)
+    if accepted:
+        result = backend.build(BuildRequest(workspace_id=handle.id))
+        assert result.success and store.read(result.binary_ref) == b"compiled binary"
+    else:
+        capture, binary, _ = backend._container(handle.path, operation, 1)
+        assert capture.tool_error == "INVALID_EXPORT" and binary == b""

@@ -6,6 +6,18 @@ import pytest
 from pydantic import SecretStr
 
 
+class SDKContractPort:
+    """Test-only inline port retains real SDK MockTransport wire coverage."""
+
+    def __init__(self, factory):
+        self.factory = factory
+
+    def call(self, request):
+        from gpu_agent.agent.provider import invoke_sdk
+
+        return invoke_sdk(request, self.factory)
+
+
 def response(value=None, **changes):
     fields = dict(
         output_parsed=value,
@@ -62,7 +74,11 @@ def provider_factory(store):
         )
         config.update(settings)
         provider = OpenAIResponsesProvider(
-            OpenAIProviderSettings(**config), LLMCallGate(), store, run.id, client_factory=factory
+            OpenAIProviderSettings(**config),
+            LLMCallGate(),
+            store,
+            run.id,
+            port=SDKContractPort(factory),
         )
         return provider, calls, clients
 
@@ -410,7 +426,7 @@ def test_real_sdk_offline_transport_sends_strict_schema_and_parses_result(store)
         LLMCallGate(),
         store,
         run.id,
-        client_factory=factory,
+        port=SDKContractPort(factory),
     )
     assert provider.plan(PublicEvidence(), AgentBudget()).action_type == "run_memcheck"
     assert len(requests) == 1
@@ -488,7 +504,7 @@ def test_sdk_format_failure_keeps_response_id_request_id_and_usage(store):
         LLMCallGate(),
         store,
         run.id,
-        client_factory=factory,
+        port=SDKContractPort(factory),
     )
     with pytest.raises(ProviderError, match="LLM_INVALID_OUTPUT"):
         provider.plan(PublicEvidence(), AgentBudget())
@@ -513,13 +529,13 @@ def test_sdk_request_logging_is_disabled_even_when_host_enables_debug(
     provider, _, _ = provider_factory([response(AgentActionOutput(action=MemcheckAction()))])
     logger = logging.getLogger("openai")
     monkeypatch.setattr(logger, "disabled", False)
-    original = provider._factory
+    original = provider._port.factory
 
     def noisy_factory(**kwargs):
         logger.debug("request body contains secret-canary")
         return original(**kwargs)
 
-    provider._factory = noisy_factory
+    provider._port.factory = noisy_factory
     with caplog.at_level(logging.DEBUG):
         provider.plan(PublicEvidence(), AgentBudget())
     assert "secret-canary" not in caplog.text
