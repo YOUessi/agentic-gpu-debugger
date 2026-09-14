@@ -21,6 +21,7 @@ from urllib.parse import unquote, urljoin, urlsplit, urlunsplit
 import httpx
 from bs4 import BeautifulSoup, Tag
 from packaging.specifiers import SpecifierSet
+from packaging.version import Version
 from pydantic import Field, ValidationError, model_validator
 
 from gpu_agent.knowledge.models import (
@@ -157,6 +158,20 @@ class Manifest(StrictModel):
                     and seen[reference].document_version != source.document_version
                 ):
                     raise ValueError("Source version must agree with its external version evidence")
+            if source.release_evidence_source:
+                release = seen[source.release_evidence_source]
+                target = Version(self.target_toolchain.compute_sanitizer).release
+                if len(target) < 2:
+                    raise ValueError("Sanitizer target must identify a release line")
+                required_anchor = f"updates-in-{target[0]}-{target[1]}"
+                if (
+                    release.canonical_url
+                    != "https://docs.nvidia.com/compute-sanitizer/ReleaseNotes/index.html"
+                    or release.kind != "html"
+                    or release.chunk_strategy != "evidence"
+                    or required_anchor not in release.include_anchors
+                ):
+                    raise ValueError("Official target release-notes anchor evidence required")
             seen[source.source_id] = source
         if not seen:
             raise ValueError("Empty manifest")
@@ -203,7 +218,8 @@ def validate_url(url: str, source: Source) -> str:
         ):
             raise KnowledgeSourceError("URL authority/scheme/query outside static allowlist")
         path = _path(parts.path)
-        if not re.fullmatch(source.allowed_path_regex, path):
+        canonical_path = _path(urlsplit(source.canonical_url).path)
+        if path != canonical_path or not re.fullmatch(source.allowed_path_regex, path):
             raise KnowledgeSourceError("URL full path outside static allowlist")
         return urlunsplit(("https", source.allowed_host, path, "", ""))
     except ValueError as exc:
@@ -508,6 +524,10 @@ def extract_chunks(
 
 
 def ingest(manifest: Manifest) -> tuple[KnowledgeIndex, list[FetchReceipt]]:
+    try:
+        manifest = Manifest.model_validate(manifest.model_dump())
+    except ValueError as exc:
+        raise KnowledgeSourceError("Invalid manifest at ingest boundary") from exc
     chunks: list[DocumentChunk] = []
     receipts: list[FetchReceipt] = []
     verified: dict[str, str] = {}

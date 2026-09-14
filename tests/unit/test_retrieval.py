@@ -534,3 +534,103 @@ def test_version_mentions_in_body_are_not_version_evidence():
             fixture_html("<p>Old v12.8 reference.</p>", version="12.0.0"),
             "2026-09-15T00:00:00Z",
         )
+
+
+def test_lock_covers_declared_dependencies_and_runtime_closure():
+    import importlib.metadata
+    import tomllib
+
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+
+    lines = [
+        line
+        for line in (ROOT / "requirements.lock").read_text().splitlines()
+        if line and not line.startswith("#")
+    ]
+    locked = {}
+    for line in lines:
+        requirement = Requirement(line)
+        assert requirement.url is None and str(requirement.specifier).startswith("==")
+        locked[canonicalize_name(requirement.name)] = next(iter(requirement.specifier)).version
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    pending = [Requirement(value) for value in project["dependencies"]]
+    visited = set()
+    while pending:
+        requirement = pending.pop()
+        if requirement.marker and not requirement.marker.evaluate({"extra": ""}):
+            continue
+        name = canonicalize_name(requirement.name)
+        assert name in locked, f"Missing dependency from install lock: {name}"
+        assert locked[name] in requirement.specifier, f"Incompatible locked version: {name}"
+        if name not in visited:
+            visited.add(name)
+            metadata = importlib.metadata.requires(requirement.name) or []
+            pending.extend(Requirement(value) for value in metadata)
+
+
+@pytest.mark.parametrize("escape, replacement", [(r"\d", "2"), (r"\w", "a"), (r"\w", "2")])
+def test_regex_escape_cannot_expand_exact_manifest_path(escape, replacement):
+    from gpu_agent.knowledge.ingest import validate_url
+    from gpu_agent.knowledge.models import KnowledgeSourceError
+
+    original = source()
+    modified = original.model_copy(
+        update={
+            "allowed_path_regex": original.allowed_path_regex.replace(
+                r"12\.8\.1", r"12\.8\." + escape
+            )
+        }
+    )
+    assert validate_url(URL, modified) == URL
+    with pytest.raises(KnowledgeSourceError):
+        validate_url(URL.replace("12.8.1", "12.8." + replacement), modified)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["substitute-probe", "missing-anchor", "wrong-anchor", "wrong-strategy", "wrong-url"],
+)
+def test_release_evidence_is_bound_to_official_target_notes(mutation, tmp_path):
+    from gpu_agent.knowledge.ingest import load_manifest
+    from gpu_agent.knowledge.models import KnowledgeSourceError
+
+    data = json.loads((ROOT / "knowledge/sources.json").read_text())
+    manual = next(s for s in data["sources"] if s["source_id"] == "sanitizer-approved-memcheck")
+    release = next(s for s in data["sources"] if s["source_id"] == "sanitizer-release-evidence")
+    if mutation == "substitute-probe":
+        data["sources"].remove(release)
+        manual["release_evidence_source"] = "sanitizer-version-probe"
+    elif mutation == "missing-anchor":
+        release["include_anchors"] = []
+    elif mutation == "wrong-anchor":
+        release["include_anchors"] = ["updates-in-2025-4"]
+    elif mutation == "wrong-strategy":
+        release["chunk_strategy"] = "heading_blocks"
+    else:
+        release["canonical_url"] = release["canonical_url"].replace("ReleaseNotes", "OtherNotes")
+        release["allowed_path_regex"] = release["allowed_path_regex"].replace(
+            "ReleaseNotes", "OtherNotes"
+        )
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(data))
+    with pytest.raises(KnowledgeSourceError):
+        load_manifest(path)
+
+
+def test_ingest_revalidates_mutated_release_reference_before_fetch(monkeypatch):
+    from gpu_agent.knowledge import ingest
+    from gpu_agent.knowledge.models import KnowledgeSourceError
+
+    manifest = ingest.load_manifest(ROOT / "knowledge/sources.json")
+    manual = next(s for s in manifest.sources if s.source_id == "sanitizer-approved-memcheck")
+    manifest.sources[manifest.sources.index(manual)] = manual.model_copy(
+        update={"release_evidence_source": "sanitizer-version-probe"}
+    )
+
+    def unexpected_fetch(*args):
+        pytest.fail("Invalid manifest must be rejected before network access")
+
+    monkeypatch.setattr(ingest, "fetch", unexpected_fetch)
+    with pytest.raises(KnowledgeSourceError):
+        ingest.ingest(manifest)
