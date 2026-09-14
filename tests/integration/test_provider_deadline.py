@@ -20,15 +20,15 @@ def worker_provider(store, monkeypatch):
     launches = []
 
     def make(code, *, timeout=0.25, remaining=600, cancel=None):
-        def launch(argv, **kwargs):
-            launches.append((argv, kwargs))
-            assert argv == [sys.executable, "-I", "-m", "gpu_agent.agent.provider_worker"]
-            assert "secret-canary" not in repr(argv) + repr(kwargs.get("env"))
-            child = real_popen([sys.executable, "-I", "-c", code], **kwargs)
-            children.append(child)
-            return child
+        class Launch(real_popen):
+            def __init__(self, argv, **kwargs):
+                launches.append((argv, kwargs))
+                assert argv == [sys.executable, "-I", "-m", "gpu_agent.agent.provider_worker"]
+                assert "secret-canary" not in repr(argv) + repr(kwargs.get("env"))
+                super().__init__([sys.executable, "-I", "-c", code], **kwargs)
+                children.append(self)
 
-        monkeypatch.setattr(subprocess, "Popen", launch)
+        monkeypatch.setattr(subprocess, "Popen", Launch)
         run = store.create_run("deadline")
         provider = OpenAIResponsesProvider(
             OpenAIProviderSettings(
@@ -178,21 +178,21 @@ def test_cleanup_reap_failure_does_not_replace_original_timeout(worker_provider,
     provider, children, _ = worker_provider("import time; time.sleep(10)")
     launch = subprocess.Popen
 
-    def slow_reap(argv, **kwargs):
-        child = launch(argv, **kwargs)
-        real_wait = child.wait
-        waits = []
+    class SlowReap(launch):
+        def __init__(self, argv, **kwargs):
+            super().__init__(argv, **kwargs)
+            real_wait = self.wait
+            waits = []
 
-        def wait(timeout=None):
-            waits.append(timeout)
-            if len(waits) == 1:
-                raise subprocess.TimeoutExpired(argv, timeout)
-            return real_wait(timeout=timeout)
+            def wait(timeout=None):
+                waits.append(timeout)
+                if len(waits) == 1:
+                    raise subprocess.TimeoutExpired(argv, timeout)
+                return real_wait(timeout=timeout)
 
-        child.wait = wait
-        return child
+            self.wait = wait
 
-    monkeypatch.setattr(subprocess, "Popen", slow_reap)
+    monkeypatch.setattr(subprocess, "Popen", SlowReap)
     with pytest.raises(ProviderError, match="LLM_TIMEOUT"):
         provider.plan(PublicEvidence(), AgentBudget())
     assert provider.invocations()[-1].state == "UNCERTAIN"
@@ -256,3 +256,85 @@ invoke_sdk(WorkerRequest.model_validate_json(sys.stdin.buffer.read()),factory)
     assert observed and len(launches) == 1 and children[0].poll() is not None
     assert provider.invocations()[-1].state == "UNCERTAIN"
     assert provider.gate.snapshot().llm_calls == 1
+
+
+@pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("after_spawn", [False, True])
+def test_startup_interruption_is_typed_and_cleans_owned_child(
+    worker_provider, monkeypatch, interruption, after_spawn
+):
+    from gpu_agent.agent.models import AgentBudget, PublicEvidence
+    from gpu_agent.agent.provider import ProviderError
+
+    provider, children, _ = worker_provider("import time; time.sleep(10)")
+    launch = subprocess.Popen
+
+    class InterruptedLaunch(launch):
+        def __init__(self, argv, **kwargs):
+            if after_spawn:
+                super().__init__(argv, **kwargs)
+            raise interruption("secret-canary")
+
+    monkeypatch.setattr(subprocess, "Popen", InterruptedLaunch)
+    caught = None
+    try:
+        provider.plan(PublicEvidence(), AgentBudget())
+    except BaseException as exc:
+        caught = exc
+    assert isinstance(caught, ProviderError) and caught.code == "LLM_CANCELLED"
+    assert all(child.poll() is not None for child in children)
+    record = provider.invocations()[-1]
+    assert record.error_code == "LLM_CANCELLED" and record.finished_at is not None
+    assert record.state == ("UNCERTAIN" if after_spawn else "FAILED")
+    assert "secret-canary" not in record.model_dump_json()
+
+
+@pytest.mark.parametrize("failure", [KeyboardInterrupt, SystemExit, OSError, RuntimeError])
+def test_selector_startup_failure_cleans_child_and_persists_terminal_record(
+    worker_provider, monkeypatch, failure
+):
+    import selectors
+
+    from gpu_agent.agent.models import AgentBudget, PublicEvidence
+    from gpu_agent.agent.provider import ProviderError
+
+    provider, children, launches = worker_provider("import time; time.sleep(10)")
+
+    def broken_selector():
+        raise failure("secret-canary")
+
+    monkeypatch.setattr(selectors, "DefaultSelector", broken_selector)
+    caught = None
+    try:
+        provider.plan(PublicEvidence(), AgentBudget())
+    except BaseException as exc:
+        caught = exc
+    code = "LLM_CANCELLED" if failure in {KeyboardInterrupt, SystemExit} else "LLM_WORKER_ERROR"
+    assert isinstance(caught, ProviderError) and caught.code == code
+    assert len(launches) == 1 and children[0].poll() is not None
+    record = provider.invocations()[-1]
+    assert record.state == "UNCERTAIN" and record.error_code == code
+    assert record.finished_at is not None and "secret-canary" not in record.model_dump_json()
+
+
+def test_production_port_real_popen_normal_exit_has_no_untyped_failure():
+    from gpu_agent.agent.provider import ProviderError, WorkerRequest
+    from gpu_agent.agent.provider_process import ProviderProcessPort
+
+    # Unsupported URL scheme cannot open a network connection; no Popen mock.
+    request = WorkerRequest(
+        endpoint="invalid://offline",
+        model="offline",
+        api_key=SecretStr("offline-placeholder"),
+        kind="plan",
+        payload={},
+        client_request_id="offline",
+        timeout_seconds=3,
+        attempt=0,
+    )
+    try:
+        result = ProviderProcessPort().call(request)
+    except ProviderError as exc:
+        pytest.fail(f"real worker launch did not return a terminal envelope: {exc.code}")
+    assert result.error_code in {"LLM_CONNECTION_ERROR", "LLM_WORKER_ERROR"}
+    assert result.state == "UNCERTAIN"
