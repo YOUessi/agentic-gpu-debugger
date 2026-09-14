@@ -171,6 +171,8 @@ class IsolatedGPUBackend(LocalBackend):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode)
         with os.fdopen(fd, "wb") as stream:
             stream.write(data)
+            # The container UID differs from the host owner, even under umask 077.
+            os.fchmod(stream.fileno(), mode)
 
     def _check_snapshot(self, state: _Workspace) -> None:
         if {p.name for p in state.handle.path.iterdir()} - (SOURCE_NAMES | {"vector_add"}):

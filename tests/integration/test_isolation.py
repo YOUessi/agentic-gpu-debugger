@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+import os
 from threading import Event
 
 import pytest
@@ -51,6 +52,21 @@ def test_candidate_snapshot_is_bounded_and_omits_git(isolated):
     backend.cleanup(handle)
     assert not handle.path.exists()
     assert all(store.read(ref) for ref in view.source_snapshot)
+
+
+@pytest.mark.parametrize("name,mode", [("kernel.cu", 0o444), ("vector_add", 0o555)])
+def test_snapshot_permissions_ignore_restrictive_controller_umask(tmp_path, name, mode):
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+
+    path = tmp_path / name
+    previous_umask = os.umask(0o077)
+    try:
+        IsolatedGPUBackend._write_snapshot(path, b"snapshot", mode)
+    finally:
+        os.umask(previous_umask)
+    # Container UID 65532 differs from the host owner: other read/execute bits matter.
+    assert path.stat().st_mode & 0o777 == mode
+    assert path.read_bytes() == b"snapshot"
 
 
 @pytest.mark.parametrize("path", ["../kernel.cu", ".git/kernel.cu", "private/kernel.cu"])
