@@ -1,0 +1,70 @@
+{
+  "run_id": "6135bcdc51c74b18baabc4a96153761f",
+  "status": "COMPLETED",
+  "artifact_count": 26,
+  "acceptance_sha256": "e6ab95239b6a11fcc76779cea2a26d14efb5e12a00428ed29cd197557d06579a",
+  "acceptance": {
+    "scope": "trusted_clean_kernel_only",
+    "execution_verified": true,
+    "sanitizer_verified": false,
+    "isolated_execution": false,
+    "binary_sha256": "340408b74d060282e85d8e25054df489d8647d5c396d98d5ad96f261998c7b40",
+    "observations": [
+      {
+        "n": 1,
+        "oracle_passed": true,
+        "input_sha256": "29abd03370296048d38e2744c67d311bfbf099edaede870ec875813dd374f86d",
+        "output_sha256": "419a15df9a21051f83595d9360e5cb8849bafb9b6fad7fe674a9c64de69bcd2b"
+      },
+      {
+        "n": 257,
+        "oracle_passed": true,
+        "input_sha256": "b55f9c16ba2df9e2964939250ab731b286a124d7d9d0dc0607c2636207ad0aef",
+        "output_sha256": "4f419a121feb35bf3ed385c0be12fa8d94d17a89c5eb9977beae2df502382446"
+      },
+      {
+        "n": 1025,
+        "oracle_passed": true,
+        "input_sha256": "a0692a5d2a29d3d7b895d2a482224e82ab1a42ba16bc37acd80644a71184e16c",
+        "output_sha256": "d8e520d1452b1d5a10dbc2d3e411862c1b88d807f8be950b14931b2b76a09bf4"
+      }
+    ]
+  },
+  "toolchain": {
+    "host_compiler": "/usr/bin/g++",
+    "nvidia_smi": "/usr/bin/nvidia-smi",
+    "target_arch": "sm_89",
+    "python_version": "3.11.16",
+    "platform": "Linux",
+    "machine": "x86_64",
+    "nvcc_version": "12.8.93",
+    "sanitizer_version": "2025.1.0.0",
+    "host_compiler_version": "11.4.0",
+    "supported_architectures": [
+      "sm_100",
+      "sm_101",
+      "sm_120",
+      "sm_50",
+      "sm_52",
+      "sm_53",
+      "sm_60",
+      "sm_61",
+      "sm_62",
+      "sm_70",
+      "sm_72",
+      "sm_75",
+      "sm_80",
+      "sm_86",
+      "sm_87",
+      "sm_89",
+      "sm_90"
+    ],
+    "gpus": [
+      {
+        "name": "NVIDIA GeForce RTX 4090 Laptop GPU",
+        "driver_version": "580.178.04",
+        "compute_capability": "8.9"
+      }
+    ]
+  }
+}

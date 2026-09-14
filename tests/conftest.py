@@ -1,7 +1,19 @@
 import pytest
 
 
+@pytest.fixture
+def store(tmp_path):
+    from gpu_agent.store import RunStore
+
+    return RunStore(tmp_path / "runs")
+
+
 def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--gpu-run-root",
+        default=None,
+        help="Optional artifact directory for real GPU acceptance runs (unique run IDs).",
+    )
     parser.addoption(
         "--require-live",
         action="store_true",

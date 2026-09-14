@@ -2,7 +2,7 @@
 
 面向 CUDA 故障的证据驱动诊断工具。Python 负责 Agent/CLI/证据与验证编排，CUDA C++ 负责真实 kernel 和可信 host harness。
 
-当前仅实现 T01 环境诊断。尚未实现源码诊断、模型补丁、隔离执行或修复验证。
+当前完成 M0（T01–T02）：环境诊断，以及登记过的 clean CUDA kernel 的真实编译运行、CPU 结果核对与证据保存。尚未实现 Agent 源码诊断、模型补丁、隔离执行或修复验证。
 
 ## 独立环境
 
@@ -40,6 +40,7 @@ python -I -m gpu_agent env --cuda-root /usr --json
 
 ```bash
 python -I -m pytest tests/unit -q
+python -I -m pytest tests/integration -q
 python -I -m ruff check src tests
 python -I -m mypy src/gpu_agent
 python -I -m pip check
@@ -47,4 +48,20 @@ python -I -m pip check
 
 已注册 `gpu`、`container`、`live_llm`、`release` 标记。`--require-live` 将带这些标记的 skipped 测试变为失败；收集阶段 skip 也失败，防止缺少必需环境时假通过。完整的发布覆盖计数门禁留待 T12；目前单元测试通过不代表 GPU/模型功能通过。
 
-本次真实验证与安装调整见 [T01 验证记录](docs/t01-validation.md)。设计与依赖顺序见 [V2 规格](PROJECT_SPEC_CN_V2.md) 和 [实施计划](IMPLEMENTATION_PLAN_CN_V2.md)。不按开发天数安排任务。
+## M0：真实 clean kernel 验收
+
+在仓库根目录、专用 Conda 环境中运行：
+
+```bash
+python -I -m pytest tests/gpu/test_clean_kernel.py --require-live --gpu-run-root runs/m0 -q -s
+```
+
+正常用例会输出一个唯一 run ID，验证长度 1、257、1025 的 vector add，保留源码快照、编译 argv、二进制 hash、输入、输出、日志及验收结果。另两项 GPU 用例注入清理/证据读取故障，预期得到失败 run；它们用于验证不会误记成功，记录留在 pytest 临时目录。
+
+`runs/` 被 Git 忽略。`runs/m0/<run_id>/manifest.json` 保存注册的 artifact refs 和状态审计事件；原始 blobs 不进入仓库。将状态审计与 manifest 一起原子提交，避免独立 audit 文件的双写不一致。
+
+本地后端只接受包内 `trusted_sources.json` 登记的完整源码/harness/parser hash 集合。修改任何文件后不能自动重新批准并运行；必须先审核。编译使用固定参数和干净环境，显式选择 `Settings.host_compiler`，不会继承 `NVCC_PREPEND_FLAGS`、`LD_PRELOAD` 或 API key。输入/二进制引用绑定到具体执行记录。
+
+这不是不可信代码沙箱。T02 不提供任意源码 CLI，不运行模型补丁；LocalBackend 的 Sanitizer 请求明确返回 `UNSUPPORTED`，不是 `CLEAN`。后续 T03 才建立隔离编译/执行和 memcheck OOB 证据。
+
+真实验证与安装调整见 [T01 记录](docs/t01-validation.md) 和 [T02/M0 记录](docs/t02-validation.md)。设计与依赖顺序见 [V2 规格](PROJECT_SPEC_CN_V2.md) 和 [实施计划](IMPLEMENTATION_PLAN_CN_V2.md)。不按开发天数安排任务。

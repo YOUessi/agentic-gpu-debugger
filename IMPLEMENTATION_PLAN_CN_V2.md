@@ -1,6 +1,6 @@
 # Agentic GPU Debugger V2 实施计划
 
-**状态：** 用户已批准执行；T01 已实现并完成环境元数据验证，T02 尚未开始。M0 尚未完成；真实 GPU 编译运行不能由 T01 替代。记录见 [T01 验证记录](docs/t01-validation.md)。
+**状态：** T01、T02 完成，M0 的真实 clean kernel 编译运行与证据验收通过。T03 尚未开始。记录见 [T01 验证记录](docs/t01-validation.md)、[T02/M0 验证记录](docs/t02-validation.md)。M0 不代表隔离执行或修复功能完成。
 
 **Goal：** 在真实 RTX 4090 Laptop 上完成可复现的 CUDA 诊断、单次候选补丁、隔离验证和五组评测。
 
@@ -216,6 +216,8 @@ conda search -c nvidia 'cuda=12.8*'
 
 ## T02 / M0：受信任 clean kernel 的真实执行和证据保存
 
+**执行记录：** NVCC 12.8.93 / SM 8.9 真实编译运行；长度 1、257、1025 全量数值通过 CPU 核对。129 项 CPU/集成测试与 3 项 GPU 验收/失败注入测试通过。主 Agent 登记已审核的四文件 hash；两个子 Agent 分别实现 harness 与 backend，另一个只读审查。详情及验收 run 见 T02/M0 验证记录。
+
 **依赖：** T01。
 
 **创建：** `src/gpu_agent/contracts.py`、`store.py`、`execution/{models,backend,process,local}.py`、`benchmarks/harness/{vector_io.cpp,vector_api.h}`、`benchmarks/public/case_0000/public_input/kernel.cu`、`tests/unit/test_store.py`、`tests/integration/test_process.py`、`tests/gpu/test_clean_kernel.py`。
@@ -232,7 +234,7 @@ conda search -c nvidia 'cuda=12.8*'
 - `ProcessExecutor.execute(argv: list[str], cwd: Path, timeout_seconds: float, max_log_bytes: int) -> ProcessCapture` 仅内部可信代码调用，不注册 Agent Tool。
 - `ProcessCapture(exit_code: int | None, stdout: bytes, stderr: bytes, timed_out: bool, elapsed_ms=0, truncated=False, tool_error=None)`；生产执行必须填写实际耗时。
 
-- [ ] 先定义 `RunStatus`、`CurrentPhase` 与终态不变量的测试。
+- [x] 先定义 `RunStatus`、`CurrentPhase` 与终态不变量的测试。
 
 ```python
 def test_terminal_run_has_no_active_phase(store):
@@ -243,11 +245,11 @@ def test_terminal_run_has_no_active_phase(store):
     assert store.load(run.id).status == "FAILED"
 ```
 
-- [ ] `store` fixture 在 `tests/conftest.py` 创建 `RunStore(tmp_path / "runs")`。添加穿越、symlink、hash mismatch、写入失败保留旧 manifest 的测试并运行失败版本。
-- [ ] ProcessExecutor 用参数数组、`shell=False`、独立进程组；同时增量读取 stdout/stderr、达到 2 MiB 保留截断标记并继续排空/丢弃，防止管道死锁。timeout 终止进程组，收集退出结果；不要先 `capture_output` 无限缓存再截断。
-- [ ] 真实 subprocess 测试覆盖大输出、子进程、超时、UTF-8 损坏；不运行 fork bomb，使用有限两个进程的夹具。
-- [ ] 定义 host harness 的标准协议：stdin JSON `{n, a, b}`；stdout 恰好一个 JSON `{dtype:"float32",shape:[n],values:[...]}`。使用审核的 JSON parser/header，固定版本和来源；每次 CUDA API、launch、synchronize 都检查错误。候选只提供 `run_vector_add` 符号，可信 harness 的输入验证与输出编码不可改。
-- [ ] clean `kernel.cu` 提供长度保护、固定 block 256、输出 a+b。`LocalBackend` 只接受审核登记的整个源码/harness hash，不信任目录名或 `trust_level` 用户参数。
+- [x] `store` fixture 在 `tests/conftest.py` 创建 `RunStore(tmp_path / "runs")`。添加穿越、symlink、hash mismatch、写入失败保留旧 manifest 的测试并运行失败版本。
+- [x] ProcessExecutor 用参数数组、`shell=False`、独立进程组；同时增量读取 stdout/stderr、达到 2 MiB 保留截断标记并继续排空/丢弃，防止管道死锁。timeout 终止进程组，收集退出结果；不要先 `capture_output` 无限缓存再截断。
+- [x] 真实 subprocess 测试覆盖大输出、子进程、超时、UTF-8 损坏；不运行 fork bomb，使用有限两个进程的夹具。
+- [x] 定义 host harness 的标准协议：stdin JSON `{n, a, b}`；stdout 恰好一个 JSON `{dtype:"float32",shape:[n],values:[...]}`。使用审核的 JSON parser/header，固定版本和来源；每次 CUDA API、launch、synchronize 都检查错误。候选只提供 `run_vector_add` 符号，可信 harness 的输入验证与输出编码不可改。
+- [x] clean `kernel.cu` 提供长度保护、固定 block 256、输出 a+b。`LocalBackend` 只接受审核登记的整个源码/harness hash，不信任目录名或 `trust_level` 用户参数。
 
 ```bash
 nvcc -std=c++17 -lineinfo -arch=sm_89 kernel.cu vector_io.cpp -o vector_add
@@ -255,8 +257,8 @@ python -m pytest tests/unit/test_store.py tests/integration/test_process.py -q
 python -m pytest tests/gpu/test_clean_kernel.py --require-live -q
 ```
 
-- [ ] 命令在 task workspace 执行，实际路径由 backend 组装；测试 clean 长度 1、257、1025，CPU 计算参考结果。保存 compile argv、二进制 hash、结果和日志，验收脚本不得只检查 stdout `PASS`。
-- [ ] 提交任务文件，消息 `feat: execute and record trusted CUDA workload`。
+- [x] 命令在 task workspace 执行，实际路径由 backend 组装；测试 clean 长度 1、257、1025，CPU 计算参考结果。保存 compile argv、二进制 hash、结果和日志，验收脚本不得只检查 stdout `PASS`。
+- [x] 提交任务文件，消息 `feat: execute and record trusted CUDA workload`。
 
 **通过标准：** M0 clean kernel 在 SM 8.9 实际编译和正确计算；日志与 artifacts 可追踪，原始输入不变。
 
@@ -658,7 +660,7 @@ git diff --check
 - [x] 用户评审并批准开始执行本计划。
 - [x] 开始 T01，并只根据真实结果勾选任务。
 
-本计划中的命令与测试代码是执行规范；计划文件存在不表示这些测试已通过。T01 的真实结果见验证记录；下一项执行是 T02，后续未执行任务仍保持未完成。
+本计划中的命令与测试代码是执行规范；计划文件存在不表示这些测试已通过。T01、T02 的真实结果见验证记录；下一项执行是 T03，后续未执行任务仍保持未完成。
 
 ## 7. 官方实现依据
 
