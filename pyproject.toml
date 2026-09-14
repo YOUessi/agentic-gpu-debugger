@@ -7,7 +7,10 @@ name = "agentic-gpu-debugger"
 version = "0.1.0"
 description = "Evidence-driven CUDA debugging with isolated candidate verification"
 requires-python = ">=3.11,<3.13"
-dependencies = ["pydantic>=2,<3", "typer>=0.16,<1"]
+dependencies = [
+  "pydantic>=2,<3", "typer>=0.16,<1", "httpx==0.28.1",
+  "beautifulsoup4==4.13.5", "packaging==25.0",
+]
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10", "ruff>=0.12,<1", "mypy>=1.16,<2"]

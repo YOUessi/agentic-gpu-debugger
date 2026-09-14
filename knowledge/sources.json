@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "corpus_id": "nvidia-cuda-debug-knowledge",
+  "corpus_version": "2026-09-15.1",
+  "normalizer_version": "nvidia-html-heading-v1",
+  "tokenizer_version": "cuda-lex-v1",
+  "target_toolchain": {"cuda_toolkit": "12.8.1", "compute_sanitizer": "2025.1.0.0"},
+  "fetch_policy": {
+    "max_redirects": 3, "connect_timeout_seconds": 5, "read_timeout_seconds": 10,
+    "wall_timeout_seconds": 20, "max_total_bytes": 16777216,
+    "user_agent": "agentic-gpu-debugger-knowledge/1"
+  },
+  "sources": [
+    {
+      "source_id": "programming-guide-12.8-u1",
+      "kind": "html", "document_title": "CUDA C++ Programming Guide",
+      "document_version": "12.8", "archive_release": "12.8.1",
+      "canonical_url": "https://docs.nvidia.com/cuda/archive/12.8.1/cuda-c-programming-guide/index.html",
+      "allowed_host": "docs.nvidia.com",
+      "allowed_path_regex": "^/cuda/archive/12\\.8\\.1/cuda-c-programming-guide/index\\.html$",
+      "expected_media_types": ["text/html"], "max_bytes": 6291456,
+      "include_anchors": ["device-memory"], "chunk_strategy": "heading_blocks",
+      "version_regex": "\\bv(12\\.8)(?![.0-9])",
+      "version_selector": ".wy-breadcrumbs-aside > span:first-child",
+      "compatibility": {"cuda": ">=12.8,<12.9"},
+      "license": {"id": "NVIDIA-documentation", "redistribution_review_required": true}
+    },
+    {
+      "source_id": "runtime-api-12.8.1",
+      "kind": "html", "document_title": "CUDA Runtime API", "document_version": "12.8.1",
+      "archive_release": "12.8.1",
+      "canonical_url": "https://docs.nvidia.com/cuda/archive/12.8.1/cuda-runtime-api/group__CUDART__TYPES.html",
+      "allowed_host": "docs.nvidia.com",
+      "allowed_path_regex": "^/cuda/archive/12\\.8\\.1/cuda-runtime-api/group__CUDART__TYPES\\.html$",
+      "expected_media_types": ["text/html"], "max_bytes": 1048576,
+      "include_anchors": ["group__CUDART__TYPES_1g3f51e3575c2178246db0a94a430e0038"],
+      "chunk_strategy": "cuda_error", "version_regex": "\\bv(12\\.8\\.1)(?![.0-9])",
+      "version_selector": "#release-info",
+      "compatibility": {"cuda": ">=12.8.1,<12.9"},
+      "license": {"id": "NVIDIA-documentation", "redistribution_review_required": true}
+    },
+    {
+      "source_id": "sanitizer-version-probe", "kind": "text",
+      "document_title": "Compute Sanitizer version metadata", "document_version": "13.4",
+      "canonical_url": "https://docs.nvidia.com/compute-sanitizer/_static/documentation_options.js",
+      "allowed_host": "docs.nvidia.com",
+      "allowed_path_regex": "^/compute-sanitizer/_static/documentation_options\\.js$",
+      "expected_media_types": ["application/javascript", "text/javascript"], "max_bytes": 131072,
+      "include_anchors": [], "chunk_strategy": "evidence",
+      "version_regex": "VERSION:\\s*['\"](13\\.4)['\"]",
+      "compatibility": {"compute_sanitizer": "==2025.1.0.0"},
+      "license": {"id": "NVIDIA-documentation", "redistribution_review_required": true}
+    },
+    {
+      "source_id": "sanitizer-release-evidence", "kind": "html",
+      "document_title": "Release Notes", "document_version": "13.4",
+      "canonical_url": "https://docs.nvidia.com/compute-sanitizer/ReleaseNotes/index.html",
+      "allowed_host": "docs.nvidia.com",
+      "allowed_path_regex": "^/compute-sanitizer/ReleaseNotes/index\\.html$",
+      "expected_media_types": ["text/html"], "max_bytes": 524288,
+      "include_anchors": ["updates-in-2025-1"], "chunk_strategy": "evidence",
+      "version_probe_source": "sanitizer-version-probe",
+      "compatibility": {"compute_sanitizer": "==2025.1.0.0"},
+      "license": {"id": "NVIDIA-documentation", "redistribution_review_required": true}
+    },
+    {
+      "source_id": "sanitizer-approved-memcheck", "kind": "html",
+      "document_title": "Compute Sanitizer", "document_version": "13.4",
+      "canonical_url": "https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html",
+      "allowed_host": "docs.nvidia.com",
+      "allowed_path_regex": "^/compute-sanitizer/ComputeSanitizer/index\\.html$",
+      "expected_media_types": ["text/html"], "max_bytes": 1048576,
+      "include_anchors": ["what-is-memcheck", "padding"], "chunk_strategy": "approved_paragraphs",
+      "version_probe_source": "sanitizer-version-probe",
+      "release_evidence_source": "sanitizer-release-evidence",
+      "approved_chunk_sha256": {
+        "what-is-memcheck": ["c36ea100900980d1c74a72368264d4b61f7acf6ee0f642b02d971a35105ad175"],
+        "padding": ["c99fe0f86d47e42df35628766432962544d7935a45e4edeec9ef9e781dbbc004", "5e9c378e0c32929013661506ff81ed4c237dcdd49e06ac4bca24ce6986928bb9"]
+      },
+      "compatibility": {"cuda": ">=12.8,<12.9", "compute_sanitizer": "==2025.1.0.0"},
+      "limitation": "Current manual is 13.4, not 2025.1. Only three manually reviewed hash-pinned memcheck paragraphs are admitted for 2025.1.0.0; release notes establish that release, not whole-manual compatibility.",
+      "license": {"id": "NVIDIA-documentation", "redistribution_review_required": true}
+    },
+    {
+      "source_id": "cuda-samples-vector-add-v12.8", "kind": "text",
+      "document_title": "CUDA Samples vectorAdd", "document_version": "12.8",
+      "canonical_url": "https://raw.githubusercontent.com/NVIDIA/cuda-samples/db3eea23946bca2e90a75eca2b5b3e07158a9e11/Samples/0_Introduction/vectorAdd/vectorAdd.cu",
+      "allowed_host": "raw.githubusercontent.com",
+      "allowed_path_regex": "^/NVIDIA/cuda-samples/db3eea23946bca2e90a75eca2b5b3e07158a9e11/Samples/0_Introduction/vectorAdd/vectorAdd\\.cu$",
+      "expected_media_types": ["text/plain"], "max_bytes": 131072,
+      "include_anchors": [], "chunk_strategy": "vector_add",
+      "git_revision": "db3eea23946bca2e90a75eca2b5b3e07158a9e11",
+      "body_sha256": "9a156c7c4f1ab0759d859af95c8dab55f2280d867edca7daee4546d63effb583",
+      "compatibility": {"cuda": ">=12.8,<12.9"},
+      "license": {
+        "id": "BSD-3-Clause", "redistribution_review_required": false,
+        "license_url": "https://github.com/NVIDIA/cuda-samples/blob/db3eea23946bca2e90a75eca2b5b3e07158a9e11/LICENSE",
+        "copyright_notice": "Copyright NVIDIA Corporation. See original source and pinned LICENSE.",
+        "notice_required": true
+      }
+    }
+  ]
+}

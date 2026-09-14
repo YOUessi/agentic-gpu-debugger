@@ -17,3 +17,4 @@ private/
 *.pem
 *.key
 .worktrees/
+.cache/gpu-agent/knowledge/
