@@ -146,13 +146,64 @@ class VerificationEngine:
             raise ValueError("incomplete source snapshot")
         return SourceSnapshot(parent_run_id=original_run_id, root=root, hashes=hashes)
 
-    @staticmethod
-    def _baseline(bundle: EvidenceBundle) -> tuple[list[Finding], ArtifactRef | None]:
+    def _registered_tool(self, run_id: str, tool: ToolResult[Payload]) -> bool:
+        """Bind bundle metadata to the immutable record written during execution."""
+        refs = [
+            ref
+            for ref in self._store.load(run_id).artifact_refs
+            if ref.name == f"{tool.tool_name}/{tool.request_id}/result.json"
+        ]
+        return len(refs) == 1 and self._store.read(refs[0]) == tool.model_dump_json().encode()
+
+    def _baseline(
+        self, run_id: str, bundle: EvidenceBundle, source_hashes: dict[str, str]
+    ) -> tuple[list[Finding], ArtifactRef | None]:
+        if len(bundle.source_snapshot) != 4 or set(source_hashes) != {
+            "kernel.cu",
+            "vector_io.cpp",
+            "vector_api.h",
+            "json.hpp",
+        }:
+            return [], None
+        build = bundle.build_result
+        if build is None or not build.success or build.binary_ref is None:
+            return [], None
+        built = build.tool_result
+        if (
+            built.tool_name != "build"
+            or built.exit_code != 0
+            or _infrastructure_failure(built)
+            or built.typed_payload.binary_ref != build.binary_ref
+            or built.typed_payload.source_manifest != source_hashes
+            or not self._registered_tool(run_id, built)
+        ):
+            return [], None
         for result in reversed(bundle.sanitizer_results):
-            if result.tool_result:
-                payload = result.tool_result.typed_payload
-                if payload.tool == "memcheck" and result.completed and result.findings:
-                    return result.findings, payload.stdin_ref
+            tool = result.tool_result
+            if tool is None:
+                continue
+            payload = tool.typed_payload
+            if (
+                tool.tool_name == "sanitizer"
+                and payload.tool == "memcheck"
+                and not _infrastructure_failure(tool)
+                and tool.exit_code is not None
+                and 0 <= tool.exit_code < 128
+                and result.completed
+                and payload.completed
+                and result.check_outcome == payload.check_outcome == "FINDING"
+                and result.findings
+                and result.findings == payload.findings
+                and all(
+                    f.tool.value == "memcheck" and f.raw_ref == tool.stderr_artifact
+                    for f in result.findings
+                )
+                and payload.binary_ref == build.binary_ref
+                and payload.stdin_ref is not None
+                and result.program_output_ref == payload.program_output_ref
+                and self._registered_tool(run_id, tool)
+            ):
+                return result.findings, payload.stdin_ref
         return [], None
 
     @staticmethod
@@ -178,6 +229,21 @@ class VerificationEngine:
             raise ValueError("M1 requires full public/private verification")
         candidate = self._candidate(original_run_id, candidate_id)
         bundle = EvidenceRepository(self._store).public_view(original_run_id)
+        baseline_hashes = {Path(ref.name).name: ref.sha256 for ref in bundle.source_snapshot}
+        original, input_ref = self._baseline(original_run_id, bundle, baseline_hashes)
+        if input_ref is None:
+            return self._publish(
+                original_run_id,
+                VerificationObservation(),
+                candidate,
+                {},
+                [],
+                0,
+                0,
+                0,
+                "",
+                "ORACLE_OR_BASELINE_UNAVAILABLE",
+            )
         directory = Path(tempfile.mkdtemp(prefix="verification-", dir=self._root))
         base = directory / "base"
         base.mkdir()
@@ -186,8 +252,7 @@ class VerificationEngine:
             sources = materialize_candidate(snapshot, candidate)
             line_map = candidate_line_map(snapshot, candidate)
             case = _Case.model_validate_json(read_regular(TRUTH_ROOT / "case.json", 65536))
-            original, input_ref = self._baseline(bundle)
-            if snapshot.hashes != case.source_hashes or input_ref is None:
+            if snapshot.hashes != case.source_hashes:
                 return self._publish(
                     original_run_id,
                     VerificationObservation(),

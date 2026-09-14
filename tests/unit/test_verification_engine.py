@@ -14,6 +14,8 @@ def original(store, tmp_path):
     from gpu_agent.evidence.models import EvidenceBundle
     from gpu_agent.evidence.repository import EvidenceRepository
     from gpu_agent.execution.models import (
+        BuildPayload,
+        BuildResult,
         Finding,
         SanitizerPayload,
         SanitizerResult,
@@ -44,6 +46,27 @@ def original(store, tmp_path):
         "public",
     )
     raw = store.put(run.id, "memcheck.log", b"synthetic unit evidence", "public")
+    binary = store.put(
+        run.id, "build/original-build/binary", b"synthetic baseline binary", "public"
+    )
+    build_tool = ToolResult(
+        tool_name="build",
+        request_id="original-build",
+        started_at=now(),
+        finished_at=now(),
+        elapsed_ms=1,
+        exit_code=0,
+        timed_out=False,
+        stdout_artifact=raw,
+        stderr_artifact=raw,
+        typed_payload=BuildPayload(argv=["nvcc"], binary_ref=binary).model_copy(
+            update={"source_manifest": hashes}
+        ),
+    )
+    build = BuildResult(success=True, binary_ref=binary, tool_result=build_tool)
+    store.put(
+        run.id, "build/original-build/result.json", build_tool.model_dump_json().encode(), "public"
+    )
     finding = Finding(
         tool="memcheck",
         category="Invalid __global__ write",
@@ -67,15 +90,134 @@ def original(store, tmp_path):
             completed=True,
             check_outcome="FINDING",
             stdin_ref=stdin,
+            binary_ref=binary,
         ),
     )
     result = SanitizerResult(
         completed=True, check_outcome="FINDING", findings=[finding], tool_result=tool
     )
+    store.put(run.id, "sanitizer/original/result.json", tool.model_dump_json().encode(), "public")
     EvidenceRepository(store).save(
-        run.id, EvidenceBundle(source_snapshot=refs, sanitizer_results=[result])
+        run.id, EvidenceBundle(source_snapshot=refs, build_result=build, sanitizer_results=[result])
     )
     return run.id, SourceSnapshot(parent_run_id=run.id, root=root, hashes=hashes)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "missing_build",
+        "missing_binary",
+        "unrelated_binary",
+        "incomplete_payload",
+        "timed_out",
+        "transport_error",
+        "wrong_tool",
+        "source_manifest",
+        "missing_source_manifest",
+        "unrelated_input",
+        "missing_input",
+        "build_timed_out",
+        "build_binary_mismatch",
+        "outer_findings_mismatch",
+        "missing_source_snapshot",
+        "mismatched_source_snapshot",
+    ],
+)
+def test_invalid_original_provenance_is_inconclusive(
+    store, tmp_path, original, container_boundary, fault
+):
+    from gpu_agent.evidence.repository import EvidenceRepository
+    from gpu_agent.verification.engine import VerificationEngine
+
+    run_id, _ = original
+    repo = EvidenceRepository(store)
+    bundle = repo.public_view(run_id)
+    baseline = bundle.sanitizer_results[0]
+    tool = baseline.tool_result
+    payload = tool.typed_payload
+    build = bundle.build_result
+    if fault == "missing_build":
+        build = None
+    elif fault == "missing_binary":
+        payload = payload.model_copy(update={"binary_ref": None})
+    elif fault == "unrelated_binary":
+        ref = store.put(run_id, "unrelated-binary", b"another executable", "public")
+        payload = payload.model_copy(update={"binary_ref": ref})
+    elif fault == "incomplete_payload":
+        payload = payload.model_copy(update={"completed": False})
+    elif fault == "timed_out":
+        tool = tool.model_copy(update={"timed_out": True})
+    elif fault == "transport_error":
+        tool = tool.model_copy(update={"tool_error": "CONTAINER_ERROR"})
+    elif fault == "wrong_tool":
+        tool = tool.model_copy(update={"tool_name": "run"})
+    elif fault in {"source_manifest", "missing_source_manifest"}:
+        manifest = {} if fault == "missing_source_manifest" else {"kernel.cu": "0" * 64}
+        build = build.model_copy(
+            update={
+                "tool_result": build.tool_result.model_copy(
+                    update={
+                        "typed_payload": build.tool_result.typed_payload.model_copy(
+                            update={"source_manifest": manifest}
+                        )
+                    }
+                )
+            }
+        )
+    elif fault == "unrelated_input":
+        ref = store.put(
+            run_id,
+            "other-input",
+            json.dumps({"n": 257, "a": [3] * 257, "b": [4] * 257}).encode(),
+            "public",
+        )
+        payload = payload.model_copy(update={"stdin_ref": ref})
+    elif fault == "missing_input":
+        payload = payload.model_copy(update={"stdin_ref": None})
+    elif fault == "build_timed_out":
+        build = build.model_copy(
+            update={"tool_result": build.tool_result.model_copy(update={"timed_out": True})}
+        )
+    elif fault == "build_binary_mismatch":
+        build = build.model_copy(update={"binary_ref": tool.stdout_artifact})
+    elif fault == "outer_findings_mismatch":
+        payload = payload.model_copy(update={"findings": []})
+    elif fault == "missing_source_snapshot":
+        bundle = bundle.model_copy(update={"source_snapshot": bundle.source_snapshot[:-1]})
+    elif fault == "mismatched_source_snapshot":
+        ref = store.put(run_id, "sources/changed/kernel.cu", b"unrelated source\n", "public")
+        refs = [ref if Path(r.name).name == "kernel.cu" else r for r in bundle.source_snapshot]
+        bundle = bundle.model_copy(update={"source_snapshot": refs})
+    tool = tool.model_copy(update={"typed_payload": payload})
+    if fault != "unrelated_input":
+        # Malformed observations must fail even if the bundle exactly matches the
+        # immutable execution record, rather than only through record comparison.
+        tool = tool.model_copy(update={"request_id": "invalid-record"})
+        store.put(
+            run_id,
+            f"{tool.tool_name}/invalid-record/result.json",
+            tool.model_dump_json().encode(),
+            "public",
+        )
+        if build is not None:
+            built = build.tool_result.model_copy(update={"request_id": "invalid-build"})
+            store.put(
+                run_id,
+                "build/invalid-build/result.json",
+                built.model_dump_json().encode(),
+                "public",
+            )
+            build = build.model_copy(update={"tool_result": built})
+    baseline = baseline.model_copy(update={"tool_result": tool})
+    repo.save(
+        run_id, bundle.model_copy(update={"build_result": build, "sanitizer_results": [baseline]})
+    )
+    candidate_id, _ = register_variant(store, original, "human")
+    result = VerificationEngine(store, tmp_path / "evaluator").verify(run_id, candidate_id)
+    assert result.verdict.value == "INCONCLUSIVE"
+    assert result.original_finding_present is None
+    assert not container_boundary
 
 
 def register_variant(store, original, variant):
@@ -398,3 +540,33 @@ def test_changed_binary_is_rejected_before_execution(
     with pytest.raises(ValueError, match="binary hash mismatch"):
         VerificationEngine(store, tmp_path / "evaluator").verify(original[0], candidate_id)
     assert not container_boundary
+
+
+def test_original_provenance_from_isolated_backend_is_accepted(
+    store, tmp_path, original, container_boundary
+):
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+    from gpu_agent.execution.models import BuildRequest, SanitizerRequest, WorkspaceRequest
+    from gpu_agent.verification.engine import VerificationEngine
+
+    _, snapshot = original
+    backend = IsolatedGPUBackend(store, snapshot.root, tmp_path / "baseline-tasks")
+    run = store.create_run("isolated-baseline")
+    handle = backend.prepare(WorkspaceRequest(run_id=run.id, source_manifest=snapshot.hashes))
+    try:
+        build = backend.build(BuildRequest(workspace_id=handle.id))
+        assert build.success
+        stdin = store.put(
+            run.id,
+            "baseline-input.json",
+            json.dumps({"n": 257, "a": [1] * 257, "b": [2] * 257}).encode(),
+            "public",
+        )
+        result = backend.run_sanitizer(SanitizerRequest(workspace_id=handle.id, stdin_ref=stdin))
+        assert result.completed and result.check_outcome == "FINDING"
+    finally:
+        backend.cleanup(handle)
+    registered = (run.id, snapshot.model_copy(update={"parent_run_id": run.id}))
+    candidate_id, _ = register_variant(store, registered, "human")
+    result = VerificationEngine(store, tmp_path / "evaluator").verify(run.id, candidate_id)
+    assert result.verdict.value == "VERIFIED_FIXED"

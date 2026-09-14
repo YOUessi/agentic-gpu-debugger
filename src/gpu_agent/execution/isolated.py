@@ -389,7 +389,9 @@ class IsolatedGPUBackend(LocalBackend):
             "-o",
             "/tmp/vector_add",
         ]
-        payload = BuildPayload(argv=argv, binary_ref=state.binary_ref)
+        payload = BuildPayload(
+            argv=argv, binary_ref=state.binary_ref, source_manifest=dict(state.hashes)
+        )
         result = BuildResult(
             success=success,
             binary_ref=state.binary_ref,

@@ -128,15 +128,52 @@ def _apply(source: bytes, diff: str) -> tuple[bytes, dict[int, int | None]]:
             if not hashlib.sha1(blob, usedforsecurity=False).hexdigest().startswith(expected):
                 raise ValueError("git blob hash mismatch")
 
-    # Include directives are controller-owned, including macro includes and line splices.
-    def directives(text: str) -> list[str]:
-        text = text.replace("\\\n", "")
-        text = re.sub(r"/\*.*?\*/", "", text, flags=re.DOTALL)
-        return re.findall(r"^\s*(?:#|%:)\s*(?:include\w*|import)\b[^\n]*", text, re.MULTILINE)
-
-    if directives(patched) != directives(source.decode()):
+    if _include_directives(patched) != _include_directives(source.decode()):
         raise ValueError("include directives cannot change")
     return patched.encode(), mapping
+
+
+def _include_directives(text: str) -> list[str]:
+    """Lex comments after line splicing; comment markers inside literals are inert.
+
+    M1 conservatively rejects raw strings, trigraphs, and nonstandard whitespace
+    splices rather than interpreting a subset differently from the C++ compiler.
+    """
+    if re.search(r"\?\?[=/'()!<>-]|\\[ \t]+\n", text):
+        raise ValueError("unsupported preprocessing syntax")
+    text = text.replace("\\\n", "")
+    clean: list[str] = []
+    i = 0
+    while i < len(text):
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            end = len(text) if end < 0 else end
+            clean.append(" " * (end - i))
+            i = end
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            if end < 0:
+                raise ValueError("unterminated block comment")
+            end += 2
+            clean.extend("\n" if c == "\n" else " " for c in text[i:end])
+            i = end
+        elif text.startswith('R"', i):
+            raise ValueError("raw string literals are outside the supported patch subset")
+        elif text[i] in {'"', "'"}:
+            quote, start = text[i], i
+            i += 1
+            while i < len(text) and text[i] != quote:
+                if text[i] == "\n":
+                    raise ValueError("unterminated literal")
+                i += 2 if text[i] == "\\" else 1
+            if i >= len(text):
+                raise ValueError("unterminated literal")
+            i += 1
+            clean.append(text[start:i])
+        else:
+            clean.append(text[i])
+            i += 1
+    return re.findall(r"^\s*(?:#|%:)\s*(?:include\w*|import)\b[^\n]*", "".join(clean), re.MULTILINE)
 
 
 def apply_candidate(

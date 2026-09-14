@@ -1,3 +1,4 @@
+import difflib
 import hashlib
 
 import pytest
@@ -17,6 +18,33 @@ def snapshot(tmp_path):
 
 
 GOOD = "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -1 +1 @@\n-int value = 1;\n+int value = 2;\n"
+
+
+@pytest.mark.parametrize(
+    "added",
+    [
+        '// /*\n#include "/etc/passwd"\n// */\n',
+        '// /* ignored opener\n%:include "/etc/passwd"\n// */\n',
+        'const char* text = "/*";\n#include "/etc/passwd"\n// */\n',
+        '// /*\n#inc\\\nlude "/etc/passwd"\n// */\n',
+        '/* benign */ #include "/etc/passwd"\n',
+        '/* line one\nline two */ #include "/etc/passwd"\n',
+    ],
+)
+def test_comment_and_literal_order_cannot_hide_active_include(snapshot, added):
+    from gpu_agent.patching import apply_candidate
+
+    before = (snapshot.root / "kernel.cu").read_text()
+    diff = "".join(
+        difflib.unified_diff(
+            before.splitlines(True),
+            (before + added).splitlines(True),
+            fromfile="a/kernel.cu",
+            tofile="b/kernel.cu",
+        )
+    )
+    with pytest.raises(ValueError):
+        apply_candidate(snapshot, diff, ["kernel.cu"])
 
 
 def test_git_index_hashes_are_checked(snapshot):

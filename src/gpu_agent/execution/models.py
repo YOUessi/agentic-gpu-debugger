@@ -54,6 +54,7 @@ RuntimeStatus = Literal["SUCCESS", "FAILED", "TIMEOUT", "CANCELLED", "TOOL_ERROR
 class BuildPayload(ExecutionModel):
     argv: list[str]
     binary_ref: ArtifactRef | None
+    source_manifest: dict[str, str] = Field(default_factory=dict)
 
 
 class BuildResult(ExecutionModel):
