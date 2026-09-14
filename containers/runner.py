@@ -115,7 +115,9 @@ def isolation_probe(stdin: bytes) -> bytes:
 
 def main() -> None:
     operation = sys.argv[1] if len(sys.argv) == 2 else ""
-    if operation not in {"build", "run", "memcheck", "isolation", "log_limit", "timeout"}:
+    if operation not in {
+        "build", "build_standalone", "run", "memcheck", "isolation", "log_limit", "timeout"
+    }:
         raise ValueError("unsupported typed operation")
     os.chdir("/tmp")
     stdin = sys.stdin.buffer.read(32 * 1024 * 1024 + 1)
@@ -134,7 +136,7 @@ def main() -> None:
     elif operation == "isolation":
         output = isolation_probe(stdin)
     else:
-        if operation == "build":
+        if operation in {"build", "build_standalone"}:
             argv = [
                 "/usr/local/cuda/bin/nvcc",
                 "-std=c++17",
@@ -149,6 +151,8 @@ def main() -> None:
                 "-o",
                 "/tmp/vector_add",
             ]
+            if operation == "build_standalone":
+                argv.remove("/input/vector_io.cpp")
         else:
             argv = ["/input/vector_add"]
             if operation == "memcheck":
@@ -166,7 +170,7 @@ def main() -> None:
         # Bound each file on tmpfs, including a sanitizer log emitted by the tool.
         resource.setrlimit(resource.RLIMIT_FSIZE, (BINARY_LIMIT, BINARY_LIMIT))
         exit_code, output, error, truncated = capture(argv, stdin)
-        if operation == "build" and exit_code == 0:
+        if operation in {"build", "build_standalone"} and exit_code == 0:
             binary, oversized = bounded_file(Path("/tmp/vector_add"), BINARY_LIMIT)
             if oversized or not binary:
                 raise ValueError("binary limit")

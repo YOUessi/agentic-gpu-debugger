@@ -33,6 +33,7 @@ class CleanupResult(ExecutionModel):
 class BuildRequest(ExecutionModel):
     workspace_id: str
     target_arch: str = Field(default="sm_89", pattern=r"^sm_[0-9]+$")
+    timeout_seconds: float = Field(default=120, gt=0, le=120)
 
 
 class ExecutionRequest(ExecutionModel):

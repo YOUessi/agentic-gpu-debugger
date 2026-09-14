@@ -113,18 +113,32 @@ class IsolatedGPUBackend(LocalBackend):
         self._image: str | None = None
         self._base: str | None = None
         if LOCK_PATH.exists():
-            lock = json.loads(read_regular(LOCK_PATH, 65536))
-            image, base = lock.get("image_id", ""), lock.get("base_repo_digest", "")
-            if re.fullmatch(r"sha256:[a-f0-9]{64}", image) and re.fullmatch(
-                r"nvidia/cuda@sha256:[a-f0-9]{64}", base
-            ):
-                self._image, self._base = image, base
+            try:
+                lock = json.loads(read_regular(LOCK_PATH, 65536))
+                image, base = lock.get("image_id", ""), lock.get("base_repo_digest", "")
+                inputs_match = all(
+                    hashlib.sha256(read_regular(LOCK_PATH.with_name(name), 65536)).hexdigest()
+                    == lock.get(key)
+                    for name, key in [
+                        ("runner.py", "runner_sha256"),
+                        ("Dockerfile", "dockerfile_sha256"),
+                    ]
+                )
+                if (
+                    inputs_match
+                    and re.fullmatch(r"sha256:[a-f0-9]{64}", image)
+                    and re.fullmatch(r"nvidia/cuda@sha256:[a-f0-9]{64}", base)
+                ):
+                    self._image, self._base = image, base
+            except (OSError, ValueError):
+                pass  # A missing/stale lock is typed CONTAINER_UNAVAILABLE at execution time.
 
     def prepare(self, request: WorkspaceRequest) -> WorkspaceHandle:
         self._active_run(request.run_id)
         snapshots: dict[str, bytes] = {}
-        if len(request.source_manifest) != 4:
-            raise ValueError("expected four public vector sources")
+        standalone = set(request.source_manifest) == {"kernel.cu"}
+        if not standalone and len(request.source_manifest) != 4:
+            raise ValueError("expected four public vector sources or one kernel.cu")
         for relative, expected in request.source_manifest.items():
             path = PurePosixPath(relative)
             if (
@@ -246,7 +260,11 @@ class IsolatedGPUBackend(LocalBackend):
             raise ValueError("invalid task mount")
         operation_id = new_id()
         name = "gpu-agent-" + operation_id
-        tmpfs = self.policy.build_tmpfs if operation == "build" else self.policy.run_tmpfs
+        tmpfs = (
+            self.policy.build_tmpfs
+            if operation in {"build", "build_standalone"}
+            else self.policy.run_tmpfs
+        )
         args = [
             "create",
             "--name",
@@ -366,7 +384,9 @@ class IsolatedGPUBackend(LocalBackend):
         reject_symlinks(binary_path)
         binary_path.unlink(missing_ok=True)
         request_id = new_id()
-        capture, binary, _ = self._container(state.handle.path, "build", 120)
+        standalone = set(state.hashes) == {"kernel.cu"}
+        operation = "build_standalone" if standalone else "build"
+        capture, binary, _ = self._container(state.handle.path, operation, request.timeout_seconds)
         if self._runtime_status(capture) == "SUCCESS" and not binary:
             capture = replace(capture, tool_error="BINARY_UNAVAILABLE")
         success = self._runtime_status(capture) == "SUCCESS"
@@ -389,6 +409,8 @@ class IsolatedGPUBackend(LocalBackend):
             "-o",
             "/tmp/vector_add",
         ]
+        if standalone:
+            argv.remove("/input/vector_io.cpp")
         payload = BuildPayload(
             argv=argv, binary_ref=state.binary_ref, source_manifest=dict(state.hashes)
         )

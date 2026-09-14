@@ -1,4 +1,4 @@
-"""CLI entry points; no candidate execution is exposed in T01."""
+"""CLI workflows delegate to the same controller service and verification guard."""
 
 from pathlib import Path
 from typing import Annotated
@@ -47,3 +47,57 @@ def environment_command(
             typer.echo(f"- {reason}")
         typer.echo("GPU execution not verified; clean-kernel acceptance is a separate step.")
     raise typer.Exit(0 if report.ready else 1)
+
+
+@app.command("diagnose")
+def diagnose_command(source: Path) -> None:
+    """Snapshot a source file/directory, investigate and attempt one model patch."""
+    from gpu_agent.service import ApplicationService
+
+    try:
+        service = ApplicationService.configured()
+        run = service.diagnose(source)
+    except (OSError, ValueError):
+        raise typer.BadParameter(
+            "Source or controller configuration is unavailable or invalid."
+        ) from None
+    typer.echo(f"run_id {run.id}")
+    result = service.diagnosis(run.id)
+    typer.echo(result.diagnostic_outcome)
+    for limitation in result.limitations:
+        typer.echo(limitation)
+
+
+@app.command("verify")
+def verify_command(
+    run_id: str,
+    candidate_path: Annotated[Path | None, typer.Argument()] = None,
+    generated_candidate: Annotated[bool, typer.Option("--generated-candidate")] = False,
+    strict: Annotated[bool, typer.Option("--strict")] = False,
+) -> None:
+    """Verify exactly one generated candidate or controller-supplied unified diff."""
+    from gpu_agent.service import ApplicationService
+
+    if generated_candidate == (candidate_path is not None):
+        raise typer.BadParameter("Select exactly one: CANDIDATE_PATH or --generated-candidate.")
+    try:
+        service = ApplicationService.configured()
+        candidate_id = service.register_patch(run_id, candidate_path) if candidate_path else None
+        result = service.verify(run_id, candidate_id, strict)
+    except (OSError, ValueError):
+        raise typer.BadParameter(
+            "Run/candidate is unavailable or failed the registration guard."
+        ) from None
+    typer.echo(result.model_dump_json(indent=2))
+
+
+@app.command("report")
+def report_command(run_id: str) -> None:
+    """Render public evidence, candidate, coverage and provider usage."""
+    from gpu_agent.service import ApplicationService
+
+    try:
+        report = ApplicationService.configured().report(run_id)
+    except (OSError, ValueError):
+        raise typer.BadParameter("Run/report is unavailable or invalid.") from None
+    typer.echo(report)
