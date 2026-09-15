@@ -60,5 +60,5 @@ def test_missing_cost_cap_stops_before_external_execution(tmp_path):
         max_cost_usd=None,
         max_unit_cost_usd=None,
     )
-    result = runner.run("E", "holdout", 3)
+    result = runner.run("E", "development", 3)
     assert result.records == [] and result.stopped_reason == "COST_CAP_REQUIRED"

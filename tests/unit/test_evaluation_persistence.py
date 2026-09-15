@@ -1,4 +1,6 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event, Lock
 
 import pytest
 
@@ -250,3 +252,49 @@ def test_runner_rejects_non_public_store(tmp_path, native_evaluation_executor):
             max_cost_usd=0,
             max_unit_cost_usd=0,
         )
+
+
+def test_concurrent_resume_claims_one_physical_evaluation_unit(native_evaluation_executor):
+    executor = native_evaluation_executor
+
+    class Blocking(_Proxy):
+        def __init__(self, executor):
+            super().__init__(executor)
+            self.guard = Lock()
+            self.started = Event()
+            self.second_seen = Event()
+            self.release = Event()
+
+        def execute_scheduled(self, item, attempt):
+            with self.guard:
+                self.calls.append(item.repeat)
+                if len(self.calls) == 1:
+                    self.started.set()
+                else:
+                    self.second_seen.set()
+            self.release.wait(2)
+            return self.executor.execute_scheduled(item, attempt)
+
+    blocking = Blocking(executor)
+    first_runner = _runner(executor, blocking)
+    schedule = first_runner._schedule("D", "development", 3)
+    store = executor.service.store
+    run = store.create_run("evaluation", binding=executor.service.binding)
+    store.transition(run.id, RunStatus.RUNNING, "EXECUTING")
+    first_runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+    second_runner = _runner(executor, blocking)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(first_runner.resume, run.id, "D", "development", 3)
+        assert blocking.started.wait(1)
+        second = pool.submit(second_runner.resume, run.id, "D", "development", 3)
+        raced = blocking.second_seen.wait(0.2)
+        blocking.release.set()
+        outcomes = []
+        for future in (first, second):
+            try:
+                outcomes.append(future.result())
+            except ValueError:
+                pass
+    assert not raced
+    assert len(blocking.calls) == 3
+    assert len(outcomes) == 1 and outcomes[0].executed_units == 3

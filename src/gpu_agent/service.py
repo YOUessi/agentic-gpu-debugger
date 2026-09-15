@@ -7,6 +7,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 from gpu_agent.agent.models import AcquisitionUsage, AgentBudget, DiagnosisResult
 from gpu_agent.agent.orchestrator import AgentOrchestrator, public_evidence
@@ -23,6 +24,7 @@ from gpu_agent.benchmark.evaluation import (
     EvaluationMode,
     EvaluationProviderPolicy,
     EvaluationUnitBinding,
+    PricingAttestation,
 )
 from gpu_agent.benchmark.ledger import CorpusFamily
 from gpu_agent.contracts import RunBinding, RunManifest
@@ -93,6 +95,7 @@ class ApplicationService:
         self._provider, self._backend_factory = provider, backend_factory
         self.knowledge, self.knowledge_version = knowledge, knowledge_version
         self._binding = _binding
+        self._pricing_attestation: PricingAttestation | None = None
 
     @property
     def binding(self) -> RunBinding | None:
@@ -267,33 +270,62 @@ class ApplicationService:
                         self.store,
                         run.id,
                         diff_validator=lambda diff: apply_generated_candidate(snapshot, diff),
+                        idempotency_key=(
+                            evaluation_unit.idempotency_key if evaluation_unit else None
+                        ),
                     )
                 else:
                     provider = self._provider
                 if isinstance(provider, FakeProvider):
                     provider.gate = gate
-                if mode == "E" and evaluation_unit is not None:
+                # Capability validation is local-only. It must finish before pricing checks,
+                # while every physical provider invocation remains behind both gates.
+                provider.ensure_available()
+                if mode == "E" and not isinstance(provider, FakeProvider):
+                    if evaluation_unit is None:
+                        raise ProviderError("PRICING_ATTESTATION_REQUIRED")
+                    settings = getattr(provider, "settings", None)
+                    if not isinstance(settings, OpenAIProviderSettings):
+                        raise ProviderError("MODEL_CONFIG_MISMATCH")
                     if (
                         self._binding is None
                         or self._binding.prompt_version != PROMPT_VERSION
                         or not provider.model_name
                     ):
                         raise ProviderError("MODEL_CONFIG_MISMATCH")
+                    endpoint_host = urlsplit(settings.endpoint or "").hostname or ""
+                    if not endpoint_host:
+                        raise ProviderError("MODEL_CONFIG_MISMATCH")
                     policy = EvaluationProviderPolicy(
                         provider=provider.provider_name,
+                        endpoint_host=endpoint_host,
                         configured_model=provider.model_name,
                         allowed_response_models=[provider.model_name],
                         prompt_version=PROMPT_VERSION,
                     )
                     if policy.sha256 != self._binding.model_config_hash:
                         raise ProviderError("MODEL_CONFIG_MISMATCH")
+                    pricing = self._pricing_attestation
+                    if (
+                        pricing is None
+                        or pricing.provider != policy.provider
+                        or pricing.model != policy.configured_model
+                        or pricing.repository_commit != self._binding.repository.commit
+                        or pricing.model_config_hash != self._binding.model_config_hash
+                    ):
+                        raise ProviderError("PRICING_ATTESTATION_REQUIRED")
                     self.store.put(
                         run.id,
                         "agent/provider-policy.json",
                         policy.content(),
                         "public",
                     )
-                provider.ensure_available()
+                    self.store.put(
+                        run.id,
+                        "agent/pricing-attestation.json",
+                        pricing.model_dump_json().encode(),
+                        "public",
+                    )
                 gate = provider.gate
                 vector = '#include "vector_api.h"' in text
                 hashes = {"kernel.cu": ref.sha256}

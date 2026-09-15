@@ -189,6 +189,8 @@ class DiagnosisResult(ExecutionModel):
 
 
 class PolicyDecision(ExecutionModel):
+    action_type: str = Field(min_length=1)
+    action_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     allowed: bool
     mandatory_actions: list[str] = Field(default_factory=list)
     prohibited_actions: list[str] = Field(default_factory=list)

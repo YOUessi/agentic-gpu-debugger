@@ -262,6 +262,13 @@ class CorpusLedger:
         finally:
             os.close(fd)
 
+    def committed(self, transaction_id: str) -> CorpusTransaction:
+        """Return one durably committed transaction; PREPARED is never evidence."""
+        transaction = self._get_transaction(transaction_id)
+        if transaction.state != "COMMITTED":
+            raise ValueError("corpus transaction is not committed")
+        return transaction
+
     @contextmanager
     def registration_lock(self, transaction: CorpusTransaction) -> Iterator[CorpusTransaction]:
         """Serialize one transaction's RunStore completion and ledger commit.

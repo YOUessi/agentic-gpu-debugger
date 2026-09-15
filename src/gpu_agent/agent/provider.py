@@ -1,5 +1,6 @@
 """Official Responses adapter. One ledger event pair per physical request, no replay."""
 
+import hashlib
 import json
 import logging
 import os
@@ -106,6 +107,7 @@ class Invocation(ExecutionModel):
     retryable: bool = False
     format_retry_of: str | None = None
     store_false_sent: bool = True
+    output_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class WorkerRequest(ExecutionModel):
@@ -343,6 +345,7 @@ class OpenAIResponsesProvider:
         port: ResponsesPort | None = None,
         cancel: Event | None = None,
         diff_validator: Callable[[str], object] | None = None,
+        idempotency_key: str | None = None,
     ) -> None:
         self.settings, self.gate, self.store, self.run_id = settings, gate, store, run_id
         self.model_name = settings.model
@@ -352,6 +355,8 @@ class OpenAIResponsesProvider:
 
         self._port = port if port is not None else ProviderProcessPort(cancel=cancel)
         self._cancel, self._diff_validator = cancel, diff_validator
+        self._idempotency_key = idempotency_key
+        self._call_sequence = 0
 
     def ensure_available(self) -> None:
         s = self.settings
@@ -432,6 +437,8 @@ class OpenAIResponsesProvider:
         if any(i.state == "UNCERTAIN" for i in self.invocations()):
             raise ProviderError("LLM_UNCERTAIN_INVOCATION")
         previous: str | None = None
+        sequence = self._call_sequence
+        self._call_sequence += 1
         for attempt in range(2):
             timeout = min(self.settings.timeout_seconds, self.gate.reserve(kind, attempt=attempt))
             invocation = Invocation(
@@ -442,7 +449,13 @@ class OpenAIResponsesProvider:
                 state="STARTED",
                 started_at=now(),
                 configured_model=self.settings.model or "",
-                client_request_id=new_id(),
+                client_request_id=(
+                    hashlib.sha256(
+                        f"{self._idempotency_key}:{sequence}:{kind}:{attempt}".encode()
+                    ).hexdigest()[:32]
+                    if self._idempotency_key is not None
+                    else new_id()
+                ),
                 endpoint_host=urlsplit(self.settings.endpoint or "").hostname or "",
                 format_retry_of=previous,
             )
@@ -450,6 +463,7 @@ class OpenAIResponsesProvider:
             started = time.monotonic()
             metadata: dict[str, object] = {}
             error: ProviderError | None = None
+            value: Output | None = None
             try:
                 assert self.settings.api_key is not None
                 result = self._port.call(
@@ -489,10 +503,16 @@ class OpenAIResponsesProvider:
                     "elapsed_ms": (time.monotonic() - started) * 1000,
                     "error_code": error.code if error else None,
                     "retryable": error.retryable if error else False,
+                    "output_hash": (
+                        hashlib.sha256(value.model_dump_json().encode()).hexdigest()
+                        if error is None and value is not None
+                        else None
+                    ),
                 }
             )
             self._save(terminal)
             if error is None:
+                assert value is not None
                 return value
             if error.code != "LLM_INVALID_OUTPUT" or error.state != "FAILED" or attempt:
                 raise error

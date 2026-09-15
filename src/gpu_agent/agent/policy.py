@@ -1,5 +1,6 @@
 """Controller authority over action phase, budget and evidence sufficiency."""
 
+import hashlib
 import threading
 import time
 from collections.abc import Callable
@@ -8,6 +9,7 @@ from typing import Literal
 
 from gpu_agent.agent.models import (
     AgentAction,
+    AgentActionOutput,
     AgentBudget,
     DiagnosisResult,
     PolicyDecision,
@@ -221,7 +223,10 @@ def decide_action(
             reason = "SOURCE_NOT_REGISTERED"
         elif budget.source_reads >= budget.max_source_reads:
             reason = "AGENT_BUDGET_EXHAUSTED"
+    action_content = AgentActionOutput(action=action).model_dump_json().encode()
     return PolicyDecision(
+        action_type=action.action_type,
+        action_hash=hashlib.sha256(action_content).hexdigest(),
         allowed=reason is None,
         mandatory_actions=mandatory,
         prohibited_actions=sorted({"shell", "network", "private_files", "modify_source"}),

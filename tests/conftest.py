@@ -148,16 +148,24 @@ def oob_service(store, tmp_path):
 
 
 @pytest.fixture
-def native_evaluation_executor(oob_service, tmp_path):
+def native_evaluation_executor(oob_service, tmp_path, monkeypatch, request):
     """Fast native evaluation producer backed by the real store/orchestrator schemas."""
     import hashlib
 
     from gpu_agent.agent.prompts import PROMPT_VERSION
+    from gpu_agent.benchmark.builder import BenchmarkBuilder
     from gpu_agent.benchmark.executor import EvaluationExecutor
-    from gpu_agent.benchmark.models import CaseManifest
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.benchmark.models import (
+        AuthoritativeCaseRegistry,
+        AuthoritativeCaseSpec,
+        CaseExecutionPlan,
+    )
+    from gpu_agent.benchmark.validation import CaseValidationController
     from gpu_agent.contracts import RepositorySnapshot, RunBinding
-    from gpu_agent.environment import load_toolchain_lock
-    from gpu_agent.execution.isolated import LOCK_PATH
+    from gpu_agent.environment import RuntimeToolchainAttestation, load_toolchain_lock
+    from gpu_agent.execution.isolated import LOCK_PATH, IsolatedGPUBackend
+    from gpu_agent.execution.process import ProcessCapture
     from gpu_agent.knowledge.models import make_chunk
     from gpu_agent.knowledge.retrieve import KnowledgeIndex
     from gpu_agent.store import RunStore
@@ -181,59 +189,141 @@ def native_evaluation_executor(oob_service, tmp_path):
         prompt_version=PROMPT_VERSION,
         model_config_hash="5" * 64,
     )
-    corpus = RunStore(tmp_path / "corpus", visibility="evaluator")
+    split = getattr(request, "param", "public")
+    if split not in {"public", "private"}:
+        raise ValueError("invalid native evaluation fixture split")
+    visibility = "public" if split == "public" else "evaluator"
+    corpus = RunStore(tmp_path / "corpus", visibility=visibility)
+    family = CorpusFamily.provision(
+        tmp_path / "corpus-controller",
+        public_store=corpus.root if visibility == "public" else tmp_path / "public-corpus",
+        evaluator_store=corpus.root if visibility == "evaluator" else tmp_path / "evaluator-corpus",
+        repository=tmp_path / "repository",
+    )
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
+    source_root = tmp_path / "corpus-sources"
+    clean_root, mutant_root = source_root / "clean", source_root / "mutant"
+    clean_root.mkdir(parents=True)
+    mutant_root.mkdir(parents=True)
+    mutant_bytes = (source / "kernel.cu").read_bytes()
+    clean_bytes = mutant_bytes.replace(
+        b"out[i] = a[i] + b[i];", b"if (i < n) out[i] = a[i] + b[i];"
+    )
+    (clean_root / "kernel.cu").write_bytes(clean_bytes)
+    (mutant_root / "kernel.cu").write_bytes(mutant_bytes)
+    harness_root = source_root / "harness"
+    harness_root.mkdir()
+    repository = __import__("pathlib").Path(__file__).resolve().parents[1]
+    for name in ("vector_io.cpp", "vector_api.h", "json.hpp"):
+        source_name = "vendor/json.hpp" if name == "json.hpp" else name
+        (harness_root / name).write_bytes(
+            (repository / "benchmarks/harness" / source_name).read_bytes()
+        )
+    input_bytes = json.dumps({"n": 257, "a": [1.0] * 257, "b": [2.0] * 257}).encode()
+    harness_hash = hashlib.sha256(
+        json.dumps(
+            sorted(
+                (name, hashlib.sha256((harness_root / name).read_bytes()).hexdigest())
+                for name in ("vector_io.cpp", "vector_api.h", "json.hpp")
+            ),
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    spec = AuthoritativeCaseSpec(
+        case_id="case_0100",
+        template_id="vector-add",
+        mutation_id="delete-guard",
+        split=split,
+        clean_source_hash=hashlib.sha256(clean_bytes).hexdigest(),
+        mutant_source_hash=hashlib.sha256(mutant_bytes).hexdigest(),
+        harness_hash=harness_hash,
+        input_set_hash=hashlib.sha256(input_bytes).hexdigest(),
+        oracle_id="vector-add-cpu-v1",
+        target_tool="memcheck",
+        expected_finding="Invalid __global__ write",
+        sanitizer_repetitions=1,
+        mutation_provenance_hash="9" * 64,
+    )
+    registry_bytes = AuthoritativeCaseRegistry(cases=[spec]).model_dump_json().encode()
+    registry_hash = hashlib.sha256(registry_bytes).hexdigest()
     corpus_binding = RunBinding(
         repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
         purpose="corpus_validation",
         toolchain_lock_hash=toolchain_hash,
-        case_registry_hash="6" * 64,
-        corpus_ledger_namespace_hash="7" * 64,
+        case_registry_hash=registry_hash,
+        corpus_ledger_namespace_hash=family.namespace_hash,
     )
-    manifest = CaseManifest(
-        id="case_0100",
-        source_hash=hashlib.sha256((source / "kernel.cu").read_bytes()).hexdigest(),
-        harness_hash="2" * 64,
-        mutation_id="delete-guard",
-        template_id="vector-add",
-        split="private",
-        oracle_id="vector-add-cpu-v1",
-        target_tool="memcheck",
-        expected_finding="PRIVATE_TRUTH_CANARY",
-        validation_run_ids=["a" * 32, "b" * 32],
-        toolchain_hash=toolchain_hash,
-        input_set_hash="4" * 64,
-        ledger_namespace_hash="7" * 64,
-        case_identity_hash="8" * 64,
-        template_identity_hash="9" * 64,
-        source_pair_hash="0" * 64,
+
+    class CorpusBackend(IsolatedGPUBackend):
+        def _attest_runtime(self):
+            assert self._expected_toolchain is not None
+            return RuntimeToolchainAttestation(
+                runtime_session_id=self._runtime_session_id,
+                lock_hash=self._expected_toolchain.lock_hash,
+                image_id=self._expected_toolchain.image_id,
+                cuda_nvcc=self._expected_toolchain.cuda_nvcc,
+                compute_sanitizer=self._expected_toolchain.compute_sanitizer,
+                compute_capability="8.9",
+                target_arch=self._expected_toolchain.target_arch,
+                policy_hash=hashlib.sha256(self.policy.model_dump_json().encode()).hexdigest(),
+            )
+
+        def _container(self, path, operation, timeout, *, stdin=b"", cancel=None):
+            mutant = b"if (i < n)" not in (path / "kernel.cu").read_bytes()
+            if operation == "build":
+                return ProcessCapture(0, b"", b"", False), b"binary", b""
+            output = json.dumps(
+                {"dtype": "float32", "shape": [257], "values": [3.0] * 257}
+            ).encode()
+            if operation == "run":
+                return ProcessCapture(0, output, b"", False), b"", b""
+            log = (
+                b"========= Invalid __global__ write of size 4 bytes\n"
+                b"=========     at kernel in kernel.cu:9\n"
+                b"========= ERROR SUMMARY: 1 error\n"
+                if mutant
+                else b"========= ERROR SUMMARY: 0 errors\n"
+            )
+            return ProcessCapture(86 if mutant else 0, output, b"", False), b"", log
+
+    backend = CorpusBackend(corpus, source_root, tmp_path / "corpus-tasks")
+    controller = CaseValidationController._for_test(corpus, backend, corpus_binding, registry_bytes)
+
+    def execute_case(role):
+        names = [
+            f"{role}/kernel.cu",
+            *[f"harness/{name}" for name in ("vector_io.cpp", "vector_api.h", "json.hpp")],
+        ]
+        return controller.execute(
+            CaseExecutionPlan(
+                case_id="case_0100",
+                template_id="vector-add",
+                mutation_id="clean" if role == "clean" else "delete-guard",
+                role=role,
+                split=split,
+                source_manifest={
+                    name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()
+                    for name in names
+                },
+                target_tool="memcheck",
+                expected_finding="Invalid __global__ write",
+                sanitizer_repetitions=1,
+                case_registry_hash=registry_hash,
+                case_spec_hash=controller.spec_hash(spec),
+                mutation_provenance_hash=spec.mutation_provenance_hash,
+            ),
+            input_bytes,
+        )
+
+    clean_id, mutant_id = execute_case("clean"), execute_case("mutant")
+    builder = BenchmarkBuilder(corpus)
+    builder.register(builder.validate(clean_id, mutant_id))
+    return EvaluationExecutor(
+        service,
+        corpus,
+        {"case_0100": source},
+        _corpus_family=family,
     )
-    registration = corpus.create_run("benchmark_case", binding=corpus_binding)
-    manifest_bytes = manifest.model_dump_json().encode()
-    corpus.put(
-        registration.id,
-        "validation/ledger-transaction.json",
-        json.dumps(
-            {
-                "schema_version": 2,
-                "transaction_id": "1" * 32,
-                "owner_id": "2" * 32,
-                "ledger_namespace_hash": "7" * 64,
-                "case_identity_hash": "8" * 64,
-                "template_identity_hash": "9" * 64,
-                "source_pair_hash": "0" * 64,
-                "target_store_hash": "3" * 64,
-                "visibility": "evaluator",
-                "expected_manifest_hash": hashlib.sha256(manifest_bytes).hexdigest(),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode(),
-        "evaluator",
-    )
-    corpus.put(registration.id, "case-manifest.json", manifest_bytes, "evaluator")
-    corpus.transition(registration.id, "RUNNING", "FINALIZING")
-    corpus.transition(registration.id, "COMPLETED", None)
-    return EvaluationExecutor(service, corpus, {"case_0100": source})
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

@@ -15,6 +15,24 @@ if TYPE_CHECKING:
     from gpu_agent.benchmark.evaluation import EvaluationRecord
 
 
+class ValidatedEvaluationRecord:
+    """Opaque evaluator-loader output accepted by public metric entry points."""
+
+    __slots__ = ("_record",)
+
+    def __init__(self, record: EvaluationRecord, authority: object) -> None:
+        if authority is not _EVALUATOR_AUTHORITY:
+            raise ValueError("validated records are created only by the evaluator loader")
+        self._record = record
+
+    @property
+    def record(self) -> EvaluationRecord:
+        return self._record
+
+
+_EVALUATOR_AUTHORITY = object()
+
+
 class HiddenTruth(ExecutionModel):
     failure_family: str
     root_cause_labels: list[str]
@@ -107,7 +125,7 @@ def _metric(values: list[bool]) -> Metric:
     )
 
 
-def score(record: EvaluationRecord, hidden_truth: HiddenTruth, rubric: Rubric) -> Score:
+def _score_record(record: EvaluationRecord, hidden_truth: HiddenTruth, rubric: Rubric) -> Score:
     diagnosis = record.diagnosis
     inconclusive = diagnosis.get("diagnostic_outcome") != "DIAGNOSED"
     family = (
@@ -133,6 +151,12 @@ def score(record: EvaluationRecord, hidden_truth: HiddenTruth, rubric: Rubric) -
         location_correct=location,
         inconclusive_correct=inconclusive == hidden_truth.should_be_inconclusive,
     )
+
+
+def score(record: ValidatedEvaluationRecord, hidden_truth: HiddenTruth, rubric: Rubric) -> Score:
+    if not isinstance(record, ValidatedEvaluationRecord):
+        raise ValueError("metrics require an evaluator-validated record")
+    return _score_record(record.record, hidden_truth, rubric)
 
 
 def _diagnosis(record: EvaluationRecord) -> DiagnosisResult | None:
@@ -217,7 +241,7 @@ def _usage_metric(records: list[EvaluationRecord], key: str) -> Metric:
     return Metric(value=total / len(records), n=len(records), numerator=total)
 
 
-def aggregate(records: list[EvaluationRecord], *, retrieval_k: int = 5) -> MetricSummary:
+def _aggregate_records(records: list[EvaluationRecord], *, retrieval_k: int = 5) -> MetricSummary:
     """Micro-aggregate repeated attempts; counts expose the unique experimental units.
 
     Label-based rates use judged items only. Repair component rates use measured
@@ -311,6 +335,12 @@ def aggregate(records: list[EvaluationRecord], *, retrieval_k: int = 5) -> Metri
     )
 
 
+def aggregate(records: list[ValidatedEvaluationRecord], *, retrieval_k: int = 5) -> MetricSummary:
+    if any(not isinstance(record, ValidatedEvaluationRecord) for record in records):
+        raise ValueError("metrics require evaluator-validated records")
+    return _aggregate_records([record.record for record in records], retrieval_k=retrieval_k)
+
+
 class GroupedMetricSummary(ExecutionModel):
     """Descriptive attempt summaries, not independent samples or confidence intervals."""
 
@@ -323,26 +353,40 @@ class GroupedMetricSummary(ExecutionModel):
 
 
 def aggregate_grouped(
+    records: list[ValidatedEvaluationRecord], *, retrieval_k: int = 5
+) -> GroupedMetricSummary:
+    if any(not isinstance(record, ValidatedEvaluationRecord) for record in records):
+        raise ValueError("metrics require evaluator-validated records")
+    return _aggregate_grouped_records(
+        [record.record for record in records], retrieval_k=retrieval_k
+    )
+
+
+def _aggregate_grouped_records(
     records: list[EvaluationRecord], *, retrieval_k: int = 5
 ) -> GroupedMetricSummary:
+    """Internal aggregation used only after native evaluator validation."""
+    raw = records
+
     def grouped(items: list[EvaluationRecord], field: str) -> dict[str, MetricSummary]:
         groups: dict[str, list[EvaluationRecord]] = defaultdict(list)
         for record in items:
             groups[str(getattr(record, field))].append(record)
         return {
-            key: aggregate(group, retrieval_k=retrieval_k) for key, group in sorted(groups.items())
+            key: _aggregate_records(group, retrieval_k=retrieval_k)
+            for key, group in sorted(groups.items())
         }
 
-    modes = sorted({record.mode for record in records})
+    modes = sorted({record.mode for record in raw})
     return GroupedMetricSummary(
-        overall=aggregate(records, retrieval_k=retrieval_k),
-        by_mode=grouped(records, "mode"),
-        by_case=grouped(records, "case_id"),
-        by_template=grouped(records, "template_id"),
+        overall=_aggregate_records(raw, retrieval_k=retrieval_k),
+        by_mode=grouped(raw, "mode"),
+        by_case=grouped(raw, "case_id"),
+        by_template=grouped(raw, "template_id"),
         by_mode_case={
-            mode: grouped([r for r in records if r.mode == mode], "case_id") for mode in modes
+            mode: grouped([r for r in raw if r.mode == mode], "case_id") for mode in modes
         },
         by_mode_template={
-            mode: grouped([r for r in records if r.mode == mode], "template_id") for mode in modes
+            mode: grouped([r for r in raw if r.mode == mode], "template_id") for mode in modes
         },
     )

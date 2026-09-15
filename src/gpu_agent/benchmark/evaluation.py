@@ -1,11 +1,16 @@
 """Serial, cost-capped evaluation records and durable public batch schedules."""
 
+import fcntl
 import hashlib
 import json
+import os
 import random
 import re
-from collections.abc import Callable
-from typing import Literal
+import stat
+import threading
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field, ValidationError
 
@@ -13,7 +18,13 @@ from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.benchmark.metrics import EvaluationLabels, Score
 from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunBinding, RunStatus
 from gpu_agent.execution.models import ExecutionModel
-from gpu_agent.store import RunStore
+from gpu_agent.store import RunStore, reject_symlinks
+
+if TYPE_CHECKING:
+    from gpu_agent.benchmark.holdout import HoldoutBatch, HoldoutController
+
+_CLAIM_GUARD = threading.Lock()
+_CLAIM_LOCKS: dict[str, threading.Lock] = {}
 
 EvaluationMode = Literal["A", "B", "C", "D", "E"]
 EvaluationSelection = EvaluationMode | Literal["all"]
@@ -44,6 +55,7 @@ class EvaluationProviderPolicy(ExecutionModel):
 
     schema_version: Literal[1] = 1
     provider: str = Field(min_length=1)
+    endpoint_host: str = Field(min_length=1)
     configured_model: str = Field(min_length=1)
     allowed_response_models: list[str] = Field(min_length=1)
     prompt_version: str = Field(min_length=1)
@@ -57,6 +69,38 @@ class EvaluationProviderPolicy(ExecutionModel):
     @property
     def sha256(self) -> str:
         return hashlib.sha256(self.content()).hexdigest()
+
+
+class PricingAttestation(ExecutionModel):
+    """Controller-owned pricing evidence; only a private test producer exists today."""
+
+    schema_version: Literal[1] = 1
+    source: Literal["TEST_ONLY"]
+    provider: str
+    model: str
+    repository_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
+    model_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    input_usd_per_million: float = Field(ge=0)
+    output_usd_per_million: float = Field(ge=0)
+
+    @classmethod
+    def _for_test(
+        cls, provider: str, model: str, commit: str, model_config_hash: str
+    ) -> "PricingAttestation":
+        return cls(
+            source="TEST_ONLY",
+            provider=provider,
+            model=model,
+            repository_commit=commit,
+            model_config_hash=model_config_hash,
+            input_usd_per_million=1,
+            output_usd_per_million=1,
+        )
+
+    def cost(self, input_tokens: int, output_tokens: int) -> float:
+        return (
+            input_tokens * self.input_usd_per_million + output_tokens * self.output_usd_per_million
+        ) / 1_000_000
 
 
 class PublicEvaluationRecord(ExecutionModel):
@@ -137,12 +181,19 @@ class EvaluationBindings(ExecutionModel):
     max_unit_cost_usd: float | None = Field(default=None, ge=0)
 
 
+class HoldoutScheduleProof(ExecutionModel):
+    public_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    aliases_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class EvaluationScheduleItem(ExecutionModel):
     ordinal: int = Field(ge=0)
     case_id: str = Field(min_length=1)
     template_id: str = Field(min_length=1)
     mode: EvaluationMode
     repeat: int = Field(ge=0)
+    split: EvaluationSplit
+    holdout_proof: HoldoutScheduleProof | None = None
 
 
 class EvaluationSchedule(ExecutionModel):
@@ -154,6 +205,7 @@ class EvaluationSchedule(ExecutionModel):
     random_seed: int
     bindings: EvaluationBindings
     items: list[EvaluationScheduleItem]
+    holdout_proof: HoldoutScheduleProof | None = None
 
 
 class EvaluationAttempt(ExecutionModel):
@@ -180,6 +232,8 @@ class EvaluationUnitBinding(ExecutionModel):
     template_id: str = Field(min_length=1)
     mode: EvaluationMode
     repeat: int = Field(ge=0)
+    split: EvaluationSplit
+    holdout_proof: HoldoutScheduleProof | None = None
 
 
 class EvaluationManifest(ExecutionModel):
@@ -220,6 +274,8 @@ class EvaluationRunner:
         max_cost_usd: float | None,
         max_unit_cost_usd: float | None,
         random_seed: int = 20260915,
+        holdout_controller: "HoldoutController | None" = None,
+        holdout_batch: "HoldoutBatch | None" = None,
     ) -> None:
         if store.visibility != "public":
             raise ValueError("evaluation requires a public RunStore")
@@ -244,6 +300,9 @@ class EvaluationRunner:
             max_unit_cost_usd=max_unit_cost_usd,
         )
         self.random_seed = random_seed
+        if (holdout_controller is None) != (holdout_batch is None):
+            raise ValueError("holdout controller and batch must be configured together")
+        self.holdout_controller, self.holdout_batch = holdout_controller, holdout_batch
 
     def run(
         self, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
@@ -255,6 +314,12 @@ class EvaluationRunner:
         return self._execute(run.id, schedule, [], {})
 
     def resume(
+        self, run_id: str, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
+    ) -> EvaluationManifest:
+        with self._claim(run_id):
+            return self._resume_claimed(run_id, mode, split, repeats)
+
+    def _resume_claimed(
         self, run_id: str, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
         run = self.store.load(run_id)
@@ -272,11 +337,40 @@ class EvaluationRunner:
         records = self._records(run_id, persisted, attempts)
         return self._execute(run_id, persisted, records, attempts)
 
+    @contextmanager
+    def _claim(self, run_id: str) -> Iterator[None]:
+        """Serialize recovery across threads and processes for one immutable batch."""
+        with _CLAIM_GUARD:
+            local = _CLAIM_LOCKS.setdefault(str(self.store.root / run_id), threading.Lock())
+        lock_path = self.store.root / f".evaluation-{run_id}.lock"
+        reject_symlinks(lock_path)
+        with local:
+            fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+            try:
+                if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_mode & 0o077:
+                    raise ValueError("evaluation claim lock is unsafe")
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                os.close(fd)
+
     def _schedule(
         self, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationSchedule:
         if repeats < 3:
             raise ValueError("evaluation requires at least three repeats")
+        if split == "holdout":
+            if self.holdout_controller is None or self.holdout_batch is None:
+                raise ValueError("holdout alias proof is required")
+            holdout_proof = self.holdout_controller.validate_batch(self.holdout_batch)
+            if set(self.case_ids) != set(self.holdout_batch.aliases) or any(
+                case_id != template_id for case_id, template_id in self.case_ids.items()
+            ):
+                raise ValueError("holdout alias proof does not match scheduled identities")
+        else:
+            if self.holdout_controller is not None:
+                raise ValueError("holdout alias proof cannot bind a development schedule")
+            holdout_proof = None
         modes: list[EvaluationMode] = ["A", "B", "C", "D", "E"] if mode == "all" else [mode]
         units = [
             (case_id, template_id, item_mode, repeat)
@@ -299,9 +393,12 @@ class EvaluationRunner:
                     template_id=template_id,
                     mode=item_mode,
                     repeat=repeat,
+                    split=split,
+                    holdout_proof=holdout_proof,
                 )
                 for ordinal, (case_id, template_id, item_mode, repeat) in enumerate(units)
             ],
+            holdout_proof=holdout_proof,
         )
 
     @staticmethod

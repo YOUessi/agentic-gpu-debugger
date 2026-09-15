@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -196,8 +197,10 @@ def registered_executor(oob_service, tmp_path):
     return EvaluationExecutor(service, corpus, {"case_0100": source}), source
 
 
-def test_executor_uses_persisted_diagnosis_candidate_and_verification(oob_service, tmp_path):
-    executor, _ = registered_executor(oob_service, tmp_path)
+def test_executor_uses_persisted_diagnosis_candidate_and_verification(
+    oob_service, tmp_path, native_evaluation_executor
+):
+    executor = native_evaluation_executor
     record = executor.execute("case_0100", "vector-add", "E", 0)
     service, provider, _ = oob_service
     assert record.mode == "E" and record.diagnosis["diagnostic_outcome"] == "DIAGNOSED"
@@ -214,8 +217,40 @@ def test_executor_uses_persisted_diagnosis_candidate_and_verification(oob_servic
     assert "PRIVATE_TRUTH_CANARY" not in wire and str(tmp_path) not in wire
 
 
-def test_executor_preserves_mode_failure(oob_service, tmp_path):
-    executor, _ = registered_executor(oob_service, tmp_path)
+def test_evaluation_rejects_self_authored_corpus_receipt(oob_service, tmp_path):
+    with pytest.raises(ValueError, match="trusted corpus family|committed corpus transaction"):
+        registered_executor(oob_service, tmp_path)
+
+
+def test_evaluation_rejects_prepared_corpus_transaction(native_evaluation_executor):
+    executor = native_evaluation_executor
+    state_path = executor._corpus_family.ledger.root / "transactions.json"
+    state = json.loads(state_path.read_text())
+    state["transactions"][0]["state"] = "PREPARED"
+    state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")))
+    with pytest.raises(ValueError, match="committed corpus transaction"):
+        executor.execute("case_0100", "vector-add", "D", 0)
+
+
+def test_evaluation_rejects_corpus_from_another_repository(native_evaluation_executor):
+    from gpu_agent.contracts import RepositorySnapshot
+
+    executor = native_evaluation_executor
+    binding = executor.service.binding
+    assert binding is not None
+    executor.service._binding = binding.model_copy(
+        update={
+            "repository": RepositorySnapshot(
+                commit="f" * 40, tracked_tree_hash="e" * 64, clean=True
+            )
+        }
+    )
+    with pytest.raises(ValueError, match="provenance"):
+        executor.execute("case_0100", "vector-add", "D", 0)
+
+
+def test_executor_preserves_mode_failure(oob_service, tmp_path, native_evaluation_executor):
+    executor = native_evaluation_executor
     oob_service[1].actions = []
     record = executor.execute("case_0100", "vector-add", "E", 0)
     assert record.mode == "E" and record.status == "FAILED"
@@ -223,10 +258,12 @@ def test_executor_preserves_mode_failure(oob_service, tmp_path):
     assert record.patch_hash is None and record.usage["physical_calls"] == 1
 
 
-def test_runner_persists_only_schedule_bound_native_lineage(oob_service, tmp_path):
+def test_runner_persists_only_schedule_bound_native_lineage(
+    oob_service, tmp_path, native_evaluation_executor
+):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     binding = executor.service.binding
     assert binding is not None and binding.prompt_version is not None
     assert binding.toolchain_lock_hash is not None and binding.model_config_hash is not None
@@ -251,11 +288,29 @@ def test_runner_persists_only_schedule_bound_native_lineage(oob_service, tmp_pat
         assert record.lineage.provider_invocation_hashes == []
 
 
-@pytest.mark.parametrize("forgery", ["record_id", "diagnosis_hash", "evidence_hash", "diagnosis"])
-def test_runner_rejects_forged_native_lineage(oob_service, tmp_path, monkeypatch, forgery):
+@pytest.mark.parametrize(
+    "forgery",
+    [
+        "record_id",
+        "diagnosis_hash",
+        "evidence_hash",
+        "diagnosis",
+        "status",
+        "failure_reason",
+        "latency",
+        "cost",
+        "usage",
+        "checks",
+        "oracle",
+        "regression",
+    ],
+)
+def test_runner_rejects_forged_native_lineage(
+    oob_service, tmp_path, monkeypatch, forgery, native_evaluation_executor
+):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     binding = executor.service.binding
     assert binding is not None and binding.prompt_version is not None
     assert binding.toolchain_lock_hash is not None and binding.model_config_hash is not None
@@ -272,7 +327,19 @@ def test_runner_rejects_forged_native_lineage(oob_service, tmp_path, monkeypatch
         if forgery == "evidence_hash":
             lineage = record.lineage.model_copy(update={"evidence_hash": "f" * 64})
             return record.model_copy(update={"lineage": lineage, "evidence_hash": "f" * 64})
-        return record.model_copy(update={"diagnosis": {}})
+        if forgery == "diagnosis":
+            return record.model_copy(update={"diagnosis": {}})
+        updates = {
+            "status": {"status": "COMPLETED"},
+            "failure_reason": {"failure_reason": "FORGED_FAILURE"},
+            "latency": {"latency_ms": record.latency_ms + 1},
+            "cost": {"cost_usd": 0.5},
+            "usage": {"usage": {**record.usage, "tool_calls": 999}},
+            "checks": {"executed_checks": {"memcheck": "FORGED"}},
+            "oracle": {"oracle_passed": True},
+            "regression": {"regression_detected": True},
+        }
+        return record.model_copy(update=updates[forgery])
 
     monkeypatch.setattr(executor, "execute_scheduled", forged)
     result = EvaluationRunner(
@@ -307,6 +374,7 @@ def _configure_responses_provider(
         SDKResult,
         Usage,
     )
+    from gpu_agent.benchmark.evaluation import PricingAttestation
 
     class Port:
         def call(self, request):
@@ -332,6 +400,7 @@ def _configure_responses_provider(
     policy = {
         "schema_version": 1,
         "provider": "openai-responses",
+        "endpoint_host": "api.openai.com",
         "configured_model": "eval-model",
         "allowed_response_models": ["eval-model"],
         "prompt_version": PROMPT_VERSION,
@@ -342,6 +411,9 @@ def _configure_responses_provider(
     ).hexdigest()
     binding = executor.service.binding.model_copy(update={"model_config_hash": policy_hash})
     executor.service._binding = binding
+    executor.service._pricing_attestation = PricingAttestation._for_test(
+        "openai-responses", "eval-model", binding.repository.commit, policy_hash
+    )
     executor.service._provider = None
     monkeypatch.setattr(service_module.OpenAIProviderSettings, "from_environment", lambda: settings)
     monkeypatch.setattr(
@@ -355,11 +427,11 @@ def _configure_responses_provider(
 
 
 def test_mode_e_binds_native_provider_policy_invocation_and_usage(
-    oob_service, tmp_path, monkeypatch
+    oob_service, tmp_path, monkeypatch, native_evaluation_executor
 ):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     binding, policy = _configure_responses_provider(executor, monkeypatch)
     result = EvaluationRunner(
         executor.service.store,
@@ -374,19 +446,23 @@ def test_mode_e_binds_native_provider_policy_invocation_and_usage(
         max_unit_cost_usd=1,
         random_seed=7,
     ).run("E", "development", 3)
-    assert result.stopped_reason == "COST_UNKNOWN" and result.executed_units == 1
+    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+    assert result.executed_units == 1
     record = result.records[0]
     assert record.usage["physical_calls"] == 1
+    assert record.cost_usd == 0.000005
     assert len(record.lineage.provider_invocation_hashes) == 1
     run = executor.service.store.load(record.lineage.diagnosis_run_id)
     policy_ref = next(ref for ref in run.artifact_refs if ref.name == "agent/provider-policy.json")
     assert json.loads(executor.service.store.read(policy_ref)) == policy
 
 
-def test_mode_e_rejects_forged_model_config_binding(oob_service, tmp_path, monkeypatch):
+def test_mode_e_rejects_forged_model_config_binding(
+    oob_service, tmp_path, monkeypatch, native_evaluation_executor
+):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     binding, _ = _configure_responses_provider(executor, monkeypatch)
     forged = binding.model_copy(update={"model_config_hash": "f" * 64})
     executor.service._binding = forged
@@ -407,15 +483,57 @@ def test_mode_e_rejects_forged_model_config_binding(oob_service, tmp_path, monke
     assert result.records == []
 
 
+def test_mode_e_requires_pricing_attestation_before_provider_call(
+    oob_service, tmp_path, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    binding, _ = _configure_responses_provider(executor, monkeypatch)
+    executor.service._pricing_attestation = None
+    result = EvaluationRunner(
+        executor.service.store,
+        {"case_0100": "vector-add"},
+        executor.execute,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+    assert result.stopped_reason == "EXECUTION_ERROR" and result.records == []
+    diagnosis_runs = [
+        executor.service.store.load(path.name)
+        for path in executor.service.store.root.iterdir()
+        if path.is_dir() and len(path.name) == 32
+    ]
+    assert not any(
+        ref.name.startswith("provider/") for run in diagnosis_runs for ref in run.artifact_refs
+    )
+
+
+def test_unscheduled_mode_e_cannot_reach_paid_provider(
+    oob_service, monkeypatch, native_evaluation_executor
+):
+    executor = native_evaluation_executor
+    _configure_responses_provider(executor, monkeypatch)
+    run = executor.service.diagnose(oob_service[2], mode="E")
+    assert executor.service.diagnosis(run.id).limitations == ["PRICING_ATTESTATION_REQUIRED"]
+    assert not any(ref.name.startswith("provider/") for ref in run.artifact_refs)
+
+
 @pytest.mark.parametrize(
     "response_model,usage", [("substituted-model", True), ("eval-model", False)]
 )
 def test_mode_e_rejects_unattested_response_policy(
-    oob_service, tmp_path, monkeypatch, response_model, usage
+    oob_service, tmp_path, monkeypatch, response_model, usage, native_evaluation_executor
 ):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     binding, _ = _configure_responses_provider(
         executor, monkeypatch, response_model=response_model, usage=usage
     )
@@ -436,14 +554,17 @@ def test_mode_e_rejects_unattested_response_policy(
     assert result.records == []
 
 
-def test_holdout_alias_and_score_binding_never_publish_private_identity(oob_service, tmp_path):
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_holdout_alias_and_score_binding_never_publish_private_identity(
+    oob_service, tmp_path, monkeypatch, native_evaluation_executor
+):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
     from gpu_agent.benchmark.executor import EvaluationExecutor
     from gpu_agent.benchmark.holdout import HoldoutController
     from gpu_agent.benchmark.metrics import EvaluationLabels, Score
     from gpu_agent.store import RunStore
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     binding = executor.service.binding
     assert binding is not None
     evaluator = RunStore(tmp_path / "private-evaluator", visibility="evaluator")
@@ -456,6 +577,7 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(oob_serv
         executor.sources,
         holdout_controller=controller,
         holdout_batch=batch,
+        _corpus_family=executor._corpus_family,
     )
     manifest = EvaluationRunner(
         executor.service.store,
@@ -469,6 +591,8 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(oob_serv
         max_cost_usd=3,
         max_unit_cost_usd=1,
         random_seed=7,
+        holdout_controller=controller,
+        holdout_batch=batch,
     ).run("D", "holdout", 3)
     evaluation_run = executor.service.store.load(manifest.run_id)
     record_ref = next(
@@ -476,20 +600,36 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(oob_serv
     )
     assert alias not in {"case_0100", "vector-add"}
     private_canary = "PRIVATE-LABEL-CANARY"
-    result = controller.bind_score(
-        batch,
-        alias,
-        record_ref,
-        labels=EvaluationLabels(claim_support={private_canary: True}),
-        score=Score(
-            family_correct=True,
-            root_cause_correct=True,
-            location_correct=True,
-            inconclusive_correct=False,
-        ),
+    labels = EvaluationLabels(claim_support={private_canary: True})
+    private_score = Score(
+        family_correct=True,
+        root_cause_correct=True,
+        location_correct=True,
+        inconclusive_correct=False,
     )
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _: controller.bind_score(
+                    batch,
+                    alias,
+                    record_ref,
+                    labels=labels,
+                    score=private_score,
+                    should_be_inconclusive=False,
+                    private_holdout_passed=True,
+                ),
+                range(2),
+            )
+        )
+    result = results[0]
+    assert results == [result, result]
     assert result.public_record_id == manifest.records[0].record_id
     assert result.private_case_id == "case_0100"
+    validated = controller.validated_record(result)
+    from gpu_agent.benchmark.metrics import aggregate
+
+    assert aggregate([validated]).record_count == 1
     public_bytes = b"".join(
         path.read_bytes() for path in executor.service.store.root.rglob("*") if path.is_file()
     )
@@ -502,27 +642,63 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(oob_serv
     assert b"case_0100" in private_bytes
     assert b"vector-add" in private_bytes
     assert private_canary.encode() in private_bytes
-    with pytest.raises(ValueError, match="already scored"):
+    assert (
         controller.bind_score(
             batch,
             alias,
             record_ref,
-            labels=EvaluationLabels(claim_support={private_canary: True}),
-            score=Score(
-                family_correct=True,
-                root_cause_correct=True,
-                location_correct=True,
-                inconclusive_correct=False,
-            ),
+            labels=labels,
+            score=private_score,
+            should_be_inconclusive=False,
+            private_holdout_passed=True,
         )
+        == result
+    )
+
+    second_ref = next(
+        ref for ref in evaluation_run.artifact_refs if ref.name == "evaluation/records/1.json"
+    )
+    original_put = evaluator.put_if_absent_exact
+    crashed = False
+
+    def crash_after_private_score(run_id, name, content, visibility):
+        nonlocal crashed
+        ref = original_put(run_id, name, content, visibility)
+        if name == "holdout/private-score.json" and not crashed:
+            crashed = True
+            raise RuntimeError("simulated controller crash")
+        return ref
+
+    monkeypatch.setattr(evaluator, "put_if_absent_exact", crash_after_private_score)
+    with pytest.raises(RuntimeError, match="simulated controller crash"):
+        controller.bind_score(
+            batch,
+            alias,
+            second_ref,
+            labels=labels,
+            score=private_score,
+            should_be_inconclusive=False,
+            private_holdout_passed=True,
+        )
+    monkeypatch.setattr(evaluator, "put_if_absent_exact", original_put)
+    recovered = controller.bind_score(
+        batch,
+        alias,
+        second_ref,
+        labels=labels,
+        score=private_score,
+        should_be_inconclusive=False,
+        private_holdout_passed=True,
+    )
+    assert controller.validated_record(recovered).record.record_id == recovered.public_record_id
 
 
 def test_deterministic_mode_rejects_unexpected_verification_child(
-    oob_service, tmp_path, monkeypatch
+    oob_service, tmp_path, monkeypatch, native_evaluation_executor
 ):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     binding = executor.service.binding
     assert binding is not None
     original = executor.execute_scheduled
@@ -551,13 +727,40 @@ def test_deterministic_mode_rejects_unexpected_verification_child(
     assert result.stopped_reason == "EXECUTION_ERROR" and result.records == []
 
 
-def test_holdout_rejects_missing_private_labels_and_forged_public_record(oob_service, tmp_path):
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_private_case_cannot_enter_public_schedule_without_holdout_alias(
+    native_evaluation_executor,
+):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    binding = executor.service.binding
+    assert binding is not None
+    runner = EvaluationRunner(
+        executor.service.store,
+        {"case_0100": "vector-add"},
+        executor.execute,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=0,
+        max_unit_cost_usd=0,
+    )
+    with pytest.raises(ValueError, match="holdout alias proof"):
+        runner.run("D", "holdout", 3)
+
+
+def test_holdout_rejects_missing_private_labels_and_forged_public_record(
+    oob_service, tmp_path, native_evaluation_executor
+):
     from gpu_agent.benchmark.holdout import HoldoutController
     from gpu_agent.benchmark.metrics import EvaluationLabels, Score
     from gpu_agent.contracts import ArtifactRef
     from gpu_agent.store import RunStore
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     binding = executor.service.binding
     assert binding is not None
     evaluator = RunStore(tmp_path / "private-evaluator", visibility="evaluator")
@@ -579,7 +782,15 @@ def test_holdout_rejects_missing_private_labels_and_forged_public_record(oob_ser
         inconclusive_correct=True,
     )
     with pytest.raises(ValueError, match="private evaluation labels"):
-        controller.bind_score(batch, batch.aliases[0], forged, labels=None, score=private_score)
+        controller.bind_score(
+            batch,
+            batch.aliases[0],
+            forged,
+            labels=None,
+            score=private_score,
+            should_be_inconclusive=False,
+            private_holdout_passed=False,
+        )
     with pytest.raises(ValueError, match="public evaluation record"):
         controller.bind_score(
             batch,
@@ -587,12 +798,16 @@ def test_holdout_rejects_missing_private_labels_and_forged_public_record(oob_ser
             forged,
             labels=EvaluationLabels(),
             score=private_score,
+            should_be_inconclusive=False,
+            private_holdout_passed=False,
         )
 
 
 @pytest.mark.parametrize("fault", ["case", "template", "source"])
-def test_executor_refuses_unregistered_or_changed_inputs(oob_service, tmp_path, fault):
-    executor, source = registered_executor(oob_service, tmp_path)
+def test_executor_refuses_unregistered_or_changed_inputs(
+    oob_service, tmp_path, fault, native_evaluation_executor
+):
+    executor, source = native_evaluation_executor, oob_service[2]
     if fault == "source":
         (source / "kernel.cu").write_text("changed source")
     with pytest.raises(ValueError):
@@ -616,13 +831,21 @@ def test_executor_refuses_unregistered_or_changed_inputs(oob_service, tmp_path, 
     ],
 )
 def test_executor_verdict_aggregation(
-    oob_service, tmp_path, monkeypatch, verdict, status, success, build_outcome, compiled
+    oob_service,
+    tmp_path,
+    monkeypatch,
+    verdict,
+    status,
+    success,
+    build_outcome,
+    compiled,
+    native_evaluation_executor,
 ):
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
     from gpu_agent.patching import PatchCandidate
     from gpu_agent.verification.models import VerificationResult
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     service = oob_service[0]
 
     def persist_verification(run_id, candidate_id):
@@ -663,8 +886,10 @@ def test_executor_verdict_aggregation(
     assert summary.failure_ids == ([] if success else [record.record_id])
 
 
-def test_missing_knowledge_has_zero_physical_retrievals(oob_service, tmp_path):
-    executor, _ = registered_executor(oob_service, tmp_path)
+def test_missing_knowledge_has_zero_physical_retrievals(
+    oob_service, tmp_path, native_evaluation_executor
+):
+    executor = native_evaluation_executor
     oob_service[0].knowledge = None
     record = executor.execute("case_0100", "vector-add", "B", 0)
     assert record.usage["retrieval_calls"] == 0
@@ -672,12 +897,12 @@ def test_missing_knowledge_has_zero_physical_retrievals(oob_service, tmp_path):
 
 
 def test_timeout_before_backend_has_zero_physical_sanitizer_calls(
-    oob_service, tmp_path, monkeypatch
+    oob_service, tmp_path, monkeypatch, native_evaluation_executor
 ):
     from gpu_agent.agent.policy import LLMCallGate
     from gpu_agent.agent.provider import ProviderError
 
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     original = LLMCallGate.timeout
     timeouts = []
 
@@ -695,8 +920,10 @@ def test_timeout_before_backend_has_zero_physical_sanitizer_calls(
     assert record.executed_checks == {}
 
 
-def test_successful_acquisition_persists_physical_calls(oob_service, tmp_path):
-    executor, _ = registered_executor(oob_service, tmp_path)
+def test_successful_acquisition_persists_physical_calls(
+    oob_service, tmp_path, native_evaluation_executor
+):
+    executor = native_evaluation_executor
     record = executor.execute("case_0100", "vector-add", "D", 0)
     assert record.usage["sanitizer_calls"] == record.usage["retrieval_calls"] == 1
     store = oob_service[0].store
@@ -723,9 +950,9 @@ def test_successful_acquisition_persists_physical_calls(oob_service, tmp_path):
     ],
 )
 def test_executor_rejects_incomplete_or_unbounded_acquisition_usage(
-    oob_service, tmp_path, monkeypatch, usage
+    oob_service, tmp_path, monkeypatch, usage, native_evaluation_executor
 ):
-    executor, _ = registered_executor(oob_service, tmp_path)
+    executor = native_evaluation_executor
     store = oob_service[0].store
     original = store.put
 

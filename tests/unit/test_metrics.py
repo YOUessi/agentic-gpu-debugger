@@ -4,7 +4,7 @@ import pytest
 
 
 def test_empty_data_is_not_perfect_accuracy():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     summary = aggregate([])
     assert summary.root_cause_accuracy.value is None
@@ -29,7 +29,8 @@ def test_empty_data_is_not_perfect_accuracy():
 
 
 def test_timeout_stays_in_end_to_end_denominator_but_not_diagnosis_denominator():
-    from gpu_agent.benchmark.metrics import Score, aggregate
+    from gpu_agent.benchmark.metrics import Score
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     good = SimpleNamespace(
         record_id="good",
@@ -84,7 +85,8 @@ def test_timeout_stays_in_end_to_end_denominator_but_not_diagnosis_denominator()
 
 
 def test_score_uses_registered_family_labels_and_line_range():
-    from gpu_agent.benchmark.metrics import HiddenTruth, Rubric, score
+    from gpu_agent.benchmark.metrics import HiddenTruth, Rubric
+    from gpu_agent.benchmark.metrics import _score_record as score
 
     record = SimpleNamespace(
         diagnosis={
@@ -111,7 +113,7 @@ def test_score_uses_registered_family_labels_and_line_range():
 @pytest.mark.parametrize("verdict", [None, "NOT_FIXED", "REGRESSION_DETECTED", "INCONCLUSIVE"])
 def test_completed_workflow_without_verified_repair_is_a_benchmark_failure(verdict):
     from gpu_agent.benchmark.evaluation import EvaluationRecord
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     record = EvaluationRecord(
         record_id="unsuccessful",
@@ -167,7 +169,7 @@ def evaluation_record(**updates):
 
 
 def test_relevance_is_not_inferred_from_citation_existence_or_text():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     diagnosis = {
         "diagnostic_outcome": "DIAGNOSED",
@@ -187,7 +189,7 @@ def test_relevance_is_not_inferred_from_citation_existence_or_text():
 
 
 def test_explicit_labels_score_only_typed_claims_and_ranked_retrieval():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     record = evaluation_record(
         diagnosis={
@@ -222,7 +224,7 @@ def test_explicit_labels_score_only_typed_claims_and_ranked_retrieval():
 
 
 def test_missing_partial_retrieval_labels_and_malformed_claims_are_not_scored():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     record = evaluation_record(
         diagnosis={"diagnostic_outcome": "DIAGNOSED", "observed_facts": "a"},
@@ -238,7 +240,7 @@ def test_missing_partial_retrieval_labels_and_malformed_claims_are_not_scored():
 
 
 def test_repair_rates_distinguish_compile_public_private_and_regression_truth():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     records = [
         evaluation_record(
@@ -267,7 +269,7 @@ def test_repair_rates_distinguish_compile_public_private_and_regression_truth():
 
 
 def test_repeats_group_by_mode_case_template_without_inflating_unique_counts():
-    from gpu_agent.benchmark.metrics import aggregate_grouped
+    from gpu_agent.benchmark.metrics import _aggregate_grouped_records as aggregate_grouped
 
     records = [
         evaluation_record(record_id=str(i), repeat=i, mode=mode, case_id=case)
@@ -284,8 +286,38 @@ def test_repeats_group_by_mode_case_template_without_inflating_unique_counts():
     assert grouped.by_mode_case["A"]["case_1"].record_count == 2
 
 
+def test_public_metric_entry_points_reject_unvalidated_records():
+    from gpu_agent.benchmark.metrics import (
+        HiddenTruth,
+        Rubric,
+        aggregate,
+        aggregate_grouped,
+        score,
+    )
+
+    record = evaluation_record()
+    with pytest.raises(ValueError, match="evaluator-validated"):
+        aggregate([record])  # type: ignore[list-item]
+    with pytest.raises(ValueError, match="evaluator-validated"):
+        aggregate([SimpleNamespace(record=record)])  # type: ignore[list-item]
+    with pytest.raises(ValueError, match="evaluator-validated"):
+        aggregate_grouped([record])  # type: ignore[list-item]
+    with pytest.raises(ValueError, match="evaluator-validated"):
+        score(  # type: ignore[arg-type]
+            record,
+            HiddenTruth(
+                failure_family="memory",
+                root_cause_labels=["bounds"],
+                source_path="kernel.cu",
+                line_start=1,
+                line_end=2,
+            ),
+            Rubric(),
+        )
+
+
 def test_efficiency_counts_failed_units_and_unknown_cost_is_not_zero():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     records = [
         evaluation_record(
@@ -327,7 +359,7 @@ def test_efficiency_counts_failed_units_and_unknown_cost_is_not_zero():
 
 
 def test_inconclusive_uses_diagnosis_outcome_not_repair_workflow_status():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     records = [
         evaluation_record(
@@ -347,7 +379,7 @@ def test_inconclusive_uses_diagnosis_outcome_not_repair_workflow_status():
 
 
 def test_known_zero_cost_and_usage_are_measured_zero_not_missing():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     summary = aggregate(
         [
@@ -368,7 +400,7 @@ def test_known_zero_cost_and_usage_are_measured_zero_not_missing():
 
 
 def test_budget_exhaustion_counts_the_production_agent_reason_code():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     record = evaluation_record(
         status="FAILED",
@@ -386,7 +418,7 @@ def test_budget_exhaustion_counts_the_production_agent_reason_code():
 
 
 def test_claim_support_includes_root_recommendation_and_inferences_without_llm_scoring():
-    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
 
     record = evaluation_record(
         diagnosis={
