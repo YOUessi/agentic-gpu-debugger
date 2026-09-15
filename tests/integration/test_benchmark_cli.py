@@ -32,11 +32,8 @@ def test_benchmark_help_exposes_controller_commands():
 
 
 def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch):
-    from gpu_agent.benchmark.builder import BenchmarkBuilder
     from gpu_agent.cli import app
 
-    called = []
-    monkeypatch.setattr(BenchmarkBuilder, "validate", lambda *args: called.append(args))
     forged = tmp_path / "PRIVATE_SECRET.json"
     forged.write_text('{"oracle_passed":true,"run_ids":["forged"]}')
     result = CliRunner().invoke(
@@ -51,8 +48,9 @@ def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch):
         ],
     )
     assert result.exit_code == 2 and "CASE_EXECUTION_ATTESTATION_UNAVAILABLE" in result.output
-    assert not called and "PRIVATE_SECRET" not in result.output
-    assert not (tmp_path / "corpus").exists()
+    assert "PRIVATE_SECRET" not in result.output
+    corpus = tmp_path / "corpus"
+    assert corpus.is_dir() and not list(corpus.iterdir())
 
 
 @pytest.mark.parametrize("cap", ["0", "10"])

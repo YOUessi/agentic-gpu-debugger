@@ -18,10 +18,6 @@ from gpu_agent.store import RunStore, read_regular
 from gpu_agent.verification.models import VerificationResult, VerificationVerdict
 
 
-class CaseExecutionAttestationUnavailable(ValueError):
-    """The current artifact contract cannot attest all CaseExecution claims."""
-
-
 class CostBoundUnavailable(ValueError):
     """A production monetary bound must be attested before any provider work is allowed."""
 

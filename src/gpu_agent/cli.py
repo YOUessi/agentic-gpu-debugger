@@ -6,17 +6,17 @@ from typing import Annotated
 import typer
 from pydantic import ValidationError
 
+from gpu_agent.benchmark.builder import BenchmarkBuilder, UnvalidatedCaseError
 from gpu_agent.benchmark.evaluation import (
     EvaluationRunner,
     EvaluationSelection,
     EvaluationSplit,
 )
-from gpu_agent.benchmark.executor import (
-    CaseExecutionAttestationUnavailable,
-    CostBoundUnavailable,
-)
+from gpu_agent.benchmark.executor import CostBoundUnavailable
+from gpu_agent.benchmark.validation import CaseExecutionAttestationUnavailable
 from gpu_agent.config import Settings
 from gpu_agent.environment import probe_environment
+from gpu_agent.store import RunStore
 
 app = typer.Typer(no_args_is_help=True, help="Evidence-driven CUDA debugger.")
 benchmark_app = typer.Typer(no_args_is_help=True)
@@ -25,22 +25,20 @@ app.add_typer(benchmark_app, name="benchmark")
 
 @benchmark_app.command("validate")
 def benchmark_validate(
-    clean_execution: Path,
-    mutant_execution: Path,
+    clean_execution: str,
+    mutant_execution: str,
     corpus_root: Annotated[Path, typer.Option("--corpus-root")],
 ) -> None:
-    """Register attested clean/mutant executions (currently fails closed).
-
-    Existing runs cannot bind all CaseExecution input/toolchain/oracle assertions.
-    No serialized booleans or run IDs may substitute for those missing attestations.
-    """
+    """Register two exact native clean/mutant execution run IDs."""
     try:
-        raise CaseExecutionAttestationUnavailable("CASE_EXECUTION_ATTESTATION_UNAVAILABLE")
-    except CaseExecutionAttestationUnavailable:
+        builder = BenchmarkBuilder(RunStore(corpus_root))
+        manifest = builder.register(builder.validate(clean_execution, mutant_execution))
+    except (OSError, ValueError, CaseExecutionAttestationUnavailable, UnvalidatedCaseError):
         raise typer.BadParameter(
-            "CASE_EXECUTION_ATTESTATION_UNAVAILABLE: current run artifacts cannot attest "
-            "serialized case validation claims; corpus was not modified."
+            "CASE_EXECUTION_ATTESTATION_UNAVAILABLE: exact native run artifacts are "
+            "missing, unbound, incomplete, or inconsistent; corpus was not modified."
         ) from None
+    typer.echo(f"registered {manifest.id}")
 
 
 @benchmark_app.command("evaluate")

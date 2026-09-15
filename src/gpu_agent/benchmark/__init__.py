@@ -9,13 +9,25 @@ from gpu_agent.benchmark.evaluation import (
     EvaluationScheduleItem,
     PublicEvaluationRecord,
 )
-from gpu_agent.benchmark.models import CaseExecution, CaseManifest, CaseValidation
+from gpu_agent.benchmark.models import (
+    CaseExecution,
+    CaseExecutionObservation,
+    CaseExecutionPlan,
+    CaseManifest,
+    CaseValidation,
+    CaseValidationArtifact,
+)
+from gpu_agent.benchmark.validation import CaseValidationController
 
 __all__ = [
     "BenchmarkBuilder",
     "CaseExecution",
+    "CaseExecutionObservation",
+    "CaseExecutionPlan",
     "CaseManifest",
     "CaseValidation",
+    "CaseValidationArtifact",
+    "CaseValidationController",
     "EvaluationAttempt",
     "EvaluationManifest",
     "EvaluationRecord",
