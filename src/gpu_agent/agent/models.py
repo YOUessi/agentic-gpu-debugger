@@ -5,7 +5,7 @@ from typing import Annotated, Literal
 from pydantic import Field, TypeAdapter
 
 from gpu_agent.contracts import new_id
-from gpu_agent.execution.models import ExecutionModel, SourceLocation
+from gpu_agent.execution.models import CheckOutcome, ExecutionModel, SanitizerTool, SourceLocation
 from gpu_agent.knowledge.models import DocumentChunk
 
 Identifier = Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]
@@ -155,6 +155,7 @@ class PublicEvidence(ExecutionModel):
     observed_facts: list[EvidenceClaim] = Field(default_factory=list)
     tool_findings: list[PublicFinding] = Field(default_factory=list)
     documentation: list[DocumentChunk] = Field(default_factory=list)
+    sanitizer_outcomes: dict[SanitizerTool, CheckOutcome] = Field(default_factory=dict)
     limitations: list[str] = Field(default_factory=list)
 
 

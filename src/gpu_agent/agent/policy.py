@@ -3,6 +3,7 @@
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Literal
 
 from gpu_agent.agent.models import (
@@ -14,8 +15,101 @@ from gpu_agent.agent.models import (
     PublicEvidence,
 )
 from gpu_agent.contracts import CurrentPhase
+from gpu_agent.execution.models import SanitizerTool
 
 CallKind = Literal["plan", "diagnose", "patch"]
+
+
+class BudgetExceeded(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class BudgetReservation:
+    reservation_id: int
+    action: str
+    attempt: int
+
+
+class BudgetLedger:
+    """Thread-safe pre-execution reservations with an append-only audit."""
+
+    def __init__(
+        self, budget: AgentBudget | None = None, clock: Callable[[], float] = time.monotonic
+    ) -> None:
+        self.budget = budget or AgentBudget()
+        self._clock, self._start = clock, clock()
+        self._lock = threading.Lock()
+        self._counts = {"llm": 0, "planner": 0, "sanitizer": 0, "rag": 0, "source": 0}
+        self._retried = False
+        self._next_id = 0
+        self._active: set[int] = set()
+        self.audit: list[dict[str, object]] = []
+
+    def remaining(self) -> float:
+        return max(0.0, self.budget.max_wall_time_seconds - (self._clock() - self._start))
+
+    def reserve(self, action: str, *, attempt: int = 0) -> BudgetReservation:
+        with self._lock:
+            self._next_id += 1
+            reservation = BudgetReservation(self._next_id, action, attempt)
+            self.audit.append(
+                {"id": reservation.reservation_id, "action": action, "state": "ATTEMPTED"}
+            )
+            try:
+                if self.remaining() <= 0:
+                    raise BudgetExceeded("WALL_TIME_EXHAUSTED")
+                if attempt not in {0, 1} or (attempt == 1 and self._retried):
+                    raise BudgetExceeded("RETRY_EXHAUSTED")
+                if action in {"planner_llm", "diagnosis_llm", "patch_llm"}:
+                    reserve_final = 2 if action == "planner_llm" else int(action == "diagnosis_llm")
+                    if self._counts["llm"] + reserve_final >= self.budget.max_llm_calls:
+                        raise BudgetExceeded("LLM_BUDGET_EXHAUSTED")
+                    if action == "planner_llm" and self._counts["planner"] >= 4:
+                        raise BudgetExceeded("PLANNER_BUDGET_EXHAUSTED")
+                    self._counts["llm"] += 1
+                    self._counts["planner"] += int(action == "planner_llm")
+                elif action.startswith("run_") and action.endswith("check"):
+                    if self._counts["sanitizer"] >= self.budget.max_sanitizer_calls:
+                        raise BudgetExceeded("SANITIZER_BUDGET_EXHAUSTED")
+                    self._counts["sanitizer"] += 1
+                elif action == "retrieve_official_docs":
+                    if self._counts["rag"] >= self.budget.max_rag_calls:
+                        raise BudgetExceeded("RAG_BUDGET_EXHAUSTED")
+                    self._counts["rag"] += 1
+                elif action == "inspect_source":
+                    if self._counts["source"] >= self.budget.max_source_reads:
+                        raise BudgetExceeded("SOURCE_BUDGET_EXHAUSTED")
+                    self._counts["source"] += 1
+                else:
+                    raise BudgetExceeded("UNKNOWN_BUDGET_ACTION")
+                self._retried |= attempt == 1
+            except BudgetExceeded as error:
+                self.audit.append(
+                    {
+                        "id": reservation.reservation_id,
+                        "action": action,
+                        "state": "REJECTED",
+                        "reason": str(error),
+                    }
+                )
+                raise
+            self.audit.append(
+                {"id": reservation.reservation_id, "action": action, "state": "STARTED"}
+            )
+            self._active.add(reservation.reservation_id)
+            return reservation
+
+    def settle(self, reservation: BudgetReservation, result: str = "COMPLETED") -> None:
+        if result not in {"COMPLETED", "FAILED", "CANCELLED"}:
+            raise ValueError("invalid settlement")
+        with self._lock:
+            if reservation.reservation_id not in self._active:
+                raise ValueError("reservation is unknown or already settled")
+            self._active.remove(reservation.reservation_id)
+            self.audit.append(
+                {"id": reservation.reservation_id, "action": reservation.action, "state": result}
+            )
 
 
 class LLMCallGate:
@@ -70,6 +164,9 @@ class LLMCallGate:
 SUPPORTED = {
     "inspect_source",
     "run_memcheck",
+    "run_racecheck",
+    "run_initcheck",
+    "run_synccheck",
     "retrieve_official_docs",
     "finish_diagnosis",
     "declare_inconclusive",
@@ -84,9 +181,9 @@ def decide_action(
     seen: set[str],
 ) -> PolicyDecision:
     mandatory = []
-    if not evidence.tool_findings:
+    if "memcheck" not in evidence.sanitizer_outcomes:
         mandatory.append("run_memcheck")
-    if not evidence.documentation:
+    if evidence.tool_findings and not evidence.documentation:
         mandatory.append("retrieve_official_docs")
     reason: str | None = None
     signature = action.action_type + action.typed_arguments.model_dump_json()
@@ -100,8 +197,14 @@ def decide_action(
         reason = "DUPLICATE_NO_BENEFIT"
     elif action.action_type == "finish_diagnosis" and mandatory:
         reason = "MANDATORY_EVIDENCE_MISSING"
+    elif action.action_type == "finish_diagnosis" and not evidence.tool_findings:
+        reason = "MANDATORY_EVIDENCE_MISSING"
+    elif action.action_type in {"run_racecheck", "run_initcheck", "run_synccheck"} and (
+        evidence.sanitizer_outcomes.get(SanitizerTool.MEMCHECK) != "CLEAN"
+    ):
+        reason = "MEMCHECK_PRECHECK_REQUIRED"
     elif (
-        action.action_type == "run_memcheck"
+        action.action_type in {"run_memcheck", "run_racecheck", "run_initcheck", "run_synccheck"}
         and budget.sanitizer_calls >= budget.max_sanitizer_calls
     ):
         reason = "AGENT_BUDGET_EXHAUSTED"

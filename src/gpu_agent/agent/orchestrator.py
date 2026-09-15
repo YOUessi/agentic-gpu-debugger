@@ -1,5 +1,6 @@
 """Controller-owned typed registry: the model proposes, policy authorizes, tools execute."""
 
+import json
 from collections.abc import Callable
 from pathlib import PurePosixPath
 
@@ -15,12 +16,25 @@ from gpu_agent.agent.models import (
     PublicFinding,
     PublicSource,
 )
-from gpu_agent.agent.policy import decide_action, validate_diagnosis
+from gpu_agent.agent.policy import (
+    BudgetExceeded,
+    BudgetLedger,
+    BudgetReservation,
+    decide_action,
+    validate_diagnosis,
+)
 from gpu_agent.agent.provider import LLMProvider, ProviderError
+from gpu_agent.agent.rule_router import RuleRouter
 from gpu_agent.contracts import ArtifactRef, CurrentPhase
 from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.execution.backend import ExecutionBackend
-from gpu_agent.execution.models import SanitizerRequest, SourceLocation, WorkspaceHandle
+from gpu_agent.execution.models import (
+    CheckOutcome,
+    SanitizerRequest,
+    SanitizerTool,
+    SourceLocation,
+    WorkspaceHandle,
+)
 from gpu_agent.knowledge.models import DocumentChunk, KnowledgeError
 from gpu_agent.knowledge.retrieve import KnowledgeIndex
 from gpu_agent.store import RunStore
@@ -61,7 +75,12 @@ def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
             )
         )
     findings: list[PublicFinding] = []
+    sanitizer_outcomes: dict[SanitizerTool, CheckOutcome] = {}
     for result in bundle.sanitizer_results:
+        if result.tool_result is not None:
+            sanitizer_outcomes[SanitizerTool(result.tool_result.typed_payload.tool)] = (
+                result.check_outcome
+            )
         for finding in result.findings:
             if finding.raw_ref is None:
                 continue
@@ -82,6 +101,7 @@ def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
         observed_facts=facts,
         tool_findings=_deduplicate_findings(findings),
         documentation=docs,
+        sanitizer_outcomes=sanitizer_outcomes,
     )
 
 
@@ -96,14 +116,21 @@ class AgentOrchestrator:
         knowledge: KnowledgeIndex | None,
         knowledge_version: str,
         budget: AgentBudget | None = None,
+        allow_rule_fallback: bool = False,
     ) -> None:
         self.store, self.provider, self.backend = store, provider, backend
         self.handle, self.stdin_ref = handle, stdin_ref
         self.knowledge, self.knowledge_version = knowledge, knowledge_version
         self.budget = budget or AgentBudget()
+        self.ledger = BudgetLedger(self.budget)
+        self.allow_rule_fallback = allow_rule_fallback
+        self.rule_router = RuleRouter()
         self.seen: set[str] = set()
         self.registry: dict[str, Callable[[AgentAction], None]] = {
             "run_memcheck": self._memcheck,
+            "run_racecheck": self._sanitizer,
+            "run_initcheck": self._sanitizer,
+            "run_synccheck": self._sanitizer,
             "retrieve_official_docs": self._docs,
             "inspect_source": self._source,
         }
@@ -111,13 +138,43 @@ class AgentOrchestrator:
     def _memcheck(self, action: AgentAction) -> None:
         if action.action_type != "run_memcheck":
             raise ValueError("typed registry mismatch")
+        reservation = self._reserve(action.action_type)
         self.budget = self.budget.model_copy(
             update={"sanitizer_calls": self.budget.sanitizer_calls + 1}
         )
+        try:
+            self._run_sanitizer(SanitizerTool.MEMCHECK)
+        except Exception:
+            self.ledger.settle(reservation, "FAILED")
+            raise
+        self.ledger.settle(reservation)
+
+    def _sanitizer(self, action: AgentAction) -> None:
+        tools = {
+            "run_racecheck": SanitizerTool.RACECHECK,
+            "run_initcheck": SanitizerTool.INITCHECK,
+            "run_synccheck": SanitizerTool.SYNCCHECK,
+        }
+        tool = tools.get(action.action_type)
+        if tool is None:
+            raise ValueError("typed registry mismatch")
+        reservation = self._reserve(action.action_type)
+        self.budget = self.budget.model_copy(
+            update={"sanitizer_calls": self.budget.sanitizer_calls + 1}
+        )
+        try:
+            self._run_sanitizer(tool)
+        except Exception:
+            self.ledger.settle(reservation, "FAILED")
+            raise
+        self.ledger.settle(reservation)
+
+    def _run_sanitizer(self, tool: SanitizerTool) -> None:
         result = self.backend.run_sanitizer(
             SanitizerRequest(
                 workspace_id=self.handle.id,
                 stdin_ref=self.stdin_ref,
+                tool=tool.value,
                 timeout_seconds=self.provider.gate.timeout(120),
             )
         )
@@ -127,16 +184,20 @@ class AgentOrchestrator:
     def _docs(self, action: AgentAction) -> None:
         if action.action_type != "retrieve_official_docs":
             raise ValueError("typed registry mismatch")
+        reservation = self._reserve(action.action_type)
         self.budget = self.budget.model_copy(update={"rag_calls": self.budget.rag_calls + 1})
         if self.knowledge is None:
+            self.ledger.settle(reservation, "FAILED")
             raise ProviderError("KNOWLEDGE_UNAVAILABLE")
         try:
             result = self.knowledge.retrieve(
                 action.typed_arguments.query, self.knowledge_version, action.typed_arguments.k
             )
         except KnowledgeError:
+            self.ledger.settle(reservation, "FAILED")
             raise ProviderError("KNOWLEDGE_UNAVAILABLE") from None
         if not result.chunks:
+            self.ledger.settle(reservation, "FAILED")
             raise ProviderError("NO_INFORMATION_GAIN")
         repo = EvidenceRepository(self.store)
         bundle = repo.public_view(self.handle.run_id)
@@ -146,6 +207,7 @@ class AgentOrchestrator:
         }
         new = [c for c in result.chunks if c.chunk_id not in known]
         if not new:
+            self.ledger.settle(reservation, "FAILED")
             raise ProviderError("NO_INFORMATION_GAIN")
         refs = [
             self.store.put(
@@ -160,10 +222,12 @@ class AgentOrchestrator:
             self.handle.run_id,
             bundle.model_copy(update={"retrieved_chunks": [*bundle.retrieved_chunks, *refs]}),
         )
+        self.ledger.settle(reservation)
 
     def _source(self, action: AgentAction) -> None:
         if action.action_type != "inspect_source":
             raise ValueError("typed registry mismatch")
+        reservation = self._reserve(action.action_type)
         self.budget = self.budget.model_copy(update={"source_reads": self.budget.source_reads + 1})
         # Source is already supplied in the public observation. Validate the registered range,
         # then record exactly which immutable lines were inspected; never open a model path.
@@ -175,6 +239,7 @@ class AgentOrchestrator:
         args = action.typed_arguments
         lines = source.content.splitlines()[args.start_line - 1 : args.end_line]
         if not lines:
+            self.ledger.settle(reservation, "FAILED")
             raise ProviderError("NO_INFORMATION_GAIN")
         self.store.put(
             self.handle.run_id,
@@ -182,6 +247,13 @@ class AgentOrchestrator:
             args.model_dump_json().encode(),
             "public",
         )
+        self.ledger.settle(reservation)
+
+    def _reserve(self, action: str) -> BudgetReservation:
+        try:
+            return self.ledger.reserve(action)
+        except BudgetExceeded as error:
+            raise ProviderError("AGENT_BUDGET_EXHAUSTED") from error
 
     def investigate(self, run_id: str) -> DiagnosisResult:
         if run_id != self.handle.run_id:
@@ -201,7 +273,21 @@ class AgentOrchestrator:
                     or self.budget.remaining_seconds <= 0
                 ):
                     raise ProviderError("AGENT_BUDGET_EXHAUSTED")
-                proposed = self.provider.plan(evidence, self.budget)
+                planner = self._reserve("planner_llm")
+                try:
+                    proposed = self.provider.plan(evidence, self.budget)
+                    self.ledger.settle(planner)
+                except ProviderError:
+                    self.ledger.settle(planner, "FAILED")
+                    if not self.allow_rule_fallback:
+                        raise
+                    proposed = self.rule_router.next_action(evidence, self.budget)
+                    self.store.put(
+                        run_id,
+                        f"actions/{self.budget.agent_steps}/fallback.json",
+                        b'{"mode":"RULE_FALLBACK"}',
+                        "public",
+                    )
                 try:
                     action = ACTION_ADAPTER.validate_python(proposed.model_dump())
                 except ValidationError:
@@ -225,7 +311,13 @@ class AgentOrchestrator:
                 if action.action_type == "declare_inconclusive":
                     return DiagnosisResult.inconclusive("MODEL_DECLARED_INCONCLUSIVE")
                 if action.action_type == "finish_diagnosis":
-                    result = self.provider.diagnose(evidence)
+                    diagnosis = self._reserve("diagnosis_llm")
+                    try:
+                        result = self.provider.diagnose(evidence)
+                    except ProviderError:
+                        self.ledger.settle(diagnosis, "FAILED")
+                        raise
+                    self.ledger.settle(diagnosis)
                     if not validate_diagnosis(result, evidence):
                         return DiagnosisResult.inconclusive("INVALID_DIAGNOSIS_EVIDENCE")
                     return result
@@ -241,4 +333,10 @@ class AgentOrchestrator:
             )
             self.store.put(
                 run_id, "agent/budget.json", snapshot.model_dump_json().encode(), "public"
+            )
+            self.store.put(
+                run_id,
+                "agent/budget-audit.json",
+                json.dumps(self.ledger.audit).encode(),
+                "public",
             )

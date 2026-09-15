@@ -126,6 +126,32 @@ class RunStore:
             raise ValueError("manifest ID mismatch")
         return manifest
 
+    def recoverable_runs(self) -> list[RunManifest]:
+        """Return interrupted controller runs without resuming native processes."""
+        runs: list[RunManifest] = []
+        for path in sorted(self.root.iterdir()):
+            if path.is_dir() and re.fullmatch(r"[a-f0-9]{32}", path.name):
+                run = self.load(path.name)
+                if run.status == RunStatus.RUNNING:
+                    runs.append(run)
+        return runs
+
+    def fail_interrupted(
+        self, run_id: str, reason_code: str = "CONTROLLER_RESTARTED"
+    ) -> RunManifest:
+        if not re.fullmatch(r"[A-Z0-9_]{1,64}", reason_code):
+            raise ValueError("invalid recovery reason")
+        run = self.load(run_id)
+        if run.status != RunStatus.RUNNING:
+            raise ValueError("run is not recoverable")
+        self.put(
+            run_id,
+            "recovery/interruption.json",
+            (f'{{"reason_code":"{reason_code}"}}').encode(),
+            self.visibility,
+        )
+        return self.transition(run_id, RunStatus.FAILED, None)
+
     def transition(
         self, run_id: str, status: RunStatus | str, phase: CurrentPhase | str | None
     ) -> RunManifest:

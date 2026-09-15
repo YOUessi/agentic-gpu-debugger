@@ -31,6 +31,9 @@ def test_memcheck_retrieve_finish_flow(oob_service):
     assert run.status.value == "COMPLETED"
     final_budget = next(r for r in run.artifact_refs if r.name == "agent/final-budget.json")
     assert json.loads(service.store.read(final_budget))["llm_calls"] == 5
+    audit = next(r for r in run.artifact_refs if r.name == "agent/budget-audit.json")
+    states = {event["state"] for event in json.loads(service.store.read(audit))}
+    assert {"ATTEMPTED", "STARTED", "COMPLETED"} <= states
 
 
 def test_provider_public_projection_excludes_private_and_controller_data(oob_service):
@@ -70,9 +73,9 @@ def test_plan_prompt_gives_an_unambiguous_mandatory_evidence_sequence():
     from gpu_agent.agent.prompts import PROMPTS
 
     prompt = PROMPTS["plan"]
-    assert "If tool_findings is empty, choose run_memcheck" in prompt
-    assert "if documentation is empty, choose retrieve_official_docs" in prompt
-    assert "otherwise choose finish_diagnosis" in prompt
+    assert "sanitizer_outcomes has no memcheck" in prompt
+    assert "retrieve official docs for that finding" in prompt
+    assert "racecheck, initcheck, or synccheck" in prompt
 
 
 def test_diagnosis_prompt_names_the_exact_citation_and_location_constraints():
@@ -117,10 +120,10 @@ def test_finish_cannot_bypass_mandatory_evidence(oob_service):
 
 
 def test_unsupported_action_is_typed_and_never_executes(oob_service):
-    from gpu_agent.agent.models import RacecheckAction
+    from gpu_agent.agent.models import RunProgramAction
 
     service, provider, source = oob_service
-    provider.actions = [RacecheckAction()]
+    provider.actions = [RunProgramAction()]
     run = service.diagnose(source)
     assert "ACTION_UNSUPPORTED" in service.diagnosis(run.id).limitations
 
