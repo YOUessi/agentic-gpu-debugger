@@ -47,6 +47,7 @@ def test_cli_candidate_selectors_are_mutually_exclusive():
 @pytest.mark.gpu
 @pytest.mark.container
 @pytest.mark.live_llm
+@pytest.mark.release
 def test_live_oob_flow(tmp_path, monkeypatch):
     from pathlib import Path
 

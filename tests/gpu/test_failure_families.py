@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.gpu, pytest.mark.container]
+pytestmark = [pytest.mark.gpu, pytest.mark.container, pytest.mark.release]
 
 FAMILIES = [
     ("case_0001", "memcheck", 257, "Invalid __global__", 1),

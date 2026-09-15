@@ -5,6 +5,8 @@ import json
 
 import pytest
 
+pytestmark = pytest.mark.release
+
 
 def rule_retrieval_corpus(service):
     from gpu_agent.knowledge.models import make_chunk

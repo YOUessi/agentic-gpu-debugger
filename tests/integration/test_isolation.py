@@ -326,6 +326,7 @@ def test_prepare_rejects_symlink_and_snapshot_tampering(isolated):
 
 
 @pytest.mark.container
+@pytest.mark.release
 def test_live_isolation_probe_and_timeout_cleanup(tmp_path):
     from gpu_agent.execution.isolated import IsolatedGPUBackend, ProbeKind
     from gpu_agent.store import RunStore
