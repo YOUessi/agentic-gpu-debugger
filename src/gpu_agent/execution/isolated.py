@@ -16,7 +16,7 @@ import tempfile
 from dataclasses import replace
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from threading import Event
+from threading import Event, Lock
 
 from pydantic import BaseModel, ConfigDict
 
@@ -116,6 +116,9 @@ class IsolatedGPUBackend(LocalBackend):
         self.policy = IsolationPolicy()
         self.evidence = EvidenceRepository(store, evaluator=store.visibility == "evaluator")
         self._owner = new_id()
+        self._runtime_session_id = new_id()
+        self._runtime_attestation: RuntimeToolchainAttestation | None = None
+        self._runtime_attestation_lock = Lock()
         self._image: str | None = None
         self._base: str | None = None
         self._versions: dict[str, str] = {}
@@ -171,13 +174,7 @@ class IsolatedGPUBackend(LocalBackend):
             attestation_ref: ArtifactRef | None = None
             if run.binding is not None:
                 assert self._expected_toolchain is not None
-                attestation = self._attest_runtime()
-                policy_hash = hashlib.sha256(self.policy.model_dump_json().encode()).hexdigest()
-                validate_runtime_toolchain(
-                    self._expected_toolchain,
-                    attestation,
-                    expected_policy_hash=policy_hash,
-                )
+                attestation = self._runtime_attestation_for_session()
                 attestation_ref = self.store.put(
                     request.run_id,
                     "environment/runtime-attestation.json",
@@ -372,7 +369,6 @@ class IsolatedGPUBackend(LocalBackend):
             raise ValueError("unsupported runtime attestation command")
         operation_id = new_id()
         name = "gpu-agent-" + operation_id
-        created = False
         try:
             argv = self._policy_create_args(name, operation_id, self.policy.run_tmpfs) + [
                 "--entrypoint",
@@ -383,7 +379,6 @@ class IsolatedGPUBackend(LocalBackend):
             create = self._docker(argv, limit=65536)
             if self._runtime_status(create) != "SUCCESS":
                 raise ValueError("runtime attestation container unavailable")
-            created = True
             image_id, policy_hash = self._inspect_attestation_container(name, operation_id)
             capture = self._docker(["start", "--attach", name], limit=65536)
             if (
@@ -393,7 +388,7 @@ class IsolatedGPUBackend(LocalBackend):
                 raise ValueError("runtime attestation command failed")
             return capture.stdout + b"\n" + capture.stderr, image_id, policy_hash
         finally:
-            if created and not self._remove_container(name, operation_id):
+            if not self._remove_container(name, operation_id):
                 raise ValueError("runtime attestation container cleanup failed")
 
     def _attest_runtime(self) -> RuntimeToolchainAttestation:
@@ -428,6 +423,7 @@ class IsolatedGPUBackend(LocalBackend):
         ):
             raise ValueError("runtime attestation output is invalid")
         return RuntimeToolchainAttestation(
+            runtime_session_id=self._runtime_session_id,
             lock_hash=self._expected_toolchain.lock_hash,
             image_id=nvcc_image,
             cuda_nvcc=nvcc_match.group(1).decode("ascii"),
@@ -436,6 +432,23 @@ class IsolatedGPUBackend(LocalBackend):
             target_arch="sm_" + capability.replace(".", ""),
             policy_hash=nvcc_policy,
         )
+
+    def _runtime_attestation_for_session(self) -> RuntimeToolchainAttestation:
+        if self._expected_toolchain is None:
+            raise ValueError("runtime expected configuration is unavailable")
+        policy_hash = hashlib.sha256(self.policy.model_dump_json().encode()).hexdigest()
+        with self._runtime_attestation_lock:
+            attestation = self._runtime_attestation
+            if attestation is None:
+                attestation = self._attest_runtime()
+            validate_runtime_toolchain(
+                self._expected_toolchain,
+                attestation,
+                expected_policy_hash=policy_hash,
+                expected_runtime_session_id=self._runtime_session_id,
+            )
+            self._runtime_attestation = attestation
+            return attestation
 
     def _remove_container(self, name: str, operation_id: str) -> bool:
         inspected = self._docker(

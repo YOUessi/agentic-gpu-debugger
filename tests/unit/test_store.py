@@ -174,6 +174,23 @@ def test_child_cannot_replace_or_add_a_parent_binding(store):
         store.create_run("candidate", old_parent.id, binding=_binding())
 
 
+def test_child_inherits_external_origin_and_cannot_replace_or_add_it(store):
+    from gpu_agent.contracts import ExternalRunOrigin
+
+    origin = ExternalRunOrigin(run_id="6" * 32, visibility="evaluator")
+    parent = store.create_run("diagnosis", external_origin=origin)
+    child = store.create_run("candidate", parent.id)
+    assert child.external_origin == origin
+
+    replacement = ExternalRunOrigin(run_id="7" * 32, visibility="evaluator")
+    with pytest.raises(ValueError, match="origin"):
+        store.create_run("candidate", parent.id, external_origin=replacement)
+
+    local_parent = store.create_run("diagnosis")
+    with pytest.raises(ValueError, match="origin"):
+        store.create_run("candidate", local_parent.id, external_origin=origin)
+
+
 def test_legacy_unbound_manifest_loads_but_is_not_release_bound(store):
     run = store.create_run("diagnosis")
     assert store.load(run.id).binding is None

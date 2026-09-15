@@ -1,3 +1,6 @@
+import pytest
+
+
 def _binding():
     from gpu_agent.contracts import RepositorySnapshot, RunBinding
 
@@ -54,10 +57,30 @@ def test_release_service_factory_captures_repository_and_lock_internally(tmp_pat
         prompt_version="diagnosis-v1",
         model_config_hash="c" * 64,
     )
-    assert calls == [(tmp_path, "a" * 40)]
+    assert calls == [(tmp_path, "a" * 40), (tmp_path, "a" * 40)]
     assert lock_calls == [tmp_path / "containers/toolchain.lock.json"]
     assert service.binding.repository == captured
     assert service.binding.toolchain_lock_hash == locked.lock_hash
+
+
+def test_release_service_rejects_repository_change_while_loading_lock(tmp_path, monkeypatch):
+    from gpu_agent.contracts import RepositorySnapshot
+    from gpu_agent.environment import load_toolchain_lock
+    from gpu_agent.execution.isolated import LOCK_PATH
+    from gpu_agent.service import ApplicationService
+
+    before = RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True)
+    after = before.model_copy(update={"tracked_tree_hash": "c" * 64})
+    snapshots = iter([before, after])
+    monkeypatch.setattr(
+        "gpu_agent.service.capture_repository_snapshot",
+        lambda *_args, **_kwargs: next(snapshots),
+    )
+    monkeypatch.setattr(
+        "gpu_agent.service.load_toolchain_lock", lambda _path: load_toolchain_lock(LOCK_PATH)
+    )
+    with pytest.raises(ValueError, match="changed"):
+        ApplicationService.for_release(tmp_path, purpose="corpus_validation")
 
 
 def test_diagnosis_and_registered_children_inherit_service_binding(oob_service):

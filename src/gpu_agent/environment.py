@@ -31,6 +31,7 @@ class ExpectedToolchain(BaseModel):
 
 class RuntimeToolchainAttestation(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
+    runtime_session_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     lock_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     image_id: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
     cuda_nvcc: str = Field(min_length=1, max_length=128)
@@ -80,10 +81,12 @@ def validate_runtime_toolchain(
     observed: RuntimeToolchainAttestation,
     *,
     expected_policy_hash: str,
+    expected_runtime_session_id: str,
 ) -> None:
     """Require actual container observations to match expected lock and host policy."""
     if (
-        observed.lock_hash != expected.lock_hash
+        observed.runtime_session_id != expected_runtime_session_id
+        or observed.lock_hash != expected.lock_hash
         or observed.image_id != expected.image_id
         or observed.cuda_nvcc != expected.cuda_nvcc
         or observed.compute_sanitizer != expected.compute_sanitizer

@@ -122,6 +122,12 @@ class RunStore:
                 if binding is not None and binding != parent.binding:
                     raise ValueError("external origin child binding differs from parent")
                 binding = parent.binding
+            if parent.external_origin is None and external_origin is not None:
+                raise ValueError("a child cannot add a missing parent external origin")
+            if parent.external_origin is not None:
+                if external_origin is not None and external_origin != parent.external_origin:
+                    raise ValueError("child external origin differs from parent")
+                external_origin = parent.external_origin
         run_id = new_id()
         directory = self._run_dir(run_id)
         directory.mkdir(mode=0o700)

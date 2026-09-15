@@ -188,6 +188,7 @@ def test_toolchain_lock_is_bounded_hash_checked_and_runtime_bound(tmp_path):
     lock = load_toolchain_lock(lock_path)
     assert lock.lock_hash == hashlib.sha256(raw).hexdigest()
     observed = RuntimeToolchainAttestation(
+        runtime_session_id="d" * 32,
         lock_hash=lock.lock_hash,
         image_id="sha256:" + "a" * 64,
         cuda_nvcc="12.8.93",
@@ -196,12 +197,18 @@ def test_toolchain_lock_is_bounded_hash_checked_and_runtime_bound(tmp_path):
         target_arch="sm_89",
         policy_hash="c" * 64,
     )
-    validate_runtime_toolchain(lock, observed, expected_policy_hash="c" * 64)
+    validate_runtime_toolchain(
+        lock,
+        observed,
+        expected_policy_hash="c" * 64,
+        expected_runtime_session_id="d" * 32,
+    )
     with pytest.raises(ValueError, match="runtime"):
         validate_runtime_toolchain(
             lock,
             observed.model_copy(update={"cuda_nvcc": "claimed-only"}),
             expected_policy_hash="c" * 64,
+            expected_runtime_session_id="d" * 32,
         )
 
 

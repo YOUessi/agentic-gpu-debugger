@@ -36,6 +36,7 @@ def oob_service(store, tmp_path):
         def _attest_runtime(self):
             assert self._expected_toolchain is not None
             return RuntimeToolchainAttestation(
+                runtime_session_id=self._runtime_session_id,
                 lock_hash=self._expected_toolchain.lock_hash,
                 image_id=self._expected_toolchain.image_id,
                 cuda_nvcc=self._expected_toolchain.cuda_nvcc,

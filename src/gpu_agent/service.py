@@ -101,6 +101,9 @@ class ApplicationService:
         """Construct a bound service only from controller-observed repository state."""
         snapshot = capture_repository_snapshot(repository, expected_commit=expected_commit)
         toolchain = load_toolchain_lock(repository.absolute() / "containers/toolchain.lock.json")
+        confirmed = capture_repository_snapshot(repository, expected_commit=snapshot.commit)
+        if confirmed != snapshot:
+            raise ValueError("repository changed while release configuration was captured")
         binding = RunBinding(
             repository=snapshot,
             purpose=purpose,

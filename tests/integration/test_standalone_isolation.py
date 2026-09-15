@@ -242,6 +242,7 @@ def test_bound_execution_requires_matching_lock_and_records_runtime_evidence(
     )
     attestation = json.loads(store.read(attestation_ref))
     assert attestation["compute_capability"] == "8.9"
+    assert len(attestation["runtime_session_id"]) == 32
     assert environment["runtime_attestation_sha256"] == attestation_ref.sha256
     assert {argv[argv.index("--entrypoint") + 1] for argv in calls if argv[1] == "create"} == {
         "/usr/local/cuda/bin/nvcc",
@@ -249,10 +250,30 @@ def test_bound_execution_requires_matching_lock_and_records_runtime_evidence(
         "/usr/bin/nvidia-smi",
     }
 
+    reused = store.create_run("case_execution", binding=binding)
+    reused_handle = backend.prepare(
+        WorkspaceRequest(
+            run_id=reused.id,
+            source_manifest={"kernel.cu": hashlib.sha256(data).hexdigest()},
+        )
+    )
+    reused_ref = next(
+        ref
+        for ref in store.load(reused.id).artifact_refs
+        if ref.name == "environment/runtime-attestation.json"
+    )
+    assert len([argv for argv in calls if argv[1] == "create"]) == 3
+    assert reused_ref.run_id != attestation_ref.run_id
+    assert reused_ref.sha256 == attestation_ref.sha256
+    assert store.read(reused_ref) == store.read(attestation_ref)
+    backend.cleanup(reused_handle)
+
     observed_image[0] = "sha256:" + "f" * 64
     forged = store.create_run("case_execution", binding=binding)
+    forged_backend = isolated.IsolatedGPUBackend(store, source, tmp_path / "forged-tasks")
+    monkeypatch.setattr(forged_backend._executor, "execute", execute)
     with pytest.raises(ValueError, match="image or policy mismatch"):
-        backend.prepare(
+        forged_backend.prepare(
             WorkspaceRequest(
                 run_id=forged.id,
                 source_manifest={"kernel.cu": hashlib.sha256(data).hexdigest()},
@@ -268,6 +289,28 @@ def test_bound_execution_requires_matching_lock_and_records_runtime_evidence(
                 source_manifest={"kernel.cu": hashlib.sha256(data).hexdigest()},
             )
         )
+
+
+def test_ambiguous_probe_create_always_attempts_label_checked_cleanup(store, tmp_path, monkeypatch):
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+    from gpu_agent.execution.process import ProcessCapture
+
+    backend = IsolatedGPUBackend(store, tmp_path, tmp_path / "tasks")
+    backend._image = "sha256:" + "0" * 64
+    calls = []
+
+    def execute(argv, *_args, **_kwargs):
+        calls.append(argv)
+        if argv[1] == "create":
+            return ProcessCapture(None, b"", b"timed out", True)
+        if argv[1:3] == ["inspect", "--format"]:
+            return ProcessCapture(0, argv[-1].removeprefix("gpu-agent-").encode(), b"", False)
+        return ProcessCapture(0, b"", b"", False)
+
+    monkeypatch.setattr(backend._executor, "execute", execute)
+    with pytest.raises(ValueError, match="unavailable"):
+        backend._fixed_container_probe("/usr/local/cuda/bin/nvcc", ("--version",))
+    assert [argv[1] for argv in calls] == ["create", "inspect", "stop", "rm"]
 
 
 def test_bound_execution_rejects_observed_runtime_version_mismatch(store, tmp_path, monkeypatch):
