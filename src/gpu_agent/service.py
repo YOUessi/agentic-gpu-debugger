@@ -18,6 +18,7 @@ from gpu_agent.agent.provider import (
     OpenAIResponsesProvider,
     ProviderError,
 )
+from gpu_agent.benchmark.evaluation import EvaluationMode
 from gpu_agent.contracts import RunManifest
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
@@ -26,6 +27,7 @@ from gpu_agent.execution.isolated import IsolatedGPUBackend
 from gpu_agent.execution.models import (
     BuildRequest,
     ExecutionRequest,
+    SanitizerTool,
     WorkspaceHandle,
     WorkspaceRequest,
 )
@@ -110,12 +112,29 @@ class ApplicationService:
             hashes[name] = ref.sha256
         return SourceSnapshot(parent_run_id=run_id, root=root, hashes=hashes)
 
-    def diagnose(self, source: Path) -> RunManifest:
+    def diagnose(
+        self,
+        source: Path,
+        *,
+        mode: EvaluationMode = "E",
+        required_tools: tuple[SanitizerTool, ...] = (SanitizerTool.MEMCHECK,),
+        expected_source_hash: str | None = None,
+    ) -> RunManifest:
+        if mode not in {"A", "B", "C", "D", "E"}:
+            raise ValueError("invalid acquisition mode")
         selected = source / "kernel.cu" if source.is_dir() else source
         data = read_regular(selected.absolute(), 4 * 1024 * 1024)
+        if (
+            expected_source_hash is not None
+            and hashlib.sha256(data).hexdigest() != expected_source_hash
+        ):
+            raise ValueError("registered source hash mismatch")
         text = data.decode("utf-8")
         run = self.store.create_run("diagnosis")
         self.store.transition(run.id, "RUNNING", "PREPARING")
+        self.store.put(
+            run.id, "agent/acquisition-policy.json", json.dumps({"mode": mode}).encode(), "public"
+        )
         ref = self.store.put(run.id, "sources/kernel.cu", data, "public")
         EvidenceRepository(self.store).save(run.id, EvidenceBundle(source_snapshot=[ref]))
         gate = LLMCallGate()
@@ -189,7 +208,7 @@ class ApplicationService:
                     stdin_ref,
                     self.knowledge,
                     self.knowledge_version,
-                ).investigate(run.id)
+                ).investigate(run.id, mode=mode, required_tools=required_tools)
                 if result.diagnostic_outcome == "DIAGNOSED":
                     self.store.transition(run.id, "RUNNING", "PATCH_GENERATING")
                     public_source = public_evidence(self.store, run.id).sources[0]

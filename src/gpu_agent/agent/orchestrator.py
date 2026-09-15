@@ -11,10 +11,12 @@ from gpu_agent.agent.models import (
     AgentAction,
     AgentBudget,
     DiagnosisResult,
+    DocsArguments,
     EvidenceClaim,
     PublicEvidence,
     PublicFinding,
     PublicSource,
+    RetrieveDocsAction,
 )
 from gpu_agent.agent.policy import (
     BudgetExceeded,
@@ -25,6 +27,7 @@ from gpu_agent.agent.policy import (
 )
 from gpu_agent.agent.provider import LLMProvider, ProviderError
 from gpu_agent.agent.rule_router import RuleRouter
+from gpu_agent.benchmark.evaluation import EvaluationMode
 from gpu_agent.contracts import ArtifactRef, CurrentPhase
 from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.execution.backend import ExecutionBackend
@@ -116,14 +119,12 @@ class AgentOrchestrator:
         knowledge: KnowledgeIndex | None,
         knowledge_version: str,
         budget: AgentBudget | None = None,
-        allow_rule_fallback: bool = False,
     ) -> None:
         self.store, self.provider, self.backend = store, provider, backend
         self.handle, self.stdin_ref = handle, stdin_ref
         self.knowledge, self.knowledge_version = knowledge, knowledge_version
         self.budget = budget or AgentBudget()
         self.ledger = BudgetLedger(self.budget)
-        self.allow_rule_fallback = allow_rule_fallback
         self.rule_router = RuleRouter()
         self.seen: set[str] = set()
         self.registry: dict[str, Callable[[AgentAction], None]] = {
@@ -255,11 +256,67 @@ class AgentOrchestrator:
         except BudgetExceeded as error:
             raise ProviderError("AGENT_BUDGET_EXHAUSTED") from error
 
-    def investigate(self, run_id: str) -> DiagnosisResult:
+    def _diagnose(self, evidence: PublicEvidence) -> DiagnosisResult:
+        diagnosis = self._reserve("diagnosis_llm")
+        try:
+            result = self.provider.diagnose(evidence)
+        except ProviderError:
+            self.ledger.settle(diagnosis, "FAILED")
+            raise
+        self.ledger.settle(diagnosis)
+        if not validate_diagnosis(result, evidence):
+            return DiagnosisResult.inconclusive("INVALID_DIAGNOSIS_EVIDENCE")
+        return result
+
+    def investigate(
+        self,
+        run_id: str,
+        *,
+        mode: EvaluationMode = "E",
+        required_tools: tuple[SanitizerTool, ...] = (SanitizerTool.MEMCHECK,),
+    ) -> DiagnosisResult:
+        if mode not in {"A", "B", "C", "D", "E"}:
+            raise ValueError("invalid acquisition mode")
         if run_id != self.handle.run_id:
             raise ValueError("workspace belongs to another run")
         self.store.transition(run_id, "RUNNING", CurrentPhase.DIAGNOSING)
         try:
+            if mode == "B":
+                # Fixed controller query against the locally frozen official corpus.
+                self._docs(
+                    RetrieveDocsAction(
+                        typed_arguments=DocsArguments(
+                            query=(
+                                "CUDA memory access out of bounds race "
+                                "synchronization initialization"
+                            ),
+                            k=5,
+                        )
+                    )
+                )
+            elif mode == "C":
+                # Precollect before the sole final diagnosis call. Preserve memcheck precedence.
+                for tool in dict.fromkeys((SanitizerTool.MEMCHECK, *required_tools)):
+                    if (
+                        tool != SanitizerTool.MEMCHECK
+                        and public_evidence(self.store, run_id).sanitizer_outcomes.get(
+                            SanitizerTool.MEMCHECK
+                        )
+                        != "CLEAN"
+                    ):
+                        break
+                    reservation = self._reserve(f"run_{tool.value}")
+                    self.budget = self.budget.model_copy(
+                        update={"sanitizer_calls": self.budget.sanitizer_calls + 1}
+                    )
+                    try:
+                        self._run_sanitizer(tool)
+                    except Exception:
+                        self.ledger.settle(reservation, "FAILED")
+                        raise
+                    self.ledger.settle(reservation)
+            if mode in {"A", "B", "C"}:
+                return self._diagnose(public_evidence(self.store, run_id))
             while True:
                 evidence = public_evidence(self.store, run_id)
                 self.budget = self.budget.model_copy(
@@ -273,21 +330,16 @@ class AgentOrchestrator:
                     or self.budget.remaining_seconds <= 0
                 ):
                     raise ProviderError("AGENT_BUDGET_EXHAUSTED")
-                planner = self._reserve("planner_llm")
-                try:
-                    proposed = self.provider.plan(evidence, self.budget)
-                    self.ledger.settle(planner)
-                except ProviderError:
-                    self.ledger.settle(planner, "FAILED")
-                    if not self.allow_rule_fallback:
-                        raise
+                if mode == "D":
                     proposed = self.rule_router.next_action(evidence, self.budget)
-                    self.store.put(
-                        run_id,
-                        f"actions/{self.budget.agent_steps}/fallback.json",
-                        b'{"mode":"RULE_FALLBACK"}',
-                        "public",
-                    )
+                else:
+                    planner = self._reserve("planner_llm")
+                    try:
+                        proposed = self.provider.plan(evidence, self.budget)
+                        self.ledger.settle(planner)
+                    except ProviderError:
+                        self.ledger.settle(planner, "FAILED")
+                        raise
                 try:
                     action = ACTION_ADAPTER.validate_python(proposed.model_dump())
                 except ValidationError:
@@ -311,16 +363,7 @@ class AgentOrchestrator:
                 if action.action_type == "declare_inconclusive":
                     return DiagnosisResult.inconclusive("MODEL_DECLARED_INCONCLUSIVE")
                 if action.action_type == "finish_diagnosis":
-                    diagnosis = self._reserve("diagnosis_llm")
-                    try:
-                        result = self.provider.diagnose(evidence)
-                    except ProviderError:
-                        self.ledger.settle(diagnosis, "FAILED")
-                        raise
-                    self.ledger.settle(diagnosis)
-                    if not validate_diagnosis(result, evidence):
-                        return DiagnosisResult.inconclusive("INVALID_DIAGNOSIS_EVIDENCE")
-                    return result
+                    return self._diagnose(evidence)
                 self.registry[action.action_type](action)
         except ProviderError as exc:
             return DiagnosisResult.inconclusive(exc.code)
