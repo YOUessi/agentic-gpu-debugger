@@ -69,6 +69,7 @@ class RunBinding(BaseModel):
     toolchain_lock_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     prompt_version: str | None = Field(default=None, min_length=1, max_length=128)
     model_config_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    case_registry_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class ExternalRunOrigin(BaseModel):

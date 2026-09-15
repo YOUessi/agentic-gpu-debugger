@@ -1,7 +1,7 @@
 """CLI workflows delegate to the same controller service and verification guard."""
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Literal
 
 import typer
 from pydantic import ValidationError
@@ -28,17 +28,22 @@ def benchmark_validate(
     clean_execution: str,
     mutant_execution: str,
     corpus_root: Annotated[Path, typer.Option("--corpus-root")],
+    ledger_root: Annotated[Path, typer.Option("--ledger-root")],
+    visibility: Annotated[Literal["public", "evaluator"], typer.Option("--visibility")],
 ) -> None:
     """Register two exact native clean/mutant execution run IDs."""
     try:
-        builder = BenchmarkBuilder(RunStore(corpus_root))
+        builder = BenchmarkBuilder(
+            RunStore(corpus_root, visibility=visibility), ledger_root=ledger_root
+        )
         manifest = builder.register(builder.validate(clean_execution, mutant_execution))
     except (OSError, ValueError, CaseExecutionAttestationUnavailable, UnvalidatedCaseError):
         raise typer.BadParameter(
             "CASE_EXECUTION_ATTESTATION_UNAVAILABLE: exact native run artifacts are "
             "missing, unbound, incomplete, or inconsistent; corpus was not modified."
         ) from None
-    typer.echo(f"registered {manifest.id}")
+    # Evaluator identities are deliberately never echoed by this public CLI surface.
+    typer.echo(f"registered corpus evidence ({manifest.split})")
 
 
 @benchmark_app.command("evaluate")

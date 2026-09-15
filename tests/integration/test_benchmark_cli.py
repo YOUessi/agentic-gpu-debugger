@@ -31,7 +31,8 @@ def test_benchmark_help_exposes_controller_commands():
     assert result.exit_code == 0 and "validate" in result.output and "evaluate" in result.output
 
 
-def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch):
+@pytest.mark.parametrize("visibility", ["public", "evaluator"])
+def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch, visibility):
     from gpu_agent.cli import app
 
     forged = tmp_path / "PRIVATE_SECRET.json"
@@ -45,6 +46,10 @@ def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch):
             str(forged),
             "--corpus-root",
             str(tmp_path / "corpus"),
+            "--ledger-root",
+            str(tmp_path / "ledger"),
+            "--visibility",
+            visibility,
         ],
     )
     assert result.exit_code == 2 and "CASE_EXECUTION_ATTESTATION_UNAVAILABLE" in result.output

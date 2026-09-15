@@ -101,6 +101,13 @@ class ApplicationService:
         """Construct a bound service only from controller-observed repository state."""
         snapshot = capture_repository_snapshot(repository, expected_commit=expected_commit)
         toolchain = load_toolchain_lock(repository.absolute() / "containers/toolchain.lock.json")
+        registry_hash = (
+            hashlib.sha256(
+                read_regular(repository.absolute() / "benchmarks/corpus-registry.json", 1024 * 1024)
+            ).hexdigest()
+            if purpose == "corpus_validation"
+            else None
+        )
         confirmed = capture_repository_snapshot(repository, expected_commit=snapshot.commit)
         if confirmed != snapshot:
             raise ValueError("repository changed while release configuration was captured")
@@ -110,6 +117,7 @@ class ApplicationService:
             toolchain_lock_hash=toolchain.lock_hash,
             prompt_version=prompt_version,
             model_config_hash=model_config_hash,
+            case_registry_hash=registry_hash,
         )
         ordinary = cls.configured()
         return cls(

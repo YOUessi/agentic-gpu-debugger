@@ -2,13 +2,18 @@
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 
 @pytest.fixture
 def native_case(tmp_path):
-    from gpu_agent.benchmark.models import CaseExecutionPlan
+    from gpu_agent.benchmark.models import (
+        AuthoritativeCaseRegistry,
+        AuthoritativeCaseSpec,
+        CaseExecutionPlan,
+    )
     from gpu_agent.benchmark.validation import CaseValidationController
     from gpu_agent.contracts import RepositorySnapshot, RunBinding
     from gpu_agent.environment import RuntimeToolchainAttestation, load_toolchain_lock
@@ -26,6 +31,33 @@ def native_case(tmp_path):
     for name in ("vector_io.cpp", "vector_api.h", "json.hpp"):
         (harness / name).write_bytes(("harness " + name).encode())
 
+    input_bytes = json.dumps({"n": 2, "a": [1.0, 1.0], "b": [2.0, 2.0]}).encode()
+    harness_hash = hashlib.sha256(
+        json.dumps(
+            sorted(
+                (name, hashlib.sha256((harness / name).read_bytes()).hexdigest())
+                for name in ("vector_io.cpp", "vector_api.h", "json.hpp")
+            ),
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    spec = AuthoritativeCaseSpec(
+        case_id="case_0100",
+        template_id="vector-add-index",
+        mutation_id="delete-index-guard",
+        split="public",
+        clean_source_hash=hashlib.sha256((root / "clean/kernel.cu").read_bytes()).hexdigest(),
+        mutant_source_hash=hashlib.sha256((root / "mutant/kernel.cu").read_bytes()).hexdigest(),
+        harness_hash=harness_hash,
+        input_set_hash=hashlib.sha256(input_bytes).hexdigest(),
+        oracle_id="vector-add-cpu-v1",
+        target_tool="memcheck",
+        expected_finding="Invalid __global__ write",
+        sanitizer_repetitions=1,
+        mutation_provenance_hash="9" * 64,
+    )
+    registry_bytes = AuthoritativeCaseRegistry(cases=[spec]).model_dump_json().encode()
+    registry_hash = hashlib.sha256(registry_bytes).hexdigest()
     store = RunStore(tmp_path / "corpus")
     lock = load_toolchain_lock(LOCK_PATH)
     binding = RunBinding(
@@ -34,6 +66,7 @@ def native_case(tmp_path):
         toolchain_lock_hash=lock.lock_hash,
         prompt_version=None,
         model_config_hash=None,
+        case_registry_hash=registry_hash,
     )
 
     class FakeBackend(IsolatedGPUBackend):
@@ -64,11 +97,11 @@ def native_case(tmp_path):
                 if mutant
                 else b"========= ERROR SUMMARY: 0 errors\n"
             )
-            return ProcessCapture(86 if mutant else 0, b"", b"", False), b"", log
+            output = b'{"dtype":"float32","shape":[2],"values":[3.0,3.0]}'
+            return ProcessCapture(86 if mutant else 0, output, b"", False), b"", log
 
     backend = FakeBackend(store, root, tmp_path / "tasks")
-    controller = CaseValidationController(store, backend, binding)
-    input_bytes = json.dumps({"n": 2, "a": [1.0, 1.0], "b": [2.0, 2.0]}).encode()
+    controller = CaseValidationController._for_test(store, backend, binding, registry_bytes)
 
     def execute(role, **changes):
         selected_controller = changes.pop("_controller", controller)
@@ -88,6 +121,10 @@ def native_case(tmp_path):
             },
             "target_tool": "memcheck",
             "expected_finding": "Invalid __global__ write",
+            "sanitizer_repetitions": 1,
+            "case_registry_hash": registry_hash,
+            "case_spec_hash": controller.spec_hash(spec),
+            "mutation_provenance_hash": spec.mutation_provenance_hash,
         }
         values.update(changes)
         return selected_controller.execute(CaseExecutionPlan(**values), selected_input)
@@ -100,13 +137,36 @@ def test_native_pair_registers_from_exact_terminal_artifacts(native_case):
 
     store, _, execute, _ = native_case
     clean_id, mutant_id = execute("clean"), execute("mutant")
-    builder = BenchmarkBuilder(store)
+    builder = BenchmarkBuilder(store, ledger_root=store.root.parent / "ledger")
     validation = builder.validate(clean_id, mutant_id)
     manifest = builder.register(validation)
     assert manifest.validation_run_ids == [clean_id, mutant_id]
     assert manifest.source_hash != store.load(clean_id).binding.repository.tracked_tree_hash
     observation_name = "validation/case-execution-observation.json"
     assert any(ref.name == observation_name for ref in store.load(clean_id).artifact_refs)
+
+
+def test_oracle_policy_covers_ordinary_and_each_instrumented_output(native_case):
+    from gpu_agent.benchmark.models import CaseExecutionObservation, CaseOracleObservation
+
+    store, _, execute, _ = native_case
+    run_id = execute("clean")
+    run = store.load(run_id)
+    observation_ref = next(
+        ref for ref in run.artifact_refs if ref.name == "validation/case-execution-observation.json"
+    )
+    observation = CaseExecutionObservation.model_validate_json(store.read(observation_ref))
+    refs = [observation.oracle_ref, *observation.sanitizer_oracle_refs]
+    assertions = [CaseOracleObservation.model_validate_json(store.read(ref)) for ref in refs]
+    assert [item.channel for item in assertions] == ["ordinary", "instrumented"]
+    assert all(item.result.passed for item in assertions)
+    assert {(item.result.atol, item.result.rtol) for item in assertions} == {(1e-5, 1e-5)}
+
+
+def test_authoritative_repetition_schedule_cannot_be_shortened(native_case):
+    _, _, execute, _ = native_case
+    with pytest.raises(ValueError, match="authoritative"):
+        execute("mutant", sanitizer_repetitions=5)
 
 
 def test_claimant_summary_model_cannot_reach_registration(native_case):
@@ -140,7 +200,9 @@ def test_claimant_summary_model_cannot_reach_registration(native_case):
         mutant_source_hash=claimed.source_hash,
     )
     with pytest.raises((UnvalidatedCaseError, TypeError, AttributeError)):
-        BenchmarkBuilder(store).register(summary)  # type: ignore[arg-type]
+        BenchmarkBuilder(store, ledger_root=store.root.parent / "ledger").register(
+            summary  # type: ignore[arg-type]
+        )
 
 
 def test_old_unbound_or_missing_observation_fails_closed(native_case):
@@ -152,7 +214,9 @@ def test_old_unbound_or_missing_observation_fails_closed(native_case):
     store.transition(old.id, "RUNNING", "FINALIZING")
     store.transition(old.id, "COMPLETED", None)
     with pytest.raises(CaseExecutionAttestationUnavailable):
-        BenchmarkBuilder(store).validate(old.id, execute("mutant"))
+        BenchmarkBuilder(store, ledger_root=store.root.parent / "ledger").validate(
+            old.id, execute("mutant")
+        )
 
 
 def test_role_swap_and_unrelated_identity_are_rejected(native_case):
@@ -160,12 +224,11 @@ def test_role_swap_and_unrelated_identity_are_rejected(native_case):
 
     store, _, execute, _ = native_case
     clean_id, mutant_id = execute("clean"), execute("mutant")
-    builder = BenchmarkBuilder(store)
+    builder = BenchmarkBuilder(store, ledger_root=store.root.parent / "ledger")
     with pytest.raises(UnvalidatedCaseError):
         builder.validate(mutant_id, clean_id)
-    unrelated = execute("mutant", case_id="case_0101")
-    with pytest.raises(UnvalidatedCaseError):
-        builder.validate(clean_id, unrelated)
+    with pytest.raises(ValueError, match="authoritative"):
+        execute("mutant", case_id="case_0101")
 
 
 @pytest.mark.parametrize(
@@ -182,22 +245,30 @@ def test_finding_tool_and_input_substitution_are_rejected(native_case, change):
 
     store, _, execute, _ = native_case
     clean_id = execute("clean")
-    mutant_id = execute("mutant", **change)
-    with pytest.raises((UnvalidatedCaseError, CaseExecutionAttestationUnavailable)):
-        BenchmarkBuilder(store).validate(clean_id, mutant_id)
+    with pytest.raises((ValueError, UnvalidatedCaseError, CaseExecutionAttestationUnavailable)):
+        mutant_id = execute("mutant", **change)
+        BenchmarkBuilder(store, ledger_root=store.root.parent / "ledger").validate(
+            clean_id, mutant_id
+        )
 
 
 def test_mixed_repository_binding_is_rejected(native_case):
     from gpu_agent.benchmark.builder import BenchmarkBuilder, UnvalidatedCaseError
+    from gpu_agent.benchmark.models import AuthoritativeCaseRegistry
     from gpu_agent.benchmark.validation import CaseValidationController
 
     store, controller, execute, _ = native_case
     different = controller.binding.model_copy(
         update={"repository": controller.binding.repository.model_copy(update={"commit": "c" * 40})}
     )
-    other = CaseValidationController(store, controller.backend, different)
+    registry_bytes = (
+        AuthoritativeCaseRegistry(cases=list(controller.specs.values())).model_dump_json().encode()
+    )
+    other = CaseValidationController._for_test(store, controller.backend, different, registry_bytes)
     with pytest.raises(UnvalidatedCaseError):
-        BenchmarkBuilder(store).validate(execute("clean"), execute("mutant", _controller=other))
+        BenchmarkBuilder(store, ledger_root=store.root.parent / "ledger").validate(
+            execute("clean"), execute("mutant", _controller=other)
+        )
 
 
 def test_timeout_artifact_is_rejected(native_case, monkeypatch):
@@ -217,20 +288,126 @@ def test_timeout_artifact_is_rejected(native_case, monkeypatch):
     monkeypatch.setattr(controller.backend, "_container", timed)
     mutant_id = execute("mutant")
     with pytest.raises(CaseExecutionAttestationUnavailable):
-        BenchmarkBuilder(store).validate(clean_id, mutant_id)
+        BenchmarkBuilder(store, ledger_root=store.root.parent / "ledger").validate(
+            clean_id, mutant_id
+        )
+
+
+def test_sanitizer_result_link_substitution_is_rejected(native_case, monkeypatch):
+    from gpu_agent.benchmark.builder import BenchmarkBuilder
+    from gpu_agent.benchmark.validation import CaseExecutionAttestationUnavailable
+
+    store, controller, execute, _ = native_case
+    clean_id = execute("clean")
+    original = controller.backend.run_sanitizer
+
+    def mismatched(request, *, cancel=None):
+        result = original(request, cancel=cancel)
+        stderr = result.tool_result.typed_payload.program_stderr_ref
+        assert stderr is not None
+        return result.model_copy(update={"program_output_ref": stderr})
+
+    monkeypatch.setattr(controller.backend, "run_sanitizer", mismatched)
+    mutant_id = execute("mutant")
+    with pytest.raises(CaseExecutionAttestationUnavailable):
+        BenchmarkBuilder(store, ledger_root=store.root.parent / "ledger").validate(
+            clean_id, mutant_id
+        )
 
 
 def test_validation_hash_and_run_pair_cannot_be_replayed(native_case):
     from gpu_agent.benchmark.builder import BenchmarkBuilder, UnvalidatedCaseError
 
     store, _, execute, _ = native_case
-    builder = BenchmarkBuilder(store)
+    builder = BenchmarkBuilder(store, ledger_root=store.root.parent / "ledger")
     validation = builder.validate(execute("clean"), execute("mutant"))
     with pytest.raises(UnvalidatedCaseError, match="hash"):
         builder.register(validation.model_copy(update={"clean_observation_hash": "f" * 64}))
     builder.register(validation)
     with pytest.raises(UnvalidatedCaseError, match="already"):
         builder.register(validation)
+
+
+def test_registration_fails_closed_without_explicit_shared_ledger(native_case):
+    from gpu_agent.benchmark.builder import BenchmarkBuilder, UnvalidatedCaseError
+
+    store, _, execute, _ = native_case
+    builder = BenchmarkBuilder(store)
+    validation = builder.validate(execute("clean"), execute("mutant"))
+    with pytest.raises(UnvalidatedCaseError, match="shared corpus ledger"):
+        builder.register(validation)
+
+
+def test_cleanup_exception_still_terminalizes_failed_run(native_case, monkeypatch):
+    store, controller, execute, _ = native_case
+
+    def broken_cleanup(_handle):
+        raise RuntimeError("simulated cleanup failure")
+
+    before = {path.name for path in store.root.iterdir() if len(path.name) == 32}
+    monkeypatch.setattr(controller.backend, "cleanup", broken_cleanup)
+    with pytest.raises(RuntimeError, match="simulated cleanup failure"):
+        execute("clean")
+    created = [
+        path.name
+        for path in store.root.iterdir()
+        if len(path.name) == 32 and path.name not in before
+    ]
+    assert len(created) == 1
+    run = store.load(created[0])
+    assert run.status.value == "FAILED"
+    assert any(ref.name == "validation/cleanup-error.json" for ref in run.artifact_refs)
+
+
+def test_cleanup_exception_does_not_replace_primary_execution_failure(native_case, monkeypatch):
+    store, controller, execute, _ = native_case
+
+    def broken_build(_request):
+        raise ValueError("primary build failure")
+
+    def broken_cleanup(_handle):
+        raise RuntimeError("secondary cleanup failure")
+
+    monkeypatch.setattr(controller.backend, "build", broken_build)
+    monkeypatch.setattr(controller.backend, "cleanup", broken_cleanup)
+    with pytest.raises(ValueError, match="primary build failure"):
+        execute("clean")
+    failed = [
+        store.load(path.name)
+        for path in store.root.iterdir()
+        if len(path.name) == 32 and store.load(path.name).status.value == "FAILED"
+    ]
+    assert len(failed) == 1
+    assert any(ref.name == "validation/cleanup-error.json" for ref in failed[0].artifact_refs)
+
+
+def test_shared_ledger_is_atomic_and_contains_no_private_plaintext(tmp_path):
+    from gpu_agent.benchmark.ledger import CorpusLedger
+
+    root = tmp_path / "shared-ledger"
+    private_identity = b"PRIVATE_case_9000_private-template"
+    private_template = b"PRIVATE_template"
+    private_pair = b"PRIVATE_source-harness-input-mutation"
+
+    def reserve():
+        return CorpusLedger(root).reserve(private_identity, private_template, private_pair)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = []
+        for future in [pool.submit(reserve), pool.submit(reserve)]:
+            try:
+                outcomes.append(future.result())
+            except ValueError:
+                outcomes.append(None)
+    assert sum(item is not None for item in outcomes) == 1
+    with pytest.raises(ValueError, match="already reserved"):
+        CorpusLedger(root).reserve(b"different-case", b"different-template", private_pair)
+    with pytest.raises(ValueError, match="already reserved"):
+        CorpusLedger(root).reserve(private_identity, b"other-template", b"other-pair")
+    with pytest.raises(ValueError, match="already reserved"):
+        CorpusLedger(root).reserve(b"other-case", private_template, b"another-pair")
+    raw = (root / "reservations.json").read_bytes()
+    assert b"PRIVATE" not in raw and b"case_9000" not in raw
 
 
 def test_private_plan_cannot_write_to_public_store(native_case):
@@ -248,6 +425,10 @@ def test_private_plan_cannot_write_to_public_store(native_case):
                 source_manifest={str(i): "0" * 64 for i in range(4)},
                 target_tool="memcheck",
                 expected_finding="Invalid __global__ write",
+                sanitizer_repetitions=1,
+                case_registry_hash=controller.registry_hash,
+                case_spec_hash="0" * 64,
+                mutation_provenance_hash="0" * 64,
             ),
             input_bytes,
         )

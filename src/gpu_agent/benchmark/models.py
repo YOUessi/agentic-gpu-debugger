@@ -65,6 +65,10 @@ class CaseManifest(ExecutionModel):
     validation_run_ids: list[str] = Field(min_length=2)
     toolchain_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     input_set_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    ledger_namespace_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    case_identity_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    template_identity_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    source_pair_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class CaseExecutionPlan(ExecutionModel):
@@ -78,8 +82,9 @@ class CaseExecutionPlan(ExecutionModel):
     target_tool: SanitizerTool
     expected_finding: str = Field(min_length=1, max_length=256)
     sanitizer_repetitions: int = Field(default=1, ge=1, le=10)
-    atol: float = Field(default=1e-5, ge=0)
-    rtol: float = Field(default=1e-5, ge=0)
+    case_registry_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    case_spec_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    mutation_provenance_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
 
     @model_validator(mode="after")
     def role_matches_mutation(self) -> "CaseExecutionPlan":
@@ -90,8 +95,10 @@ class CaseExecutionPlan(ExecutionModel):
 
 class CaseOracleObservation(ExecutionModel):
     oracle_id: Literal["vector-add-cpu-v1"]
+    channel: Literal["ordinary", "instrumented"]
     input_ref: ArtifactRef
     output_ref: ArtifactRef
+    sanitizer_result_ref: ArtifactRef | None = None
     result: OracleResult
 
 
@@ -108,10 +115,34 @@ class CaseExecutionObservation(ExecutionModel):
     oracle_id: Literal["vector-add-cpu-v1"]
     target_tool: SanitizerTool
     expected_finding: str = Field(min_length=1, max_length=256)
+    case_spec_ref: ArtifactRef
+    plan_ref: ArtifactRef
     build_ref: ArtifactRef
     runtime_ref: ArtifactRef
     sanitizer_refs: list[ArtifactRef] = Field(min_length=1, max_length=10)
     oracle_ref: ArtifactRef
+    sanitizer_oracle_refs: list[ArtifactRef] = Field(min_length=1, max_length=10)
+
+
+class AuthoritativeCaseSpec(ExecutionModel):
+    case_id: str = Field(pattern=r"^case_[0-9]{4}$")
+    template_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{1,63}$")
+    mutation_id: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{1,63}$")
+    split: Literal["public", "private"]
+    clean_source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    mutant_source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    harness_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    input_set_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    oracle_id: Literal["vector-add-cpu-v1"]
+    target_tool: SanitizerTool
+    expected_finding: str = Field(min_length=1, max_length=256)
+    sanitizer_repetitions: int = Field(ge=1, le=10)
+    mutation_provenance_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class AuthoritativeCaseRegistry(ExecutionModel):
+    schema_version: Literal[1] = 1
+    cases: list[AuthoritativeCaseSpec] = Field(min_length=1)
 
 
 class CaseValidationArtifact(ExecutionModel):

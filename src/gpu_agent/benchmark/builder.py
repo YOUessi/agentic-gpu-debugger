@@ -1,11 +1,15 @@
 """Fail-closed registration derived only from native RunStore execution artifacts."""
 
 import hashlib
-from pathlib import PurePosixPath
+import json
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from gpu_agent.benchmark.ledger import CorpusLedger
 from gpu_agent.benchmark.models import (
+    AuthoritativeCaseSpec,
     CaseExecutionObservation,
+    CaseExecutionPlan,
     CaseManifest,
     CaseOracleObservation,
     CaseValidationArtifact,
@@ -16,7 +20,7 @@ from gpu_agent.benchmark.validation import (
     derive_oracle,
     source_identities,
 )
-from gpu_agent.contracts import ArtifactRef, RunBinding, RunManifest, RunStatus, ToolResult
+from gpu_agent.contracts import ArtifactRef, RunManifest, RunStatus, ToolResult
 from gpu_agent.environment import RuntimeToolchainAttestation
 from gpu_agent.evidence.sanitizer import parse_sanitizer
 from gpu_agent.execution.models import BuildResult, ExecutionResult, SanitizerResult
@@ -34,18 +38,24 @@ class _NativeExecution:
         run: RunManifest,
         observation_ref: ArtifactRef,
         observation: CaseExecutionObservation,
+        spec: AuthoritativeCaseSpec,
+        plan: CaseExecutionPlan,
         build: BuildResult,
         runtime: ExecutionResult,
         sanitizers: list[SanitizerResult],
         oracle: CaseOracleObservation,
+        sanitizer_oracles: list[CaseOracleObservation],
     ) -> None:
         self.run = run
         self.observation_ref = observation_ref
         self.observation = observation
+        self.spec = spec
+        self.plan = plan
         self.build = build
         self.runtime = runtime
         self.sanitizers = sanitizers
         self.oracle = oracle
+        self.sanitizer_oracles = sanitizer_oracles
 
 
 def _failed(result: ToolResult[Any] | None) -> bool:
@@ -67,8 +77,9 @@ def _runtime_status(result: ToolResult[Any]) -> str:
 
 
 class BenchmarkBuilder:
-    def __init__(self, store: RunStore) -> None:
+    def __init__(self, store: RunStore, *, ledger_root: Path | None = None) -> None:
         self.store = store
+        self.ledger_root = ledger_root
 
     def _one(self, run: RunManifest, name: str) -> ArtifactRef:
         refs = [ref for ref in run.artifact_refs if ref.name == name]
@@ -85,6 +96,7 @@ class BenchmarkBuilder:
                 or run.binding is None
                 or run.binding.purpose != "corpus_validation"
                 or run.binding.toolchain_lock_hash is None
+                or run.binding.case_registry_hash is None
             ):
                 raise ValueError
             observation_ref = self._one(run, "validation/case-execution-observation.json")
@@ -92,6 +104,10 @@ class BenchmarkBuilder:
                 self.store.read(observation_ref)
             )
             _validate_refs(self.store, run_id, observation)
+            spec = AuthoritativeCaseSpec.model_validate_json(
+                self.store.read(observation.case_spec_ref)
+            )
+            plan = CaseExecutionPlan.model_validate_json(self.store.read(observation.plan_ref))
             build = BuildResult.model_validate_json(self.store.read(observation.build_ref))
             runtime = ExecutionResult.model_validate_json(self.store.read(observation.runtime_ref))
             sanitizers = [
@@ -101,7 +117,11 @@ class BenchmarkBuilder:
             oracle = CaseOracleObservation.model_validate_json(
                 self.store.read(observation.oracle_ref)
             )
-            for value in (build, runtime, sanitizers, oracle):
+            sanitizer_oracles = [
+                CaseOracleObservation.model_validate_json(self.store.read(ref))
+                for ref in observation.sanitizer_oracle_refs
+            ]
+            for value in (spec, plan, build, runtime, sanitizers, oracle, sanitizer_oracles):
                 _validate_refs(self.store, run_id, value)
         except (OSError, ValueError) as exc:
             if isinstance(exc, CaseExecutionAttestationUnavailable):
@@ -109,24 +129,40 @@ class BenchmarkBuilder:
             raise CaseExecutionAttestationUnavailable(
                 "CASE_EXECUTION_ATTESTATION_UNAVAILABLE"
             ) from exc
-        self._validate_native(run, observation, build, runtime, sanitizers, oracle)
+        self._validate_native(
+            run, observation, spec, plan, build, runtime, sanitizers, oracle, sanitizer_oracles
+        )
         return _NativeExecution(
-            run, observation_ref, observation, build, runtime, sanitizers, oracle
+            run,
+            observation_ref,
+            observation,
+            spec,
+            plan,
+            build,
+            runtime,
+            sanitizers,
+            oracle,
+            sanitizer_oracles,
         )
 
     def _validate_native(
         self,
         run: RunManifest,
         observation: CaseExecutionObservation,
+        spec: AuthoritativeCaseSpec,
+        plan: CaseExecutionPlan,
         build: BuildResult,
         runtime: ExecutionResult,
         sanitizers: list[SanitizerResult],
         oracle: CaseOracleObservation,
+        sanitizer_oracles: list[CaseOracleObservation],
     ) -> None:
         binding = run.binding
         assert binding is not None and binding.toolchain_lock_hash is not None
         expected_result_refs = (
-            observation.build_ref.name == "validation/build-result.json"
+            observation.case_spec_ref.name == "validation/case-spec.json"
+            and observation.plan_ref.name == "validation/execution-plan.json"
+            and observation.build_ref.name == "validation/build-result.json"
             and observation.runtime_ref.name == "validation/runtime-result.json"
             and observation.oracle_ref.name == "validation/oracle-result.json"
             and len({ref.id for ref in observation.sanitizer_refs})
@@ -135,6 +171,12 @@ class BenchmarkBuilder:
             == [
                 f"validation/sanitizer-{index:02d}.json"
                 for index in range(len(observation.sanitizer_refs))
+            ]
+            and len(sanitizer_oracles) == len(sanitizers) == plan.sanitizer_repetitions
+            and [ref.name for ref in observation.sanitizer_oracle_refs]
+            == [
+                f"validation/sanitizer-oracle-{index:02d}.json"
+                for index in range(len(observation.sanitizer_oracle_refs))
             ]
         )
         observed_sources = [ref for ref in run.artifact_refs if ref.name.startswith("sources/")]
@@ -177,11 +219,12 @@ class BenchmarkBuilder:
         recomputed_oracle = derive_oracle(
             input_bytes,
             self.store.read(runtime.output_ref),
-            oracle.result.atol,
-            oracle.result.rtol,
+            observation.oracle_id,
         )
         oracle_ok = (
             oracle.oracle_id == observation.oracle_id
+            and oracle.channel == "ordinary"
+            and oracle.sanitizer_result_ref is None
             and oracle.result.oracle_id == observation.oracle_id
             and oracle.input_ref == input_ref
             and oracle.output_ref == runtime.output_ref
@@ -191,10 +234,61 @@ class BenchmarkBuilder:
             self._valid_sanitizer(result, observation, input_ref, build.binary_ref)
             for result in sanitizers
         )
+        instrumented_oracle_ok = all(
+            item.oracle_id == observation.oracle_id
+            and item.channel == "instrumented"
+            and item.input_ref == input_ref
+            and item.sanitizer_result_ref == sanitizer_ref
+            and item.output_ref == sanitizer.program_output_ref
+            and item.result
+            == derive_oracle(
+                input_bytes,
+                self.store.read(item.output_ref),
+                observation.oracle_id,
+            )
+            for item, sanitizer_ref, sanitizer in zip(
+                sanitizer_oracles,
+                observation.sanitizer_refs,
+                sanitizers,
+                strict=True,
+            )
+        )
+        plan_ok = (
+            plan.case_registry_hash == binding.case_registry_hash
+            and plan.case_spec_hash == hashlib.sha256(spec.model_dump_json().encode()).hexdigest()
+            and plan.mutation_provenance_hash == spec.mutation_provenance_hash
+            and plan.sanitizer_repetitions == spec.sanitizer_repetitions
+            and plan.case_id == spec.case_id
+            and plan.template_id == spec.template_id
+            and plan.split == spec.split
+            and plan.oracle_id == spec.oracle_id
+            and plan.target_tool == spec.target_tool
+            and plan.expected_finding == spec.expected_finding
+            and plan.mutation_id == ("clean" if plan.role == "clean" else spec.mutation_id)
+            and observation.source_hash
+            == (spec.clean_source_hash if plan.role == "clean" else spec.mutant_source_hash)
+            and observation.harness_hash == spec.harness_hash
+            and observation.input_set_hash == spec.input_set_hash
+            and {PurePosixPath(name).name: digest for name, digest in plan.source_manifest.items()}
+            == build_sources
+        ) and all(
+            getattr(plan, name) == getattr(observation, name)
+            for name in (
+                "case_id",
+                "template_id",
+                "mutation_id",
+                "role",
+                "split",
+                "oracle_id",
+                "target_tool",
+                "expected_finding",
+            )
+        )
         visibility = "public" if observation.split == "public" else "evaluator"
         if not (
             self.store.visibility == visibility
             and expected_result_refs
+            and plan_ok
             and len(observed_sources) == 4
             and source_refs == build_sources
             and runtime_attestation is not None
@@ -207,6 +301,7 @@ class BenchmarkBuilder:
             and runtime_ok
             and oracle_ok
             and sanitizer_ok
+            and instrumented_oracle_ok
         ):
             raise CaseExecutionAttestationUnavailable("CASE_EXECUTION_ATTESTATION_UNAVAILABLE")
 
@@ -244,8 +339,15 @@ class BenchmarkBuilder:
             and tool_result.typed_payload.tool == observation.target_tool
             and tool_result.typed_payload.stdin_ref == input_ref
             and tool_result.typed_payload.binary_ref == binary_ref
+            and result.program_output_ref == tool_result.typed_payload.program_output_ref
+            and result.program_output_ref == tool_result.stdout_artifact
+            and result.program_output_ref.name.endswith("/program.stdout")
+            and tool_result.typed_payload.program_stderr_ref is not None
+            and tool_result.typed_payload.program_stderr_ref.name.endswith("/program.stderr")
+            and tool_result.stderr_artifact.name.endswith(f"/{observation.target_tool.value}.log")
             and result.check_outcome == tool_result.typed_payload.check_outcome
             and result.findings == tool_result.typed_payload.findings
+            and all(finding.raw_ref == tool_result.stderr_artifact for finding in result.findings)
             and result.check_outcome == parsed.check_outcome
             and result.completed == parsed.completed
             and observed_findings == parsed.findings
@@ -276,6 +378,7 @@ class BenchmarkBuilder:
             and left.mutation_id == "clean"
             and clean.runtime.runtime_status == "SUCCESS"
             and clean.oracle.result.passed
+            and all(item.result.passed for item in clean.sanitizer_oracles)
             and all(result.check_outcome == "CLEAN" for result in clean.sanitizers)
         )
         mutant_ok = (
@@ -307,25 +410,35 @@ class BenchmarkBuilder:
             or self.validate(validation.clean_run_id, validation.mutant_run_id) != validation
         ):
             raise UnvalidatedCaseError("validation artifact hash mismatch")
-        selected = {validation.clean_run_id, validation.mutant_run_id}
-        for path in self.store.root.iterdir():
-            if not path.is_dir() or len(path.name) != 32:
-                continue
-            run = self.store.load(path.name)
-            if run.kind != "benchmark_case":
-                continue
-            ref = self._one(run, "case-manifest.json")
-            existing = CaseManifest.model_validate_json(self.store.read(ref))
-            if selected.intersection(existing.validation_run_ids):
-                raise UnvalidatedCaseError("validation run is already registered")
-            if existing.id == mutant.observation.case_id:
-                raise UnvalidatedCaseError("case ID is already registered")
-            if (
-                existing.template_id == mutant.observation.template_id
-                and existing.split != mutant.observation.split
-            ):
-                raise UnvalidatedCaseError("template cannot cross public/private splits")
+        if self.ledger_root is None:
+            raise UnvalidatedCaseError("shared corpus ledger is required")
         observed = mutant.observation
+        binding = mutant.run.binding
+        assert binding is not None and binding.case_registry_hash is not None
+        identity = observed.case_id.encode()
+        template_identity = observed.template_id.encode()
+        source_pair = json.dumps(
+            {
+                "clean_source_hash": clean.observation.source_hash,
+                "mutant_source_hash": mutant.observation.source_hash,
+                "harness_hash": observed.harness_hash,
+                "input_set_hash": observed.input_set_hash,
+                "mutation_provenance_hash": mutant.spec.mutation_provenance_hash,
+                "toolchain_hash": observed.toolchain_hash,
+                "oracle_id": observed.oracle_id,
+                "target_tool": observed.target_tool.value,
+                "expected_finding": observed.expected_finding,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        ledger = CorpusLedger(self.ledger_root)
+        try:
+            case_hash, template_hash, source_pair_hash = ledger.reserve(
+                identity, template_identity, source_pair
+            )
+        except ValueError as exc:
+            raise UnvalidatedCaseError(str(exc)) from exc
         manifest = CaseManifest(
             id=observed.case_id,
             source_hash=observed.source_hash,
@@ -339,9 +452,28 @@ class BenchmarkBuilder:
             validation_run_ids=[validation.clean_run_id, validation.mutant_run_id],
             toolchain_hash=observed.toolchain_hash,
             input_set_hash=observed.input_set_hash,
+            ledger_namespace_hash=ledger.namespace_hash,
+            case_identity_hash=case_hash,
+            template_identity_hash=template_hash,
+            source_pair_hash=source_pair_hash,
         )
-        binding: RunBinding | None = mutant.run.binding
         run = self.store.create_run("benchmark_case", binding=binding)
+        self.store.put(
+            run.id,
+            "validation/ledger-reservation.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "ledger_namespace_hash": ledger.namespace_hash,
+                    "case_identity_hash": case_hash,
+                    "template_identity_hash": template_hash,
+                    "source_pair_hash": source_pair_hash,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            self.store.visibility,
+        )
         self.store.put(
             run.id, "case-manifest.json", manifest.model_dump_json().encode(), self.store.visibility
         )

@@ -2,11 +2,14 @@
 
 import hashlib
 import json
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, model_validator
 
 from gpu_agent.benchmark.models import (
+    AuthoritativeCaseRegistry,
+    AuthoritativeCaseSpec,
     CaseExecutionObservation,
     CaseExecutionPlan,
     CaseOracleObservation,
@@ -19,9 +22,12 @@ from gpu_agent.execution.models import (
     SanitizerRequest,
     WorkspaceRequest,
 )
-from gpu_agent.store import RunStore
+from gpu_agent.provenance import capture_repository_snapshot
+from gpu_agent.store import RunStore, read_regular
 from gpu_agent.verification.models import OracleResult
 from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
+
+ORACLE_POLICIES = {"vector-add-cpu-v1": (1e-5, 1e-5)}
 
 
 class CaseExecutionAttestationUnavailable(ValueError):
@@ -86,9 +92,11 @@ def source_identities(source_manifest: dict[str, str]) -> tuple[str, str]:
     return normalized["kernel.cu"], hashlib.sha256(harness).hexdigest()
 
 
-def derive_oracle(
-    input_bytes: bytes, output_bytes: bytes, atol: float, rtol: float
-) -> OracleResult:
+def derive_oracle(input_bytes: bytes, output_bytes: bytes, oracle_id: str) -> OracleResult:
+    try:
+        atol, rtol = ORACLE_POLICIES[oracle_id]
+    except KeyError as exc:
+        raise ValueError("oracle implementation is not registered") from exc
     try:
         vector_input = _VectorInput.model_validate_json(input_bytes)
         actual = parse_output(output_bytes)
@@ -114,10 +122,54 @@ class CaseValidationController:
         store: RunStore,
         backend: ExecutionBackend,
         binding: RunBinding,
+        repository: Path,
     ) -> None:
-        if binding.purpose != "corpus_validation" or binding.toolchain_lock_hash is None:
+        before = capture_repository_snapshot(repository, expected_commit=binding.repository.commit)
+        if before != binding.repository:
+            raise ValueError("repository differs from the validation binding")
+        registry_bytes = read_regular(repository / "benchmarks/corpus-registry.json", 1024 * 1024)
+        after = capture_repository_snapshot(repository, expected_commit=binding.repository.commit)
+        if after != before:
+            raise ValueError("repository changed while loading case registry")
+        self._configure(store, backend, binding, registry_bytes)
+
+    def _configure(
+        self,
+        store: RunStore,
+        backend: ExecutionBackend,
+        binding: RunBinding,
+        registry_bytes: bytes,
+    ) -> None:
+        registry_hash = hashlib.sha256(registry_bytes).hexdigest()
+        if (
+            binding.purpose != "corpus_validation"
+            or binding.toolchain_lock_hash is None
+            or binding.case_registry_hash != registry_hash
+        ):
             raise ValueError("corpus controller requires a complete validation binding")
+        registry = AuthoritativeCaseRegistry.model_validate_json(registry_bytes)
+        if len({case.case_id for case in registry.cases}) != len(registry.cases):
+            raise ValueError("authoritative case registry has duplicate identities")
         self.store, self.backend, self.binding = store, backend, binding
+        self.registry_hash = registry_hash
+        self.specs = MappingProxyType({case.case_id: case for case in registry.cases})
+
+    @classmethod
+    def _for_test(
+        cls,
+        store: RunStore,
+        backend: ExecutionBackend,
+        binding: RunBinding,
+        registry_bytes: bytes,
+    ) -> "CaseValidationController":
+        """Private dependency-injection seam; production callers supply a repository path."""
+        controller = cls.__new__(cls)
+        controller._configure(store, backend, binding, registry_bytes)
+        return controller
+
+    @staticmethod
+    def spec_hash(spec: AuthoritativeCaseSpec) -> str:
+        return hashlib.sha256(spec.model_dump_json().encode()).hexdigest()
 
     def execute(self, plan: CaseExecutionPlan, input_bytes: bytes) -> str:
         expected_visibility = "public" if plan.split == "public" else "evaluator"
@@ -127,8 +179,34 @@ class CaseValidationController:
             _VectorInput.model_validate_json(input_bytes)
         except (ValueError, UnicodeError) as exc:
             raise ValueError("invalid controller validation input") from exc
+        spec = self.specs.get(plan.case_id)
+        source_hash, harness_hash = source_identities(plan.source_manifest)
+        expected_source = (
+            spec.clean_source_hash
+            if spec is not None and plan.role == "clean"
+            else (spec.mutant_source_hash if spec is not None else "")
+        )
+        if (
+            spec is None
+            or plan.case_registry_hash != self.registry_hash
+            or plan.case_spec_hash != self.spec_hash(spec)
+            or plan.template_id != spec.template_id
+            or plan.mutation_id != ("clean" if plan.role == "clean" else spec.mutation_id)
+            or plan.split != spec.split
+            or plan.oracle_id != spec.oracle_id
+            or plan.target_tool != spec.target_tool
+            or plan.expected_finding != spec.expected_finding
+            or plan.sanitizer_repetitions != spec.sanitizer_repetitions
+            or plan.mutation_provenance_hash != spec.mutation_provenance_hash
+            or source_hash != expected_source
+            or harness_hash != spec.harness_hash
+            or hashlib.sha256(input_bytes).hexdigest() != spec.input_set_hash
+        ):
+            raise ValueError("execution plan differs from authoritative case registry")
         run = self.store.create_run("case_execution", binding=self.binding)
         self.store.transition(run.id, "RUNNING", "PREPARING")
+        case_spec_ref = _put_model(self.store, run.id, "validation/case-spec.json", spec)
+        plan_ref = _put_model(self.store, run.id, "validation/execution-plan.json", plan)
         handle = None
         try:
             handle = self.backend.prepare(
@@ -154,17 +232,18 @@ class CaseValidationController:
             result = derive_oracle(
                 input_bytes,
                 self.store.read(runtime.output_ref),
-                plan.atol,
-                plan.rtol,
+                plan.oracle_id,
             )
             oracle = CaseOracleObservation(
                 oracle_id=plan.oracle_id,
+                channel="ordinary",
                 input_ref=input_ref,
                 output_ref=runtime.output_ref,
                 result=result,
             )
             oracle_ref = _put_model(self.store, run.id, "validation/oracle-result.json", oracle)
             sanitizer_refs = []
+            sanitizer_oracle_refs = []
             for index in range(plan.sanitizer_repetitions):
                 sanitizer = self.backend.run_sanitizer(
                     SanitizerRequest(
@@ -173,12 +252,35 @@ class CaseValidationController:
                         stdin_ref=input_ref,
                     )
                 )
-                sanitizer_refs.append(
+                sanitizer_ref = _put_model(
+                    self.store,
+                    run.id,
+                    f"validation/sanitizer-{index:02d}.json",
+                    sanitizer,
+                )
+                sanitizer_refs.append(sanitizer_ref)
+                if sanitizer.program_output_ref is None:
+                    raise CaseExecutionAttestationUnavailable(
+                        "instrumented runtime output is unavailable"
+                    )
+                sanitizer_oracle = CaseOracleObservation(
+                    oracle_id=plan.oracle_id,
+                    channel="instrumented",
+                    input_ref=input_ref,
+                    output_ref=sanitizer.program_output_ref,
+                    sanitizer_result_ref=sanitizer_ref,
+                    result=derive_oracle(
+                        input_bytes,
+                        self.store.read(sanitizer.program_output_ref),
+                        plan.oracle_id,
+                    ),
+                )
+                sanitizer_oracle_refs.append(
                     _put_model(
                         self.store,
                         run.id,
-                        f"validation/sanitizer-{index:02d}.json",
-                        sanitizer,
+                        f"validation/sanitizer-oracle-{index:02d}.json",
+                        sanitizer_oracle,
                     )
                 )
             source_hash, harness_hash = source_identities(
@@ -199,10 +301,13 @@ class CaseValidationController:
                 oracle_id=plan.oracle_id,
                 target_tool=plan.target_tool,
                 expected_finding=plan.expected_finding,
+                case_spec_ref=case_spec_ref,
+                plan_ref=plan_ref,
                 build_ref=build_ref,
                 runtime_ref=runtime_ref,
                 sanitizer_refs=sanitizer_refs,
                 oracle_ref=oracle_ref,
+                sanitizer_oracle_refs=sanitizer_oracle_refs,
             )
             _put_model(
                 self.store, run.id, "validation/case-execution-observation.json", observation
@@ -210,14 +315,38 @@ class CaseValidationController:
             cleaned = self.backend.cleanup(handle)
             handle = None
             if not cleaned.removed:
+                self.store.put(
+                    run.id,
+                    "validation/cleanup-error.json",
+                    b'{"reason_code":"WORKSPACE_CLEANUP_FAILED"}',
+                    self.store.visibility,
+                )
                 raise CaseExecutionAttestationUnavailable("validation workspace cleanup failed")
             self.store.transition(run.id, "RUNNING", "FINALIZING")
             self.store.transition(run.id, "COMPLETED", None)
             return run.id
-        except BaseException:
+        except BaseException as primary_error:
             if handle is not None:
-                self.backend.cleanup(handle)
+                try:
+                    self.backend.cleanup(handle)
+                except BaseException as cleanup_error:
+                    try:
+                        self.store.put(
+                            run.id,
+                            "validation/cleanup-error.json",
+                            json.dumps(
+                                {
+                                    "reason_code": "WORKSPACE_CLEANUP_FAILED",
+                                    "error_type": type(cleanup_error).__name__,
+                                },
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode(),
+                            self.store.visibility,
+                        )
+                    except BaseException:
+                        pass
             current = self.store.load(run.id)
             if current.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
                 self.store.transition(run.id, "FAILED", None)
-            raise
+            raise primary_error

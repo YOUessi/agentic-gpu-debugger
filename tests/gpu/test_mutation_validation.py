@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.gpu, pytest.mark.container]
 )
 def test_live_mutation_registration(tmp_path, number, tool, n, repetitions, expected_finding):
     from gpu_agent.benchmark.builder import BenchmarkBuilder
-    from gpu_agent.benchmark.models import CaseExecutionPlan
+    from gpu_agent.benchmark.models import AuthoritativeCaseRegistry, CaseExecutionPlan
     from gpu_agent.benchmark.validation import CaseValidationController
     from gpu_agent.contracts import RunBinding
     from gpu_agent.environment import load_toolchain_lock
@@ -35,14 +35,21 @@ def test_live_mutation_registration(tmp_path, number, tool, n, repetitions, expe
     if not backend.availability().ready:
         pytest.skip(backend.availability().reason)
     lock = load_toolchain_lock(root / "containers/toolchain.lock.json")
+    registry_bytes = (root / "benchmarks/corpus-registry.json").read_bytes()
+    registry_hash = hashlib.sha256(registry_bytes).hexdigest()
+    registry = AuthoritativeCaseRegistry.model_validate_json(registry_bytes)
+    spec = next(case for case in registry.cases if case.case_id == f"case_{number:04d}")
+    assert spec.expected_finding == expected_finding
+    assert spec.sanitizer_repetitions == repetitions
     binding = RunBinding(
         repository=capture_repository_snapshot(root),
         purpose="corpus_validation",
         toolchain_lock_hash=lock.lock_hash,
         prompt_version=None,
         model_config_hash=None,
+        case_registry_hash=registry_hash,
     )
-    controller = CaseValidationController(store, backend, binding)
+    controller = CaseValidationController(store, backend, binding, root)
     input_bytes = json.dumps({"n": n, "a": [1.0] * n, "b": [2.0] * n}).encode()
     harness_names = ["harness/vector_io.cpp", "harness/vector_api.h", "harness/vendor/json.hpp"]
 
@@ -55,19 +62,22 @@ def test_live_mutation_registration(tmp_path, number, tool, n, repetitions, expe
         return controller.execute(
             CaseExecutionPlan(
                 case_id=f"case_{number:04d}",
-                template_id=f"vector-add-{number}",
-                mutation_id="clean" if role == "clean" else f"mutation-{number}",
+                template_id=spec.template_id,
+                mutation_id="clean" if role == "clean" else spec.mutation_id,
                 role=role,
                 split="public",
                 source_manifest=source_manifest,
                 target_tool=tool,
-                expected_finding=expected_finding,
-                sanitizer_repetitions=repetitions,
+                expected_finding=spec.expected_finding,
+                sanitizer_repetitions=spec.sanitizer_repetitions,
+                case_registry_hash=registry_hash,
+                case_spec_hash=controller.spec_hash(spec),
+                mutation_provenance_hash=spec.mutation_provenance_hash,
             ),
             input_bytes,
         )
 
     clean_run, mutant_run = execute("clean"), execute("mutant")
-    builder = BenchmarkBuilder(store)
+    builder = BenchmarkBuilder(store, ledger_root=tmp_path / "ledger")
     manifest = builder.register(builder.validate(clean_run, mutant_run))
     assert manifest.validation_run_ids == [clean_run, mutant_run]
