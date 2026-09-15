@@ -19,7 +19,7 @@ from gpu_agent.agent.provider import (
     ProviderError,
 )
 from gpu_agent.benchmark.evaluation import EvaluationMode
-from gpu_agent.contracts import RunManifest
+from gpu_agent.contracts import RunBinding, RunManifest
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.execution.backend import ExecutionBackend
@@ -57,13 +57,15 @@ class ApplicationService:
         backend_factory: BackendFactory = IsolatedGPUBackend,
         knowledge: KnowledgeIndex | None = None,
         knowledge_version: str = "",
+        binding: RunBinding | None = None,
     ) -> None:
         self.store, self.evaluator_root = store, evaluator_root
         self._provider, self._backend_factory = provider, backend_factory
         self.knowledge, self.knowledge_version = knowledge, knowledge_version
+        self.binding = binding
 
     @classmethod
-    def configured(cls) -> "ApplicationService":
+    def configured(cls, *, binding: RunBinding | None = None) -> "ApplicationService":
         root = Path(os.environ.get("GPU_AGENT_RUN_ROOT", ".gpu-agent/runs")).absolute()
         evaluator = Path(os.environ.get("GPU_AGENT_EVALUATOR_ROOT", str(root.parent / "evaluator")))
         knowledge = None
@@ -77,6 +79,7 @@ class ApplicationService:
             evaluator.absolute(),
             knowledge=knowledge,
             knowledge_version=os.environ.get("GPU_AGENT_KNOWLEDGE_VERSION", ""),
+            binding=binding,
         )
 
     def _save_diagnosis(self, run_id: str, result: DiagnosisResult) -> None:
@@ -130,7 +133,7 @@ class ApplicationService:
         ):
             raise ValueError("registered source hash mismatch")
         text = data.decode("utf-8")
-        run = self.store.create_run("diagnosis")
+        run = self.store.create_run("diagnosis", binding=self.binding)
         self.store.transition(run.id, "RUNNING", "PREPARING")
         self.store.put(
             run.id, "agent/acquisition-policy.json", json.dumps({"mode": mode}).encode(), "public"

@@ -148,6 +148,50 @@ def test_stale_runner_lock_fails_closed(store, tmp_path, monkeypatch):
     assert not backend.availability().ready
 
 
+def test_bound_execution_requires_matching_lock_and_records_runtime_evidence(
+    store, tmp_path, monkeypatch
+):
+    import json
+
+    from gpu_agent.contracts import RepositorySnapshot, RunBinding
+    from gpu_agent.environment import load_toolchain_lock
+    from gpu_agent.execution import isolated
+
+    source = tmp_path / "source"
+    source.mkdir()
+    data = b"int main() { return 0; }\n"
+    (source / "kernel.cu").write_bytes(data)
+    lock_hash = load_toolchain_lock(isolated.LOCK_PATH).lock_hash
+    binding = RunBinding(
+        repository=RepositorySnapshot(commit="1" * 40, tracked_tree_hash="2" * 64, clean=True),
+        purpose="corpus_validation",
+        toolchain_lock_hash=lock_hash,
+        prompt_version=None,
+        model_config_hash=None,
+    )
+    run = store.create_run("case_execution", binding=binding)
+    backend = isolated.IsolatedGPUBackend(store, source, tmp_path / "tasks")
+    backend.prepare(
+        WorkspaceRequest(
+            run_id=run.id,
+            source_manifest={"kernel.cu": hashlib.sha256(data).hexdigest()},
+        )
+    )
+    environment = backend.evidence.public_view(run.id).environment
+    assert environment["toolchain_lock_hash"] == lock_hash
+    assert json.loads(environment["policy"])["network"] == "none"
+
+    wrong = binding.model_copy(update={"toolchain_lock_hash": "f" * 64})
+    other = store.create_run("case_execution", binding=wrong)
+    with pytest.raises(ValueError, match="toolchain binding"):
+        backend.prepare(
+            WorkspaceRequest(
+                run_id=other.id,
+                source_manifest={"kernel.cu": hashlib.sha256(data).hexdigest()},
+            )
+        )
+
+
 @pytest.mark.parametrize(
     "operation,accepted", [("build_standalone", True), ("run", False), ("memcheck", False)]
 )

@@ -1,6 +1,8 @@
 """Read-only, bounded metadata probes; not a workload execution backend."""
 
 import csv
+import hashlib
+import json
 import platform as host_platform
 import re
 import subprocess
@@ -9,11 +11,75 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.config import Settings
+from gpu_agent.store import read_regular
 
 ProbeRunner = Callable[[list[str], float], subprocess.CompletedProcess[str]]
+
+
+class LockedToolchain(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    lock_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    image_id: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    base_repo_digest: str = Field(pattern=r"^nvidia/cuda@sha256:[a-f0-9]{64}$")
+    cuda_nvcc: str = Field(min_length=1, max_length=128)
+    compute_sanitizer: str = Field(min_length=1, max_length=128)
+    target_arch: str = Field(pattern=r"^sm_[0-9]+$")
+
+
+def load_toolchain_lock(path: Path) -> LockedToolchain:
+    """Load a bounded lock and verify the build inputs it hashes."""
+    lock_path = path.absolute()
+    raw = read_regular(lock_path, 65536)
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("invalid toolchain lock") from exc
+    if not isinstance(payload, dict) or payload.get("schema_version") != 1:
+        raise ValueError("invalid toolchain lock")
+    required = {
+        "image_id",
+        "base_repo_digest",
+        "cuda_nvcc",
+        "compute_sanitizer",
+        "target_arch",
+        "runner_sha256",
+        "dockerfile_sha256",
+    }
+    if any(not isinstance(payload.get(key), str) for key in required):
+        raise ValueError("invalid toolchain lock")
+    for name, key in (("runner.py", "runner_sha256"), ("Dockerfile", "dockerfile_sha256")):
+        actual = hashlib.sha256(read_regular(lock_path.with_name(name), 65536)).hexdigest()
+        if actual != payload[key]:
+            raise ValueError("toolchain lock input mismatch")
+    return LockedToolchain(
+        lock_hash=hashlib.sha256(raw).hexdigest(),
+        image_id=payload["image_id"],
+        base_repo_digest=payload["base_repo_digest"],
+        cuda_nvcc=payload["cuda_nvcc"],
+        compute_sanitizer=payload["compute_sanitizer"],
+        target_arch=payload["target_arch"],
+    )
+
+
+def validate_runtime_toolchain(
+    lock: LockedToolchain, environment: dict[str, str], *, expected_policy: str
+) -> None:
+    """Require recorded isolated-runtime identity to exactly match the verified lock."""
+    expected = {
+        "backend": "IsolatedGPUBackend",
+        "toolchain_lock_hash": lock.lock_hash,
+        "image_id": lock.image_id,
+        "base_repo_digest": lock.base_repo_digest,
+        "cuda_nvcc": lock.cuda_nvcc,
+        "compute_sanitizer": lock.compute_sanitizer,
+        "target_arch": lock.target_arch,
+        "policy": expected_policy,
+    }
+    if environment != expected:
+        raise ValueError("recorded runtime does not match the locked toolchain and policy")
 
 
 class ProbeEvidence(BaseModel):

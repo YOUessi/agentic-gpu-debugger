@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from gpu_agent.contracts import (
     ArtifactRef,
     CurrentPhase,
+    RunBinding,
     RunManifest,
     RunStatus,
     StateEvent,
@@ -102,9 +103,21 @@ class RunStore:
         finally:
             Path(temporary).unlink(missing_ok=True)
 
-    def create_run(self, kind: str, parent_run_id: str | None = None) -> RunManifest:
+    def create_run(
+        self,
+        kind: str,
+        parent_run_id: str | None = None,
+        *,
+        binding: RunBinding | None = None,
+    ) -> RunManifest:
         if parent_run_id is not None:
-            self.load(parent_run_id)
+            parent = self.load(parent_run_id)
+            if parent.binding is None and binding is not None:
+                raise ValueError("a child cannot add a missing parent release binding")
+            if parent.binding is not None:
+                if binding is not None and binding != parent.binding:
+                    raise ValueError("child release binding differs from parent")
+                binding = parent.binding
         run_id = new_id()
         directory = self._run_dir(run_id)
         directory.mkdir(mode=0o700)
@@ -113,6 +126,7 @@ class RunStore:
             id=run_id,
             kind=kind,
             parent_run_id=parent_run_id,
+            binding=binding,
             events=[StateEvent(status=RunStatus.QUEUED, phase=None)],
         )
         self._save(run)

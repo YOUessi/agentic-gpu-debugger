@@ -1,6 +1,18 @@
 import pytest
 
 
+def _binding(commit="1" * 40, purpose="evaluation", toolchain_hash="2" * 64):
+    from gpu_agent.contracts import RepositorySnapshot, RunBinding
+
+    return RunBinding(
+        repository=RepositorySnapshot(commit=commit, tracked_tree_hash="3" * 64, clean=True),
+        purpose=purpose,
+        toolchain_lock_hash=toolchain_hash,
+        prompt_version="diagnosis-v1",
+        model_config_hash="4" * 64,
+    )
+
+
 def test_terminal_state_preserves_last_successful_phase(store):
     run = store.create_run("diagnosis")
     store.transition(run.id, "RUNNING", "PREPARING")
@@ -132,3 +144,36 @@ def test_new_run_directory_entry_is_durable_before_return(store, monkeypatch):
     run = store.create_run("diagnosis")
     assert store.root in synced
     assert synced.index(store.root / run.id) < synced.index(store.root)
+
+
+def test_release_binding_is_persisted_at_creation_and_cannot_be_rebound(store):
+    from pydantic import ValidationError
+
+    binding = _binding()
+    run = store.create_run("diagnosis", binding=binding)
+    assert store.load(run.id).binding == binding
+    with pytest.raises(ValidationError):
+        run.binding = _binding(commit="5" * 40)  # type: ignore[misc]
+
+
+def test_bound_child_inherits_exact_parent_binding(store):
+    binding = _binding()
+    parent = store.create_run("diagnosis", binding=binding)
+    child = store.create_run("candidate", parent.id)
+    assert child.binding == binding
+    assert store.load(child.id).binding == store.load(parent.id).binding
+
+
+def test_child_cannot_replace_or_add_a_parent_binding(store):
+    parent = store.create_run("diagnosis", binding=_binding())
+    with pytest.raises(ValueError, match="binding"):
+        store.create_run("candidate", parent.id, binding=_binding(commit="5" * 40))
+
+    old_parent = store.create_run("diagnosis")
+    with pytest.raises(ValueError, match="binding"):
+        store.create_run("candidate", old_parent.id, binding=_binding())
+
+
+def test_legacy_unbound_manifest_loads_but_is_not_release_bound(store):
+    run = store.create_run("diagnosis")
+    assert store.load(run.id).binding is None

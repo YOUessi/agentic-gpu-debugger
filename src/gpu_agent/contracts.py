@@ -55,11 +55,28 @@ class StateEvent(BaseModel):
     phase: CurrentPhase | None
 
 
+class RepositorySnapshot(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    commit: str = Field(pattern=r"^(?:[a-f0-9]{40}|[a-f0-9]{64})$")
+    tracked_tree_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    clean: Literal[True]
+
+
+class RunBinding(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    repository: RepositorySnapshot
+    purpose: Literal["corpus_validation", "evaluation", "release_acceptance"]
+    toolchain_lock_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    prompt_version: str | None = Field(default=None, min_length=1, max_length=128)
+    model_config_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
 class RunManifest(BaseModel):
     schema_version: Literal[1] = 1
     id: str
     kind: str
     parent_run_id: str | None = None
+    binding: RunBinding | None = Field(default=None, frozen=True)
     status: RunStatus = RunStatus.QUEUED
     current_phase: CurrentPhase | None = None
     last_completed_phase: CurrentPhase | None = None

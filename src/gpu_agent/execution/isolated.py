@@ -10,7 +10,6 @@ import binascii
 import hashlib
 import json
 import os
-import re
 import shutil
 import tempfile
 from dataclasses import replace
@@ -22,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 
 from gpu_agent.config import Settings
 from gpu_agent.contracts import ArtifactRef, new_id
+from gpu_agent.environment import LockedToolchain, load_toolchain_lock, validate_runtime_toolchain
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.evidence.sanitizer import parse_sanitizer
@@ -113,34 +113,30 @@ class IsolatedGPUBackend(LocalBackend):
         self._image: str | None = None
         self._base: str | None = None
         self._versions: dict[str, str] = {}
+        self._toolchain: LockedToolchain | None = None
         if LOCK_PATH.exists():
             try:
-                lock = json.loads(read_regular(LOCK_PATH, 65536))
-                image, base = lock.get("image_id", ""), lock.get("base_repo_digest", "")
-                inputs_match = all(
-                    hashlib.sha256(read_regular(LOCK_PATH.with_name(name), 65536)).hexdigest()
-                    == lock.get(key)
-                    for name, key in [
-                        ("runner.py", "runner_sha256"),
-                        ("Dockerfile", "dockerfile_sha256"),
-                    ]
-                )
-                if (
-                    inputs_match
-                    and re.fullmatch(r"sha256:[a-f0-9]{64}", image)
-                    and re.fullmatch(r"nvidia/cuda@sha256:[a-f0-9]{64}", base)
-                ):
-                    self._image, self._base = image, base
-                    self._versions = {
-                        key: lock[key]
-                        for key in ("cuda_nvcc", "compute_sanitizer", "target_arch")
-                        if isinstance(lock.get(key), str)
-                    }
+                self._toolchain = load_toolchain_lock(LOCK_PATH)
+                self._image = self._toolchain.image_id
+                self._base = self._toolchain.base_repo_digest
+                self._versions = {
+                    "cuda_nvcc": self._toolchain.cuda_nvcc,
+                    "compute_sanitizer": self._toolchain.compute_sanitizer,
+                    "target_arch": self._toolchain.target_arch,
+                }
             except (OSError, ValueError):
                 pass  # A missing/stale lock is typed CONTAINER_UNAVAILABLE at execution time.
 
     def prepare(self, request: WorkspaceRequest) -> WorkspaceHandle:
         self._active_run(request.run_id)
+        run = self.store.load(request.run_id)
+        if run.binding is not None:
+            if (
+                self._toolchain is None
+                or run.binding.toolchain_lock_hash is None
+                or run.binding.toolchain_lock_hash != self._toolchain.lock_hash
+            ):
+                raise ValueError("release toolchain binding does not match backend lock")
         snapshots: dict[str, bytes] = {}
         standalone = set(request.source_manifest) == {"kernel.cu"}
         if not standalone and len(request.source_manifest) != 4:
@@ -177,16 +173,25 @@ class IsolatedGPUBackend(LocalBackend):
                 handle=handle,
                 hashes={name: hashlib.sha256(data).hexdigest() for name, data in snapshots.items()},
             )
+            environment = {
+                **self._versions,
+                "backend": "IsolatedGPUBackend",
+                "toolchain_lock_hash": (
+                    self._toolchain.lock_hash if self._toolchain is not None else "unavailable"
+                ),
+                "image_id": self._image or "unavailable",
+                "base_repo_digest": self._base or "unavailable",
+                "policy": self.policy.model_dump_json(),
+            }
+            if run.binding is not None:
+                assert self._toolchain is not None
+                validate_runtime_toolchain(
+                    self._toolchain, environment, expected_policy=self.policy.model_dump_json()
+                )
             self.evidence.save(
                 request.run_id,
                 EvidenceBundle(
-                    environment={
-                        **self._versions,
-                        "backend": "IsolatedGPUBackend",
-                        "image_id": self._image or "unavailable",
-                        "base_repo_digest": self._base or "unavailable",
-                        "policy": self.policy.model_dump_json(),
-                    },
+                    environment=environment,
                     source_snapshot=refs,
                     limitations=["Containers share the host kernel and GPU driver."],
                 ),
