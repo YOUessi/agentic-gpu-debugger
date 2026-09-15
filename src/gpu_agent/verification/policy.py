@@ -1,10 +1,75 @@
 """Pure verdict priority: infrastructure gaps, original defect, regressions, proof."""
 
 import re
+from collections.abc import Mapping
 from pathlib import PurePosixPath
+from typing import Literal
 
-from gpu_agent.execution.models import Finding, SanitizerResult
-from gpu_agent.verification.models import VerificationObservation, VerificationVerdict
+from gpu_agent.execution.models import Finding, SanitizerResult, SanitizerTool
+from gpu_agent.verification.models import (
+    CheckRequirement,
+    VerificationObservation,
+    VerificationVerdict,
+)
+
+CheckSupport = Literal["SUPPORTED", "UNSUPPORTED", "NOT_APPLICABLE"]
+
+
+def plan_checks(
+    target: SanitizerTool | str,
+    mode: Literal["standard", "strict"],
+    capability_report: Mapping[SanitizerTool | str, CheckSupport],
+) -> list[CheckRequirement]:
+    """Plan mandatory checks without conflating necessity and availability."""
+    try:
+        target_tool = SanitizerTool(target)
+    except ValueError as error:
+        raise ValueError("unknown sanitizer target") from error
+    if mode not in {"standard", "strict"}:
+        raise ValueError("unknown verification mode")
+    probed: dict[SanitizerTool, CheckSupport] = {}
+    for name, reported_support in capability_report.items():
+        try:
+            tool = SanitizerTool(name)
+        except ValueError as error:
+            raise ValueError("unknown sanitizer capability") from error
+        if reported_support not in {"SUPPORTED", "UNSUPPORTED", "NOT_APPLICABLE"}:
+            raise ValueError("unknown sanitizer support state")
+        probed[tool] = reported_support
+
+    required_tools = {SanitizerTool.MEMCHECK, target_tool}
+    if mode == "strict":
+        required_tools = set(SanitizerTool)
+    checks: list[CheckRequirement] = []
+    for tool in SanitizerTool:
+        required = tool in required_tools
+        if not required:
+            checks.append(
+                CheckRequirement(
+                    tool=tool,
+                    required=False,
+                    support="NOT_APPLICABLE",
+                    reason_code="NOT_SELECTED",
+                )
+            )
+            continue
+        support = probed.get(tool)
+        if support is None:
+            support, reason = "UNSUPPORTED", "CAPABILITY_NOT_PROBED"
+        elif support != "SUPPORTED":
+            reason = (
+                "TARGET_TOOL_UNSUPPORTED" if tool == target_tool else "REQUIRED_TOOL_UNSUPPORTED"
+            )
+        elif tool == SanitizerTool.MEMCHECK and target_tool != SanitizerTool.MEMCHECK:
+            reason = "MEMORY_SAFETY_PRECHECK"
+        elif tool == target_tool:
+            reason = "TARGET_TOOL"
+        else:
+            reason = "STRICT_MODE"
+        checks.append(
+            CheckRequirement(tool=tool, required=True, support=support, reason_code=reason)
+        )
+    return checks
 
 
 def decide_verdict(observation: VerificationObservation) -> VerificationVerdict:

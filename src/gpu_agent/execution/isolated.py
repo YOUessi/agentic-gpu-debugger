@@ -489,15 +489,16 @@ class IsolatedGPUBackend(LocalBackend):
         binary_ref = self._binary(state)
         stdin = self._input(state, request.stdin_ref) if request.stdin_ref else b""
         request_id = new_id()
-        if request.tool == "memcheck":
-            capture, _, log = self._container(
-                state.handle.path, "memcheck", request.timeout_seconds, stdin=stdin, cancel=cancel
-            )
-        else:
-            capture, log = ProcessCapture(None, b"", b"", False, tool_error="UNSUPPORTED"), b""
+        capture, _, log = self._container(
+            state.handle.path,
+            request.tool,
+            request.timeout_seconds,
+            stdin=stdin,
+            cancel=cancel,
+        )
         stdout = self._put(state, f"sanitizer/{request_id}/program.stdout", capture.stdout)
         stderr = self._put(state, f"sanitizer/{request_id}/program.stderr", capture.stderr)
-        raw = self._put(state, f"sanitizer/{request_id}/memcheck.log", log)
+        raw = self._put(state, f"sanitizer/{request_id}/{request.tool}.log", log)
         parsed = parse_sanitizer(SanitizerTool(request.tool), replace(capture, stderr=log))
         findings = [f.model_copy(update={"raw_ref": raw}) for f in parsed.findings]
         payload = SanitizerPayload(

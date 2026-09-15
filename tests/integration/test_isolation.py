@@ -154,12 +154,20 @@ def test_gpu_runtime_missing_at_start_is_unavailable(isolated, monkeypatch):
     assert result.tool_result.tool_error == "CONTAINER_UNAVAILABLE"
 
 
-def test_build_run_and_memcheck_bind_artifacts_and_separate_logs(isolated, monkeypatch):
+def test_build_run_and_all_sanitizers_bind_artifacts_and_separate_logs(isolated, monkeypatch):
     from gpu_agent.execution.models import ExecutionRequest, SanitizerRequest
 
     backend, store, handle = isolated
     operation = operation_id = None
-    log = b"========= COMPUTE-SANITIZER\n========= ERROR SUMMARY: 0 errors\n"
+    logs = {
+        "memcheck": b"========= COMPUTE-SANITIZER\n========= ERROR SUMMARY: 0 errors\n",
+        "racecheck": (
+            b"========= COMPUTE-SANITIZER\n"
+            b"========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)\n"
+        ),
+        "initcheck": b"========= COMPUTE-SANITIZER\n========= ERROR SUMMARY: 0 errors\n",
+        "synccheck": b"========= COMPUTE-SANITIZER\n========= ERROR SUMMARY: 0 errors\n",
+    }
 
     def encoded(data):
         return base64.b64encode(data).decode()
@@ -180,7 +188,7 @@ def test_build_run_and_memcheck_bind_artifacts_and_separate_logs(isolated, monke
                 "stdout": encoded(b"program"),
                 "stderr": encoded(b"program diagnostic"),
                 "binary": encoded(b"binary") if operation == "build" else "",
-                "sanitizer": encoded(log) if operation == "memcheck" else "",
+                "sanitizer": encoded(logs[operation]) if operation in logs else "",
             }
             return ProcessCapture(0, json.dumps(envelope).encode(), b"", False)
         return ProcessCapture(0, b"", b"", False)
@@ -193,20 +201,26 @@ def test_build_run_and_memcheck_bind_artifacts_and_separate_logs(isolated, monke
     run = backend.run(ExecutionRequest(workspace_id=handle.id, stdin_ref=stdin))
     assert run.runtime_status == "SUCCESS"
     assert run.tool_result.typed_payload.binary_ref == built.binary_ref
-    result = backend.run_sanitizer(SanitizerRequest(workspace_id=handle.id, stdin_ref=stdin))
-    assert result.completed and result.check_outcome == "CLEAN"
-    assert store.read(result.program_output_ref) == b"program"
-    payload = result.tool_result.typed_payload
-    assert store.read(payload.program_stderr_ref) == b"program diagnostic"
-    assert store.read(result.tool_result.stderr_artifact) == log
-    assert payload.binary_ref == built.binary_ref and payload.stdin_ref == stdin
+    results = []
+    for tool in logs:
+        result = backend.run_sanitizer(
+            SanitizerRequest(workspace_id=handle.id, stdin_ref=stdin, tool=tool)
+        )
+        results.append(result)
+        assert result.completed and result.check_outcome == "CLEAN"
+        assert store.read(result.program_output_ref) == b"program"
+        payload = result.tool_result.typed_payload
+        assert payload.tool == tool
+        assert store.read(payload.program_stderr_ref) == b"program diagnostic"
+        assert store.read(result.tool_result.stderr_artifact) == logs[tool]
+        assert payload.binary_ref == built.binary_ref and payload.stdin_ref == stdin
     other = store.create_run("sibling")
     sibling_input = store.put(other.id, "input", b"secret", "public")
     with pytest.raises(ValueError, match="another run"):
         backend.run(ExecutionRequest(workspace_id=handle.id, stdin_ref=sibling_input))
     with pytest.raises(ValueError, match="another run"):
         backend.run_sanitizer(SanitizerRequest(workspace_id=handle.id, stdin_ref=sibling_input))
-    assert backend.evidence.public_view(handle.run_id).sanitizer_results == [result]
+    assert backend.evidence.public_view(handle.run_id).sanitizer_results == results
 
 
 @pytest.mark.parametrize("fault", ["bad_base64", "oversized_log", "cleanup_label", "cancelled"])

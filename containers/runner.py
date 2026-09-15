@@ -115,8 +115,15 @@ def isolation_probe(stdin: bytes) -> bytes:
 
 def main() -> None:
     operation = sys.argv[1] if len(sys.argv) == 2 else ""
+    sanitizer_tools = {"memcheck", "racecheck", "initcheck", "synccheck"}
     if operation not in {
-        "build", "build_standalone", "run", "memcheck", "isolation", "log_limit", "timeout"
+        "build",
+        "build_standalone",
+        "run",
+        *sanitizer_tools,
+        "isolation",
+        "log_limit",
+        "timeout",
     }:
         raise ValueError("unsupported typed operation")
     os.chdir("/tmp")
@@ -155,16 +162,18 @@ def main() -> None:
                 argv.remove("/input/vector_io.cpp")
         else:
             argv = ["/input/vector_add"]
-            if operation == "memcheck":
+            if operation in sanitizer_tools:
                 # The log cannot be mixed with program stdout/stderr.
                 argv = [
                     "/usr/local/cuda/bin/compute-sanitizer",
                     "--tool",
-                    "memcheck",
+                    operation,
+                    "--print-limit",
+                    "100",
                     "--error-exitcode",
                     "86",
                     "--log-file",
-                    "/tmp/memcheck.log",
+                    f"/tmp/{operation}.log",
                     *argv,
                 ]
         # Bound each file on tmpfs, including a sanitizer log emitted by the tool.
@@ -174,9 +183,9 @@ def main() -> None:
             binary, oversized = bounded_file(Path("/tmp/vector_add"), BINARY_LIMIT)
             if oversized or not binary:
                 raise ValueError("binary limit")
-        if operation == "memcheck":
+        if operation in sanitizer_tools:
             try:
-                sanitizer, cut = bounded_file(Path("/tmp/memcheck.log"), LOG_LIMIT)
+                sanitizer, cut = bounded_file(Path(f"/tmp/{operation}.log"), LOG_LIMIT)
                 truncated |= cut
             except FileNotFoundError:
                 sanitizer = b""

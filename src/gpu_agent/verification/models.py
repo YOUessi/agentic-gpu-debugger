@@ -1,10 +1,18 @@
 """Typed verification observations and explicitly public aggregate results."""
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import Field
 
-from gpu_agent.execution.models import ExecutionModel, Finding
+from gpu_agent.execution.models import ExecutionModel, Finding, SanitizerTool
+
+
+class CheckRequirement(ExecutionModel):
+    tool: SanitizerTool
+    required: bool
+    support: Literal["SUPPORTED", "UNSUPPORTED", "NOT_APPLICABLE"]
+    reason_code: str
 
 
 class OracleResult(ExecutionModel):

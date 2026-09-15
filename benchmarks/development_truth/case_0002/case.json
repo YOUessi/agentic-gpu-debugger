@@ -1,0 +1,13 @@
+{
+  "failure_family": "shared_memory_race",
+  "target_tool": "racecheck",
+  "public_input_size": 256,
+  "race_repetitions": 5,
+  "oracle": "vector-add-cpu-v1",
+  "source_hashes": {
+    "kernel.cu": "e2999a161f86d14895af378385880a3ac455d76965d5dd6308557c551e36c5f5",
+    "vector_io.cpp": "a86f1e64fc67880eca0c97c5e56d4df46f1e49ca7d4f70cce4436efd691c5ea3",
+    "vector_api.h": "49c25fd434fe26a9799a1ce86798d5b5c043b32a3d27475a37f5e31b52c4e2b7",
+    "json.hpp": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63"
+  }
+}

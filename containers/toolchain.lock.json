@@ -3,13 +3,13 @@
   "base_tag": "nvidia/cuda:12.8.1-devel-ubuntu22.04",
   "base_repo_digest": "nvidia/cuda@sha256:a99a1860ba8e2916e5c3e73b72ec4c4301653a84586e05bfc9a2aa2d58027e97",
   "base_image_id": "sha256:892341855b05029f404cd7e242fa46bb6116b511ef2ac42fe2487e267d27f7b4",
-  "image_id": "sha256:cf603d6fefe333a7ec32ea5c93805658ab7fd402e88447fd16eff2c62d60bec3",
-  "local_build_tag": "gpu-agent-cuda:t06",
+  "image_id": "sha256:ec7f38d73b44d6e363f23cf5f2c22d7bdb93865b2a05d4110f068a7591b5f515",
+  "local_build_tag": "gpu-agent-cuda:t07",
   "platform": "linux/amd64",
   "cuda_nvcc": "12.8.93",
   "compute_sanitizer": "2025.1.0.0 (build 35583870)",
   "target_arch": "sm_89",
   "dockerfile_sha256": "9e998db3103f1174ee05ca69e7f38aabf7d57853b9af723d7363c057bb358d9b",
-  "runner_sha256": "972dce37289049cc38d6a4c9d6c965271dc7526ff8ffb5fd34ee2ee4b1e17272",
-  "provenance": "Original official base RepoDigest retained. T06 local docker build from that immutable base; image inspect verified derived image ID, host and no-network container sha256sum verified runner bytes. Recorded 2026-09-15. GPU runtime acceptance remains unavailable."
+  "runner_sha256": "7454e2e6fed6f8ee24f48fea397472c9c3e04592d7aa5aa0aef791d4e7d54ad4",
+  "provenance": "Original official base RepoDigest retained. T07 local docker build from that immutable base; image inspect verified the derived image ID, and host/container sha256sum matched the trusted runner bytes. CUDA 12.8.93, Compute Sanitizer 2025.1.0.0, and RTX 4090 Laptop sm_89 GPU runtime were exercised on 2026-09-15."
 }

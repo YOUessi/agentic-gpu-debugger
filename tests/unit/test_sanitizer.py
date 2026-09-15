@@ -5,6 +5,39 @@ import pytest
 from gpu_agent.execution.process import ProcessCapture
 
 CLEAN = b"========= COMPUTE-SANITIZER\n========= ERROR SUMMARY: 0 errors\n"
+# Minimal excerpts captured from the locked CUDA 12.8.93 / Compute Sanitizer
+# 2025.1.0.0 image on 2026-09-15. Full raw logs remain run artifacts, not fixtures.
+RACE_CLEAN = (
+    b"========= COMPUTE-SANITIZER\n"
+    b"========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)\n"
+)
+RACE = (
+    b"========= COMPUTE-SANITIZER\n"
+    b"========= Error: Race reported between Write access at vector_add(float const *, "
+    b"float const *, float *, unsigned long)+0x130 in /input/kernel.cu:9\n"
+    b"=========     and Write access at vector_add(float const *, float const *, float *, "
+    b"unsigned long)+0x130 in /input/kernel.cu:9 [34 hazards]\n"
+    b"========= RACECHECK SUMMARY: 1 hazard displayed (1 error, 0 warnings)\n"
+)
+INIT = (
+    b"========= COMPUTE-SANITIZER\n"
+    b"========= Uninitialized __global__ memory read of size 4 bytes\n"
+    b"=========     at vector_add(float const *, float const *, float *, unsigned long)"
+    b"+0x130 in /input/kernel.cu:8\n"
+    b"=========     by thread (0,0,0) in block (0,0,0)\n"
+    b"========= ERROR SUMMARY: 257 errors\n"
+    b"========= ERROR SUMMARY: 157 errors were not printed. "
+    b"Use --print-limit option to adjust the number of printed errors\n"
+)
+SYNC = (
+    b"========= COMPUTE-SANITIZER\n"
+    b"========= Barrier error detected. Invalid arguments.\n"
+    b"=========     at __syncwarp(unsigned int)+0xe0 in sm_30_intrinsics.hpp:110\n"
+    b"=========         Device Frame: broken_sync(float *, unsigned long)+0xb0 "
+    b"in /input/kernel.cu:12\n"
+    b"========= Target application returned an error\n"
+    b"========= ERROR SUMMARY: 17 errors\n"
+)
 OOB = (
     b"========= COMPUTE-SANITIZER\n"
     b"========= Invalid __global__ write of size 4 bytes\n"
@@ -74,10 +107,43 @@ def test_program_stdout_cannot_forge_sanitizer_summary():
     assert result.check_outcome == "TOOL_ERROR"
 
 
-def test_other_tools_explicitly_unsupported():
+@pytest.mark.parametrize(
+    "tool,log,exit_code,category,source_line",
+    [
+        ("racecheck", RACE, 86, "Race reported between Write access and Write access", 9),
+        ("initcheck", INIT, 86, "Uninitialized __global__ memory read", 8),
+        ("synccheck", SYNC, 86, "Barrier error detected. Invalid arguments.", 12),
+    ],
+)
+def test_four_tool_parser_uses_real_version_formats(tool, log, exit_code, category, source_line):
     from gpu_agent.evidence.sanitizer import parse_sanitizer
     from gpu_agent.execution.models import SanitizerTool
 
-    for tool in [SanitizerTool.RACECHECK, SanitizerTool.INITCHECK, SanitizerTool.SYNCCHECK]:
-        result = parse_sanitizer(tool, ProcessCapture(0, b"", CLEAN, False))
-        assert result.check_outcome == "UNSUPPORTED"
+    result = parse_sanitizer(SanitizerTool(tool), ProcessCapture(exit_code, b"", log, False))
+    assert result.completed
+    assert result.check_outcome == "FINDING"
+    assert result.findings[0].category == category
+    assert result.findings[0].source_location.path == "/input/kernel.cu"
+    assert result.findings[0].source_location.line == source_line
+
+
+@pytest.mark.parametrize(
+    "tool,log",
+    [("memcheck", CLEAN), ("racecheck", RACE_CLEAN), ("initcheck", CLEAN), ("synccheck", CLEAN)],
+)
+def test_each_tool_requires_its_own_complete_clean_summary(tool, log):
+    from gpu_agent.evidence.sanitizer import parse_sanitizer
+    from gpu_agent.execution.models import SanitizerTool
+
+    result = parse_sanitizer(SanitizerTool(tool), ProcessCapture(0, b"", log, False))
+    assert result.completed
+    assert result.check_outcome == "CLEAN"
+
+
+def test_racecheck_rejects_generic_error_summary_as_completion():
+    from gpu_agent.evidence.sanitizer import parse_sanitizer
+    from gpu_agent.execution.models import SanitizerTool
+
+    result = parse_sanitizer(SanitizerTool.RACECHECK, ProcessCapture(0, b"", CLEAN, False))
+    assert not result.completed
+    assert result.check_outcome == "TOOL_ERROR"
