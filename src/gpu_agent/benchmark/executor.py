@@ -6,7 +6,7 @@ import re
 from collections.abc import Mapping
 from pathlib import Path
 
-from gpu_agent.agent.models import AgentBudget
+from gpu_agent.agent.models import AcquisitionUsage, AgentBudget
 from gpu_agent.agent.provider import Invocation
 from gpu_agent.benchmark.evaluation import EvaluationMode, EvaluationRecord
 from gpu_agent.benchmark.models import CaseManifest
@@ -20,6 +20,10 @@ from gpu_agent.verification.models import VerificationResult, VerificationVerdic
 
 class CaseExecutionAttestationUnavailable(ValueError):
     """The current artifact contract cannot attest all CaseExecution claims."""
+
+
+class CostBoundUnavailable(ValueError):
+    """A production monetary bound must be attested before any provider work is allowed."""
 
 
 def registered_cases(corpus: RunStore) -> dict[str, CaseManifest]:
@@ -99,10 +103,20 @@ class EvaluationExecutor:
         summary = json.loads(store.read(self._ref(run, "agent/usage-summary.json")))
         if summary["physical_calls"] != budget.llm_calls:
             raise ValueError("provider usage artifacts disagree")
+        acquisition = AcquisitionUsage.model_validate_json(
+            store.read(self._ref(run, "agent/acquisition-usage.json"))
+        )
+        if (
+            acquisition.sanitizer_calls > budget.sanitizer_calls
+            or acquisition.retrieval_calls > budget.rag_calls
+        ):
+            raise ValueError("physical acquisition exceeds reserved attempts")
         usage: dict[str, int | None] = {
             "physical_calls": budget.llm_calls,
-            "sanitizer_calls": budget.sanitizer_calls,
-            "retrieval_calls": budget.rag_calls,
+            "sanitizer_calls": acquisition.sanitizer_calls,
+            "retrieval_calls": acquisition.retrieval_calls,
+            "sanitizer_attempts": budget.sanitizer_calls,
+            "retrieval_attempts": budget.rag_calls,
             "build_calls": int(bundle.build_result is not None),
             "runtime_calls": int(bundle.execution_result is not None),
         }

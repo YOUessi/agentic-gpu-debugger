@@ -91,6 +91,9 @@ def score(record: EvaluationRecord, hidden_truth: HiddenTruth, rubric: Rubric) -
 
 
 def aggregate(records: list[EvaluationRecord]) -> MetricSummary:
+    successful = [
+        record.status == "COMPLETED" and record.verdict == "VERIFIED_FIXED" for record in records
+    ]
     scored = [record.score for record in records if record.score is not None]
     family = [item.family_correct for item in scored if item.family_correct is not None]
     root = [item.root_cause_correct for item in scored if item.root_cause_correct is not None]
@@ -110,7 +113,7 @@ def aggregate(records: list[EvaluationRecord]) -> MetricSummary:
     return MetricSummary(
         case_count=len({record.case_id for record in records}),
         record_count=len(records),
-        end_to_end_success=_metric([record.status == "COMPLETED" for record in records]),
+        end_to_end_success=_metric(successful),
         family_accuracy=_metric(family),
         root_cause_accuracy=_metric(root),
         source_location_accuracy=_metric(locations),
@@ -123,5 +126,9 @@ def aggregate(records: list[EvaluationRecord]) -> MetricSummary:
         ),
         latency_median_ms=median(record.latency_ms for record in records) if records else None,
         cost_total_usd=sum(known_costs) if all_cost_known else None,
-        failure_ids=[record.record_id for record in records if record.status != "COMPLETED"],
+        failure_ids=[
+            record.record_id
+            for record, success in zip(records, successful, strict=True)
+            if not success
+        ],
     )

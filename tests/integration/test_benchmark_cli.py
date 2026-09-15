@@ -55,9 +55,77 @@ def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch):
     assert not (tmp_path / "corpus").exists()
 
 
+@pytest.mark.parametrize("cap", ["0", "10"])
+def test_production_evaluation_requires_attested_cost_before_construction(
+    tmp_path, monkeypatch, cap
+):
+    from gpu_agent.benchmark.models import CaseManifest
+    from gpu_agent.cli import app
+    from gpu_agent.service import ApplicationService
+    from gpu_agent.store import RunStore
+
+    corpus = RunStore(tmp_path / "corpus")
+    case = CaseManifest(
+        id="case_0100",
+        source_hash="1" * 64,
+        harness_hash="2" * 64,
+        mutation_id="delete-guard",
+        template_id="vector-add",
+        split="public",
+        oracle_id="vector-add-cpu-v1",
+        target_tool="memcheck",
+        expected_finding="out of bounds",
+        validation_run_ids=["a", "b"],
+        toolchain_hash="3" * 64,
+        input_set_hash="4" * 64,
+    )
+    run = corpus.create_run("benchmark_case")
+    corpus.put(run.id, "case-manifest.json", case.model_dump_json().encode(), "public")
+    corpus.transition(run.id, "RUNNING", "FINALIZING")
+    corpus.transition(run.id, "COMPLETED", None)
+
+    constructed = []
+
+    def forbidden():
+        constructed.append(True)
+        raise AssertionError("configured service reached")
+
+    monkeypatch.setattr(ApplicationService, "configured", forbidden)
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "evaluate",
+            "--mode",
+            "A",
+            "--split",
+            "development",
+            "--repeats",
+            "3",
+            "--max-cost-usd",
+            cap,
+            "--max-unit-cost-usd",
+            cap,
+            "--corpus-root",
+            str(corpus.root),
+            "--case-root",
+            str(tmp_path),
+            "--commit",
+            "a" * 40,
+            "--toolchain-hash",
+            "3" * 64,
+            "--model-config-hash",
+            "5" * 64,
+        ],
+    )
+    assert result.exit_code == 2 and "COST_BOUND_UNAVAILABLE" in result.output
+    assert not constructed
+    assert "Hard maximum" not in result.output
+
+
 def test_evaluate_uses_injected_executor_and_prints_reservation(tmp_path, monkeypatch, oob_service):
     from gpu_agent import cli
-    from gpu_agent.benchmark.evaluation import EvaluationRecord
+    from gpu_agent.benchmark.evaluation import EvaluationRecord, EvaluationRunner
     from gpu_agent.service import ApplicationService
 
     service = oob_service[0]
@@ -106,8 +174,23 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(tmp_path, monkey
     corpus.put(run.id, "case-manifest.json", case.model_dump_json().encode(), "public")
     corpus.transition(run.id, "RUNNING", "FINALIZING")
     corpus.transition(run.id, "COMPLETED", None)
-    monkeypatch.setattr(cli, "EvaluationExecutor", InjectedExecutor, raising=False)
-    monkeypatch.setattr(ApplicationService, "configured", lambda: service)
+
+    def forbidden():
+        raise AssertionError("offline path cannot construct configured services")
+
+    monkeypatch.setattr(ApplicationService, "configured", forbidden)
+    executor = InjectedExecutor(service, corpus, {})
+    runner = EvaluationRunner(
+        service.store,
+        {"case_0100": "vector-add"},
+        executor.execute,
+        commit="a" * 40,
+        prompt_version="test",
+        toolchain_hash="3" * 64,
+        model_config_hash="5" * 64,
+        max_cost_usd=3,
+        max_unit_cost_usd=1,
+    )
     result = CliRunner().invoke(
         cli.app,
         [
@@ -134,8 +217,10 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(tmp_path, monkey
             "--model-config-hash",
             "5" * 64,
         ],
+        obj=runner,
     )
     assert result.exit_code == 0, result.output
     assert "1 case × 1 mode × 3 repeats = 3 units" in result.output
-    assert "Hard maximum cost: $3.00" in result.output
+    assert "Cost reservation: $3.00" in result.output
+    assert "Hard maximum" not in result.output
     assert len(calls) == 3 and {call[3] for call in calls} == {0, 1, 2}

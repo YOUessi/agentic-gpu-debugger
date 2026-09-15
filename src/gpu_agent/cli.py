@@ -7,15 +7,13 @@ import typer
 from pydantic import ValidationError
 
 from gpu_agent.benchmark.evaluation import (
-    EvaluationBindings,
     EvaluationRunner,
     EvaluationSelection,
     EvaluationSplit,
 )
 from gpu_agent.benchmark.executor import (
     CaseExecutionAttestationUnavailable,
-    EvaluationExecutor,
-    registered_cases,
+    CostBoundUnavailable,
 )
 from gpu_agent.config import Settings
 from gpu_agent.environment import probe_environment
@@ -47,6 +45,7 @@ def benchmark_validate(
 
 @benchmark_app.command("evaluate")
 def benchmark_evaluate(
+    ctx: typer.Context,
     mode: Annotated[str, typer.Option("--mode")],
     split: Annotated[str, typer.Option("--split")],
     repeats: Annotated[int, typer.Option("--repeats", min=3)],
@@ -58,67 +57,39 @@ def benchmark_evaluate(
     toolchain_hash: Annotated[str | None, typer.Option("--toolchain-hash")] = None,
     model_config_hash: Annotated[str | None, typer.Option("--model-config-hash")] = None,
 ) -> None:
-    """Run registered cases with explicit caps and controller-owned provenance bindings."""
+    """Paid batches require cost attestation; injected controller runners support offline tests."""
     from typing import cast
-
-    from gpu_agent.agent.prompts import PROMPT_VERSION
-    from gpu_agent.service import ApplicationService
-    from gpu_agent.store import RunStore, reject_symlinks
 
     # This check precedes any configured service, corpus, or provider construction.
     if max_cost_usd is None or max_unit_cost_usd is None:
         raise typer.BadParameter("COST_CAP_REQUIRED: both total and unit caps must be explicit.")
+    # The shipped command has no configured provider path until reviewed pricing attestation
+    # exists. Context injection is a Python/controller dependency, not a flag or environment knob.
+    try:
+        if not isinstance(ctx.obj, EvaluationRunner):
+            raise CostBoundUnavailable("COST_BOUND_UNAVAILABLE")
+        runner = ctx.obj
+    except CostBoundUnavailable:
+        raise typer.BadParameter(
+            "COST_BOUND_UNAVAILABLE: paid evaluation requires reviewed pricing attestation "
+            "before provider execution."
+        ) from None
     if mode not in {"A", "B", "C", "D", "E", "all"} or split not in {"development", "holdout"}:
         raise typer.BadParameter("EVALUATION_SELECTION_INVALID")
-    if corpus_root is None or case_root is None:
-        raise typer.BadParameter("EVALUATION_CONTROLLER_ROOTS_REQUIRED")
     try:
-        bindings = EvaluationBindings.model_validate(
-            {
-                "commit": commit,
-                "prompt_version": PROMPT_VERSION,
-                "toolchain_hash": toolchain_hash,
-                "model_config_hash": model_config_hash,
-                "max_cost_usd": max_cost_usd,
-                "max_unit_cost_usd": max_unit_cost_usd,
-            }
-        )
-        corpus_root, case_root = corpus_root.absolute(), case_root.absolute()
-        reject_symlinks(corpus_root)
-        reject_symlinks(case_root)
-        if not corpus_root.is_dir():
-            raise ValueError("corpus unavailable")
-        corpus = RunStore(corpus_root, visibility="evaluator" if split == "holdout" else "public")
-        cases = {
-            key: case
-            for key, case in registered_cases(corpus).items()
-            if case.split == ("private" if split == "holdout" else "public")
-        }
-        if not cases or any(
-            case.toolchain_hash != bindings.toolchain_hash for case in cases.values()
+        if (
+            runner.bindings.max_cost_usd != max_cost_usd
+            or runner.bindings.max_unit_cost_usd != max_unit_cost_usd
         ):
-            raise ValueError("registered case bindings unavailable")
-        sources = {key: case_root / key / "public_input" / "kernel.cu" for key in cases}
+            raise ValueError("injected runner caps differ from requested caps")
+        cases = runner.case_ids
         mode_count = 5 if mode == "all" else 1
         typer.echo(
             f"{len(cases)} case × {mode_count} mode × {repeats} repeats = "
             f"{len(cases) * mode_count * repeats} units"
         )
         typer.echo(
-            f"Hard maximum cost: ${max_cost_usd:.2f}; unit reservation: ${max_unit_cost_usd:.2f}"
-        )
-        service = ApplicationService.configured()
-        executor = EvaluationExecutor(service, corpus, sources)
-        runner = EvaluationRunner(
-            service.store,
-            {key: case.template_id for key, case in cases.items()},
-            executor.execute,
-            commit=bindings.commit,
-            prompt_version=bindings.prompt_version,
-            toolchain_hash=bindings.toolchain_hash,
-            model_config_hash=bindings.model_config_hash,
-            max_cost_usd=max_cost_usd,
-            max_unit_cost_usd=max_unit_cost_usd,
+            f"Cost reservation: ${max_cost_usd:.2f}; unit reservation: ${max_unit_cost_usd:.2f}"
         )
         result = runner.run(cast(EvaluationSelection, mode), cast(EvaluationSplit, split), repeats)
     except (OSError, ValueError):

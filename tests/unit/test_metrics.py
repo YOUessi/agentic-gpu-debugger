@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 
 def test_empty_data_is_not_perfect_accuracy():
     from gpu_agent.benchmark.metrics import aggregate
@@ -72,3 +74,28 @@ def test_score_uses_registered_family_labels_and_line_range():
         Rubric(root_cause_required_labels=2),
     )
     assert result.family_correct and result.root_cause_correct and result.location_correct
+
+
+@pytest.mark.parametrize("verdict", [None, "NOT_FIXED", "REGRESSION_DETECTED", "INCONCLUSIVE"])
+def test_completed_workflow_without_verified_repair_is_a_benchmark_failure(verdict):
+    from gpu_agent.benchmark.evaluation import EvaluationRecord
+    from gpu_agent.benchmark.metrics import aggregate
+
+    record = EvaluationRecord(
+        record_id="unsuccessful",
+        case_id="case_0100",
+        template_id="vector-add",
+        mode="D",
+        repeat=0,
+        input_hash="a" * 64,
+        evidence_hash="b" * 64,
+        executed_checks={},
+        status="COMPLETED",
+        diagnosis={},
+        verdict=verdict,
+        latency_ms=1,
+    )
+    summary = aggregate([record])
+    assert summary.end_to_end_success.n == 1
+    assert summary.end_to_end_success.numerator == 0
+    assert summary.failure_ids == ["unsuccessful"]

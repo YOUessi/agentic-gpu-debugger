@@ -177,3 +177,129 @@ def test_executor_refuses_unregistered_or_changed_inputs(oob_service, tmp_path, 
             0,
         )
     assert oob_service[1].kinds == []
+
+
+@pytest.mark.parametrize(
+    "verdict, status, success",
+    [
+        ("VERIFIED_FIXED", "COMPLETED", 1),
+        ("NOT_FIXED", "COMPLETED", 0),
+        ("REGRESSION_DETECTED", "COMPLETED", 0),
+        ("INCONCLUSIVE", "INCONCLUSIVE", 0),
+    ],
+)
+def test_executor_verdict_aggregation(oob_service, tmp_path, monkeypatch, verdict, status, success):
+    from gpu_agent.benchmark.metrics import aggregate
+    from gpu_agent.patching import PatchCandidate
+    from gpu_agent.verification.models import VerificationResult
+
+    executor, _ = registered_executor(oob_service, tmp_path)
+    service = oob_service[0]
+
+    def persist_verification(run_id, candidate_id):
+        candidate_run = service.store.load(candidate_id)
+        candidate_ref = next(
+            ref for ref in candidate_run.artifact_refs if ref.name == "candidate.json"
+        )
+        candidate = PatchCandidate.model_validate_json(service.store.read(candidate_ref))
+        result = VerificationResult(
+            verdict=verdict,
+            failure_stage=None,
+            reason_code="TEST_VERDICT",
+            original_finding_present=verdict == "NOT_FIXED",
+            public_oracle_passed=verdict == "VERIFIED_FIXED",
+            private_holdout_passed=verdict == "VERIFIED_FIXED",
+            required_checks={"memcheck": "CLEAN"},
+            candidate_hash=candidate.patched_source_hash,
+            suite_hash="a" * 64,
+        )
+        run = service.store.create_run("verification", run_id)
+        service.store.put(
+            run.id, "verification/result.json", result.model_dump_json().encode(), "public"
+        )
+        service.store.transition(run.id, "RUNNING", "FINALIZING")
+        service.store.transition(run.id, "COMPLETED", None)
+        return result
+
+    monkeypatch.setattr(service, "verify", persist_verification)
+    record = executor.execute("case_0100", "vector-add", "D", 0)
+    assert record.status == status and record.verdict == verdict
+    summary = aggregate([record])
+    assert summary.end_to_end_success.numerator == success
+    assert summary.failure_ids == ([] if success else [record.record_id])
+
+
+def test_missing_knowledge_has_zero_physical_retrievals(oob_service, tmp_path):
+    executor, _ = registered_executor(oob_service, tmp_path)
+    oob_service[0].knowledge = None
+    record = executor.execute("case_0100", "vector-add", "B", 0)
+    assert record.usage["retrieval_calls"] == 0
+    assert record.usage["retrieval_attempts"] == 1
+
+
+def test_timeout_before_backend_has_zero_physical_sanitizer_calls(
+    oob_service, tmp_path, monkeypatch
+):
+    from gpu_agent.agent.policy import LLMCallGate
+    from gpu_agent.agent.provider import ProviderError
+
+    executor, _ = registered_executor(oob_service, tmp_path)
+    original = LLMCallGate.timeout
+    timeouts = []
+
+    def reject_sanitizer(self, limit):
+        timeouts.append(limit)
+        if len(timeouts) == 3:  # Build and ordinary runtime finish before sanitizer request.
+            raise ProviderError("AGENT_BUDGET_EXHAUSTED")
+        return original(self, limit)
+
+    monkeypatch.setattr(LLMCallGate, "timeout", reject_sanitizer)
+    record = executor.execute("case_0100", "vector-add", "C", 0)
+    assert record.failure_reason == "AGENT_BUDGET_EXHAUSTED"
+    assert record.usage["sanitizer_calls"] == 0
+    assert record.usage["sanitizer_attempts"] == 1
+    assert record.executed_checks == {}
+
+
+def test_successful_acquisition_persists_physical_calls(oob_service, tmp_path):
+    executor, _ = registered_executor(oob_service, tmp_path)
+    record = executor.execute("case_0100", "vector-add", "D", 0)
+    assert record.usage["sanitizer_calls"] == record.usage["retrieval_calls"] == 1
+    store = oob_service[0].store
+    refs = [
+        ref
+        for ref in store.load(record.record_id).artifact_refs
+        if ref.name == "agent/acquisition-usage.json"
+    ]
+    assert len(refs) == 1
+    assert json.loads(store.read(refs[0])) == {
+        "schema_version": 1,
+        "sanitizer_calls": 1,
+        "retrieval_calls": 1,
+    }
+
+
+@pytest.mark.parametrize(
+    "usage",
+    [
+        {},
+        {"sanitizer_calls": 0},
+        {"sanitizer_calls": 0, "retrieval_calls": True},
+        {"sanitizer_calls": 5, "retrieval_calls": 0},
+    ],
+)
+def test_executor_rejects_incomplete_or_unbounded_acquisition_usage(
+    oob_service, tmp_path, monkeypatch, usage
+):
+    executor, _ = registered_executor(oob_service, tmp_path)
+    store = oob_service[0].store
+    original = store.put
+
+    def malformed(run_id, name, content, visibility):
+        if name == "agent/acquisition-usage.json":
+            content = json.dumps(usage).encode()
+        return original(run_id, name, content, visibility)
+
+    monkeypatch.setattr(store, "put", malformed)
+    with pytest.raises(ValueError):
+        executor.execute("case_0100", "vector-add", "B", 0)

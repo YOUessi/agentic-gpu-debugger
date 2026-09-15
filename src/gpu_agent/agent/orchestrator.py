@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from gpu_agent.agent.models import (
     ACTION_ADAPTER,
+    AcquisitionUsage,
     AgentAction,
     AgentBudget,
     DiagnosisResult,
@@ -124,6 +125,7 @@ class AgentOrchestrator:
         self.handle, self.stdin_ref = handle, stdin_ref
         self.knowledge, self.knowledge_version = knowledge, knowledge_version
         self.budget = budget or AgentBudget()
+        self.acquisition_usage = AcquisitionUsage(sanitizer_calls=0, retrieval_calls=0)
         self.ledger = BudgetLedger(self.budget)
         self.rule_router = RuleRouter()
         self.seen: set[str] = set()
@@ -171,14 +173,16 @@ class AgentOrchestrator:
         self.ledger.settle(reservation)
 
     def _run_sanitizer(self, tool: SanitizerTool) -> None:
-        result = self.backend.run_sanitizer(
-            SanitizerRequest(
-                workspace_id=self.handle.id,
-                stdin_ref=self.stdin_ref,
-                tool=tool.value,
-                timeout_seconds=self.provider.gate.timeout(120),
-            )
+        request = SanitizerRequest(
+            workspace_id=self.handle.id,
+            stdin_ref=self.stdin_ref,
+            tool=tool.value,
+            timeout_seconds=self.provider.gate.timeout(120),
         )
+        self.acquisition_usage = self.acquisition_usage.model_copy(
+            update={"sanitizer_calls": self.acquisition_usage.sanitizer_calls + 1}
+        )
+        result = self.backend.run_sanitizer(request)
         if not result.completed or result.check_outcome in {"TOOL_ERROR", "UNSUPPORTED"}:
             raise ProviderError("SANITIZER_EVIDENCE_UNAVAILABLE")
 
@@ -191,6 +195,9 @@ class AgentOrchestrator:
             self.ledger.settle(reservation, "FAILED")
             raise ProviderError("KNOWLEDGE_UNAVAILABLE")
         try:
+            self.acquisition_usage = self.acquisition_usage.model_copy(
+                update={"retrieval_calls": self.acquisition_usage.retrieval_calls + 1}
+            )
             result = self.knowledge.retrieve(
                 action.typed_arguments.query, self.knowledge_version, action.typed_arguments.k
             )
@@ -368,6 +375,12 @@ class AgentOrchestrator:
         except ProviderError as exc:
             return DiagnosisResult.inconclusive(exc.code)
         finally:
+            self.store.put(
+                run_id,
+                "agent/acquisition-usage.json",
+                self.acquisition_usage.model_dump_json().encode(),
+                "public",
+            )
             snapshot = self.budget.model_copy(
                 update={
                     "llm_calls": self.provider.gate.snapshot().llm_calls,

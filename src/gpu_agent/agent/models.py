@@ -27,6 +27,14 @@ class AgentBudget(ExecutionModel):
     remaining_seconds: float = Field(default=600, ge=0)
 
 
+class AcquisitionUsage(ExecutionModel):
+    """Actual acquisition invocations, distinct from budget reservations and attempts."""
+
+    schema_version: Literal[1] = 1
+    sanitizer_calls: int = Field(strict=True, ge=0, le=4)
+    retrieval_calls: int = Field(strict=True, ge=0, le=3)
+
+
 class NoArguments(ExecutionModel):
     pass
 

@@ -7,7 +7,7 @@ import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from gpu_agent.agent.models import AgentBudget, DiagnosisResult
+from gpu_agent.agent.models import AcquisitionUsage, AgentBudget, DiagnosisResult
 from gpu_agent.agent.orchestrator import AgentOrchestrator, public_evidence
 from gpu_agent.agent.policy import LLMCallGate
 from gpu_agent.agent.prompts import PROMPT_VERSION
@@ -237,6 +237,17 @@ class ApplicationService:
                 if backend is not None and handle is not None:
                     backend.cleanup(handle)
         self._save_diagnosis(run.id, result)
+        if not any(
+            ref.name == "agent/acquisition-usage.json"
+            for ref in self.store.load(run.id).artifact_refs
+        ):
+            # Preparation failed before the orchestrator could invoke acquisition dependencies.
+            self.store.put(
+                run.id,
+                "agent/acquisition-usage.json",
+                AcquisitionUsage(sanitizer_calls=0, retrieval_calls=0).model_dump_json().encode(),
+                "public",
+            )
         budget_refs = [
             r for r in self.store.load(run.id).artifact_refs if r.name == "agent/budget.json"
         ]
