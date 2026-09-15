@@ -59,6 +59,7 @@ class EvaluationProviderPolicy(ExecutionModel):
     configured_model: str = Field(min_length=1)
     allowed_response_models: list[str] = Field(min_length=1)
     prompt_version: str = Field(min_length=1)
+    pricing_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     store_false_required: Literal[True] = True
 
     def content(self) -> bytes:
@@ -75,13 +76,14 @@ class PricingAttestation(ExecutionModel):
     """Controller-owned pricing evidence; only a private test producer exists today."""
 
     schema_version: Literal[1] = 1
-    source: Literal["TEST_ONLY"]
+    source: Literal["TEST_ONLY", "REVIEWED_REGISTRY"]
     provider: str
     model: str
     repository_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     model_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     input_usd_per_million: float = Field(ge=0)
     output_usd_per_million: float = Field(ge=0)
+    registry_signature: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @classmethod
     def _for_test(
@@ -101,6 +103,28 @@ class PricingAttestation(ExecutionModel):
         return (
             input_tokens * self.input_usd_per_million + output_tokens * self.output_usd_per_million
         ) / 1_000_000
+
+    @property
+    def rate_card_hash(self) -> str:
+        content = json.dumps(
+            {
+                "source": self.source,
+                "provider": self.provider,
+                "model": self.model,
+                "input_usd_per_million": self.input_usd_per_million,
+                "output_usd_per_million": self.output_usd_per_million,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        return hashlib.sha256(content).hexdigest()
+
+    def signing_content(self) -> bytes:
+        return json.dumps(
+            self.model_dump(mode="json", exclude={"registry_signature"}),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
 
 
 class PublicEvaluationRecord(ExecutionModel):
@@ -474,9 +498,14 @@ class EvaluationRunner:
             attempts[item.ordinal] = attempt
             try:
                 owner = getattr(self.execute, "__self__", None)
-                if owner is None or not hasattr(owner, "execute_scheduled"):
+                if (
+                    owner is None
+                    or not hasattr(owner, "execute_scheduled")
+                    or not hasattr(owner, "_claim_scheduled")
+                ):
                     raise ValueError("evaluation requires a schedule-bound native executor")
-                record = owner.execute_scheduled(item, attempt)
+                claim = owner._claim_scheduled(item, attempt)
+                record = owner.execute_scheduled(claim)
                 self._validate_record(record, item, attempt)
             except Exception:
                 return self._terminal(
@@ -596,9 +625,11 @@ class EvaluationRunner:
             item.repeat,
         ):
             raise ValueError("evaluation record does not match scheduled unit")
-        from gpu_agent.benchmark.executor import validate_evaluation_record
-
-        validate_evaluation_record(self.store, record, item, attempt, self.binding)
+        owner = getattr(self.execute, "__self__", None)
+        validator = getattr(owner, "validate_scheduled_record", None)
+        if validator is None:
+            raise ValueError("evaluation requires a native record validator")
+        validator(record, item, attempt)
 
     def _one_artifact(self, run_id: str, name: str) -> ArtifactRef:
         refs = [ref for ref in self.store.load(run_id).artifact_refs if ref.name == name]

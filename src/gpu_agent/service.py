@@ -16,6 +16,7 @@ from gpu_agent.agent.prompts import PROMPT_VERSION
 from gpu_agent.agent.provider import (
     FakeProvider,
     LLMProvider,
+    MockResponsesProvider,
     OpenAIProviderSettings,
     OpenAIResponsesProvider,
     ProviderError,
@@ -27,6 +28,7 @@ from gpu_agent.benchmark.evaluation import (
     PricingAttestation,
 )
 from gpu_agent.benchmark.ledger import CorpusFamily
+from gpu_agent.benchmark.pricing import ReviewedPricingRegistry
 from gpu_agent.contracts import RunBinding, RunManifest
 from gpu_agent.environment import load_toolchain_lock
 from gpu_agent.evidence.models import EvidenceBundle
@@ -296,19 +298,31 @@ class ApplicationService:
                     endpoint_host = urlsplit(settings.endpoint or "").hostname or ""
                     if not endpoint_host:
                         raise ProviderError("MODEL_CONFIG_MISMATCH")
+                    if isinstance(provider, MockResponsesProvider):
+                        pricing = self._pricing_attestation
+                        if pricing is None or pricing.source != "TEST_ONLY":
+                            raise ProviderError("PRICING_ATTESTATION_REQUIRED")
+                    else:
+                        try:
+                            pricing = ReviewedPricingRegistry.configured().load(
+                                provider=provider.provider_name,
+                                model=provider.model_name,
+                                binding=self._binding,
+                            )
+                        except (ValueError, OSError):
+                            raise ProviderError("PRICING_ATTESTATION_REQUIRED") from None
                     policy = EvaluationProviderPolicy(
                         provider=provider.provider_name,
                         endpoint_host=endpoint_host,
                         configured_model=provider.model_name,
                         allowed_response_models=[provider.model_name],
                         prompt_version=PROMPT_VERSION,
+                        pricing_hash=pricing.rate_card_hash,
                     )
                     if policy.sha256 != self._binding.model_config_hash:
                         raise ProviderError("MODEL_CONFIG_MISMATCH")
-                    pricing = self._pricing_attestation
                     if (
-                        pricing is None
-                        or pricing.provider != policy.provider
+                        pricing.provider != policy.provider
                         or pricing.model != policy.configured_model
                         or pricing.repository_commit != self._binding.repository.commit
                         or pricing.model_config_hash != self._binding.model_config_hash
@@ -329,6 +343,7 @@ class ApplicationService:
                 gate = provider.gate
                 vector = '#include "vector_api.h"' in text
                 hashes = {"kernel.cu": ref.sha256}
+                source_refs = [ref]
                 if vector:
                     for name, path in {
                         "vector_io.cpp": BENCHMARK_ROOT / "harness/vector_io.cpp",
@@ -337,7 +352,12 @@ class ApplicationService:
                     }.items():
                         content = read_regular(path, 4 * 1024 * 1024)
                         IsolatedGPUBackend._write_snapshot(root / name, content)
-                        hashes[name] = hashlib.sha256(content).hexdigest()
+                        source_ref = self.store.put(run.id, f"sources/{name}", content, "public")
+                        source_refs.append(source_ref)
+                        hashes[name] = source_ref.sha256
+                EvidenceRepository(self.store).save(
+                    run.id, EvidenceBundle(source_snapshot=source_refs)
+                )
                 snapshot = snapshot.model_copy(update={"hashes": hashes})
                 backend = self._backend_factory(self.store, root, root / "tasks")
                 handle = backend.prepare(

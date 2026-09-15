@@ -1,9 +1,11 @@
 """Production adapter from registered controller cases to immutable public observations."""
 
 import hashlib
+import hmac
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -21,12 +23,25 @@ from gpu_agent.benchmark.evaluation import (
     PublicEvaluationRecord,
 )
 from gpu_agent.benchmark.models import CaseManifest
-from gpu_agent.contracts import ArtifactRef, RunBinding, RunManifest, RunStatus
+from gpu_agent.contracts import (
+    ArtifactRef,
+    ExternalRunOrigin,
+    RunBinding,
+    RunManifest,
+    RunStatus,
+    ToolResult,
+)
 from gpu_agent.evidence.repository import EvidenceRepository
+from gpu_agent.execution.models import BuildPayload, ExecutionPayload, SanitizerPayload
 from gpu_agent.patching import PatchCandidate
 from gpu_agent.service import ApplicationService
 from gpu_agent.store import RunStore, read_regular
-from gpu_agent.verification.models import VerificationResult, VerificationVerdict
+from gpu_agent.verification.models import (
+    VerificationObservation,
+    VerificationResult,
+    VerificationVerdict,
+)
+from gpu_agent.verification.policy import decide_verdict
 
 if TYPE_CHECKING:
     from gpu_agent.benchmark.holdout import HoldoutBatch, HoldoutController
@@ -37,11 +52,178 @@ class CostBoundUnavailable(ValueError):
     """A production monetary bound must be attested before any provider work is allowed."""
 
 
+@dataclass(frozen=True)
+class _ScheduledClaim:
+    item: EvaluationScheduleItem
+    attempt: EvaluationAttempt
+    mac: str
+
+
 def _one_ref(run: RunManifest, name: str) -> ArtifactRef:
     refs = [ref for ref in run.artifact_refs if ref.name == name]
     if len(refs) != 1:
         raise ValueError("evaluation lineage artifact is missing or ambiguous")
     return refs[0]
+
+
+def _validate_verification_audit(
+    evaluator: RunStore | None,
+    diagnosis_run_id: str,
+    result: VerificationResult,
+    binding: RunBinding,
+) -> None:
+    """Resolve the public projection to evaluator-owned native execution output."""
+    if (
+        evaluator is None
+        or evaluator.visibility != "evaluator"
+        or result.evaluator_audit_run_id is None
+        or result.evaluator_observation_hash is None
+    ):
+        raise ValueError("evaluation verification has no evaluator audit lineage")
+    audit = evaluator.load(result.evaluator_audit_run_id)
+    observation_ref = _one_ref(audit, "observation.json")
+    if (
+        audit.kind != "verification_audit"
+        or audit.status != RunStatus.COMPLETED
+        or audit.binding != binding
+        or audit.external_origin != ExternalRunOrigin(run_id=diagnosis_run_id, visibility="public")
+        or observation_ref.sha256 != result.evaluator_observation_hash
+    ):
+        raise ValueError("evaluation verification audit is invalid")
+    observation = VerificationObservation.model_validate_json(evaluator.read(observation_ref))
+    if (
+        decide_verdict(observation) != result.verdict
+        or observation.original_finding_present != result.original_finding_present
+        or observation.public_oracle_passed != result.public_oracle_passed
+        or observation.private_holdout_passed != result.private_holdout_passed
+        or observation.check_requirements != result.check_requirements
+        or observation.check_outcomes != result.check_outcomes
+        or len(observation.new_blocking_findings) != result.new_findings
+    ):
+        raise ValueError("evaluation verification projection differs from evaluator audit")
+
+    children: dict[int, RunManifest] = {}
+    for path in evaluator.root.iterdir():
+        if not path.is_dir() or not re.fullmatch(r"[a-f0-9]{32}", path.name):
+            continue
+        child = evaluator.load(path.name)
+        if child.kind != "verification_input" or child.parent_run_id != audit.id:
+            continue
+        index_ref = _one_ref(child, "input-index.json")
+        index_payload = json.loads(evaluator.read(index_ref))
+        index = index_payload.get("index")
+        if (
+            type(index) is not int
+            or index < 0
+            or index in children
+            or child.status != RunStatus.COMPLETED
+            or child.binding != binding
+            or child.external_origin
+            != ExternalRunOrigin(run_id=diagnosis_run_id, visibility="public")
+        ):
+            raise ValueError("evaluation verification input lineage is invalid")
+        children[index] = child
+    if children and sorted(children) != list(range(len(children))):
+        raise ValueError("evaluation verification input sequence is invalid")
+    if result.suite_hash and len(children) + result.not_run_count == 0:
+        raise ValueError("evaluation verification suite has no native inputs")
+
+    public_oracle: bool | None = None
+    private_oracles: list[bool] = []
+    build_clean: list[bool] = []
+    runtime_clean: list[bool] = []
+    sanitizer_clean: dict[str, list[bool]] = {}
+    for index, child in sorted(children.items()):
+        result_refs = [
+            ref
+            for ref in child.artifact_refs
+            if ref.name.startswith(("build/", "run/", "sanitizer/"))
+            and ref.name.endswith("/result.json")
+        ]
+        native_refs = [
+            ref
+            for ref in result_refs
+            if re.fullmatch(r"(build|run|sanitizer)/[a-f0-9]{32}/result\.json", ref.name)
+        ]
+        kinds = [ref.name.split("/", 1)[0] for ref in native_refs]
+        if (
+            native_refs != result_refs
+            or kinds.count("build") != 1
+            or kinds.count("run") > 1
+            or (kinds.count("run") == 1 and kinds.count("sanitizer") < 1)
+        ):
+            raise ValueError("evaluation verification input lacks native tool output")
+        for ref in native_refs:
+            raw = evaluator.read(ref)
+            payload = json.loads(raw)
+            tool_name, request_id = ref.name.split("/")[:2]
+            if payload.get("tool_name") != tool_name or payload.get("request_id") != request_id:
+                raise ValueError("evaluation verification tool output is spliced")
+            model: (
+                ToolResult[BuildPayload]
+                | ToolResult[ExecutionPayload]
+                | ToolResult[SanitizerPayload]
+            )
+            if tool_name == "build":
+                model = ToolResult[BuildPayload].model_validate_json(raw)
+                build_clean.append(
+                    model.exit_code == 0
+                    and model.typed_payload.binary_ref is not None
+                    and not (
+                        model.tool_error or model.timed_out or model.cancelled or model.truncated
+                    )
+                )
+            elif tool_name == "run":
+                model = ToolResult[ExecutionPayload].model_validate_json(raw)
+                runtime_clean.append(
+                    model.typed_payload.runtime_status == "SUCCESS"
+                    and model.typed_payload.output_ref == model.stdout_artifact
+                    and not (
+                        model.tool_error or model.timed_out or model.cancelled or model.truncated
+                    )
+                )
+            else:
+                model = ToolResult[SanitizerPayload].model_validate_json(raw)
+                sanitizer_clean.setdefault(model.typed_payload.tool, []).append(
+                    model.typed_payload.completed
+                    and model.typed_payload.check_outcome == "CLEAN"
+                    and model.typed_payload.program_output_ref == model.stdout_artifact
+                    and not (
+                        model.tool_error or model.timed_out or model.cancelled or model.truncated
+                    )
+                )
+            for nested in (model.stdout_artifact, model.stderr_artifact):
+                if nested.run_id != child.id or nested.visibility != "evaluator":
+                    raise ValueError("evaluation verification tool artifact crosses lineage")
+                evaluator.read(nested)
+        oracle_refs = [ref for ref in child.artifact_refs if ref.name == "oracle.json"]
+        if len(oracle_refs) > 1:
+            raise ValueError("evaluation verification oracle output is ambiguous")
+        if oracle_refs:
+            oracle = json.loads(evaluator.read(oracle_refs[0]))
+            passed = bool(
+                oracle.get("ordinary", {}).get("passed") is True
+                and oracle.get("instrumented", {}).get("passed") is True
+            )
+            if index == 0:
+                public_oracle = passed
+            else:
+                private_oracles.append(passed)
+    if public_oracle is not None and public_oracle != result.public_oracle_passed:
+        raise ValueError("public oracle projection differs from native audit")
+    if private_oracles and all(private_oracles) != observation.private_holdout_passed:
+        raise ValueError("private oracle projection differs from native audit")
+    claimed = result.required_checks
+    if (
+        (claimed.get("build") == "CLEAN" and (not build_clean or not all(build_clean)))
+        or (claimed.get("runtime") == "CLEAN" and (not runtime_clean or not all(runtime_clean)))
+        or any(
+            claimed.get(tool) == "CLEAN"
+            and (not sanitizer_clean.get(tool) or not all(sanitizer_clean[tool]))
+            for tool in ("memcheck", "racecheck", "initcheck", "synccheck")
+        )
+    ):
+        raise ValueError("verification checks differ from native tool results")
 
 
 def validate_evaluation_record(
@@ -50,6 +232,7 @@ def validate_evaluation_record(
     item: EvaluationScheduleItem,
     attempt: EvaluationAttempt,
     binding: RunBinding,
+    evaluator: RunStore | None = None,
 ) -> None:
     """Resolve one public record back to immutable native execution artifacts."""
     public = record.public() if isinstance(record, EvaluationRecord) else record
@@ -159,6 +342,53 @@ def validate_evaluation_record(
             terminal_hashes.append(ref.sha256)
     policy: EvaluationProviderPolicy | None = None
     pricing: PricingAttestation | None = None
+    sanitizer_actions = {
+        "run_memcheck",
+        "run_racecheck",
+        "run_initcheck",
+        "run_synccheck",
+    }
+    decision_types = [decision.action_type for decision in decisions]
+    observed_sanitizers = len(bundle.sanitizer_results)
+    observed_retrievals = len(bundle.retrieved_chunks)
+    if item.mode == "A" and (
+        observed_sanitizers
+        or observed_retrievals
+        or acquisition.sanitizer_calls
+        or acquisition.retrieval_calls
+        or budget.sanitizer_calls
+        or budget.rag_calls
+    ):
+        raise ValueError("fixed controller evidence differs from scheduled mode")
+    if item.mode == "B" and (
+        observed_sanitizers
+        or acquisition.sanitizer_calls
+        or budget.sanitizer_calls
+        or acquisition.retrieval_calls not in {0, 1}
+        or bool(observed_retrievals) != bool(acquisition.retrieval_calls)
+    ):
+        raise ValueError("fixed controller evidence differs from scheduled mode")
+    if item.mode == "C" and (
+        observed_retrievals
+        or acquisition.retrieval_calls
+        or budget.rag_calls
+        or acquisition.sanitizer_calls not in {0, 1}
+        or observed_sanitizers != acquisition.sanitizer_calls
+    ):
+        raise ValueError("fixed controller evidence differs from scheduled mode")
+    if item.mode == "D" and (
+        sum(action in sanitizer_actions for action in decision_types) != acquisition.sanitizer_calls
+        or decision_types.count("retrieve_official_docs") != acquisition.retrieval_calls
+        or observed_sanitizers != acquisition.sanitizer_calls
+        or bool(observed_retrievals) != bool(acquisition.retrieval_calls)
+        or any(
+            action
+            not in sanitizer_actions
+            | {"retrieve_official_docs", "finish_diagnosis", "declare_inconclusive"}
+            for action in decision_types
+        )
+    ):
+        raise ValueError("rule controller evidence differs from route decisions")
     if item.mode in {"A", "B", "C", "D"}:
         if (
             trace != expected_trace
@@ -183,6 +413,7 @@ def validate_evaluation_record(
             or policy.sha256 != binding.model_config_hash
             or policy.prompt_version != binding.prompt_version
             or policy.allowed_response_models != [policy.configured_model]
+            or policy.pricing_hash != pricing.rate_card_hash
             or pricing.provider != policy.provider
             or pricing.model != policy.configured_model
             or pricing.repository_commit != binding.repository.commit
@@ -337,6 +568,7 @@ def validate_evaluation_record(
             or public.verdict != verification.verdict.value
         ):
             raise ValueError("evaluation verification lineage is invalid")
+        _validate_verification_audit(evaluator, run.id, verification, binding)
     elif (
         verifications
         or lineage.candidate_run_id is not None
@@ -362,7 +594,11 @@ def validate_evaluation_record(
     }
     if verification is not None:
         expected_checks.update(
-            {f"verification/{key}": value for key, value in verification.required_checks.items()}
+            {
+                f"verification/{key}": value
+                for key, value in verification.required_checks.items()
+                if key != "private_oracle"
+            }
         )
     expected_usage: dict[str, int | None] = {
         "physical_calls": budget.llm_calls,
@@ -570,6 +806,11 @@ class EvaluationExecutor:
             _corpus_family = CorpusFamily.configured(corpus)
         _corpus_family.require_store(corpus)
         self._corpus_family = _corpus_family
+        # Claims must survive a controller restart during durable evaluation
+        # recovery, while remaining unavailable from the public RunStore.  The
+        # corpus-family ledger key is controller-private and already pins both
+        # public and evaluator stores to one trusted namespace.
+        self.__claim_key = _corpus_family.ledger.key
 
     def _ref(self, run: RunManifest, name: str) -> ArtifactRef:
         refs = [ref for ref in run.artifact_refs if ref.name == name]
@@ -577,16 +818,66 @@ class EvaluationExecutor:
             raise ValueError("evaluation artifact is missing or ambiguous")
         return refs[0]
 
-    def execute(
-        self, case_id: str, template_id: str, mode: EvaluationMode, repeat: int
-    ) -> EvaluationRecord:
-        return self._execute(case_id, template_id, mode, repeat, None)
+    def validate_scheduled_record(
+        self,
+        record: PublicEvaluationRecord | EvaluationRecord,
+        item: EvaluationScheduleItem,
+        attempt: EvaluationAttempt,
+    ) -> None:
+        if self.service.binding is None:
+            raise ValueError("evaluation service is unbound")
+        validate_evaluation_record(
+            self.service.store,
+            record,
+            item,
+            attempt,
+            self.service.binding,
+            RunStore(self.service.evaluator_root / "runs", visibility="evaluator"),
+        )
 
-    def execute_scheduled(
+    @staticmethod
+    def _claim_content(item: EvaluationScheduleItem, attempt: EvaluationAttempt) -> bytes:
+        return json.dumps(
+            {
+                "domain": "gpu-agent-evaluation-claim-v1",
+                "item": item.model_dump(mode="json"),
+                "attempt": attempt.model_dump(mode="json"),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+
+    def _claim_scheduled(
         self, item: EvaluationScheduleItem, attempt: EvaluationAttempt
-    ) -> EvaluationRecord:
+    ) -> _ScheduledClaim:
+        return _ScheduledClaim(
+            item=item,
+            attempt=attempt,
+            mac=hmac.new(
+                self.__claim_key, self._claim_content(item, attempt), hashlib.sha256
+            ).hexdigest(),
+        )
+
+    def execute_scheduled(self, claim: _ScheduledClaim) -> EvaluationRecord:
+        if not isinstance(claim, _ScheduledClaim) or not hmac.compare_digest(
+            claim.mac,
+            hmac.new(
+                self.__claim_key,
+                self._claim_content(claim.item, claim.attempt),
+                hashlib.sha256,
+            ).hexdigest(),
+        ):
+            raise ValueError("evaluation unit requires an internal runner claim")
+        item, attempt = claim.item, claim.attempt
         if attempt.ordinal != item.ordinal:
             raise ValueError("evaluation attempt ordinal does not match scheduled unit")
+        if item.split == "holdout":
+            if self.holdout_controller is None or self.holdout_batch is None:
+                raise ValueError("private evaluation requires validated holdout authority")
+            if self.holdout_controller.validate_batch(self.holdout_batch) != item.holdout_proof:
+                raise ValueError("holdout authority differs from scheduled proof")
+        elif item.holdout_proof is not None:
+            raise ValueError("development evaluation cannot carry holdout authority")
         unit = EvaluationUnitBinding(
             evaluation_run_id=attempt.run_id,
             ordinal=item.ordinal,
@@ -608,7 +899,7 @@ class EvaluationExecutor:
         template_id: str,
         mode: EvaluationMode,
         repeat: int,
-        unit: EvaluationUnitBinding | None,
+        unit: EvaluationUnitBinding,
     ) -> EvaluationRecord:
         registered_case_id, registered_template_id = case_id, template_id
         if self.holdout_controller is not None and self.holdout_batch is not None:
@@ -628,9 +919,8 @@ class EvaluationExecutor:
             or registered_case_id not in self.sources
         ):
             raise ValueError("case or template is not registered")
-        if unit is not None and (
-            (case.split == "private")
-            != (unit.split == "holdout" and unit.holdout_proof is not None)
+        if (case.split == "private") != (
+            unit.split == "holdout" and unit.holdout_proof is not None
         ):
             raise ValueError("case visibility does not match evaluation split")
         if repeat < 0 or mode not in {"A", "B", "C", "D", "E"}:

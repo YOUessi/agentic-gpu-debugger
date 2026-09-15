@@ -569,6 +569,16 @@ class OpenAIResponsesProvider:
         ).unified_diff
 
 
+class MockResponsesProvider(OpenAIResponsesProvider):
+    """Explicit zero-cost adapter used only with an injected in-process port."""
+
+    provider_name = "mock-responses"
+
+    def __init__(self, *args: object, port: ResponsesPort, **kwargs: object) -> None:
+        super().__init__(*args, port=port, **kwargs)  # type: ignore[arg-type]
+        self.provider_name = "mock-responses"
+
+
 class FakeProvider:
     """Test-only scripted provider. It is never selected by configuration or CLI."""
 

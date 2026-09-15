@@ -4,7 +4,12 @@ from threading import Event, Lock
 
 import pytest
 
-from gpu_agent.benchmark.evaluation import EvaluationRunner, PublicEvaluationRecord
+from gpu_agent.benchmark.evaluation import (
+    EvaluationAttempt,
+    EvaluationRunner,
+    EvaluationScheduleItem,
+    PublicEvaluationRecord,
+)
 from gpu_agent.contracts import RunStatus
 
 
@@ -15,7 +20,7 @@ def _runner(executor, execute_owner=None, **overrides) -> EvaluationRunner:
     options = {
         "store": executor.service.store,
         "case_ids": {"case_0100": "vector-add"},
-        "execute": owner.execute,
+        "execute": owner.execute_scheduled,
         "commit": binding.repository.commit,
         "prompt_version": binding.prompt_version,
         "toolchain_hash": binding.toolchain_lock_hash,
@@ -39,19 +44,22 @@ class _Proxy:
         self.executor = executor
         self.calls = []
 
-    def execute(self, case, template, mode, repeat):
-        return self.executor.execute(case, template, mode, repeat)
+    def _claim_scheduled(self, item, attempt):
+        return self.executor._claim_scheduled(item, attempt)
 
-    def execute_scheduled(self, item, attempt):
-        self.calls.append(item.repeat)
-        return self.executor.execute_scheduled(item, attempt)
+    def execute_scheduled(self, claim):
+        self.calls.append(claim.item.repeat)
+        return self.executor.execute_scheduled(claim)
+
+    def validate_scheduled_record(self, record, item, attempt):
+        return self.executor.validate_scheduled_record(record, item, attempt)
 
 
 def test_record_is_durable_before_next_unit(native_evaluation_executor):
     executor = native_evaluation_executor
 
     class Observer(_Proxy):
-        def execute_scheduled(self, item, attempt):
+        def execute_scheduled(self, claim):
             active = executor.service.store.recoverable_runs()
             if self.calls:
                 persisted = PublicEvaluationRecord.model_validate_json(
@@ -62,7 +70,7 @@ def test_record_is_durable_before_next_unit(native_evaluation_executor):
                     )
                 )
                 assert persisted.repeat == self.calls[-1]
-            return super().execute_scheduled(item, attempt)
+            return super().execute_scheduled(claim)
 
     result = _runner(executor, Observer(executor)).run("D", "development", 3)
     run = executor.service.store.load(result.run_id)
@@ -92,10 +100,10 @@ def test_unit_reservation_stops_before_cost_cap_can_be_exceeded(native_evaluatio
 
 def test_unexpected_executor_failure_preserves_completed_records(native_evaluation_executor):
     class FailsSecond(_Proxy):
-        def execute_scheduled(self, item, attempt):
+        def execute_scheduled(self, claim):
             if self.calls:
                 raise RuntimeError("executor died")
-            return super().execute_scheduled(item, attempt)
+            return super().execute_scheduled(claim)
 
     executor = native_evaluation_executor
     result = _runner(executor, FailsSecond(executor)).run("D", "development", 3)
@@ -108,7 +116,7 @@ def test_unexpected_executor_failure_preserves_completed_records(native_evaluati
 
 def test_resume_rejects_commit_or_schedule_mismatch(native_evaluation_executor):
     class Interrupt(_Proxy):
-        def execute_scheduled(self, item, attempt):
+        def execute_scheduled(self, claim):
             raise KeyboardInterrupt
 
     executor = native_evaluation_executor
@@ -128,7 +136,7 @@ def test_started_attempt_without_record_fails_closed_without_resume_replay(
     native_evaluation_executor,
 ):
     class Interrupt(_Proxy):
-        def execute_scheduled(self, item, attempt):
+        def execute_scheduled(self, claim):
             raise KeyboardInterrupt
 
     executor = native_evaluation_executor
@@ -144,6 +152,8 @@ def test_started_attempt_without_record_fails_closed_without_resume_replay(
 def test_successful_resume_continues_after_completed_ordinal(
     native_evaluation_executor, monkeypatch
 ):
+    from gpu_agent.benchmark.executor import EvaluationExecutor
+
     executor = native_evaluation_executor
     proxy = _Proxy(executor)
     runner = _runner(executor, proxy)
@@ -161,8 +171,16 @@ def test_successful_resume_continues_after_completed_ordinal(
         runner.run("D", "development", 3)
     run_id = store.recoverable_runs()[0].id
     monkeypatch.setattr(store, "put", put)
-    result = runner.resume(run_id, "D", "development", 3)
-    assert proxy.calls == [2, 0, 1]
+    restarted = EvaluationExecutor(
+        executor.service,
+        executor.corpus,
+        executor.sources,
+        _corpus_family=executor._corpus_family,
+    )
+    restarted_proxy = _Proxy(restarted)
+    result = _runner(restarted, restarted_proxy).resume(run_id, "D", "development", 3)
+    assert proxy.calls == [2]
+    assert restarted_proxy.calls == [0, 1]
     assert [record.repeat for record in result.records] == [2, 0, 1]
     assert result.executed_units == 3 and result.stopped_reason is None
 
@@ -192,11 +210,11 @@ def test_native_record_cannot_be_replayed_for_another_schedule_unit(
     class Replay(_Proxy):
         record = None
 
-        def execute_scheduled(self, item, attempt):
+        def execute_scheduled(self, claim):
             if self.record is None:
-                self.record = super().execute_scheduled(item, attempt)
+                self.record = super().execute_scheduled(claim)
             else:
-                self.calls.append(item.repeat)
+                self.calls.append(claim.item.repeat)
             return self.record
 
     executor = native_evaluation_executor
@@ -227,7 +245,7 @@ def test_resume_recomputes_exact_attempt_set(native_evaluation_executor, fault):
             extra.model_dump_json().encode(),
         )
     else:
-        record = executor.execute_scheduled(schedule.items[0], attempt)
+        record = executor.execute_scheduled(executor._claim_scheduled(schedule.items[0], attempt))
         runner._put(run.id, "evaluation/records/0.json", record.public().model_dump_json().encode())
     with pytest.raises(ValueError):
         runner.resume(run.id, "D", "development", 3)
@@ -243,7 +261,7 @@ def test_runner_rejects_non_public_store(tmp_path, native_evaluation_executor):
         EvaluationRunner(
             RunStore(tmp_path / "evaluator", visibility="evaluator"),
             {"case_0100": "vector-add"},
-            executor.execute,
+            executor.execute_scheduled,
             commit=binding.repository.commit,
             prompt_version=binding.prompt_version or "",
             toolchain_hash=binding.toolchain_lock_hash or "",
@@ -265,15 +283,15 @@ def test_concurrent_resume_claims_one_physical_evaluation_unit(native_evaluation
             self.second_seen = Event()
             self.release = Event()
 
-        def execute_scheduled(self, item, attempt):
+        def execute_scheduled(self, claim):
             with self.guard:
-                self.calls.append(item.repeat)
+                self.calls.append(claim.item.repeat)
                 if len(self.calls) == 1:
                     self.started.set()
                 else:
                     self.second_seen.set()
             self.release.wait(2)
-            return self.executor.execute_scheduled(item, attempt)
+            return self.executor.execute_scheduled(claim)
 
     blocking = Blocking(executor)
     first_runner = _runner(executor, blocking)
@@ -298,3 +316,31 @@ def test_concurrent_resume_claims_one_physical_evaluation_unit(native_evaluation
     assert not raced
     assert len(blocking.calls) == 3
     assert len(outcomes) == 1 and outcomes[0].executed_units == 3
+
+
+def test_low_level_executor_rejects_caller_constructed_schedule_unit(
+    native_evaluation_executor,
+):
+    from gpu_agent.benchmark.executor import _ScheduledClaim
+
+    executor = native_evaluation_executor
+    assert not hasattr(executor, "execute")
+    item = EvaluationScheduleItem(
+        ordinal=0,
+        case_id="case_0100",
+        template_id="vector-add",
+        mode="D",
+        repeat=0,
+        split="development",
+    )
+    attempt = EvaluationAttempt(
+        run_id="a" * 32,
+        ordinal=0,
+        schedule_hash="b" * 64,
+        idempotency_key="c" * 64,
+        reserved_cost_usd=0,
+    )
+    with pytest.raises((TypeError, ValueError)):
+        executor.execute_scheduled(item, attempt)
+    with pytest.raises(ValueError, match="internal runner claim"):
+        executor.execute_scheduled(_ScheduledClaim(item=item, attempt=attempt, mac="0" * 64))

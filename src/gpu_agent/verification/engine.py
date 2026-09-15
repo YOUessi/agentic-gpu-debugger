@@ -240,10 +240,18 @@ class VerificationEngine:
         original_manifest = self._store.load(original_run_id)
         candidate = self._candidate(original_run_id, candidate_id, original_manifest.binding)
         origin = ExternalRunOrigin(run_id=original_run_id, visibility="public")
+        audit = self._private.create_run(
+            "verification_audit",
+            binding=original_manifest.binding,
+            external_origin=origin,
+        )
+        self._private.transition(audit.id, "RUNNING", "PREPARING")
         bundle = EvidenceRepository(self._store).public_view(original_run_id)
         baseline_hashes = {Path(ref.name).name: ref.sha256 for ref in bundle.source_snapshot}
         original, input_ref = self._baseline(original_run_id, bundle, baseline_hashes)
         if input_ref is None:
+            empty_observation = self._with_check_plan(VerificationObservation(), {}, mode)
+            observation_ref = self._finish_audit(audit.id, empty_observation)
             return self._publish(
                 original_run_id,
                 VerificationObservation(),
@@ -256,6 +264,8 @@ class VerificationEngine:
                 "",
                 "ORACLE_OR_BASELINE_UNAVAILABLE",
                 mode,
+                audit.id,
+                observation_ref.sha256,
             )
         directory = Path(tempfile.mkdtemp(prefix="verification-", dir=self._root))
         base = directory / "base"
@@ -266,6 +276,8 @@ class VerificationEngine:
             line_map = candidate_line_map(snapshot, candidate)
             case = _Case.model_validate_json(read_regular(TRUTH_ROOT / "case.json", 65536))
             if snapshot.hashes != case.source_hashes:
+                empty_observation = self._with_check_plan(VerificationObservation(), {}, mode)
+                observation_ref = self._finish_audit(audit.id, empty_observation)
                 return self._publish(
                     original_run_id,
                     VerificationObservation(),
@@ -278,6 +290,8 @@ class VerificationEngine:
                     "",
                     "ORACLE_OR_BASELINE_UNAVAILABLE",
                     mode,
+                    audit.id,
+                    observation_ref.sha256,
                 )
             public_input = _Input.model_validate_json(self._store.read(input_ref))
             holdouts = self._suite(case)
@@ -286,11 +300,6 @@ class VerificationEngine:
                 [item.model_dump() for item in holdouts], sort_keys=True
             ).encode()
             suite_hash = hashlib.sha256(suite_bytes).hexdigest()
-            audit = self._private.create_run(
-                "verification_audit",
-                binding=original_manifest.binding,
-                external_origin=origin,
-            )
             self._private.put(audit.id, "private-suite.json", suite_bytes, "evaluator")
             self._private.put(audit.id, "case.json", case.model_dump_json().encode(), "evaluator")
             self._private.put(
@@ -334,6 +343,12 @@ class VerificationEngine:
                     parent_run_id=audit.id,
                     binding=original_manifest.binding,
                     external_origin=origin,
+                )
+                self._private.put(
+                    run.id,
+                    "input-index.json",
+                    json.dumps({"index": index}, separators=(",", ":")).encode(),
+                    "evaluator",
                 )
                 handle = backend.prepare(
                     WorkspaceRequest(
@@ -508,11 +523,8 @@ class VerificationEngine:
             if executed < len(suite) and observation.private_holdout_passed is True:
                 observation = observation.model_copy(update={"private_holdout_passed": None})
                 checks["private_oracle"] = "INCOMPLETE"
-            self._private.put(
-                audit.id, "observation.json", observation.model_dump_json().encode(), "evaluator"
-            )
-            self._private.transition(audit.id, "RUNNING", "FINALIZING")
-            self._private.transition(audit.id, "COMPLETED", None)
+            observation = self._with_check_plan(observation, checks, mode)
+            observation_ref = self._finish_audit(audit.id, observation)
             return self._publish(
                 original_run_id,
                 observation,
@@ -525,6 +537,8 @@ class VerificationEngine:
                 suite_hash,
                 reason,
                 mode,
+                audit.id,
+                observation_ref.sha256,
             )
         finally:
             shutil.rmtree(directory)
@@ -560,21 +574,17 @@ class VerificationEngine:
         suite_hash: str,
         reason: str,
         mode: Literal["standard", "full"] = "standard",
+        evaluator_audit_run_id: str | None = None,
+        evaluator_observation_hash: str | None = None,
     ) -> VerificationResult:
-        requirements = plan_checks(
-            SanitizerTool.MEMCHECK,
-            "strict" if mode == "full" else "standard",
-            {tool: "SUPPORTED" for tool in SanitizerTool},
-        )
-        outcomes = {item.tool: checks.get(item.tool.value, "NOT_RUN") for item in requirements}
+        observation = self._with_check_plan(observation, checks, mode)
+        requirements = observation.check_requirements
+        outcomes = observation.check_outcomes
         not_run_reasons = {
             item.tool: "UPSTREAM_CHECK_DID_NOT_PASS"
             for item in requirements
             if item.required and outcomes[item.tool] == "NOT_RUN"
         }
-        observation = observation.model_copy(
-            update={"check_requirements": requirements, "check_outcomes": outcomes}
-        )
         # Explicit allowlist construction: never dump/copy private evidence into public storage.
         result = VerificationResult(
             verdict=decide_verdict(observation),
@@ -594,6 +604,8 @@ class VerificationEngine:
             private_passed_count=private_passed,
             not_run_count=not_run,
             suite_hash=suite_hash,
+            evaluator_audit_run_id=evaluator_audit_run_id,
+            evaluator_observation_hash=evaluator_observation_hash,
             limitations=["Containers share the host kernel and GPU driver."],
         )
         run = self._store.create_run("verification", original_run_id)
@@ -603,3 +615,30 @@ class VerificationEngine:
         self._store.transition(run.id, "RUNNING", "FINALIZING")
         self._store.transition(run.id, "COMPLETED", None)
         return result
+
+    @staticmethod
+    def _with_check_plan(
+        observation: VerificationObservation,
+        checks: dict[str, str],
+        mode: Literal["standard", "full"],
+    ) -> VerificationObservation:
+        requirements = plan_checks(
+            SanitizerTool.MEMCHECK,
+            "strict" if mode == "full" else "standard",
+            {tool: "SUPPORTED" for tool in SanitizerTool},
+        )
+        outcomes = {item.tool: checks.get(item.tool.value, "NOT_RUN") for item in requirements}
+        return observation.model_copy(
+            update={"check_requirements": requirements, "check_outcomes": outcomes}
+        )
+
+    def _finish_audit(self, audit_run_id: str, observation: VerificationObservation) -> ArtifactRef:
+        ref = self._private.put(
+            audit_run_id,
+            "observation.json",
+            observation.model_dump_json().encode(),
+            "evaluator",
+        )
+        self._private.transition(audit_run_id, "RUNNING", "FINALIZING")
+        self._private.transition(audit_run_id, "COMPLETED", None)
+        return ref

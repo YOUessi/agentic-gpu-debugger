@@ -149,12 +149,16 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(
     calls = []
 
     class InjectedExecutor:
-        def execute(self, case_id, template_id, mode, repeat):
-            return executor.execute(case_id, template_id, mode, repeat)
+        def _claim_scheduled(self, item, attempt):
+            return executor._claim_scheduled(item, attempt)
 
-        def execute_scheduled(self, item, attempt):
+        def validate_scheduled_record(self, record, item, attempt):
+            return executor.validate_scheduled_record(record, item, attempt)
+
+        def execute_scheduled(self, claim):
+            item = claim.item
             calls.append((item.case_id, item.template_id, item.mode, item.repeat))
-            return executor.execute_scheduled(item, attempt)
+            return executor.execute_scheduled(claim)
 
     def forbidden():
         raise AssertionError("offline path cannot construct configured services")
@@ -164,7 +168,7 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(
     runner = EvaluationRunner(
         service.store,
         {"case_0100": "vector-add"},
-        injected.execute,
+        injected.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",

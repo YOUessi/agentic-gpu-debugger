@@ -197,11 +197,51 @@ def registered_executor(oob_service, tmp_path):
     return EvaluationExecutor(service, corpus, {"case_0100": source}), source
 
 
+def _execute_claimed_test_unit(
+    executor, mode, *, case_id="case_0100", template_id="vector-add", repeat=0
+):
+    """Exercise the production schedule/attempt claim path for one unit.
+
+    Component tests intentionally stop after the native executor returns; batch
+    persistence and terminalization are covered by EvaluationRunner tests.
+    """
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+    from gpu_agent.contracts import CurrentPhase, RunStatus
+
+    binding = executor.service.binding
+    assert binding is not None
+    runner = EvaluationRunner(
+        executor.service.store,
+        {case_id: template_id},
+        executor.execute_scheduled,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    )
+    schedule = runner._schedule(mode, "development", 3)
+    item = next(value for value in schedule.items if value.repeat == repeat)
+    run = runner.store.create_run("evaluation", binding=binding)
+    runner.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
+    runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+    attempt = runner._attempt(run.id, schedule, item)
+    runner._put(
+        run.id,
+        f"evaluation/attempts/{item.ordinal}.json",
+        attempt.model_dump_json().encode(),
+    )
+    return executor.execute_scheduled(executor._claim_scheduled(item, attempt))
+
+
 def test_executor_uses_persisted_diagnosis_candidate_and_verification(
     oob_service, tmp_path, native_evaluation_executor
 ):
     executor = native_evaluation_executor
-    record = executor.execute("case_0100", "vector-add", "E", 0)
+    record = _execute_claimed_test_unit(executor, "E")
     service, provider, _ = oob_service
     assert record.mode == "E" and record.diagnosis["diagnostic_outcome"] == "DIAGNOSED"
     assert record.patch_hash and record.verdict == "INCONCLUSIVE"
@@ -229,7 +269,7 @@ def test_evaluation_rejects_prepared_corpus_transaction(native_evaluation_execut
     state["transactions"][0]["state"] = "PREPARED"
     state_path.write_text(json.dumps(state, sort_keys=True, separators=(",", ":")))
     with pytest.raises(ValueError, match="committed corpus transaction"):
-        executor.execute("case_0100", "vector-add", "D", 0)
+        _execute_claimed_test_unit(executor, "D")
 
 
 def test_evaluation_rejects_corpus_from_another_repository(native_evaluation_executor):
@@ -246,13 +286,13 @@ def test_evaluation_rejects_corpus_from_another_repository(native_evaluation_exe
         }
     )
     with pytest.raises(ValueError, match="provenance"):
-        executor.execute("case_0100", "vector-add", "D", 0)
+        _execute_claimed_test_unit(executor, "D")
 
 
 def test_executor_preserves_mode_failure(oob_service, tmp_path, native_evaluation_executor):
     executor = native_evaluation_executor
     oob_service[1].actions = []
-    record = executor.execute("case_0100", "vector-add", "E", 0)
+    record = _execute_claimed_test_unit(executor, "E")
     assert record.mode == "E" and record.status == "FAILED"
     assert record.failure_reason == "FAKE_SCRIPT_EXHAUSTED"
     assert record.patch_hash is None and record.usage["physical_calls"] == 1
@@ -270,7 +310,7 @@ def test_runner_persists_only_schedule_bound_native_lineage(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute,
+        executor.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version,
         toolchain_hash=binding.toolchain_lock_hash,
@@ -286,6 +326,55 @@ def test_runner_persists_only_schedule_bound_native_lineage(
         assert run.parent_run_id == result.run_id
         assert record.record_id == run.id
         assert record.lineage.provider_invocation_hashes == []
+
+
+@pytest.mark.parametrize("mode", ["A", "B", "C", "D"])
+def test_deterministic_modes_reject_extra_controller_actions(
+    mode, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.agent.models import PolicyDecision
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    binding = executor.service.binding
+    assert binding is not None
+    store = executor.service.store
+    original = store.put
+    injected = False
+
+    def add_extra(run_id, name, content, visibility):
+        nonlocal injected
+        if name == "agent/controller-lineage.json" and not injected:
+            injected = True
+            original(
+                run_id,
+                "actions/99/decision.json",
+                PolicyDecision(
+                    action_type="retrieve_official_docs",
+                    action_hash="f" * 64,
+                    allowed=True,
+                )
+                .model_dump_json()
+                .encode(),
+                visibility,
+            )
+        return original(run_id, name, content, visibility)
+
+    monkeypatch.setattr(store, "put", add_extra)
+    result = EvaluationRunner(
+        store,
+        {"case_0100": "vector-add"},
+        executor.execute_scheduled,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run(mode, "development", 3)
+    assert result.stopped_reason == "EXECUTION_ERROR" and result.records == []
 
 
 @pytest.mark.parametrize(
@@ -345,7 +434,7 @@ def test_runner_rejects_forged_native_lineage(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute,
+        executor.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version,
         toolchain_hash=binding.toolchain_lock_hash,
@@ -360,14 +449,21 @@ def test_runner_rejects_forged_native_lineage(
 
 
 def _configure_responses_provider(
-    executor, monkeypatch, *, response_model="eval-model", usage=True
+    executor,
+    monkeypatch,
+    *,
+    response_model="eval-model",
+    usage=True,
+    mock_provider=True,
+    full_script=False,
 ):
     from pydantic import SecretStr
 
     import gpu_agent.service as service_module
-    from gpu_agent.agent.models import InconclusiveAction
+    from gpu_agent.agent.models import DiagnosisResult, EvidenceClaim, InconclusiveAction
     from gpu_agent.agent.prompts import PROMPT_VERSION
     from gpu_agent.agent.provider import (
+        MockResponsesProvider,
         OpenAIProviderSettings,
         OpenAIResponsesProvider,
         ResponseMetadata,
@@ -375,11 +471,46 @@ def _configure_responses_provider(
         Usage,
     )
     from gpu_agent.benchmark.evaluation import PricingAttestation
+    from gpu_agent.execution.models import SourceLocation
+
+    scripted = executor.service._provider
 
     class Port:
+        def __init__(self):
+            self.plan_index = 0
+
         def call(self, request):
+            if full_script and request.kind == "plan":
+                value = {"action": scripted.actions[self.plan_index].model_dump(mode="json")}
+                self.plan_index += 1
+            elif full_script and request.kind == "diagnose":
+                evidence = request.payload["evidence"]
+                value = DiagnosisResult(
+                    diagnostic_outcome="DIAGNOSED",
+                    failure_family="out_of_bounds",
+                    root_cause="The thread index can exceed the input length.",
+                    source_locations=[SourceLocation(path="kernel.cu", line=9)],
+                    observed_facts=[
+                        EvidenceClaim.model_validate(item) for item in evidence["observed_facts"]
+                    ],
+                    tool_findings=[
+                        EvidenceClaim(text=item["category"], citation_ids=[item["artifact_id"]])
+                        for item in evidence["tool_findings"]
+                    ],
+                    documentation_evidence=[
+                        EvidenceClaim(text=item["text"], citation_ids=[item["chunk_id"]])
+                        for item in evidence["documentation"]
+                    ],
+                    model_inferences=["An index guard may prevent the reported write."],
+                    recommended_change="Guard the write with i < n.",
+                    confidence_label="high",
+                ).model_dump(mode="json")
+            elif full_script and request.kind == "patch":
+                value = {"unified_diff": scripted.diff}
+            else:
+                value = {"action": InconclusiveAction().model_dump(mode="json")}
             return SDKResult(
-                value={"action": InconclusiveAction().model_dump(mode="json")},
+                value=value,
                 metadata=ResponseMetadata(
                     response_id="response-1",
                     provider_request_id="request-1",
@@ -397,13 +528,21 @@ def _configure_responses_provider(
         api_key=SecretStr("fixture-only"),
         supports_store_false=True,
     )
+    provider_name = "mock-responses" if mock_provider else "openai-responses"
+    rate_card = PricingAttestation._for_test(
+        provider_name,
+        "eval-model",
+        executor.service.binding.repository.commit,
+        "0" * 64,
+    )
     policy = {
         "schema_version": 1,
-        "provider": "openai-responses",
+        "provider": provider_name,
         "endpoint_host": "api.openai.com",
         "configured_model": "eval-model",
         "allowed_response_models": ["eval-model"],
         "prompt_version": PROMPT_VERSION,
+        "pricing_hash": rate_card.rate_card_hash,
         "store_false_required": True,
     }
     policy_hash = hashlib.sha256(
@@ -412,18 +551,45 @@ def _configure_responses_provider(
     binding = executor.service.binding.model_copy(update={"model_config_hash": policy_hash})
     executor.service._binding = binding
     executor.service._pricing_attestation = PricingAttestation._for_test(
-        "openai-responses", "eval-model", binding.repository.commit, policy_hash
+        provider_name, "eval-model", binding.repository.commit, policy_hash
     )
     executor.service._provider = None
     monkeypatch.setattr(service_module.OpenAIProviderSettings, "from_environment", lambda: settings)
     monkeypatch.setattr(
         service_module,
         "OpenAIResponsesProvider",
-        lambda settings, gate, store, run_id, **kwargs: OpenAIResponsesProvider(
-            settings, gate, store, run_id, port=Port(), **kwargs
-        ),
+        lambda settings, gate, store, run_id, **kwargs: (
+            MockResponsesProvider if mock_provider else OpenAIResponsesProvider
+        )(settings, gate, store, run_id, port=Port(), **kwargs),
     )
     return binding, policy
+
+
+def test_test_pricing_cannot_unlock_real_provider(monkeypatch, native_evaluation_executor):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    binding, _ = _configure_responses_provider(executor, monkeypatch, mock_provider=False)
+    result = EvaluationRunner(
+        executor.service.store,
+        {"case_0100": "vector-add"},
+        executor.execute_scheduled,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+    assert result.stopped_reason == "EXECUTION_ERROR" and result.records == []
+    assert not any(
+        ref.name.startswith("provider/")
+        for run_dir in executor.service.store.root.iterdir()
+        if run_dir.is_dir() and len(run_dir.name) == 32
+        for ref in executor.service.store.load(run_dir.name).artifact_refs
+    )
 
 
 def test_mode_e_binds_native_provider_policy_invocation_and_usage(
@@ -436,7 +602,7 @@ def test_mode_e_binds_native_provider_policy_invocation_and_usage(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute,
+        executor.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version,
         toolchain_hash=binding.toolchain_lock_hash,
@@ -457,6 +623,90 @@ def test_mode_e_binds_native_provider_policy_invocation_and_usage(
     assert json.loads(executor.service.store.read(policy_ref)) == policy
 
 
+@pytest.mark.parametrize("native_evaluation_executor", ["public_exact"], indirect=True)
+def test_scheduled_repair_resolves_native_private_verification(
+    monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
+    result = EvaluationRunner(
+        executor.service.store,
+        {"case_0100": "vector-add"},
+        executor.execute_scheduled,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+    assert result.executed_units == 1
+    assert result.records[0].lineage.verification_run_id is not None
+    assert "verification/runtime" in result.records[0].executed_checks
+    assert "verification/private_oracle" not in result.records[0].executed_checks
+    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+
+
+def test_scheduled_repair_rejects_public_only_verification_summary(
+    monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+    from gpu_agent.patching import PatchCandidate
+    from gpu_agent.verification.models import VerificationResult
+
+    executor = native_evaluation_executor
+    binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
+
+    def fake_verify(run_id, candidate_id):
+        candidate_run = executor.service.store.load(candidate_id)
+        candidate = PatchCandidate.model_validate_json(
+            executor.service.store.read(
+                next(ref for ref in candidate_run.artifact_refs if ref.name == "candidate.json")
+            )
+        )
+        value = VerificationResult(
+            verdict="INCONCLUSIVE",
+            failure_stage="verification",
+            reason_code="FORGED_SUMMARY",
+            original_finding_present=None,
+            public_oracle_passed=None,
+            private_holdout_passed=None,
+            required_checks={},
+            candidate_hash=candidate.patched_source_hash,
+            suite_hash="a" * 64,
+        )
+        child = executor.service.store.create_run("verification", run_id)
+        executor.service.store.put(
+            child.id,
+            "verification/result.json",
+            value.model_dump_json().encode(),
+            "public",
+        )
+        executor.service.store.transition(child.id, "RUNNING", "FINALIZING")
+        executor.service.store.transition(child.id, "COMPLETED", None)
+        return value
+
+    monkeypatch.setattr(executor.service, "verify", fake_verify)
+    result = EvaluationRunner(
+        executor.service.store,
+        {"case_0100": "vector-add"},
+        executor.execute_scheduled,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+    assert result.stopped_reason == "EXECUTION_ERROR" and result.records == []
+
+
 def test_mode_e_rejects_forged_model_config_binding(
     oob_service, tmp_path, monkeypatch, native_evaluation_executor
 ):
@@ -469,7 +719,7 @@ def test_mode_e_rejects_forged_model_config_binding(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute,
+        executor.execute_scheduled,
         commit=forged.repository.commit,
         prompt_version=forged.prompt_version,
         toolchain_hash=forged.toolchain_lock_hash,
@@ -494,7 +744,7 @@ def test_mode_e_requires_pricing_attestation_before_provider_call(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute,
+        executor.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -540,7 +790,7 @@ def test_mode_e_rejects_unattested_response_policy(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute,
+        executor.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -582,7 +832,7 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
     manifest = EvaluationRunner(
         executor.service.store,
         {alias: alias},
-        holdout_executor.execute,
+        holdout_executor.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -626,10 +876,48 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
     assert results == [result, result]
     assert result.public_record_id == manifest.records[0].record_id
     assert result.private_case_id == "case_0100"
-    validated = controller.validated_record(result)
     from gpu_agent.benchmark.metrics import aggregate
 
-    assert aggregate([validated]).record_count == 1
+    assert (
+        aggregate(
+            [result],
+            public_store=executor.service.store,
+            evaluator_store=evaluator,
+            run_binding=binding,
+        ).record_count
+        == 1
+    )
+    copied_run = executor.service.store.create_run("evaluation", binding=binding)
+    executor.service.store.transition(copied_run.id, "RUNNING", "EXECUTING")
+    original_refs = {ref.name: ref for ref in evaluation_run.artifact_refs}
+    for name in (
+        "evaluation/schedule.json",
+        "evaluation/attempts/0.json",
+        "evaluation/records/0.json",
+    ):
+        executor.service.store.put(
+            copied_run.id,
+            name,
+            executor.service.store.read(original_refs[name]),
+            "public",
+        )
+    executor.service.store.transition(copied_run.id, "RUNNING", "FINALIZING")
+    executor.service.store.transition(copied_run.id, "COMPLETED", None)
+    copied_ref = next(
+        ref
+        for ref in executor.service.store.load(copied_run.id).artifact_refs
+        if ref.name == "evaluation/records/0.json"
+    )
+    with pytest.raises(ValueError, match="public evaluation record"):
+        controller.bind_score(
+            batch,
+            alias,
+            copied_ref,
+            labels=labels,
+            score=private_score,
+            should_be_inconclusive=False,
+            private_holdout_passed=True,
+        )
     public_bytes = b"".join(
         path.read_bytes() for path in executor.service.store.root.rglob("*") if path.is_file()
     )
@@ -690,7 +978,7 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
         should_be_inconclusive=False,
         private_holdout_passed=True,
     )
-    assert controller.validated_record(recovered).record.record_id == recovered.public_record_id
+    assert controller._load_metric_record(recovered).record_id == recovered.public_record_id
 
 
 def test_deterministic_mode_rejects_unexpected_verification_child(
@@ -714,7 +1002,7 @@ def test_deterministic_mode_rejects_unexpected_verification_child(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute,
+        executor.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -739,7 +1027,7 @@ def test_private_case_cannot_enter_public_schedule_without_holdout_alias(
     runner = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute,
+        executor.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -811,11 +1099,11 @@ def test_executor_refuses_unregistered_or_changed_inputs(
     if fault == "source":
         (source / "kernel.cu").write_text("changed source")
     with pytest.raises(ValueError):
-        executor.execute(
-            "case_9999" if fault == "case" else "case_0100",
-            "wrong" if fault == "template" else "vector-add",
+        _execute_claimed_test_unit(
+            executor,
             "A",
-            0,
+            case_id="case_9999" if fault == "case" else "case_0100",
+            template_id="wrong" if fault == "template" else "vector-add",
         )
     assert oob_service[1].kinds == []
 
@@ -874,7 +1162,7 @@ def test_executor_verdict_aggregation(
         return result
 
     monkeypatch.setattr(service, "verify", persist_verification)
-    record = executor.execute("case_0100", "vector-add", "E", 0)
+    record = _execute_claimed_test_unit(executor, "E")
     assert record.status == status and record.verdict == verdict
     assert record.patch_compile_passed is compiled
     assert record.private_holdout_passed == (verdict == "VERIFIED_FIXED")
@@ -891,7 +1179,7 @@ def test_missing_knowledge_has_zero_physical_retrievals(
 ):
     executor = native_evaluation_executor
     oob_service[0].knowledge = None
-    record = executor.execute("case_0100", "vector-add", "B", 0)
+    record = _execute_claimed_test_unit(executor, "B")
     assert record.usage["retrieval_calls"] == 0
     assert record.usage["retrieval_attempts"] == 1
 
@@ -913,7 +1201,7 @@ def test_timeout_before_backend_has_zero_physical_sanitizer_calls(
         return original(self, limit)
 
     monkeypatch.setattr(LLMCallGate, "timeout", reject_sanitizer)
-    record = executor.execute("case_0100", "vector-add", "C", 0)
+    record = _execute_claimed_test_unit(executor, "C")
     assert record.failure_reason == "AGENT_BUDGET_EXHAUSTED"
     assert record.usage["sanitizer_calls"] == 0
     assert record.usage["sanitizer_attempts"] == 1
@@ -924,7 +1212,7 @@ def test_successful_acquisition_persists_physical_calls(
     oob_service, tmp_path, native_evaluation_executor
 ):
     executor = native_evaluation_executor
-    record = executor.execute("case_0100", "vector-add", "D", 0)
+    record = _execute_claimed_test_unit(executor, "D")
     assert record.usage["sanitizer_calls"] == record.usage["retrieval_calls"] == 1
     store = oob_service[0].store
     refs = [
@@ -963,4 +1251,4 @@ def test_executor_rejects_incomplete_or_unbounded_acquisition_usage(
 
     monkeypatch.setattr(store, "put", malformed)
     with pytest.raises(ValueError):
-        executor.execute("case_0100", "vector-add", "B", 0)
+        _execute_claimed_test_unit(executor, "B")

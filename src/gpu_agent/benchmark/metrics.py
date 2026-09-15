@@ -13,24 +13,9 @@ from gpu_agent.execution.models import ExecutionModel
 
 if TYPE_CHECKING:
     from gpu_agent.benchmark.evaluation import EvaluationRecord
-
-
-class ValidatedEvaluationRecord:
-    """Opaque evaluator-loader output accepted by public metric entry points."""
-
-    __slots__ = ("_record",)
-
-    def __init__(self, record: EvaluationRecord, authority: object) -> None:
-        if authority is not _EVALUATOR_AUTHORITY:
-            raise ValueError("validated records are created only by the evaluator loader")
-        self._record = record
-
-    @property
-    def record(self) -> EvaluationRecord:
-        return self._record
-
-
-_EVALUATOR_AUTHORITY = object()
+    from gpu_agent.benchmark.holdout import EvaluatorRecordBinding
+    from gpu_agent.contracts import RunBinding
+    from gpu_agent.store import RunStore
 
 
 class HiddenTruth(ExecutionModel):
@@ -153,10 +138,36 @@ def _score_record(record: EvaluationRecord, hidden_truth: HiddenTruth, rubric: R
     )
 
 
-def score(record: ValidatedEvaluationRecord, hidden_truth: HiddenTruth, rubric: Rubric) -> Score:
-    if not isinstance(record, ValidatedEvaluationRecord):
-        raise ValueError("metrics require an evaluator-validated record")
-    return _score_record(record.record, hidden_truth, rubric)
+def _load_records(
+    records: list[EvaluatorRecordBinding],
+    public_store: RunStore | None,
+    evaluator_store: RunStore | None,
+    run_binding: RunBinding | None,
+) -> list[EvaluationRecord]:
+    from gpu_agent.benchmark.holdout import EvaluatorRecordBinding, HoldoutController
+
+    if (
+        public_store is None
+        or evaluator_store is None
+        or run_binding is None
+        or any(not isinstance(record, EvaluatorRecordBinding) for record in records)
+    ):
+        raise ValueError("metrics require persisted evaluator record bindings")
+    controller = HoldoutController(public_store, evaluator_store, binding=run_binding)
+    return [controller._load_metric_record(record) for record in records]
+
+
+def score(
+    record: EvaluatorRecordBinding,
+    hidden_truth: HiddenTruth,
+    rubric: Rubric,
+    *,
+    public_store: RunStore | None = None,
+    evaluator_store: RunStore | None = None,
+    run_binding: RunBinding | None = None,
+) -> Score:
+    loaded = _load_records([record], public_store, evaluator_store, run_binding)
+    return _score_record(loaded[0], hidden_truth, rubric)
 
 
 def _diagnosis(record: EvaluationRecord) -> DiagnosisResult | None:
@@ -335,10 +346,18 @@ def _aggregate_records(records: list[EvaluationRecord], *, retrieval_k: int = 5)
     )
 
 
-def aggregate(records: list[ValidatedEvaluationRecord], *, retrieval_k: int = 5) -> MetricSummary:
-    if any(not isinstance(record, ValidatedEvaluationRecord) for record in records):
-        raise ValueError("metrics require evaluator-validated records")
-    return _aggregate_records([record.record for record in records], retrieval_k=retrieval_k)
+def aggregate(
+    records: list[EvaluatorRecordBinding],
+    *,
+    public_store: RunStore | None = None,
+    evaluator_store: RunStore | None = None,
+    run_binding: RunBinding | None = None,
+    retrieval_k: int = 5,
+) -> MetricSummary:
+    return _aggregate_records(
+        _load_records(records, public_store, evaluator_store, run_binding),
+        retrieval_k=retrieval_k,
+    )
 
 
 class GroupedMetricSummary(ExecutionModel):
@@ -353,12 +372,16 @@ class GroupedMetricSummary(ExecutionModel):
 
 
 def aggregate_grouped(
-    records: list[ValidatedEvaluationRecord], *, retrieval_k: int = 5
+    records: list[EvaluatorRecordBinding],
+    *,
+    public_store: RunStore | None = None,
+    evaluator_store: RunStore | None = None,
+    run_binding: RunBinding | None = None,
+    retrieval_k: int = 5,
 ) -> GroupedMetricSummary:
-    if any(not isinstance(record, ValidatedEvaluationRecord) for record in records):
-        raise ValueError("metrics require evaluator-validated records")
     return _aggregate_grouped_records(
-        [record.record for record in records], retrieval_k=retrieval_k
+        _load_records(records, public_store, evaluator_store, run_binding),
+        retrieval_k=retrieval_k,
     )
 
 

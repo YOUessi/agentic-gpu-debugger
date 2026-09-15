@@ -8,18 +8,21 @@ def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_e
     class ObservedExecutor:
         calls = []
 
-        def execute(self, case, template, mode, repeat):
-            return executor.execute(case, template, mode, repeat)
+        def _claim_scheduled(self, item, attempt):
+            return executor._claim_scheduled(item, attempt)
 
-        def execute_scheduled(self, item, attempt):
-            self.calls.append((item.case_id, item.mode, item.repeat))
-            return executor.execute_scheduled(item, attempt)
+        def validate_scheduled_record(self, record, item, attempt):
+            return executor.validate_scheduled_record(record, item, attempt)
+
+        def execute_scheduled(self, claim):
+            self.calls.append((claim.item.case_id, claim.item.mode, claim.item.repeat))
+            return executor.execute_scheduled(claim)
 
     observed = ObservedExecutor()
     runner = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        observed.execute,
+        observed.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",

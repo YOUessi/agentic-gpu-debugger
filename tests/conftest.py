@@ -170,7 +170,7 @@ def native_evaluation_executor(oob_service, tmp_path, monkeypatch, request):
     from gpu_agent.knowledge.retrieve import KnowledgeIndex
     from gpu_agent.store import RunStore
 
-    service, _, source = oob_service
+    service, provider, source = oob_service
     chunk = service.knowledge.chunks[0]
     fields = chunk.model_dump(exclude={"chunk_id", "content_hash", "text"})
     service.knowledge = KnowledgeIndex(
@@ -189,9 +189,30 @@ def native_evaluation_executor(oob_service, tmp_path, monkeypatch, request):
         prompt_version=PROMPT_VERSION,
         model_config_hash="5" * 64,
     )
-    split = getattr(request, "param", "public")
+    requested_split = getattr(request, "param", "public")
+    exact_verification_source = requested_split == "public_exact"
+    split = "public" if exact_verification_source else requested_split
     if split not in {"public", "private"}:
         raise ValueError("invalid native evaluation fixture split")
+    if exact_verification_source:
+        import difflib
+
+        exact_source = (
+            __import__("pathlib").Path(__file__).resolve().parents[1]
+            / "benchmarks/public/case_0001/public_input/kernel.cu"
+        ).read_text()
+        (source / "kernel.cu").write_text(exact_source)
+        fixed_source = exact_source.replace(
+            "out[i] = a[i] + b[i];", "if (i < n) out[i] = a[i] + b[i];"
+        ).replace("n != 257", "n == 0")
+        provider.diff = "".join(
+            difflib.unified_diff(
+                exact_source.splitlines(True),
+                fixed_source.splitlines(True),
+                fromfile="a/kernel.cu",
+                tofile="b/kernel.cu",
+            )
+        )
     visibility = "public" if split == "public" else "evaluator"
     corpus = RunStore(tmp_path / "corpus", visibility=visibility)
     family = CorpusFamily.provision(

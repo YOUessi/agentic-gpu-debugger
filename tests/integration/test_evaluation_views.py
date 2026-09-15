@@ -48,11 +48,14 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(native_evaluati
     assert binding is not None
 
     class PrivateScoringProjection:
-        def execute(self, case, template, mode, repeat):
-            return executor.execute(case, template, mode, repeat)
+        def _claim_scheduled(self, item, attempt):
+            return executor._claim_scheduled(item, attempt)
 
-        def execute_scheduled(self, item, attempt):
-            record = executor.execute_scheduled(item, attempt)
+        def validate_scheduled_record(self, record, item, attempt):
+            return executor.validate_scheduled_record(record, item, attempt)
+
+        def execute_scheduled(self, claim):
+            record = executor.execute_scheduled(claim)
             return record.model_copy(
                 update={
                     "executed_checks": {
@@ -79,7 +82,7 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(native_evaluati
     result = EvaluationRunner(
         store,
         {"case_0100": "vector-add"},
-        projection.execute,
+        projection.execute_scheduled,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",

@@ -67,4 +67,6 @@ class VerificationResult(ExecutionModel):
     private_passed_count: int = 0
     not_run_count: int = 0
     suite_hash: str
+    evaluator_audit_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    evaluator_observation_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     limitations: list[str] = Field(default_factory=list)

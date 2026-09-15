@@ -287,6 +287,7 @@ def test_repeats_group_by_mode_case_template_without_inflating_unique_counts():
 
 
 def test_public_metric_entry_points_reject_unvalidated_records():
+    import gpu_agent.benchmark.metrics as metrics
     from gpu_agent.benchmark.metrics import (
         HiddenTruth,
         Rubric,
@@ -296,13 +297,14 @@ def test_public_metric_entry_points_reject_unvalidated_records():
     )
 
     record = evaluation_record()
-    with pytest.raises(ValueError, match="evaluator-validated"):
+    assert not hasattr(metrics, "_EVALUATOR_AUTHORITY")
+    with pytest.raises(ValueError, match="persisted evaluator"):
         aggregate([record])  # type: ignore[list-item]
-    with pytest.raises(ValueError, match="evaluator-validated"):
+    with pytest.raises(ValueError, match="persisted evaluator"):
         aggregate([SimpleNamespace(record=record)])  # type: ignore[list-item]
-    with pytest.raises(ValueError, match="evaluator-validated"):
+    with pytest.raises(ValueError, match="persisted evaluator"):
         aggregate_grouped([record])  # type: ignore[list-item]
-    with pytest.raises(ValueError, match="evaluator-validated"):
+    with pytest.raises(ValueError, match="persisted evaluator"):
         score(  # type: ignore[arg-type]
             record,
             HiddenTruth(
