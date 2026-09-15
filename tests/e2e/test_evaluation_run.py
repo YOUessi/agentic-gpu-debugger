@@ -1,5 +1,6 @@
-def test_evaluation_is_repeated_randomized_serial_and_cost_capped():
+def test_evaluation_is_repeated_randomized_serial_and_cost_capped(tmp_path):
     from gpu_agent.benchmark.evaluation import EvaluationRecord, EvaluationRunner
+    from gpu_agent.store import RunStore
 
     calls = []
 
@@ -22,20 +23,35 @@ def test_evaluation_is_repeated_randomized_serial_and_cost_capped():
         )
 
     runner = EvaluationRunner(
-        {"case_0001": "index", "case_0002": "race"}, execute, max_cost_usd=1.0
+        RunStore(tmp_path / "runs"),
+        {"case_0001": "index", "case_0002": "race"},
+        execute,
+        commit="c" * 40,
+        prompt_version="v2",
+        toolchain_hash="d" * 64,
+        model_config_hash="e" * 64,
+        max_cost_usd=1.0,
+        max_unit_cost_usd=0.05,
     )
     result = runner.run("all", "development", 3)
     assert len(result.records) == 30 and result.stopped_reason is None
     assert len(calls) == len(set(calls))
 
 
-def test_missing_cost_cap_stops_before_external_execution():
+def test_missing_cost_cap_stops_before_external_execution(tmp_path):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
+    from gpu_agent.store import RunStore
 
     runner = EvaluationRunner(
+        RunStore(tmp_path / "runs"),
         {"case_0001": "index"},
         lambda *args: (_ for _ in ()).throw(AssertionError()),
+        commit="c" * 40,
+        prompt_version="v2",
+        toolchain_hash="d" * 64,
+        model_config_hash="e" * 64,
         max_cost_usd=None,
+        max_unit_cost_usd=None,
     )
     result = runner.run("E", "holdout", 3)
     assert result.records == [] and result.stopped_reason == "COST_CAP_REQUIRED"
