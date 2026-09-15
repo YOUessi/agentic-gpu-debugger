@@ -1,4 +1,4 @@
-"""Serial, cost-capped evaluation records and durable batch schedules."""
+"""Serial, cost-capped evaluation records and durable public batch schedules."""
 
 import hashlib
 import json
@@ -17,9 +17,20 @@ from gpu_agent.store import RunStore
 EvaluationMode = Literal["A", "B", "C", "D", "E"]
 EvaluationSelection = EvaluationMode | Literal["all"]
 EvaluationSplit = Literal["development", "holdout"]
+StoppedReason = Literal[
+    "COST_CAP_REQUIRED",
+    "COST_UNKNOWN",
+    "COST_CAP_RESERVATION_REQUIRED",
+    "UNIT_COST_CEILING_EXCEEDED",
+    "EXECUTION_ERROR",
+    "AMBIGUOUS_STARTED_ATTEMPT",
+    "RECORD_PERSISTENCE_ERROR",
+]
 
 
-class EvaluationRecord(ExecutionModel):
+class PublicEvaluationRecord(ExecutionModel):
+    """The public projection of an evaluation result; it contains no hidden truth."""
+
     record_id: str
     case_id: str
     template_id: str
@@ -38,8 +49,6 @@ class EvaluationRecord(ExecutionModel):
     latency_ms: float = Field(ge=0)
     cost_usd: float | None = Field(default=None, ge=0)
     failure_reason: str | None = None
-    should_be_inconclusive: bool | None = None
-    score: Score | None = None
 
     def blind(self) -> dict[str, object]:
         return {
@@ -47,6 +56,18 @@ class EvaluationRecord(ExecutionModel):
             "diagnosis": self.diagnosis,
             "evidence_hash": self.evidence_hash,
         }
+
+
+class EvaluationRecord(PublicEvaluationRecord):
+    """Evaluator-private result that may carry truth-derived scoring fields."""
+
+    should_be_inconclusive: bool | None = None
+    score: Score | None = None
+
+    def public(self) -> PublicEvaluationRecord:
+        return PublicEvaluationRecord.model_validate(
+            self.model_dump(exclude={"should_be_inconclusive", "score"})
+        )
 
 
 class EvaluationBindings(ExecutionModel):
@@ -77,6 +98,17 @@ class EvaluationSchedule(ExecutionModel):
     items: list[EvaluationScheduleItem]
 
 
+class EvaluationAttempt(ExecutionModel):
+    """A durable pre-execution reservation for exactly one scheduled ordinal."""
+
+    schema_version: Literal[1] = 1
+    run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    ordinal: int = Field(ge=0)
+    schedule_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    idempotency_key: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reserved_cost_usd: float = Field(ge=0)
+
+
 class EvaluationManifest(ExecutionModel):
     schema_version: Literal[1] = 1
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
@@ -91,12 +123,15 @@ class EvaluationManifest(ExecutionModel):
     split: EvaluationSplit
     repeats: int = Field(ge=3)
     random_seed: int
-    records: list[EvaluationRecord]
-    stopped_reason: str | None = None
+    records: list[PublicEvaluationRecord]
+    stopped_reason: StoppedReason | None = None
+
+
+PersistedOrReturnedRecord = PublicEvaluationRecord | EvaluationRecord
 
 
 class EvaluationRunner:
-    """Own one immutable, resumable evaluation batch in a ``RunStore``."""
+    """Own one immutable, resumable evaluation batch in the public ``RunStore``."""
 
     def __init__(
         self,
@@ -112,6 +147,8 @@ class EvaluationRunner:
         max_unit_cost_usd: float | None,
         random_seed: int = 20260915,
     ) -> None:
+        if store.visibility != "public":
+            raise ValueError("evaluation requires a public RunStore")
         self.store = store
         self.case_ids = dict(case_ids)
         self.execute = execute
@@ -132,7 +169,7 @@ class EvaluationRunner:
         run = self.store.create_run("evaluation")
         self.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
         self._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
-        return self._execute(run.id, schedule, [])
+        return self._execute(run.id, schedule, [], {})
 
     def resume(
         self, run_id: str, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
@@ -146,7 +183,11 @@ class EvaluationRunner:
         )
         if self._schedule_hash(persisted) != self._schedule_hash(expected) or persisted != expected:
             raise ValueError("evaluation schedule or bindings do not match")
-        return self._execute(run_id, persisted, self._records(run_id, persisted))
+        records = self._records(run_id, persisted)
+        attempts = self._attempts(run_id, persisted)
+        if any(ordinal not in attempts for ordinal in range(len(records))):
+            raise ValueError("completed evaluation record has no durable attempt")
+        return self._execute(run_id, persisted, records, attempts)
 
     def _schedule(
         self, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
@@ -187,11 +228,27 @@ class EvaluationRunner:
         ).encode()
         return hashlib.sha256(content).hexdigest()
 
+    def _attempt(
+        self, run_id: str, schedule: EvaluationSchedule, item: EvaluationScheduleItem
+    ) -> EvaluationAttempt:
+        if schedule.bindings.max_unit_cost_usd is None:
+            raise ValueError("evaluation attempt requires a unit cost reservation")
+        schedule_hash = self._schedule_hash(schedule)
+        key = hashlib.sha256(f"{run_id}:{schedule_hash}:{item.ordinal}".encode()).hexdigest()
+        return EvaluationAttempt(
+            run_id=run_id,
+            ordinal=item.ordinal,
+            schedule_hash=schedule_hash,
+            idempotency_key=key,
+            reserved_cost_usd=schedule.bindings.max_unit_cost_usd,
+        )
+
     def _execute(
         self,
         run_id: str,
         schedule: EvaluationSchedule,
-        records: list[EvaluationRecord],
+        records: list[PersistedOrReturnedRecord],
+        attempts: dict[int, EvaluationAttempt],
     ) -> EvaluationManifest:
         if (
             schedule.bindings.max_cost_usd is None
@@ -200,6 +257,7 @@ class EvaluationRunner:
             return self._terminal(
                 run_id, schedule, records, "COST_CAP_REQUIRED", RunStatus.COMPLETED
             )
+
         spent = 0.0
         for record in records:
             if record.cost_usd is None:
@@ -212,6 +270,15 @@ class EvaluationRunner:
                 )
             spent += record.cost_usd
 
+        incomplete_attempts = [
+            attempt for ordinal, attempt in attempts.items() if ordinal >= len(records)
+        ]
+        if incomplete_attempts:
+            spent += sum(attempt.reserved_cost_usd for attempt in incomplete_attempts)
+            return self._terminal(
+                run_id, schedule, records, "AMBIGUOUS_STARTED_ATTEMPT", RunStatus.FAILED
+            )
+
         for item in schedule.items[len(records) :]:
             if spent + schedule.bindings.max_unit_cost_usd > schedule.bindings.max_cost_usd:
                 return self._terminal(
@@ -221,6 +288,13 @@ class EvaluationRunner:
                     "COST_CAP_RESERVATION_REQUIRED",
                     RunStatus.COMPLETED,
                 )
+            attempt = self._attempt(run_id, schedule, item)
+            self._put(
+                run_id,
+                f"evaluation/attempts/{item.ordinal}.json",
+                attempt.model_dump_json().encode(),
+            )
+            attempts[item.ordinal] = attempt
             try:
                 record = self.execute(item.case_id, item.template_id, item.mode, item.repeat)
                 self._validate_record(record, item)
@@ -228,11 +302,16 @@ class EvaluationRunner:
                 return self._terminal(
                     run_id, schedule, records, "EXECUTION_ERROR", RunStatus.FAILED
                 )
-            self._put(
-                run_id,
-                f"evaluation/records/{item.ordinal}.json",
-                record.model_dump_json().encode(),
-            )
+            try:
+                self._put(
+                    run_id,
+                    f"evaluation/records/{item.ordinal}.json",
+                    record.public().model_dump_json().encode(),
+                )
+            except Exception:
+                return self._terminal(
+                    run_id, schedule, records, "RECORD_PERSISTENCE_ERROR", RunStatus.FAILED
+                )
             records.append(record)
             if record.cost_usd is None:
                 return self._terminal(
@@ -249,8 +328,8 @@ class EvaluationRunner:
         self,
         run_id: str,
         schedule: EvaluationSchedule,
-        records: list[EvaluationRecord],
-        stopped_reason: str | None,
+        records: list[PersistedOrReturnedRecord],
+        stopped_reason: StoppedReason | None,
         status: RunStatus,
     ) -> EvaluationManifest:
         manifest = EvaluationManifest(
@@ -266,15 +345,21 @@ class EvaluationRunner:
             split=schedule.split,
             repeats=schedule.repeats,
             random_seed=schedule.random_seed,
-            records=records,
+            records=[self._public(record) for record in records],
             stopped_reason=stopped_reason,
         )
         self._put(run_id, "evaluation/manifest.json", manifest.model_dump_json().encode())
         self.store.transition(run_id, status, None)
         return manifest
 
-    def _records(self, run_id: str, schedule: EvaluationSchedule) -> list[EvaluationRecord]:
-        records: dict[int, EvaluationRecord] = {}
+    @staticmethod
+    def _public(record: PersistedOrReturnedRecord) -> PublicEvaluationRecord:
+        return record.public() if isinstance(record, EvaluationRecord) else record
+
+    def _records(
+        self, run_id: str, schedule: EvaluationSchedule
+    ) -> list[PublicEvaluationRecord]:
+        records: dict[int, PublicEvaluationRecord] = {}
         for ref in self.store.load(run_id).artifact_refs:
             if not ref.name.startswith("evaluation/records/"):
                 continue
@@ -286,15 +371,39 @@ class EvaluationRunner:
                 raise ValueError("duplicate evaluation record ordinal")
             if ordinal >= len(schedule.items):
                 raise ValueError("evaluation record ordinal is out of range")
-            record = EvaluationRecord.model_validate_json(self.store.read(ref))
+            record = PublicEvaluationRecord.model_validate_json(self.store.read(ref))
             self._validate_record(record, schedule.items[ordinal])
             records[ordinal] = record
         if set(records) != set(range(len(records))):
             raise ValueError("evaluation record ordinals have a gap")
         return [records[ordinal] for ordinal in range(len(records))]
 
+    def _attempts(
+        self, run_id: str, schedule: EvaluationSchedule
+    ) -> dict[int, EvaluationAttempt]:
+        attempts: dict[int, EvaluationAttempt] = {}
+        for ref in self.store.load(run_id).artifact_refs:
+            if not ref.name.startswith("evaluation/attempts/"):
+                continue
+            match = re.fullmatch(r"evaluation/attempts/([0-9]+)\.json", ref.name)
+            if match is None:
+                raise ValueError("invalid evaluation attempt artifact name")
+            ordinal = int(match.group(1))
+            if ref.name != f"evaluation/attempts/{ordinal}.json" or ordinal in attempts:
+                raise ValueError("duplicate evaluation attempt ordinal")
+            if ordinal >= len(schedule.items):
+                raise ValueError("evaluation attempt ordinal is out of range")
+            attempt = EvaluationAttempt.model_validate_json(self.store.read(ref))
+            expected = self._attempt(run_id, schedule, schedule.items[ordinal])
+            if attempt != expected:
+                raise ValueError("evaluation attempt does not match scheduled unit")
+            attempts[ordinal] = attempt
+        return attempts
+
     @staticmethod
-    def _validate_record(record: EvaluationRecord, item: EvaluationScheduleItem) -> None:
+    def _validate_record(
+        record: PersistedOrReturnedRecord, item: EvaluationScheduleItem
+    ) -> None:
         if (record.case_id, record.template_id, record.mode, record.repeat) != (
             item.case_id,
             item.template_id,

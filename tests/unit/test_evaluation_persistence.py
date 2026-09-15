@@ -60,7 +60,7 @@ def test_record_is_durable_before_next_unit(store):
             persisted = EvaluationRecord.model_validate_json(
                 _artifact(store, active[0].id, "evaluation/records/0.json")
             )
-            assert persisted == completed[0]
+            assert persisted.record_id == completed[0].record_id
         record = _record(case, template, mode, repeat, 1.0)
         completed.append(record)
         return record
@@ -112,7 +112,7 @@ def test_unexpected_executor_failure_preserves_completed_records(store):
     assert result.executed_units == 1
     assert EvaluationRecord.model_validate_json(
         _artifact(store, result.run_id, "evaluation/records/0.json")
-    ) == completed[0]
+    ).record_id == completed[0].record_id
     assert "evaluation/records/1.json" not in {
         ref.name for ref in store.load(result.run_id).artifact_refs
     }
@@ -141,3 +141,93 @@ def test_resume_rejects_commit_or_schedule_mismatch(store):
         _runner(store, interrupt, case_ids={"case_0002": "race"}).resume(
             schedule_run_id, "E", "development", 3
         )
+
+
+def test_started_attempt_without_record_fails_closed_without_resume_replay(store, monkeypatch):
+    runner = _runner(
+        store,
+        lambda case, template, mode, repeat: _record(case, template, mode, repeat, 1.0),
+    )
+    put = store.put
+
+    def interrupt_record(run_id, name, content, visibility):
+        if name == "evaluation/records/0.json":
+            raise KeyboardInterrupt
+        return put(run_id, name, content, visibility)
+
+    monkeypatch.setattr(store, "put", interrupt_record)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run("E", "development", 3)
+    run_id = store.recoverable_runs()[0].id
+    assert "evaluation/attempts/0.json" in {
+        ref.name for ref in store.load(run_id).artifact_refs
+    }
+
+    monkeypatch.setattr(store, "put", put)
+    result = _runner(
+        store,
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not replay")),
+    ).resume(run_id, "E", "development", 3)
+
+    assert result.stopped_reason == "AMBIGUOUS_STARTED_ATTEMPT"
+    assert result.executed_units == 0
+    assert store.load(run_id).status == RunStatus.FAILED
+
+
+def test_successful_resume_continues_after_completed_ordinal(store, monkeypatch):
+    calls = []
+
+    def execute(case, template, mode, repeat):
+        calls.append(repeat)
+        return _record(case, template, mode, repeat, 1.0)
+
+    runner = _runner(store, execute)
+    put = store.put
+
+    def interrupt_after_first_record(run_id, name, content, visibility):
+        result = put(run_id, name, content, visibility)
+        if name == "evaluation/records/0.json":
+            raise KeyboardInterrupt
+        return result
+
+    monkeypatch.setattr(store, "put", interrupt_after_first_record)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run("E", "development", 3)
+    run_id = store.recoverable_runs()[0].id
+    assert "evaluation/attempts/0.json" in {
+        ref.name for ref in store.load(run_id).artifact_refs
+    }
+
+    monkeypatch.setattr(store, "put", put)
+    result = runner.resume(run_id, "E", "development", 3)
+
+    assert calls == [2, 0, 1]
+    assert [record.repeat for record in result.records] == [2, 0, 1]
+    assert result.executed_units == 3 and result.stopped_reason is None
+    assert {
+        "evaluation/records/0.json",
+        "evaluation/records/1.json",
+        "evaluation/records/2.json",
+    } <= {ref.name for ref in store.load(run_id).artifact_refs}
+
+
+def test_record_serialization_failure_persists_failed_terminal_manifest(store):
+    def execute(case, template, mode, repeat):
+        return _record(case, template, mode, repeat, 1.0).model_copy(
+            update={"diagnosis": {"unserializable": object()}}
+        )
+
+    result = _runner(store, execute).run("E", "development", 3)
+
+    assert result.stopped_reason == "RECORD_PERSISTENCE_ERROR"
+    assert result.records == [] and result.executed_units == 0
+    persisted = json.loads(_artifact(store, result.run_id, "evaluation/manifest.json"))
+    assert persisted["stopped_reason"] == "RECORD_PERSISTENCE_ERROR"
+    assert store.load(result.run_id).status == RunStatus.FAILED
+
+
+def test_runner_rejects_non_public_store(tmp_path):
+    from gpu_agent.store import RunStore
+
+    with pytest.raises(ValueError):
+        _runner(RunStore(tmp_path / "evaluator", visibility="evaluator"), lambda *_args: None)

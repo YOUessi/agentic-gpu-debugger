@@ -35,7 +35,38 @@ def test_evaluation_is_repeated_randomized_serial_and_cost_capped(tmp_path):
     )
     result = runner.run("all", "development", 3)
     assert len(result.records) == 30 and result.stopped_reason is None
-    assert len(calls) == len(set(calls))
+    assert calls == [
+        ("case_0001", "B", 1),
+        ("case_0002", "D", 0),
+        ("case_0002", "C", 0),
+        ("case_0002", "E", 2),
+        ("case_0001", "E", 2),
+        ("case_0002", "C", 2),
+        ("case_0002", "A", 1),
+        ("case_0002", "E", 1),
+        ("case_0001", "D", 1),
+        ("case_0002", "D", 2),
+        ("case_0002", "A", 2),
+        ("case_0001", "C", 0),
+        ("case_0001", "B", 0),
+        ("case_0002", "B", 1),
+        ("case_0001", "B", 2),
+        ("case_0002", "A", 0),
+        ("case_0001", "E", 1),
+        ("case_0002", "C", 1),
+        ("case_0001", "E", 0),
+        ("case_0002", "E", 0),
+        ("case_0001", "C", 1),
+        ("case_0001", "A", 0),
+        ("case_0001", "A", 1),
+        ("case_0002", "B", 2),
+        ("case_0002", "B", 0),
+        ("case_0001", "D", 2),
+        ("case_0001", "D", 0),
+        ("case_0001", "C", 2),
+        ("case_0002", "D", 1),
+        ("case_0001", "A", 2),
+    ]
 
 
 def test_missing_cost_cap_stops_before_external_execution(tmp_path):
