@@ -349,9 +349,12 @@ class VerificationEngine:
                     json.dumps({"index": index}, separators=(",", ":")).encode(),
                     "evaluator",
                 )
-                stdin = self._private.put(
-                    run.id, "input.json", input_data.model_dump_json().encode(), "evaluator"
+                input_content = (
+                    self._store.read(input_ref)
+                    if index == 0
+                    else input_data.model_dump_json().encode()
                 )
+                stdin = self._private.put(run.id, "input.json", input_content, "evaluator")
                 handle = backend.prepare(
                     WorkspaceRequest(
                         run_id=run.id, source_manifest=manifest, trust_level="UNTRUSTED"

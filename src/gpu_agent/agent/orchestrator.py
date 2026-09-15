@@ -315,6 +315,12 @@ class AgentOrchestrator:
             raise ValueError("invalid acquisition mode")
         if run_id != self.handle.run_id:
             raise ValueError("workspace belongs to another run")
+        self.store.put_if_absent_exact(
+            run_id,
+            "agent/initial-budget.json",
+            self.budget.model_dump_json().encode(),
+            "public",
+        )
         self.store.transition(run_id, "RUNNING", CurrentPhase.DIAGNOSING)
         try:
             if mode == "B":

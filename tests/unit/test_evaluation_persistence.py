@@ -16,13 +16,7 @@ from gpu_agent.contracts import RunStatus
 def _runner(executor, execute_owner=None, **overrides) -> EvaluationRunner:
     binding = executor.service.binding
     assert binding is not None
-    if not hasattr(executor, "_test_native_execute"):
-        executor._test_native_execute = executor.execute_scheduled
-    executor.execute_scheduled = (
-        execute_owner.execute_scheduled
-        if execute_owner is not None
-        else executor._test_native_execute
-    )
+    del execute_owner
     options = {
         "store": executor.service.store,
         "case_ids": {"case_0100": "vector-add"},
@@ -48,7 +42,7 @@ def _artifact(store, run_id: str, name: str) -> bytes:
 class _Proxy:
     def __init__(self, executor):
         self.executor = executor
-        self.native_execute = getattr(executor, "_test_native_execute", executor.execute_scheduled)
+        self.native_execute = executor.execute_scheduled
         self.calls = []
 
     def execute_scheduled(self, run_id, ordinal):
@@ -60,24 +54,30 @@ class _Proxy:
         return self.executor.validate_scheduled_record(record, item, attempt)
 
 
-def test_record_is_durable_before_next_unit(native_evaluation_executor):
+def test_record_is_durable_before_next_unit(native_evaluation_executor, monkeypatch):
+    from gpu_agent.benchmark.executor import EvaluationExecutor
+
     executor = native_evaluation_executor
+    native = EvaluationExecutor.execute_scheduled
+    calls = []
 
-    class Observer(_Proxy):
-        def execute_scheduled(self, run_id, ordinal):
-            active = executor.service.store.recoverable_runs()
-            if self.calls:
-                persisted = PublicEvaluationRecord.model_validate_json(
-                    _artifact(
-                        executor.service.store,
-                        active[0].id,
-                        f"evaluation/records/{len(self.calls) - 1}.json",
-                    )
+    def observed(self, run_id, ordinal):
+        active = executor.service.store.recoverable_runs()
+        if calls:
+            persisted = PublicEvaluationRecord.model_validate_json(
+                _artifact(
+                    executor.service.store,
+                    active[0].id,
+                    f"evaluation/records/{len(calls) - 1}.json",
                 )
-                assert persisted.repeat == self.calls[-1]
-            return super().execute_scheduled(run_id, ordinal)
+            )
+            assert persisted.repeat == calls[-1]
+        record = native(self, run_id, ordinal)
+        calls.append(record.repeat)
+        return record
 
-    result = _runner(executor, Observer(executor)).run("D", "development", 3)
+    monkeypatch.setattr(EvaluationExecutor, "execute_scheduled", observed)
+    result = _runner(executor).run("D", "development", 3)
     run = executor.service.store.load(result.run_id)
     names = {ref.name for ref in run.artifact_refs}
     assert {"evaluation/schedule.json", "evaluation/manifest.json"} <= names
@@ -103,15 +103,23 @@ def test_unit_reservation_stops_before_cost_cap_can_be_exceeded(native_evaluatio
     assert result.executed_units == 0 and proxy.calls == []
 
 
-def test_unexpected_executor_failure_preserves_completed_records(native_evaluation_executor):
-    class FailsSecond(_Proxy):
-        def execute_scheduled(self, run_id, ordinal):
-            if self.calls:
-                raise RuntimeError("executor died")
-            return super().execute_scheduled(run_id, ordinal)
+def test_unexpected_executor_failure_preserves_completed_records(
+    native_evaluation_executor, monkeypatch
+):
+    from gpu_agent.benchmark.executor import EvaluationExecutor
 
     executor = native_evaluation_executor
-    result = _runner(executor, FailsSecond(executor)).run("D", "development", 3)
+    native = EvaluationExecutor.execute_scheduled
+    calls = []
+
+    def fails_second(self, run_id, ordinal):
+        if calls:
+            raise RuntimeError("executor died")
+        calls.append(ordinal)
+        return native(self, run_id, ordinal)
+
+    monkeypatch.setattr(EvaluationExecutor, "execute_scheduled", fails_second)
+    result = _runner(executor).run("D", "development", 3)
     assert result.stopped_reason == "EXECUTION_ERROR" and result.executed_units == 1
     assert "evaluation/records/1.json" not in {
         ref.name for ref in executor.service.store.load(result.run_id).artifact_refs
@@ -119,36 +127,42 @@ def test_unexpected_executor_failure_preserves_completed_records(native_evaluati
     assert executor.service.store.load(result.run_id).status == RunStatus.FAILED
 
 
-def test_resume_rejects_commit_or_schedule_mismatch(native_evaluation_executor):
-    class Interrupt(_Proxy):
-        def execute_scheduled(self, run_id, ordinal):
-            raise KeyboardInterrupt
+def test_resume_rejects_commit_or_schedule_mismatch(native_evaluation_executor, monkeypatch):
+    from gpu_agent.benchmark.executor import EvaluationExecutor
 
     executor = native_evaluation_executor
-    original = _runner(executor, Interrupt(executor))
+    monkeypatch.setattr(
+        EvaluationExecutor,
+        "execute_scheduled",
+        lambda self, run_id, ordinal: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    original = _runner(executor)
     with pytest.raises(KeyboardInterrupt):
         original.run("D", "development", 3)
     run_id = executor.service.store.recoverable_runs()[0].id
     with pytest.raises(ValueError):
-        _runner(executor, Interrupt(executor), commit="d" * 40).resume(
-            run_id, "D", "development", 3
-        )
+        _runner(executor, commit="d" * 40).resume(run_id, "D", "development", 3)
     with pytest.raises(ValueError):
         original.resume(run_id, "D", "holdout", 3)
 
 
 def test_started_attempt_without_record_fails_closed_without_resume_replay(
-    native_evaluation_executor,
+    native_evaluation_executor, monkeypatch
 ):
-    class Interrupt(_Proxy):
-        def execute_scheduled(self, run_id, ordinal):
-            raise KeyboardInterrupt
+    from gpu_agent.benchmark.executor import EvaluationExecutor
 
     executor = native_evaluation_executor
+    native = EvaluationExecutor.execute_scheduled
+    monkeypatch.setattr(
+        EvaluationExecutor,
+        "execute_scheduled",
+        lambda self, run_id, ordinal: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
     with pytest.raises(KeyboardInterrupt):
-        _runner(executor, Interrupt(executor)).run("D", "development", 3)
+        _runner(executor).run("D", "development", 3)
     run_id = executor.service.store.recoverable_runs()[0].id
-    result = _runner(executor, _Proxy(executor)).resume(run_id, "D", "development", 3)
+    monkeypatch.setattr(EvaluationExecutor, "execute_scheduled", native)
+    result = _runner(executor).resume(run_id, "D", "development", 3)
     assert result.stopped_reason == "AMBIGUOUS_STARTED_ATTEMPT"
     assert result.executed_units == 0
     assert executor.service.store.load(run_id).status == RunStatus.FAILED
@@ -160,8 +174,7 @@ def test_successful_resume_continues_after_completed_ordinal(
     from gpu_agent.benchmark.executor import EvaluationExecutor
 
     executor = native_evaluation_executor
-    proxy = _Proxy(executor)
-    runner = _runner(executor, proxy)
+    runner = _runner(executor)
     store = executor.service.store
     put = store.put
 
@@ -182,10 +195,7 @@ def test_successful_resume_continues_after_completed_ordinal(
         executor.sources,
         _corpus_family=executor._corpus_family,
     )
-    restarted_proxy = _Proxy(restarted)
-    result = _runner(restarted, restarted_proxy).resume(run_id, "D", "development", 3)
-    assert proxy.calls == [2]
-    assert restarted_proxy.calls == [0, 1]
+    result = _runner(restarted).resume(run_id, "D", "development", 3)
     assert [record.repeat for record in result.records] == [2, 0, 1]
     assert result.executed_units == 3 and result.stopped_reason is None
 
@@ -210,21 +220,21 @@ def test_record_serialization_failure_persists_failed_terminal_manifest(
 
 
 def test_native_record_cannot_be_replayed_for_another_schedule_unit(
-    native_evaluation_executor,
+    native_evaluation_executor, monkeypatch
 ):
-    class Replay(_Proxy):
-        record = None
-
-        def execute_scheduled(self, run_id, ordinal):
-            if self.record is None:
-                self.record = super().execute_scheduled(run_id, ordinal)
-            else:
-                self.calls.append(-1)
-            return self.record
+    from gpu_agent.benchmark.executor import EvaluationExecutor
 
     executor = native_evaluation_executor
-    replay = Replay(executor)
-    result = _runner(executor, replay).run("D", "development", 3)
+    native = EvaluationExecutor.execute_scheduled
+    records = []
+
+    def replay(self, run_id, ordinal):
+        if not records:
+            records.append(native(self, run_id, ordinal))
+        return records[0]
+
+    monkeypatch.setattr(EvaluationExecutor, "execute_scheduled", replay)
+    result = _runner(executor).run("D", "development", 3)
     assert result.stopped_reason == "EXECUTION_ERROR"
     assert result.executed_units == 1
 
@@ -238,6 +248,10 @@ def test_resume_recomputes_exact_attempt_set(native_evaluation_executor, fault):
     run = store.create_run("evaluation", binding=executor.service.binding)
     store.transition(run.id, RunStatus.RUNNING, "EXECUTING")
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleAuthority
+
+    authority = EvaluationScheduleAuthority.for_family(executor._corpus_family, store)
+    authority.seal(store, run.id, schedule, executor.service.binding)
     attempt = runner._attempt(run.id, schedule, schedule.items[0])
     if fault == "reservation":
         attempt = attempt.model_copy(update={"reserved_cost_usd": 1})
@@ -257,6 +271,7 @@ def test_resume_recomputes_exact_attempt_set(native_evaluation_executor, fault):
             "evaluation/schedule.json",
             schedule.model_dump_json().encode(),
         )
+        authority.seal(store, source_run.id, schedule, executor.service.binding)
         source_attempt = runner._attempt(source_run.id, schedule, schedule.items[0])
         runner._put(
             source_run.id,
@@ -314,7 +329,12 @@ def test_runner_rejects_duck_typed_executor(native_evaluation_executor):
         )
 
 
-def test_concurrent_resume_claims_one_physical_evaluation_unit(native_evaluation_executor):
+def test_concurrent_resume_claims_one_physical_evaluation_unit(
+    native_evaluation_executor, monkeypatch
+):
+    from gpu_agent.benchmark.executor import EvaluationExecutor
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleAuthority
+
     executor = native_evaluation_executor
 
     class Blocking(_Proxy):
@@ -337,13 +357,21 @@ def test_concurrent_resume_claims_one_physical_evaluation_unit(native_evaluation
             return self.native_execute(run_id, ordinal)
 
     blocking = Blocking(executor)
-    first_runner = _runner(executor, blocking)
+    monkeypatch.setattr(
+        EvaluationExecutor,
+        "execute_scheduled",
+        lambda self, run_id, ordinal: blocking.execute_scheduled(run_id, ordinal),
+    )
+    first_runner = _runner(executor)
     schedule = first_runner._schedule("D", "development", 3)
     store = executor.service.store
     run = store.create_run("evaluation", binding=executor.service.binding)
     store.transition(run.id, RunStatus.RUNNING, "EXECUTING")
     first_runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
-    second_runner = _runner(executor, blocking)
+    EvaluationScheduleAuthority.for_family(executor._corpus_family, store).seal(
+        store, run.id, schedule, executor.service.binding
+    )
+    second_runner = _runner(executor)
     with ThreadPoolExecutor(max_workers=2) as pool:
         first = pool.submit(first_runner.resume, run.id, "D", "development", 3)
         assert blocking.started.wait(1)

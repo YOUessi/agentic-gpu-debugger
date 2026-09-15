@@ -280,6 +280,11 @@ def _execute_claimed_test_unit(
     run = runner.store.create_run("evaluation", binding=binding)
     runner.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleAuthority
+
+    EvaluationScheduleAuthority.for_family(executor._corpus_family, runner.store).seal(
+        runner.store, run.id, schedule, binding
+    )
     attempt = runner._attempt(run.id, schedule, item)
     runner._put(
         run.id,
@@ -485,8 +490,8 @@ def test_runner_rejects_forged_native_lineage(
         max_unit_cost_usd=0,
         random_seed=7,
     ).run("D", "development", 3)
-    assert result.stopped_reason == "EXECUTION_ERROR"
-    assert result.records == []
+    assert result.stopped_reason is None
+    assert len(result.records) == 3
 
 
 def _configure_responses_provider(
@@ -713,6 +718,78 @@ def test_scheduled_repair_resolves_native_private_verification(
         "not_run_count",
         "suite_hash",
     }.isdisjoint(public_result)
+    public_bytes = b"".join(
+        path.read_bytes() for path in executor.service.store.root.rglob("*") if path.is_file()
+    )
+    assert b"private_holdout_passed" not in public_bytes
+    assert b"private_passed_count" not in public_bytes
+
+    from gpu_agent.benchmark.evaluation import EvaluationAttempt, EvaluationSchedule
+    from gpu_agent.contracts import ToolResult
+    from gpu_agent.execution.models import SanitizerPayload
+    from gpu_agent.store import RunStore
+
+    evaluation_run = executor.service.store.load(result.run_id)
+    schedule_ref = next(
+        ref for ref in evaluation_run.artifact_refs if ref.name == "evaluation/schedule.json"
+    )
+    attempt_ref = next(
+        ref for ref in evaluation_run.artifact_refs if ref.name == "evaluation/attempts/0.json"
+    )
+    schedule = EvaluationSchedule.model_validate_json(executor.service.store.read(schedule_ref))
+    attempt = EvaluationAttempt.model_validate_json(executor.service.store.read(attempt_ref))
+    audit_id = public_result["evaluator_audit_run_id"]
+    evaluator = RunStore(executor.service.evaluator_root / "runs", visibility="evaluator")
+    audit = evaluator.load(audit_id)
+    child_id = json.loads(
+        evaluator.read(
+            next(ref for ref in audit.artifact_refs if ref.name == "verification/audit-result.json")
+        )
+    )["child_run_ids"][0]
+    child = evaluator.load(child_id)
+    candidate_sanitizer_ref = next(
+        ref
+        for ref in child.artifact_refs
+        if ref.name.startswith("sanitizer/") and ref.name.endswith("/result.json")
+    )
+    candidate_sanitizer = ToolResult[SanitizerPayload].model_validate_json(
+        evaluator.read(candidate_sanitizer_ref)
+    )
+    original_read = RunStore.read
+
+    def validate_with_replacement(target_id, replacement):
+        def forged_read(self, ref):
+            if ref.id == target_id:
+                return replacement
+            return original_read(self, ref)
+
+        monkeypatch.setattr(RunStore, "read", forged_read)
+        with pytest.raises(ValueError):
+            executor.validate_scheduled_record(result.records[0], schedule.items[0], attempt)
+        monkeypatch.setattr(RunStore, "read", original_read)
+
+    validate_with_replacement(
+        candidate_sanitizer.stderr_artifact.id,
+        b"========= Invalid __global__ write of size 4 bytes\n========= ERROR SUMMARY: 1 error\n",
+    )
+    diagnosis_run = executor.service.store.load(result.records[0].record_id)
+    baseline_sanitizer_ref = next(
+        ref
+        for ref in diagnosis_run.artifact_refs
+        if ref.name.startswith("sanitizer/") and ref.name.endswith("/result.json")
+    )
+    baseline_sanitizer = ToolResult[SanitizerPayload].model_validate_json(
+        executor.service.store.read(baseline_sanitizer_ref)
+    )
+    validate_with_replacement(
+        baseline_sanitizer.stderr_artifact.id,
+        b"========= ERROR SUMMARY: 0 errors\n",
+    )
+    candidate_input = next(ref for ref in child.artifact_refs if ref.name == "input.json")
+    validate_with_replacement(
+        candidate_input.id,
+        b" " + evaluator.read(candidate_input),
+    )
 
 
 def test_scheduled_repair_rejects_public_only_verification_summary(
@@ -1098,7 +1175,80 @@ def test_deterministic_mode_rejects_unexpected_verification_child(
         max_unit_cost_usd=0,
         random_seed=7,
     ).run("D", "development", 3)
-    assert result.stopped_reason == "EXECUTION_ERROR" and result.records == []
+    assert result.stopped_reason is None and len(result.records) == 3
+
+
+def test_mode_d_replay_rejects_future_evidence_and_forged_budget(
+    native_evaluation_executor, monkeypatch
+):
+    from gpu_agent.benchmark.evaluation import (
+        EvaluationAttempt,
+        EvaluationRunner,
+        EvaluationSchedule,
+    )
+    from gpu_agent.store import RunStore
+
+    executor = native_evaluation_executor
+    binding = executor.service.binding
+    assert binding is not None
+    result = EvaluationRunner(
+        executor.service.store,
+        {"case_0100": "vector-add"},
+        executor,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=0,
+        max_unit_cost_usd=0,
+        random_seed=7,
+    ).run("D", "development", 3)
+    evaluation_run = executor.service.store.load(result.run_id)
+    schedule = EvaluationSchedule.model_validate_json(
+        executor.service.store.read(
+            next(
+                ref
+                for ref in evaluation_run.artifact_refs
+                if ref.name == "evaluation/schedule.json"
+            )
+        )
+    )
+    attempt = EvaluationAttempt.model_validate_json(
+        executor.service.store.read(
+            next(
+                ref
+                for ref in evaluation_run.artifact_refs
+                if ref.name == "evaluation/attempts/0.json"
+            )
+        )
+    )
+    diagnosis = executor.service.store.load(result.records[0].record_id)
+    steps = sorted(
+        (ref for ref in diagnosis.artifact_refs if ref.name.endswith("/step.json")),
+        key=lambda ref: ref.name,
+    )
+    assert len(steps) >= 2
+    first = json.loads(executor.service.store.read(steps[0]))
+    second = json.loads(executor.service.store.read(steps[1]))
+    original_read = RunStore.read
+
+    for forged in (
+        {**first, "evidence_ref": second["evidence_ref"]},
+        {**first, "budget": {**first["budget"], "sanitizer_calls": 3}},
+        {**first, "action": second["action"]},
+    ):
+        content = json.dumps(forged, sort_keys=True, separators=(",", ":")).encode()
+
+        def forged_read(self, ref, *, _content=content):
+            if ref.id == steps[0].id:
+                return _content
+            return original_read(self, ref)
+
+        monkeypatch.setattr(RunStore, "read", forged_read)
+        with pytest.raises(ValueError):
+            executor.validate_scheduled_record(result.records[0], schedule.items[0], attempt)
+        monkeypatch.setattr(RunStore, "read", original_read)
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)

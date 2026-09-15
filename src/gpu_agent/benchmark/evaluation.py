@@ -338,10 +338,16 @@ class EvaluationRunner:
     def run(
         self, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleAuthority
+
         schedule = self._schedule(mode, split, repeats)
         run = self.store.create_run("evaluation", binding=self.binding)
-        self.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
+        authority = EvaluationScheduleAuthority.for_family(self.executor._corpus_family, self.store)
+        prepared = authority.prepare(run.id, schedule, self.binding)
         self._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+        committed = authority.commit(prepared)
+        authority.persist_receipt(self.store, committed)
+        self.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
         return self._execute(run.id, schedule, [], {})
 
     def resume(
@@ -353,12 +359,17 @@ class EvaluationRunner:
     def _resume_claimed(
         self, run_id: str, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
         run = self.store.load(run_id)
         if run.kind != "evaluation" or run.status != RunStatus.RUNNING:
             raise ValueError("only a running evaluation run may be resumed")
         if run.binding != self.binding:
             raise ValueError("evaluation run binding does not match controller")
         expected = self._schedule(mode, split, repeats)
+        EvaluationScheduleVerifier.for_family(self.executor._corpus_family, self.store).verify(
+            run_id
+        )
         persisted = EvaluationSchedule.model_validate_json(
             self.store.read(self._one_artifact(run_id, "evaluation/schedule.json"))
         )
@@ -504,7 +515,9 @@ class EvaluationRunner:
             )
             attempts[item.ordinal] = attempt
             try:
-                record = self.executor.execute_scheduled(run_id, item.ordinal)
+                from gpu_agent.benchmark.executor import EvaluationExecutor
+
+                record = EvaluationExecutor.execute_scheduled(self.executor, run_id, item.ordinal)
                 self._validate_record(record, item, attempt)
             except Exception:
                 return self._terminal(
@@ -624,7 +637,9 @@ class EvaluationRunner:
             item.repeat,
         ):
             raise ValueError("evaluation record does not match scheduled unit")
-        self.executor.validate_scheduled_record(record, item, attempt)
+        from gpu_agent.benchmark.executor import EvaluationExecutor
+
+        EvaluationExecutor.validate_scheduled_record(self.executor, record, item, attempt)
 
     def _one_artifact(self, run_id: str, name: str) -> ArtifactRef:
         refs = [ref for ref in self.store.load(run_id).artifact_refs if ref.name == name]

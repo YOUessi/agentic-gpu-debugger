@@ -23,7 +23,7 @@ from gpu_agent.benchmark.evaluation import (
     PublicEvaluationRecord,
 )
 from gpu_agent.benchmark.metrics import EvaluationLabels, Score
-from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, RunStatus
+from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, RunStatus, Visibility
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.store import RunStore, reject_symlinks
 
@@ -85,6 +85,14 @@ class HoldoutController:
         ):
             raise ValueError("holdout controller requires bound split stores")
         self.public, self.evaluator, self.binding = public, evaluator, binding
+        from pathlib import Path
+
+        from gpu_agent.benchmark.ledger import CorpusFamily
+
+        family_root = os.environ.get("GPU_AGENT_CORPUS_FAMILY_ROOT")
+        if family_root is None:
+            raise ValueError("trusted corpus family configuration is required")
+        self._schedule_family = CorpusFamily.open(Path(family_root))
 
     def prepare(self, private_identities: list[tuple[str, str]]) -> HoldoutBatch:
         if not private_identities or len(set(private_identities)) != len(private_identities):
@@ -296,7 +304,7 @@ class HoldoutController:
         self, ref: ArtifactRef, batch: HoldoutBatch | None = None
     ) -> PublicEvaluationRecord:
         try:
-            record, schedule, ordinal = self._resolve_public_record(ref)
+            record, schedule, ordinal = self._resolve_public_record(ref, batch)
             if batch is not None:
                 proof = self.validate_batch(batch)
                 item = schedule.items[ordinal]
@@ -314,7 +322,7 @@ class HoldoutController:
             raise ValueError("public evaluation record is invalid") from None
 
     def _resolve_public_record(
-        self, ref: ArtifactRef
+        self, ref: ArtifactRef, batch: HoldoutBatch | None = None
     ) -> tuple[PublicEvaluationRecord, EvaluationSchedule, int]:
         if ref.visibility != "public" or not re.fullmatch(
             r"evaluation/records/[0-9]+\.json", ref.name
@@ -328,6 +336,9 @@ class HoldoutController:
             or ref not in run.artifact_refs
         ):
             raise ValueError("public evaluation record is invalid")
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        EvaluationScheduleVerifier.for_family(self._schedule_family, self.public).verify(run.id)
         ordinal = int(ref.name.split("/")[-1].removesuffix(".json"))
         schedule_refs = [r for r in run.artifact_refs if r.name == "evaluation/schedule.json"]
         manifest_refs = [r for r in run.artifact_refs if r.name == "evaluation/manifest.json"]
@@ -422,13 +433,24 @@ class HoldoutController:
         from gpu_agent.benchmark.executor import validate_evaluation_record
 
         for record_ordinal, observed_record in records.items():
+            scheduled_item = schedule.items[record_ordinal]
+            registered_case_id = scheduled_item.case_id
+            corpus_visibility: Visibility = "public"
+            if scheduled_item.split == "holdout":
+                if batch is None:
+                    raise ValueError("public evaluation record is invalid")
+                registered_case_id, _ = self.resolve_private(batch, scheduled_item.case_id)
+                corpus_visibility = "evaluator"
             validate_evaluation_record(
                 self.public,
                 observed_record,
-                schedule.items[record_ordinal],
+                scheduled_item,
                 attempts[record_ordinal],
                 self.binding,
                 self.evaluator,
+                self._schedule_family.corpus_store(corpus_visibility),
+                self._schedule_family,
+                registered_case_id,
             )
         return records[ordinal], schedule, ordinal
 

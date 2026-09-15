@@ -29,6 +29,9 @@ def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_e
         or record
     )
     executor.execute_scheduled = observed.execute_scheduled
+    executor.validate_scheduled_record = lambda *args: (_ for _ in ()).throw(
+        AssertionError("instance validator monkeypatch must not run")
+    )
     runner = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
@@ -43,7 +46,11 @@ def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_e
     )
     result = runner.run("D", "development", 3)
     assert len(result.records) == 3 and result.stopped_reason is None
-    assert observed.calls == [
+    assert observed.calls == []
+    assert "evaluation/schedule-receipt.json" in {
+        ref.name for ref in executor.service.store.load(result.run_id).artifact_refs
+    }
+    assert [(record.case_id, record.mode, record.repeat) for record in result.records] == [
         ("case_0100", "D", 1),
         ("case_0100", "D", 0),
         ("case_0100", "D", 2),

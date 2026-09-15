@@ -222,6 +222,10 @@ def native_evaluation_executor(oob_service, tmp_path, monkeypatch, request):
         repository=tmp_path / "repository",
     )
     monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
+    assert service.binding is not None
+    service._binding = service.binding.model_copy(
+        update={"corpus_ledger_namespace_hash": family.namespace_hash}
+    )
     source_root = tmp_path / "corpus-sources"
     clean_root, mutant_root = source_root / "clean", source_root / "mutant"
     clean_root.mkdir(parents=True)

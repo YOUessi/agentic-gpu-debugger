@@ -208,4 +208,4 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(
     assert "1 case × 1 mode × 3 repeats = 3 units" in result.output
     assert "Cost reservation: $0.00" in result.output
     assert "Hard maximum" not in result.output
-    assert len(calls) == 3 and {call[3] for call in calls} == {0, 1, 2}
+    assert calls == []

@@ -69,7 +69,7 @@ from gpu_agent.verification.models import (
     VerificationVerdict,
 )
 from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
-from gpu_agent.verification.policy import decide_verdict, finding_signature
+from gpu_agent.verification.policy import decide_verdict, finding_signature, plan_checks
 
 if TYPE_CHECKING:
     from gpu_agent.benchmark.holdout import HoldoutBatch, HoldoutController
@@ -207,6 +207,24 @@ def _validate_verification_audit(
     native_new_findings: list[Finding] = []
     candidate_public_findings: list[Finding] = []
     candidate_public_memcheck: SanitizerPayload | None = None
+    standard_requirements = plan_checks(
+        SanitizerTool.MEMCHECK,
+        "standard",
+        {tool: "SUPPORTED" for tool in SanitizerTool},
+    )
+    full_requirements = plan_checks(
+        SanitizerTool.MEMCHECK,
+        "strict",
+        {tool: "SUPPORTED" for tool in SanitizerTool},
+    )
+    if result.check_requirements == standard_requirements:
+        full_check_plan = False
+    elif result.check_requirements == full_requirements:
+        full_check_plan = True
+    else:
+        raise ValueError("evaluation verification check plan is not controller-derived")
+    observed_binary_hashes: list[str] = []
+    infrastructure_missing = False
     baseline_bundle = EvidenceRepository(public).public_view(diagnosis_run_id)
     baseline_memchecks = [
         item
@@ -220,7 +238,36 @@ def _validate_verification_audit(
     baseline_tool_result = baseline_memcheck.tool_result
     if baseline_tool_result is None:
         raise ValueError("evaluation verification baseline sanitizer is invalid")
-    baseline_signatures = {finding_signature(item) for item in baseline_memcheck.findings}
+    baseline_capture = ProcessCapture(
+        exit_code=baseline_tool_result.exit_code,
+        stdout=public.read(baseline_tool_result.stdout_artifact),
+        stderr=public.read(baseline_tool_result.stderr_artifact),
+        timed_out=baseline_tool_result.timed_out,
+        elapsed_ms=baseline_tool_result.elapsed_ms,
+        started_at=baseline_tool_result.started_at,
+        finished_at=baseline_tool_result.finished_at,
+        truncated=baseline_tool_result.truncated,
+        cancelled=baseline_tool_result.cancelled,
+        tool_error=baseline_tool_result.tool_error,
+    )
+    baseline_reparsed = parse_sanitizer(SanitizerTool.MEMCHECK, baseline_capture)
+    baseline_payload = baseline_tool_result.typed_payload
+    if (
+        baseline_reparsed.status != baseline_payload.status
+        or baseline_reparsed.completed != baseline_payload.completed
+        or baseline_reparsed.parser_version != baseline_payload.parser_version
+        or baseline_reparsed.check_outcome != baseline_payload.check_outcome
+        or [item.model_copy(update={"raw_ref": None}) for item in baseline_payload.findings]
+        != baseline_reparsed.findings
+        or baseline_memcheck.findings != baseline_payload.findings
+        or any(
+            item.raw_ref != baseline_tool_result.stderr_artifact
+            for item in baseline_payload.findings
+        )
+        or baseline_payload.program_output_ref != baseline_tool_result.stdout_artifact
+    ):
+        raise ValueError("evaluation verification baseline sanitizer is not reproducible")
+    baseline_signatures = {finding_signature(item) for item in baseline_reparsed.findings}
     oracle = NumericOracle(trusted_case["atol"], trusted_case["rtol"], False, False)
     for index, child in sorted(children.items()):
         input_ref = _one_ref(child, "input.json")
@@ -337,6 +384,62 @@ def _validate_verification_audit(
         binary_ref = build_model.typed_payload.binary_ref
         if binary_ref is not None:
             evaluator.read(binary_ref)
+            observed_binary_hashes.append(binary_ref.sha256)
+        build_succeeded = bool(
+            build_model.exit_code == 0
+            and binary_ref is not None
+            and not (
+                build_model.tool_error
+                or build_model.timed_out
+                or build_model.cancelled
+                or build_model.truncated
+            )
+        )
+        child_infrastructure_missing = bool(
+            build_model.tool_error
+            or build_model.timed_out
+            or build_model.cancelled
+            or build_model.truncated
+            or (
+                run_model is not None
+                and (
+                    run_model.tool_error
+                    or run_model.timed_out
+                    or run_model.cancelled
+                    or run_model.truncated
+                )
+            )
+            or any(
+                checked.tool_error
+                or checked.timed_out
+                or checked.cancelled
+                or checked.truncated
+                or not checked.typed_payload.completed
+                for checked in sanitizer_models
+            )
+        )
+        infrastructure_missing |= child_infrastructure_missing
+        sanitizer_tools = [checked.typed_payload.tool for checked in sanitizer_models]
+        expected_sanitizer_tools = [SanitizerTool.MEMCHECK.value]
+        if (
+            full_check_plan
+            and sanitizer_models
+            and sanitizer_models[0].typed_payload.tool == SanitizerTool.MEMCHECK
+            and sanitizer_models[0].typed_payload.completed
+            and sanitizer_models[0].typed_payload.check_outcome == "CLEAN"
+        ):
+            expected_sanitizer_tools.extend(
+                [
+                    SanitizerTool.RACECHECK.value,
+                    SanitizerTool.INITCHECK.value,
+                    SanitizerTool.SYNCCHECK.value,
+                ]
+            )
+        if build_succeeded:
+            if run_model is None or sanitizer_tools != expected_sanitizer_tools:
+                raise ValueError("evaluation verification required tool multiplicity is invalid")
+        elif run_model is not None or sanitizer_models:
+            raise ValueError("evaluation verification ran tools after a failed build")
         if (
             provenance.get("candidate_hash") != result.candidate_hash
             or provenance.get("source_manifest") != build_model.typed_payload.source_manifest
@@ -443,10 +546,11 @@ def _validate_verification_audit(
     if derived_private_oracle != audit_result.observation.private_holdout_passed:
         raise ValueError("private oracle projection differs from native audit")
     baseline_input = baseline_tool_result.typed_payload.stdin_ref
+    candidate_input_ref = _one_ref(children[0], "input.json")
     same_public_input = bool(
         baseline_input is not None
-        and json.loads(public.read(baseline_input))
-        == json.loads(evaluator.read(_one_ref(children[0], "input.json")))
+        and baseline_input.sha256 == candidate_input_ref.sha256
+        and public.read(baseline_input) == evaluator.read(candidate_input_ref)
     )
     candidate_signatures = {finding_signature(item) for item in candidate_public_findings}
     derived_original: bool | None = None
@@ -464,15 +568,51 @@ def _validate_verification_audit(
         or native_new_findings != audit_result.observation.new_blocking_findings
     ):
         raise ValueError("verification findings differ from native sanitizer results")
-    claimed = result.required_checks
+    derived_checks: dict[str, str] = {
+        "build": "CLEAN" if build_clean and all(build_clean) else "FAILED",
+        "runtime": "CLEAN" if runtime_clean and all(runtime_clean) else "FAILED",
+        "public_oracle": (
+            "CLEAN" if public_oracle is True else "FAILED" if public_oracle is False else "NOT_RUN"
+        ),
+        "private_oracle": (
+            "CLEAN"
+            if len(private_oracles) == len(holdouts) and all(private_oracles)
+            else "FAILED"
+            if private_oracles and not all(private_oracles)
+            else "INCOMPLETE"
+            if private_oracles
+            else "NOT_RUN"
+        ),
+    }
+    for tool in ("memcheck", "racecheck", "initcheck", "synccheck"):
+        values = sanitizer_clean.get(tool, [])
+        if values:
+            derived_checks[tool] = "CLEAN" if all(values) else "FINDING"
+        elif tool == "memcheck" or full_check_plan:
+            derived_checks[tool] = "NOT_RUN"
+    derived_outcomes = {
+        requirement.tool: derived_checks.get(requirement.tool.value, "NOT_RUN")
+        for requirement in result.check_requirements
+    }
+    derived_observation = audit_result.observation.model_copy(
+        update={
+            "build_ok": all(build_clean) if build_clean else False,
+            "runtime_ok": all(runtime_clean) if runtime_clean else None,
+            "original_finding_present": derived_original,
+            "public_oracle_passed": public_oracle,
+            "private_holdout_passed": derived_private_oracle,
+            "required_evidence_missing": infrastructure_missing,
+            "new_blocking_findings": native_new_findings,
+            "check_requirements": result.check_requirements,
+            "check_outcomes": derived_outcomes,
+        }
+    )
     if (
-        (claimed.get("build") == "CLEAN" and (not build_clean or not all(build_clean)))
-        or (claimed.get("runtime") == "CLEAN" and (not runtime_clean or not all(runtime_clean)))
-        or any(
-            claimed.get(tool) == "CLEAN"
-            and (not sanitizer_clean.get(tool) or not all(sanitizer_clean[tool]))
-            for tool in ("memcheck", "racecheck", "initcheck", "synccheck")
-        )
+        result.required_checks != derived_checks
+        or result.check_outcomes != derived_outcomes
+        or audit_result.observation != derived_observation
+        or result.binary_hashes != sorted(set(observed_binary_hashes))
+        or decide_verdict(derived_observation) != result.verdict
     ):
         raise ValueError("verification checks differ from native tool results")
     if (
@@ -490,6 +630,9 @@ def validate_evaluation_record(
     attempt: EvaluationAttempt,
     binding: RunBinding,
     evaluator: RunStore | None = None,
+    corpus: RunStore | None = None,
+    corpus_family: "CorpusFamily | None" = None,
+    registered_case_id: str | None = None,
 ) -> None:
     """Resolve one public record back to immutable native execution artifacts."""
     public = record.public() if isinstance(record, EvaluationRecord) else record
@@ -678,7 +821,16 @@ def validate_evaluation_record(
         or bool(observed_retrievals) != bool(acquisition.retrieval_calls)
     ):
         raise ValueError("fixed controller evidence differs from scheduled mode")
-    required_tools = [SanitizerTool.MEMCHECK.value, *acquisition_policy["required_tools"]]
+    if corpus is None or corpus_family is None:
+        raise ValueError("native corpus authority is required for evaluation validation")
+    trusted_case = registered_cases(corpus, binding, corpus_family).get(
+        registered_case_id or item.case_id
+    )
+    if trusted_case is None:
+        raise ValueError("scheduled case is absent from the trusted corpus")
+    if acquisition_policy["required_tools"] != [trusted_case.target_tool]:
+        raise ValueError("acquisition policy differs from the trusted case manifest")
+    required_tools = [SanitizerTool.MEMCHECK.value, trusted_case.target_tool]
     expected_c_tools = list(dict.fromkeys(required_tools))
     observed_tools = [
         result.tool_result.typed_payload.tool
@@ -712,6 +864,12 @@ def validate_evaluation_record(
     ):
         raise ValueError("rule controller evidence differs from route decisions")
     if item.mode == "D":
+        initial_budget = AgentBudget.model_validate_json(
+            store.read(_one_ref(run, "agent/initial-budget.json"))
+        )
+        budget_audit = json.loads(store.read(_one_ref(run, "agent/budget-audit.json")))
+        if not isinstance(budget_audit, list):
+            raise ValueError("rule controller budget audit is invalid")
         step_refs = sorted(
             (
                 ref
@@ -723,7 +881,14 @@ def validate_evaluation_record(
         if len(step_refs) != len(decision_refs):
             raise ValueError("rule controller action steps are incomplete")
         seen: set[str] = set()
-        previous_budget: AgentBudget | None = None
+        expected_budget = initial_budget
+        expected_audit: list[dict[str, object]] = []
+        expected_evidence_index: int | None = None
+        evidence_by_id = {ref.id: index for index, ref in enumerate(evidence_refs)}
+        acquisition_actions = sanitizer_actions | {
+            "retrieve_official_docs",
+            "inspect_source",
+        }
         for index, (step_ref, decision_ref) in enumerate(
             zip(step_refs, decision_refs, strict=True)
         ):
@@ -750,22 +915,32 @@ def validate_evaluation_record(
             evidence = PublicEvidence.model_validate(step["evidence"])
             step_budget = AgentBudget.model_validate(step["budget"])
             evidence_ref = ArtifactRef.model_validate(step["evidence_ref"])
-            if evidence_ref not in evidence_refs:
+            evidence_index = evidence_by_id.get(evidence_ref.id)
+            if evidence_ref not in evidence_refs or evidence_index is None:
                 raise ValueError("rule controller evidence reference is invalid")
+            if expected_evidence_index is None:
+                expected_evidence_index = evidence_index
+            if evidence_index != expected_evidence_index:
+                raise ValueError("rule controller evidence snapshot is out of sequence")
             observed_bundle = EvidenceBundle.model_validate_json(store.read(evidence_ref))
             if evidence != public_evidence_from_bundle(store, observed_bundle):
                 raise ValueError("rule controller evidence snapshot is invalid")
             if step["seen"] != sorted(seen):
                 raise ValueError("rule controller seen state is invalid")
-            proposed = RuleRouter().next_action(evidence, step_budget)
+            expected_step_budget = expected_budget.model_copy(
+                update={"remaining_seconds": step_budget.remaining_seconds}
+            )
+            if (
+                step_budget != expected_step_budget
+                or step_budget.remaining_seconds > expected_budget.remaining_seconds
+                or step_budget.llm_calls != 0
+            ):
+                raise ValueError("rule controller budget state is invalid")
+            proposed = RuleRouter().next_action(evidence, expected_step_budget)
             if (
                 proposed.action_type != action.action_type
                 or proposed.typed_arguments != action.typed_arguments
                 or proposed.rationale != action.rationale
-                or (
-                    previous_budget is not None
-                    and step_budget.agent_steps != previous_budget.agent_steps + 1
-                )
             ):
                 raise ValueError("rule controller action differs from deterministic routing")
             expected_decision = decide_action(
@@ -778,7 +953,39 @@ def validate_evaluation_record(
             if PolicyDecision.model_validate_json(store.read(decision_ref)) != expected_decision:
                 raise ValueError("rule controller policy decision is invalid")
             seen.add(action.action_type + action.typed_arguments.model_dump_json())
-            previous_budget = step_budget
+            updates: dict[str, object] = {
+                "agent_steps": expected_step_budget.agent_steps + 1,
+                "remaining_seconds": step_budget.remaining_seconds,
+            }
+            if action.action_type in acquisition_actions:
+                reservation_id = len(expected_audit) // 3 + 1
+                expected_audit.extend(
+                    [
+                        {"id": reservation_id, "action": action.action_type, "state": "ATTEMPTED"},
+                        {"id": reservation_id, "action": action.action_type, "state": "STARTED"},
+                        {"id": reservation_id, "action": action.action_type, "state": "COMPLETED"},
+                    ]
+                )
+                if action.action_type in sanitizer_actions:
+                    updates["sanitizer_calls"] = expected_step_budget.sanitizer_calls + 1
+                elif action.action_type == "retrieve_official_docs":
+                    updates["rag_calls"] = expected_step_budget.rag_calls + 1
+                elif action.action_type == "inspect_source":
+                    updates["source_reads"] = expected_step_budget.source_reads + 1
+                expected_evidence_index += 1
+            expected_budget = expected_step_budget.model_copy(update=updates)
+        final_budget = budget
+        expected_final = expected_budget.model_copy(
+            update={"remaining_seconds": final_budget.remaining_seconds}
+        )
+        if (
+            final_budget != expected_final
+            or final_budget.remaining_seconds > expected_budget.remaining_seconds
+            or budget_audit != expected_audit
+            or expected_evidence_index is None
+            or expected_evidence_index != len(evidence_refs) - 1
+        ):
+            raise ValueError("rule controller final budget or audit is invalid")
     if item.mode in {"A", "B", "C", "D"}:
         if (
             trace != expected_trace
@@ -1211,6 +1418,13 @@ class EvaluationExecutor:
     ) -> None:
         if self.service.binding is None:
             raise ValueError("evaluation service is unbound")
+        registered_case_id = item.case_id
+        if item.split == "holdout":
+            if self.holdout_controller is None or self.holdout_batch is None:
+                raise ValueError("private evaluation requires validated holdout authority")
+            registered_case_id, _ = self.holdout_controller.resolve_private(
+                self.holdout_batch, item.case_id
+            )
         validate_evaluation_record(
             self.service.store,
             record,
@@ -1218,6 +1432,9 @@ class EvaluationExecutor:
             attempt,
             self.service.binding,
             RunStore(self.service.evaluator_root / "runs", visibility="evaluator"),
+            self.corpus,
+            self._corpus_family,
+            registered_case_id,
         )
 
     @contextmanager
@@ -1239,6 +1456,8 @@ class EvaluationExecutor:
 
     @_serialized_locator
     def _execute(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
         parent = self.service.store.load(evaluation_run_id)
         if (
             parent.kind != "evaluation"
@@ -1247,6 +1466,9 @@ class EvaluationExecutor:
             or parent.binding != self.service.binding
         ):
             raise ValueError("evaluation run is not active and bound")
+        EvaluationScheduleVerifier.for_family(self._corpus_family, self.service.store).verify(
+            evaluation_run_id
+        )
         schedule_ref = self._ref(parent, "evaluation/schedule.json")
         schedule = EvaluationSchedule.model_validate_json(self.service.store.read(schedule_ref))
         if ordinal >= len(schedule.items) or schedule.bindings.max_unit_cost_usd is None:

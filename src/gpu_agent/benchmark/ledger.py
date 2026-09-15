@@ -170,6 +170,17 @@ class CorpusFamily:
         if store.root != expected:
             raise ValueError("store does not belong to the configured corpus family")
 
+    def corpus_store(self, visibility: Visibility) -> RunStore:
+        """Open one store fixed by the controller-private family configuration."""
+        path = (
+            Path(self._config.public_store)
+            if visibility == "public"
+            else Path(self._config.evaluator_store)
+        )
+        store = RunStore(path, visibility=visibility)
+        self.require_store(store)
+        return store
+
     def reject_repository_overlap(self, repository: Path) -> None:
         repo = repository.absolute()
         if _is_within(self.root, repo) or _is_within(repo, self.root):
