@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "operators": [
+    {"mutation_id": "delete-index-guard", "template_id": "vector-add-index"},
+    {"mutation_id": "remove-global-initialization", "template_id": "vector-add-init"},
+    {"mutation_id": "remove-shared-barrier", "template_id": "vector-add-shared"},
+    {"mutation_id": "expand-syncwarp-participants", "template_id": "vector-add-sync"}
+  ]
+}
