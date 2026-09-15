@@ -7,6 +7,7 @@ from types import MappingProxyType
 
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, model_validator
 
+from gpu_agent.benchmark.ledger import CorpusFamily
 from gpu_agent.benchmark.models import (
     AuthoritativeCaseRegistry,
     AuthoritativeCaseSpec,
@@ -131,7 +132,9 @@ class CaseValidationController:
         after = capture_repository_snapshot(repository, expected_commit=binding.repository.commit)
         if after != before:
             raise ValueError("repository changed while loading case registry")
-        self._configure(store, backend, binding, registry_bytes)
+        family = CorpusFamily.configured(store)
+        family.reject_repository_overlap(repository)
+        self._configure(store, backend, binding, registry_bytes, family)
 
     def _configure(
         self,
@@ -139,18 +142,21 @@ class CaseValidationController:
         backend: ExecutionBackend,
         binding: RunBinding,
         registry_bytes: bytes,
+        family: CorpusFamily,
     ) -> None:
         registry_hash = hashlib.sha256(registry_bytes).hexdigest()
         if (
             binding.purpose != "corpus_validation"
             or binding.toolchain_lock_hash is None
             or binding.case_registry_hash != registry_hash
+            or binding.corpus_ledger_namespace_hash != family.namespace_hash
         ):
             raise ValueError("corpus controller requires a complete validation binding")
         registry = AuthoritativeCaseRegistry.model_validate_json(registry_bytes)
         if len({case.case_id for case in registry.cases}) != len(registry.cases):
             raise ValueError("authoritative case registry has duplicate identities")
-        self.store, self.backend, self.binding = store, backend, binding
+        family.require_store(store)
+        self.store, self.backend, self.binding, self.family = store, backend, binding, family
         self.registry_hash = registry_hash
         self.specs = MappingProxyType({case.case_id: case for case in registry.cases})
 
@@ -164,7 +170,9 @@ class CaseValidationController:
     ) -> "CaseValidationController":
         """Private dependency-injection seam; production callers supply a repository path."""
         controller = cls.__new__(cls)
-        controller._configure(store, backend, binding, registry_bytes)
+        controller._configure(
+            store, backend, binding, registry_bytes, CorpusFamily.configured(store)
+        )
         return controller
 
     @staticmethod
@@ -312,15 +320,14 @@ class CaseValidationController:
             _put_model(
                 self.store, run.id, "validation/case-execution-observation.json", observation
             )
-            cleaned = self.backend.cleanup(handle)
+            try:
+                cleaned = self.backend.cleanup(handle)
+            except BaseException as cleanup_error:
+                self._record_cleanup_error(run.id, cleanup_error)
+                raise
             handle = None
             if not cleaned.removed:
-                self.store.put(
-                    run.id,
-                    "validation/cleanup-error.json",
-                    b'{"reason_code":"WORKSPACE_CLEANUP_FAILED"}',
-                    self.store.visibility,
-                )
+                self._record_cleanup_error(run.id, cleaned)
                 raise CaseExecutionAttestationUnavailable("validation workspace cleanup failed")
             self.store.transition(run.id, "RUNNING", "FINALIZING")
             self.store.transition(run.id, "COMPLETED", None)
@@ -331,22 +338,28 @@ class CaseValidationController:
                     self.backend.cleanup(handle)
                 except BaseException as cleanup_error:
                     try:
-                        self.store.put(
-                            run.id,
-                            "validation/cleanup-error.json",
-                            json.dumps(
-                                {
-                                    "reason_code": "WORKSPACE_CLEANUP_FAILED",
-                                    "error_type": type(cleanup_error).__name__,
-                                },
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            ).encode(),
-                            self.store.visibility,
-                        )
+                        self._record_cleanup_error(run.id, cleanup_error)
                     except BaseException:
                         pass
             current = self.store.load(run.id)
             if current.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
                 self.store.transition(run.id, "FAILED", None)
             raise primary_error
+
+    def _record_cleanup_error(self, run_id: str, error: object) -> None:
+        run = self.store.load(run_id)
+        if any(ref.name == "validation/cleanup-error.json" for ref in run.artifact_refs):
+            return
+        self.store.put(
+            run_id,
+            "validation/cleanup-error.json",
+            json.dumps(
+                {
+                    "reason_code": "WORKSPACE_CLEANUP_FAILED",
+                    "error_type": type(error).__name__,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            self.store.visibility,
+        )

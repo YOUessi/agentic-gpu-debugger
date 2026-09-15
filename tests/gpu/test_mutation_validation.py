@@ -18,8 +18,11 @@ pytestmark = [pytest.mark.gpu, pytest.mark.container]
         (4, "synccheck", 32, 1, "Barrier error detected. Invalid arguments."),
     ],
 )
-def test_live_mutation_registration(tmp_path, number, tool, n, repetitions, expected_finding):
+def test_live_mutation_registration(
+    tmp_path, monkeypatch, number, tool, n, repetitions, expected_finding
+):
     from gpu_agent.benchmark.builder import BenchmarkBuilder
+    from gpu_agent.benchmark.ledger import CorpusFamily
     from gpu_agent.benchmark.models import AuthoritativeCaseRegistry, CaseExecutionPlan
     from gpu_agent.benchmark.validation import CaseValidationController
     from gpu_agent.contracts import RunBinding
@@ -31,6 +34,13 @@ def test_live_mutation_registration(tmp_path, number, tool, n, repetitions, expe
     root = Path(__file__).resolve().parents[2]
     public = root / "benchmarks"
     store = RunStore(tmp_path / "runs")
+    family = CorpusFamily.provision(
+        tmp_path / "controller",
+        public_store=store.root,
+        evaluator_store=tmp_path / "evaluator",
+        repository=root,
+    )
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
     backend = IsolatedGPUBackend(store, public, tmp_path / "tasks")
     if not backend.availability().ready:
         pytest.skip(backend.availability().reason)
@@ -48,6 +58,7 @@ def test_live_mutation_registration(tmp_path, number, tool, n, repetitions, expe
         prompt_version=None,
         model_config_hash=None,
         case_registry_hash=registry_hash,
+        corpus_ledger_namespace_hash=family.namespace_hash,
     )
     controller = CaseValidationController(store, backend, binding, root)
     input_bytes = json.dumps({"n": n, "a": [1.0] * n, "b": [2.0] * n}).encode()
@@ -78,6 +89,6 @@ def test_live_mutation_registration(tmp_path, number, tool, n, repetitions, expe
         )
 
     clean_run, mutant_run = execute("clean"), execute("mutant")
-    builder = BenchmarkBuilder(store, ledger_root=tmp_path / "ledger")
+    builder = BenchmarkBuilder(store)
     manifest = builder.register(builder.validate(clean_run, mutant_run))
     assert manifest.validation_run_ids == [clean_run, mutant_run]

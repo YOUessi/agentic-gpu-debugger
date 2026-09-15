@@ -28,14 +28,11 @@ def benchmark_validate(
     clean_execution: str,
     mutant_execution: str,
     corpus_root: Annotated[Path, typer.Option("--corpus-root")],
-    ledger_root: Annotated[Path, typer.Option("--ledger-root")],
     visibility: Annotated[Literal["public", "evaluator"], typer.Option("--visibility")],
 ) -> None:
     """Register two exact native clean/mutant execution run IDs."""
     try:
-        builder = BenchmarkBuilder(
-            RunStore(corpus_root, visibility=visibility), ledger_root=ledger_root
-        )
+        builder = BenchmarkBuilder(RunStore(corpus_root, visibility=visibility))
         manifest = builder.register(builder.validate(clean_execution, mutant_execution))
     except (OSError, ValueError, CaseExecutionAttestationUnavailable, UnvalidatedCaseError):
         raise typer.BadParameter(

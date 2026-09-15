@@ -33,10 +33,19 @@ def test_benchmark_help_exposes_controller_commands():
 
 @pytest.mark.parametrize("visibility", ["public", "evaluator"])
 def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch, visibility):
+    from gpu_agent.benchmark.ledger import CorpusFamily
     from gpu_agent.cli import app
 
     forged = tmp_path / "PRIVATE_SECRET.json"
     forged.write_text('{"oracle_passed":true,"run_ids":["forged"]}')
+    corpus_root = tmp_path / "corpus"
+    family = CorpusFamily.provision(
+        tmp_path / "controller",
+        public_store=corpus_root if visibility == "public" else tmp_path / "public",
+        evaluator_store=corpus_root if visibility == "evaluator" else tmp_path / "evaluator",
+        repository=tmp_path / "repository",
+    )
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
     result = CliRunner().invoke(
         app,
         [
@@ -45,9 +54,7 @@ def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch, vi
             str(forged),
             str(forged),
             "--corpus-root",
-            str(tmp_path / "corpus"),
-            "--ledger-root",
-            str(tmp_path / "ledger"),
+            str(corpus_root),
             "--visibility",
             visibility,
         ],
@@ -55,7 +62,9 @@ def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch, vi
     assert result.exit_code == 2 and "CASE_EXECUTION_ATTESTATION_UNAVAILABLE" in result.output
     assert "PRIVATE_SECRET" not in result.output
     corpus = tmp_path / "corpus"
-    assert corpus.is_dir() and not list(corpus.iterdir())
+    assert corpus.is_dir()
+    assert not [path for path in corpus.iterdir() if len(path.name) == 32]
+    assert b"PRIVATE" not in (corpus / ".corpus-family.json").read_bytes()
 
 
 @pytest.mark.parametrize("cap", ["0", "10"])

@@ -1,6 +1,21 @@
 import pytest
 
 
+def _configure_corpus_family(tmp_path, monkeypatch):
+    from gpu_agent.benchmark.ledger import CorpusFamily
+
+    family = CorpusFamily.provision(
+        tmp_path.parent / f"{tmp_path.name}-controller",
+        public_store=tmp_path / "runs",
+        evaluator_store=tmp_path / "evaluator",
+        repository=tmp_path,
+    )
+    monkeypatch.setenv("GPU_AGENT_RUN_ROOT", str(tmp_path / "runs"))
+    monkeypatch.setenv("GPU_AGENT_EVALUATOR_ROOT", str(tmp_path / "evaluator"))
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
+    return family
+
+
 def _binding():
     from gpu_agent.contracts import RepositorySnapshot, RunBinding
 
@@ -80,6 +95,7 @@ def test_release_service_rejects_repository_change_while_loading_lock(tmp_path, 
         "gpu_agent.service.load_toolchain_lock", lambda _path: load_toolchain_lock(LOCK_PATH)
     )
     monkeypatch.setattr("gpu_agent.service.read_regular", lambda *_args: b"registry")
+    _configure_corpus_family(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="changed"):
         ApplicationService.for_release(tmp_path, purpose="corpus_validation")
 
@@ -103,9 +119,11 @@ def test_corpus_release_binding_includes_bounded_registry_hash(tmp_path, monkeyp
         "gpu_agent.service.load_toolchain_lock", lambda _path: load_toolchain_lock(LOCK_PATH)
     )
     monkeypatch.setattr("gpu_agent.service.read_regular", lambda *_args: registry)
+    family = _configure_corpus_family(tmp_path, monkeypatch)
     service = ApplicationService.for_release(tmp_path, purpose="corpus_validation")
     assert service.binding is not None
     assert service.binding.case_registry_hash == hashlib.sha256(registry).hexdigest()
+    assert service.binding.corpus_ledger_namespace_hash == family.namespace_hash
 
 
 def test_diagnosis_and_registered_children_inherit_service_binding(oob_service):

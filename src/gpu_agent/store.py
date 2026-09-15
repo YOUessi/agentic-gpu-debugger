@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import os
 import re
+import shutil
 import stat
 import tempfile
 from collections.abc import Iterator
@@ -104,6 +105,28 @@ class RunStore:
         finally:
             Path(temporary).unlink(missing_ok=True)
 
+    def _create_atomic_run(self, manifest: RunManifest) -> None:
+        """Publish a complete controller-selected run directory in one rename."""
+        target = self._run_dir(manifest.id)
+        temporary = Path(tempfile.mkdtemp(prefix=".run-", dir=self.root))
+        try:
+            (temporary / "artifacts").mkdir(mode=0o700)
+            fd, manifest_temporary = tempfile.mkstemp(prefix=".manifest-", dir=temporary)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(manifest.model_dump_json(indent=2).encode())
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(manifest_temporary, temporary / "manifest.json")
+            finally:
+                Path(manifest_temporary).unlink(missing_ok=True)
+            sync_directory(temporary)
+            os.rename(temporary, target)
+            sync_directory(self.root)
+        finally:
+            if temporary.exists():
+                shutil.rmtree(temporary)
+
     def create_run(
         self,
         kind: str,
@@ -111,6 +134,7 @@ class RunStore:
         *,
         binding: RunBinding | None = None,
         external_origin: ExternalRunOrigin | None = None,
+        _run_id: str | None = None,
     ) -> RunManifest:
         if external_origin is not None and external_origin.visibility == self.visibility:
             raise ValueError("external origin visibility must name a different store")
@@ -128,10 +152,9 @@ class RunStore:
                 if external_origin is not None and external_origin != parent.external_origin:
                     raise ValueError("child external origin differs from parent")
                 external_origin = parent.external_origin
-        run_id = new_id()
-        directory = self._run_dir(run_id)
-        directory.mkdir(mode=0o700)
-        (directory / "artifacts").mkdir(mode=0o700)
+        run_id = _run_id or new_id()
+        if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+            raise ValueError("invalid controller run ID")
         run = RunManifest(
             id=run_id,
             kind=kind,
@@ -140,8 +163,14 @@ class RunStore:
             external_origin=external_origin,
             events=[StateEvent(status=RunStatus.QUEUED, phase=None)],
         )
-        self._save(run)
-        sync_directory(self.root)
+        if _run_id is not None:
+            self._create_atomic_run(run)
+        else:
+            directory = self._run_dir(run_id)
+            directory.mkdir(mode=0o700)
+            (directory / "artifacts").mkdir(mode=0o700)
+            self._save(run)
+            sync_directory(self.root)
         return run
 
     def load(self, run_id: str) -> RunManifest:

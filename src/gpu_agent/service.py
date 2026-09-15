@@ -20,6 +20,7 @@ from gpu_agent.agent.provider import (
     ProviderError,
 )
 from gpu_agent.benchmark.evaluation import EvaluationMode
+from gpu_agent.benchmark.ledger import CorpusFamily
 from gpu_agent.contracts import RunBinding, RunManifest
 from gpu_agent.environment import load_toolchain_lock
 from gpu_agent.evidence.models import EvidenceBundle
@@ -108,6 +109,15 @@ class ApplicationService:
             if purpose == "corpus_validation"
             else None
         )
+        family = (
+            CorpusFamily.open(Path(os.environ["GPU_AGENT_CORPUS_FAMILY_ROOT"]))
+            if purpose == "corpus_validation" and "GPU_AGENT_CORPUS_FAMILY_ROOT" in os.environ
+            else None
+        )
+        if purpose == "corpus_validation" and family is None:
+            raise ValueError("trusted corpus family configuration is required")
+        if family is not None:
+            family.reject_repository_overlap(repository)
         confirmed = capture_repository_snapshot(repository, expected_commit=snapshot.commit)
         if confirmed != snapshot:
             raise ValueError("repository changed while release configuration was captured")
@@ -118,8 +128,11 @@ class ApplicationService:
             prompt_version=prompt_version,
             model_config_hash=model_config_hash,
             case_registry_hash=registry_hash,
+            corpus_ledger_namespace_hash=(family.namespace_hash if family else None),
         )
         ordinary = cls.configured()
+        if family is not None:
+            family.require_store(ordinary.store)
         return cls(
             ordinary.store,
             ordinary.evaluator_root,

@@ -2,10 +2,10 @@
 
 import hashlib
 import json
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any
 
-from gpu_agent.benchmark.ledger import CorpusLedger
+from gpu_agent.benchmark.ledger import CorpusFamily, CorpusTransaction
 from gpu_agent.benchmark.models import (
     AuthoritativeCaseSpec,
     CaseExecutionObservation,
@@ -20,7 +20,7 @@ from gpu_agent.benchmark.validation import (
     derive_oracle,
     source_identities,
 )
-from gpu_agent.contracts import ArtifactRef, RunManifest, RunStatus, ToolResult
+from gpu_agent.contracts import ArtifactRef, RunBinding, RunManifest, RunStatus, ToolResult
 from gpu_agent.environment import RuntimeToolchainAttestation
 from gpu_agent.evidence.sanitizer import parse_sanitizer
 from gpu_agent.execution.models import BuildResult, ExecutionResult, SanitizerResult
@@ -77,9 +77,9 @@ def _runtime_status(result: ToolResult[Any]) -> str:
 
 
 class BenchmarkBuilder:
-    def __init__(self, store: RunStore, *, ledger_root: Path | None = None) -> None:
+    def __init__(self, store: RunStore) -> None:
         self.store = store
-        self.ledger_root = ledger_root
+        self.family = CorpusFamily.configured(store)
 
     def _one(self, run: RunManifest, name: str) -> ArtifactRef:
         refs = [ref for ref in run.artifact_refs if ref.name == name]
@@ -97,6 +97,7 @@ class BenchmarkBuilder:
                 or run.binding.purpose != "corpus_validation"
                 or run.binding.toolchain_lock_hash is None
                 or run.binding.case_registry_hash is None
+                or run.binding.corpus_ledger_namespace_hash != self.family.namespace_hash
             ):
                 raise ValueError
             observation_ref = self._one(run, "validation/case-execution-observation.json")
@@ -201,6 +202,11 @@ class BenchmarkBuilder:
             and build.binary_ref is not None
             and build.binary_ref == build.tool_result.typed_payload.binary_ref
             and build.tool_result.tool_name == "build"
+            and build.tool_result.stdout_artifact.name
+            == f"build/{build.tool_result.request_id}/stdout"
+            and build.tool_result.stderr_artifact.name
+            == f"build/{build.tool_result.request_id}/stderr"
+            and build.binary_ref.name == f"build/{build.tool_result.request_id}/binary"
             and _runtime_status(build.tool_result) == "SUCCESS"
             and not _failed(build.tool_result)
         )
@@ -209,8 +215,13 @@ class BenchmarkBuilder:
             and runtime.runtime_status == _runtime_status(runtime.tool_result)
             and runtime.runtime_status == runtime.tool_result.typed_payload.runtime_status
             and runtime.output_ref == runtime.tool_result.typed_payload.output_ref
+            and runtime.output_ref == runtime.tool_result.stdout_artifact
+            and runtime.output_ref.name == f"run/{runtime.tool_result.request_id}/stdout"
+            and runtime.tool_result.stderr_artifact.name
+            == f"run/{runtime.tool_result.request_id}/stderr"
             and runtime.tool_result.tool_name == "run"
             and runtime.tool_result.typed_payload.binary_ref == build.binary_ref
+            and runtime.tool_result.typed_payload.stdin_ref.name == "validation/input.json"
             and not _failed(runtime.tool_result)
         )
         input_ref = runtime.tool_result.typed_payload.stdin_ref
@@ -233,6 +244,55 @@ class BenchmarkBuilder:
         sanitizer_ok = bool(sanitizers) and all(
             self._valid_sanitizer(result, observation, input_ref, build.binary_ref)
             for result in sanitizers
+        )
+        sanitizer_request_ids = [
+            result.tool_result.request_id for result in sanitizers if result.tool_result is not None
+        ]
+        sanitizer_invocations_unique = len(sanitizer_request_ids) == len(sanitizers) and len(
+            set(sanitizer_request_ids)
+        ) == len(sanitizer_request_ids)
+        expected_native_paths = {
+            f"build/{build.tool_result.request_id}/binary",
+            f"build/{build.tool_result.request_id}/result.json",
+            f"build/{build.tool_result.request_id}/stdout",
+            f"build/{build.tool_result.request_id}/stderr",
+            f"run/{runtime.tool_result.request_id}/stdout",
+            f"run/{runtime.tool_result.request_id}/stderr",
+            f"run/{runtime.tool_result.request_id}/result.json",
+        }
+        for result in sanitizers:
+            if result.tool_result is not None:
+                prefix = f"sanitizer/{result.tool_result.request_id}"
+                expected_native_paths.update(
+                    {
+                        f"{prefix}/program.stdout",
+                        f"{prefix}/program.stderr",
+                        f"{prefix}/{observation.target_tool.value}.log",
+                        f"{prefix}/result.json",
+                    }
+                )
+        observed_native_paths = {
+            ref.name
+            for ref in run.artifact_refs
+            if ref.name.startswith(("build/", "run/", "sanitizer/"))
+        }
+        native_invocation_paths_exact = observed_native_paths == expected_native_paths
+        native_result_models_exact = (
+            self.store.read(self._one(run, f"build/{build.tool_result.request_id}/result.json"))
+            == build.tool_result.model_dump_json().encode()
+            and self.store.read(self._one(run, f"run/{runtime.tool_result.request_id}/result.json"))
+            == runtime.tool_result.model_dump_json().encode()
+            and all(
+                result.tool_result is not None
+                and self.store.read(
+                    self._one(
+                        run,
+                        f"sanitizer/{result.tool_result.request_id}/result.json",
+                    )
+                )
+                == result.tool_result.model_dump_json().encode()
+                for result in sanitizers
+            )
         )
         instrumented_oracle_ok = all(
             item.oracle_id == observation.oracle_id
@@ -301,6 +361,9 @@ class BenchmarkBuilder:
             and runtime_ok
             and oracle_ok
             and sanitizer_ok
+            and sanitizer_invocations_unique
+            and native_invocation_paths_exact
+            and native_result_models_exact
             and instrumented_oracle_ok
         ):
             raise CaseExecutionAttestationUnavailable("CASE_EXECUTION_ATTESTATION_UNAVAILABLE")
@@ -335,18 +398,28 @@ class BenchmarkBuilder:
             result.completed
             and result.status == "COMPLETED"
             and tool_result.tool_name == "sanitizer"
+            and tool_result.stdout_artifact.name
+            == f"sanitizer/{tool_result.request_id}/program.stdout"
+            and tool_result.stderr_artifact.name
+            == f"sanitizer/{tool_result.request_id}/{observation.target_tool.value}.log"
             and tool_result.typed_payload.completed
             and tool_result.typed_payload.tool == observation.target_tool
             and tool_result.typed_payload.stdin_ref == input_ref
             and tool_result.typed_payload.binary_ref == binary_ref
             and result.program_output_ref == tool_result.typed_payload.program_output_ref
             and result.program_output_ref == tool_result.stdout_artifact
-            and result.program_output_ref.name.endswith("/program.stdout")
+            and result.program_output_ref.name
+            == f"sanitizer/{tool_result.request_id}/program.stdout"
             and tool_result.typed_payload.program_stderr_ref is not None
-            and tool_result.typed_payload.program_stderr_ref.name.endswith("/program.stderr")
-            and tool_result.stderr_artifact.name.endswith(f"/{observation.target_tool.value}.log")
+            and tool_result.typed_payload.program_stderr_ref.name
+            == f"sanitizer/{tool_result.request_id}/program.stderr"
+            and result.status == tool_result.typed_payload.status == parsed.status
+            and result.parser_version
+            == tool_result.typed_payload.parser_version
+            == parsed.parser_version
             and result.check_outcome == tool_result.typed_payload.check_outcome
             and result.findings == tool_result.typed_payload.findings
+            and all(finding.tool == observation.target_tool for finding in result.findings)
             and all(finding.raw_ref == tool_result.stderr_artifact for finding in result.findings)
             and result.check_outcome == parsed.check_outcome
             and result.completed == parsed.completed
@@ -410,11 +483,13 @@ class BenchmarkBuilder:
             or self.validate(validation.clean_run_id, validation.mutant_run_id) != validation
         ):
             raise UnvalidatedCaseError("validation artifact hash mismatch")
-        if self.ledger_root is None:
-            raise UnvalidatedCaseError("shared corpus ledger is required")
         observed = mutant.observation
         binding = mutant.run.binding
-        assert binding is not None and binding.case_registry_hash is not None
+        assert (
+            binding is not None
+            and binding.case_registry_hash is not None
+            and binding.corpus_ledger_namespace_hash == self.family.namespace_hash
+        )
         identity = observed.case_id.encode()
         template_identity = observed.template_id.encode()
         source_pair = json.dumps(
@@ -432,13 +507,10 @@ class BenchmarkBuilder:
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
-        ledger = CorpusLedger(self.ledger_root)
-        try:
-            case_hash, template_hash, source_pair_hash = ledger.reserve(
-                identity, template_identity, source_pair
-            )
-        except ValueError as exc:
-            raise UnvalidatedCaseError(str(exc)) from exc
+        ledger = self.family.ledger
+        case_hash, template_hash, source_pair_hash = ledger.identities(
+            identity, template_identity, source_pair
+        )
         manifest = CaseManifest(
             id=observed.case_id,
             source_hash=observed.source_hash,
@@ -457,26 +529,81 @@ class BenchmarkBuilder:
             template_identity_hash=template_hash,
             source_pair_hash=source_pair_hash,
         )
-        run = self.store.create_run("benchmark_case", binding=binding)
-        self.store.put(
-            run.id,
-            "validation/ledger-reservation.json",
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "ledger_namespace_hash": ledger.namespace_hash,
-                    "case_identity_hash": case_hash,
-                    "template_identity_hash": template_hash,
-                    "source_pair_hash": source_pair_hash,
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode(),
-            self.store.visibility,
-        )
-        self.store.put(
-            run.id, "case-manifest.json", manifest.model_dump_json().encode(), self.store.visibility
-        )
-        self.store.transition(run.id, "RUNNING", "FINALIZING")
-        self.store.transition(run.id, "COMPLETED", None)
+        manifest_bytes = manifest.model_dump_json().encode()
+        try:
+            transaction = ledger.prepare(
+                identity,
+                template_identity,
+                source_pair,
+                store=self.store,
+                manifest_hash=hashlib.sha256(manifest_bytes).hexdigest(),
+            )
+            self._complete_registration(transaction, binding, manifest_bytes)
+            if transaction.state == "PREPARED":
+                ledger.commit(transaction)
+        except ValueError as exc:
+            raise UnvalidatedCaseError(str(exc)) from exc
         return manifest
+
+    def _put_exact(self, run_id: str, name: str, content: bytes) -> None:
+        run = self.store.load(run_id)
+        refs = [ref for ref in run.artifact_refs if ref.name == name]
+        if len(refs) > 1 or (refs and self.store.read(refs[0]) != content):
+            raise ValueError("registration recovery artifact mismatch")
+        if not refs:
+            self.store.put(run_id, name, content, self.store.visibility)
+
+    def _complete_registration(
+        self, transaction: CorpusTransaction, binding: RunBinding, manifest_bytes: bytes
+    ) -> None:
+        if (
+            transaction.target_store_hash != self.family.ledger.target_store_hash(self.store)
+            or transaction.visibility != self.store.visibility
+            or transaction.manifest_hash != hashlib.sha256(manifest_bytes).hexdigest()
+            or binding.corpus_ledger_namespace_hash != self.family.namespace_hash
+        ):
+            raise ValueError("registration transaction binding mismatch")
+        run_path = self.store.root / transaction.run_id
+        if not run_path.exists():
+            self.store.create_run("benchmark_case", binding=binding, _run_id=transaction.run_id)
+        run = self.store.load(transaction.run_id)
+        if run.kind != "benchmark_case" or run.binding != binding:
+            raise ValueError("registration recovery run mismatch")
+        reservation = json.dumps(
+            {
+                "schema_version": 2,
+                "transaction_id": transaction.transaction_id,
+                "owner_id": transaction.owner_id,
+                "ledger_namespace_hash": self.family.namespace_hash,
+                "case_identity_hash": transaction.case_hash,
+                "template_identity_hash": transaction.template_hash,
+                "source_pair_hash": transaction.source_pair_hash,
+                "target_store_hash": transaction.target_store_hash,
+                "visibility": transaction.visibility,
+                "expected_manifest_hash": transaction.manifest_hash,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        if run.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
+            self._put_exact(run.id, "validation/ledger-transaction.json", reservation)
+            self._put_exact(run.id, "case-manifest.json", manifest_bytes)
+            run = self.store.load(run.id)
+            if run.status == RunStatus.QUEUED:
+                self.store.transition(run.id, "RUNNING", "FINALIZING")
+            elif run.current_phase != "FINALIZING":
+                raise ValueError("registration recovery phase mismatch")
+            self.store.transition(run.id, "COMPLETED", None)
+            run = self.store.load(run.id)
+        if run.status != RunStatus.COMPLETED:
+            raise ValueError("registration recovery run is terminally invalid")
+        expected = {
+            "validation/ledger-transaction.json": reservation,
+            "case-manifest.json": manifest_bytes,
+        }
+        if {ref.name for ref in run.artifact_refs} != set(expected):
+            raise ValueError("registration recovery artifacts are ambiguous")
+        for name, content in expected.items():
+            ref = self._one(run, name)
+            if self.store.read(ref) != content:
+                raise ValueError("registration recovery artifact mismatch")
