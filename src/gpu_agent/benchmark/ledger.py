@@ -189,15 +189,17 @@ class CorpusLedger:
             fcntl.flock(init_fd, fcntl.LOCK_EX)
             if not self.key_path.exists():
                 _atomic_create(self.key_path, os.urandom(32), 0o600)
-            self.key = read_regular(self.key_path, 32)
+            self.__key = read_regular(self.key_path, 32)
         finally:
             os.close(init_fd)
-        if len(self.key) != 32 or self.key_path.stat().st_mode & 0o077:
+        if len(self.__key) != 32 or self.key_path.stat().st_mode & 0o077:
             raise ValueError("corpus ledger key is unavailable or has unsafe permissions")
-        self.namespace_hash = hashlib.sha256(b"gpu-agent-corpus-ledger-v2\0" + self.key).hexdigest()
+        self.namespace_hash = hashlib.sha256(
+            b"gpu-agent-corpus-ledger-v2\0" + self.__key
+        ).hexdigest()
 
     def _identity(self, domain: bytes, value: bytes) -> str:
-        return hmac.new(self.key, domain + b"\0" + value, hashlib.sha256).hexdigest()
+        return hmac.new(self.__key, domain + b"\0" + value, hashlib.sha256).hexdigest()
 
     def identities(
         self, case_identity: bytes, template_identity: bytes, source_pair: bytes

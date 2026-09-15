@@ -28,7 +28,6 @@ from gpu_agent.benchmark.evaluation import (
     PricingAttestation,
 )
 from gpu_agent.benchmark.ledger import CorpusFamily
-from gpu_agent.benchmark.pricing import ReviewedPricingRegistry
 from gpu_agent.contracts import RunBinding, RunManifest
 from gpu_agent.environment import load_toolchain_lock
 from gpu_agent.evidence.models import EvidenceBundle
@@ -246,7 +245,17 @@ class ApplicationService:
                 "public",
             )
         self.store.put(
-            run.id, "agent/acquisition-policy.json", json.dumps({"mode": mode}).encode(), "public"
+            run.id,
+            "agent/acquisition-policy.json",
+            json.dumps(
+                {
+                    "mode": mode,
+                    "required_tools": [tool.value for tool in required_tools],
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+            "public",
         )
         ref = self.store.put(run.id, "sources/kernel.cu", data, "public")
         EvidenceRepository(self.store).save(run.id, EvidenceBundle(source_snapshot=[ref]))
@@ -303,14 +312,9 @@ class ApplicationService:
                         if pricing is None or pricing.source != "TEST_ONLY":
                             raise ProviderError("PRICING_ATTESTATION_REQUIRED")
                     else:
-                        try:
-                            pricing = ReviewedPricingRegistry.configured().load(
-                                provider=provider.provider_name,
-                                model=provider.model_name,
-                                binding=self._binding,
-                            )
-                        except (ValueError, OSError):
-                            raise ProviderError("PRICING_ATTESTATION_REQUIRED") from None
+                        # V2 deliberately has no production pricing trust root.  A provider
+                        # that could perform a paid call therefore remains hard-closed.
+                        raise ProviderError("PRICING_ATTESTATION_REQUIRED")
                     policy = EvaluationProviderPolicy(
                         provider=provider.provider_name,
                         endpoint_host=endpoint_host,
@@ -510,11 +514,8 @@ class ApplicationService:
             reason_code=code,
             original_finding_present=None,
             public_oracle_passed=None,
-            private_holdout_passed=None,
             required_checks={"oracle": "NOT_RUN"},
             candidate_hash=candidate_hash,
-            suite_hash="",
-            not_run_count=1,
             limitations=[code],
         )
         verification = self.store.create_run("verification", run_id)

@@ -147,28 +147,27 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(
     binding = service.binding
     assert binding is not None
     calls = []
+    native_execute = executor.execute_scheduled
 
     class InjectedExecutor:
-        def _claim_scheduled(self, item, attempt):
-            return executor._claim_scheduled(item, attempt)
-
         def validate_scheduled_record(self, record, item, attempt):
             return executor.validate_scheduled_record(record, item, attempt)
 
-        def execute_scheduled(self, claim):
-            item = claim.item
-            calls.append((item.case_id, item.template_id, item.mode, item.repeat))
-            return executor.execute_scheduled(claim)
+        def execute_scheduled(self, run_id, ordinal):
+            record = native_execute(run_id, ordinal)
+            calls.append((record.case_id, record.template_id, record.mode, record.repeat))
+            return record
 
     def forbidden():
         raise AssertionError("offline path cannot construct configured services")
 
     monkeypatch.setattr(ApplicationService, "configured", forbidden)
     injected = InjectedExecutor()
+    executor.execute_scheduled = injected.execute_scheduled
     runner = EvaluationRunner(
         service.store,
         {"case_0100": "vector-add"},
-        injected.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",

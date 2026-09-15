@@ -110,8 +110,16 @@ def test_live_candidate_verification(tmp_path, request, variant, want):
     assert result.verdict.value == want, result.model_dump_json(indent=2)
     assert result.candidate_hash == candidate.patched_source_hash
     if variant == "human":
-        assert result.public_passed_count == 1 and result.private_passed_count == 13
-        assert result.not_run_count == 0 and result.binary_hashes
+        from gpu_agent.verification.models import VerificationAuditResult
+
+        evaluator = RunStore(private_root / "runs", visibility="evaluator")
+        audit = evaluator.load(result.evaluator_audit_run_id)
+        audit_ref = next(
+            ref for ref in audit.artifact_refs if ref.name == "verification/audit-result.json"
+        )
+        private_result = VerificationAuditResult.model_validate_json(evaluator.read(audit_ref))
+        assert result.public_passed_count == 1 and private_result.private_passed_count == 13
+        assert private_result.not_run_count == 0 and result.binary_hashes
         assert all(state == "CLEAN" for state in result.required_checks.values())
     if variant == "syntax":
         assert result.reason_code == "CANDIDATE_BUILD_FAILED"

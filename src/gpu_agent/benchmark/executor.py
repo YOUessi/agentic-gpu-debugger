@@ -1,22 +1,37 @@
 """Production adapter from registered controller cases to immutable public observations."""
 
+import fcntl
 import hashlib
-import hmac
 import json
+import os
+import random
 import re
-from collections.abc import Mapping
-from dataclasses import dataclass
+import stat
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from gpu_agent.agent.models import AcquisitionUsage, AgentBudget, DiagnosisResult, PolicyDecision
+from gpu_agent.agent.models import (
+    ACTION_ADAPTER,
+    AcquisitionUsage,
+    AgentBudget,
+    DiagnosisResult,
+    PolicyDecision,
+    PublicEvidence,
+)
+from gpu_agent.agent.orchestrator import public_evidence_from_bundle
+from gpu_agent.agent.policy import decide_action
 from gpu_agent.agent.provider import Invocation
+from gpu_agent.agent.rule_router import RuleRouter
 from gpu_agent.benchmark.evaluation import (
     EvaluationAttempt,
+    EvaluationExecutionClaim,
     EvaluationLineage,
-    EvaluationMode,
     EvaluationProviderPolicy,
     EvaluationRecord,
+    EvaluationSchedule,
     EvaluationScheduleItem,
     EvaluationUnitBinding,
     PricingAttestation,
@@ -25,38 +40,65 @@ from gpu_agent.benchmark.evaluation import (
 from gpu_agent.benchmark.models import CaseManifest
 from gpu_agent.contracts import (
     ArtifactRef,
+    CurrentPhase,
     ExternalRunOrigin,
     RunBinding,
     RunManifest,
     RunStatus,
     ToolResult,
 )
+from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
-from gpu_agent.execution.models import BuildPayload, ExecutionPayload, SanitizerPayload
+from gpu_agent.evidence.sanitizer import parse_sanitizer
+from gpu_agent.execution.models import (
+    BuildPayload,
+    ExecutionPayload,
+    Finding,
+    SanitizerPayload,
+    SanitizerTool,
+)
+from gpu_agent.execution.process import ProcessCapture
 from gpu_agent.patching import PatchCandidate
 from gpu_agent.service import ApplicationService
-from gpu_agent.store import RunStore, read_regular
+from gpu_agent.store import RunStore, read_regular, reject_symlinks
 from gpu_agent.verification.models import (
+    OracleResult,
+    VerificationAuditResult,
     VerificationObservation,
     VerificationResult,
     VerificationVerdict,
 )
-from gpu_agent.verification.policy import decide_verdict
+from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
+from gpu_agent.verification.policy import decide_verdict, finding_signature
 
 if TYPE_CHECKING:
     from gpu_agent.benchmark.holdout import HoldoutBatch, HoldoutController
     from gpu_agent.benchmark.ledger import CorpusFamily
 
 
+_TRUTH_CASE = (
+    Path(__file__).resolve().parents[3] / "benchmarks/development_truth/case_0001/case.json"
+)
+
+
 class CostBoundUnavailable(ValueError):
     """A production monetary bound must be attested before any provider work is allowed."""
 
 
-@dataclass(frozen=True)
-class _ScheduledClaim:
-    item: EvaluationScheduleItem
-    attempt: EvaluationAttempt
-    mac: str
+_LocatorMethod = Callable[[Any, str, int], EvaluationRecord]
+
+
+def _serialized_locator(method: _LocatorMethod) -> _LocatorMethod:
+    """Make every entry to the implementation pass through the locator transaction."""
+
+    @wraps(method)
+    def guarded(self: Any, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
+        if not re.fullmatch(r"[a-f0-9]{32}", evaluation_run_id) or ordinal < 0:
+            raise ValueError("evaluation run locator is invalid")
+        with self._unit_transaction(evaluation_run_id, ordinal):
+            return method(self, evaluation_run_id, ordinal)
+
+    return guarded
 
 
 def _one_ref(run: RunManifest, name: str) -> ArtifactRef:
@@ -67,35 +109,36 @@ def _one_ref(run: RunManifest, name: str) -> ArtifactRef:
 
 
 def _validate_verification_audit(
+    public: RunStore,
     evaluator: RunStore | None,
     diagnosis_run_id: str,
     result: VerificationResult,
     binding: RunBinding,
-) -> None:
+) -> VerificationAuditResult:
     """Resolve the public projection to evaluator-owned native execution output."""
     if (
         evaluator is None
         or evaluator.visibility != "evaluator"
         or result.evaluator_audit_run_id is None
-        or result.evaluator_observation_hash is None
     ):
         raise ValueError("evaluation verification has no evaluator audit lineage")
     audit = evaluator.load(result.evaluator_audit_run_id)
     observation_ref = _one_ref(audit, "observation.json")
+    audit_result_ref = _one_ref(audit, "verification/audit-result.json")
     if (
         audit.kind != "verification_audit"
         or audit.status != RunStatus.COMPLETED
         or audit.binding != binding
         or audit.external_origin != ExternalRunOrigin(run_id=diagnosis_run_id, visibility="public")
-        or observation_ref.sha256 != result.evaluator_observation_hash
     ):
         raise ValueError("evaluation verification audit is invalid")
     observation = VerificationObservation.model_validate_json(evaluator.read(observation_ref))
+    audit_result = VerificationAuditResult.model_validate_json(evaluator.read(audit_result_ref))
     if (
-        decide_verdict(observation) != result.verdict
+        audit_result.observation != observation
+        or decide_verdict(observation) != result.verdict
         or observation.original_finding_present != result.original_finding_present
         or observation.public_oracle_passed != result.public_oracle_passed
-        or observation.private_holdout_passed != result.private_holdout_passed
         or observation.check_requirements != result.check_requirements
         or observation.check_outcomes != result.check_outcomes
         or len(observation.new_blocking_findings) != result.new_findings
@@ -125,15 +168,73 @@ def _validate_verification_audit(
         children[index] = child
     if children and sorted(children) != list(range(len(children))):
         raise ValueError("evaluation verification input sequence is invalid")
-    if result.suite_hash and len(children) + result.not_run_count == 0:
-        raise ValueError("evaluation verification suite has no native inputs")
+    if not children or audit_result.child_run_ids != [
+        child.id for _, child in sorted(children.items())
+    ]:
+        raise ValueError("evaluation verification child selection is invalid")
+    trusted_case = json.loads(read_regular(_TRUTH_CASE, 65536))
+    persisted_case = json.loads(evaluator.read(_one_ref(audit, "case.json")))
+    if persisted_case != trusted_case:
+        raise ValueError("evaluation verification case policy is invalid")
+    rng = random.Random(trusted_case["private_seed"])
+    sizes = [
+        *trusted_case["boundary_sizes"],
+        *(rng.randint(2, 2048) for _ in range(trusted_case["random_cases"])),
+    ]
+    holdouts = [
+        {
+            "n": n,
+            "a": [rng.randint(-8192, 8192) / 8 for _ in range(n)],
+            "b": [rng.randint(-8192, 8192) / 8 for _ in range(n)],
+        }
+        for n in sizes
+    ]
+    suite_bytes = json.dumps(holdouts, sort_keys=True).encode()
+    if (
+        evaluator.read(_one_ref(audit, "private-suite.json")) != suite_bytes
+        or audit_result.suite_hash != hashlib.sha256(suite_bytes).hexdigest()
+        or len(children) + audit_result.not_run_count != 1 + len(holdouts)
+    ):
+        raise ValueError("evaluation verification suite is invalid")
 
     public_oracle: bool | None = None
     private_oracles: list[bool] = []
     build_clean: list[bool] = []
     runtime_clean: list[bool] = []
     sanitizer_clean: dict[str, list[bool]] = {}
+    native_public_passed = 0
+    native_private_passed = 0
+    native_new_findings: list[Finding] = []
+    candidate_public_findings: list[Finding] = []
+    candidate_public_memcheck: SanitizerPayload | None = None
+    baseline_bundle = EvidenceRepository(public).public_view(diagnosis_run_id)
+    baseline_memchecks = [
+        item
+        for item in baseline_bundle.sanitizer_results
+        if item.tool_result is not None
+        and item.tool_result.typed_payload.tool == SanitizerTool.MEMCHECK
+    ]
+    if len(baseline_memchecks) != 1 or baseline_memchecks[0].tool_result is None:
+        raise ValueError("evaluation verification baseline sanitizer is invalid")
+    baseline_memcheck = baseline_memchecks[0]
+    baseline_tool_result = baseline_memcheck.tool_result
+    if baseline_tool_result is None:
+        raise ValueError("evaluation verification baseline sanitizer is invalid")
+    baseline_signatures = {finding_signature(item) for item in baseline_memcheck.findings}
+    oracle = NumericOracle(trusted_case["atol"], trusted_case["rtol"], False, False)
     for index, child in sorted(children.items()):
+        input_ref = _one_ref(child, "input.json")
+        input_payload = json.loads(evaluator.read(input_ref))
+        if (
+            set(input_payload) != {"n", "a", "b"}
+            or type(input_payload["n"]) is not int
+            or len(input_payload["a"]) != input_payload["n"]
+            or len(input_payload["b"]) != input_payload["n"]
+            or (index > 0 and input_payload != holdouts[index - 1])
+        ):
+            raise ValueError("evaluation verification input differs from frozen suite")
+        expected_output = reference_add(input_payload["a"], input_payload["b"])
+        provenance = json.loads(evaluator.read(_one_ref(child, "provenance.json")))
         result_refs = [
             ref
             for ref in child.artifact_refs
@@ -153,6 +254,9 @@ def _validate_verification_audit(
             or (kinds.count("run") == 1 and kinds.count("sanitizer") < 1)
         ):
             raise ValueError("evaluation verification input lacks native tool output")
+        build_model: ToolResult[BuildPayload] | None = None
+        run_model: ToolResult[ExecutionPayload] | None = None
+        sanitizer_models: list[ToolResult[SanitizerPayload]] = []
         for ref in native_refs:
             raw = evaluator.read(ref)
             payload = json.loads(raw)
@@ -166,6 +270,7 @@ def _validate_verification_audit(
             )
             if tool_name == "build":
                 model = ToolResult[BuildPayload].model_validate_json(raw)
+                build_model = model
                 build_clean.append(
                     model.exit_code == 0
                     and model.typed_payload.binary_ref is not None
@@ -175,6 +280,7 @@ def _validate_verification_audit(
                 )
             elif tool_name == "run":
                 model = ToolResult[ExecutionPayload].model_validate_json(raw)
+                run_model = model
                 runtime_clean.append(
                     model.typed_payload.runtime_status == "SUCCESS"
                     and model.typed_payload.output_ref == model.stdout_artifact
@@ -184,6 +290,36 @@ def _validate_verification_audit(
                 )
             else:
                 model = ToolResult[SanitizerPayload].model_validate_json(raw)
+                sanitizer_models.append(model)
+                capture = ProcessCapture(
+                    exit_code=model.exit_code,
+                    stdout=evaluator.read(model.stdout_artifact),
+                    stderr=evaluator.read(model.stderr_artifact),
+                    timed_out=model.timed_out,
+                    elapsed_ms=model.elapsed_ms,
+                    started_at=model.started_at,
+                    finished_at=model.finished_at,
+                    truncated=model.truncated,
+                    cancelled=model.cancelled,
+                    tool_error=model.tool_error,
+                )
+                reparsed = parse_sanitizer(SanitizerTool(model.typed_payload.tool), capture)
+                if (
+                    reparsed.status != model.typed_payload.status
+                    or reparsed.completed != model.typed_payload.completed
+                    or reparsed.parser_version != model.typed_payload.parser_version
+                    or reparsed.check_outcome != model.typed_payload.check_outcome
+                    or [
+                        item.model_copy(update={"raw_ref": None})
+                        for item in model.typed_payload.findings
+                    ]
+                    != reparsed.findings
+                    or any(
+                        item.raw_ref != model.stderr_artifact
+                        for item in model.typed_payload.findings
+                    )
+                ):
+                    raise ValueError("evaluation verification sanitizer result is not reproducible")
                 sanitizer_clean.setdefault(model.typed_payload.tool, []).append(
                     model.typed_payload.completed
                     and model.typed_payload.check_outcome == "CLEAN"
@@ -196,23 +332,138 @@ def _validate_verification_audit(
                 if nested.run_id != child.id or nested.visibility != "evaluator":
                     raise ValueError("evaluation verification tool artifact crosses lineage")
                 evaluator.read(nested)
+        if build_model is None:
+            raise ValueError("evaluation verification build lineage is missing")
+        binary_ref = build_model.typed_payload.binary_ref
+        if binary_ref is not None:
+            evaluator.read(binary_ref)
+        if (
+            provenance.get("candidate_hash") != result.candidate_hash
+            or provenance.get("source_manifest") != build_model.typed_payload.source_manifest
+            or provenance.get("binary_ref")
+            != (binary_ref.model_dump(mode="json") if binary_ref is not None else None)
+            or provenance.get("input_ref") != input_ref.model_dump(mode="json")
+        ):
+            raise ValueError("evaluation verification provenance is invalid")
+        if run_model is not None and (
+            binary_ref is None
+            or run_model.typed_payload.binary_ref != binary_ref
+            or run_model.typed_payload.stdin_ref != input_ref
+            or run_model.typed_payload.output_ref != run_model.stdout_artifact
+        ):
+            raise ValueError("evaluation verification runtime links are invalid")
+        if any(
+            binary_ref is None
+            or checked.typed_payload.binary_ref != binary_ref
+            or checked.typed_payload.stdin_ref != input_ref
+            or checked.typed_payload.program_output_ref != checked.stdout_artifact
+            for checked in sanitizer_models
+        ):
+            raise ValueError("evaluation verification sanitizer links are invalid")
+        for checked in sanitizer_models:
+            findings = checked.typed_payload.findings
+            if index == 0:
+                candidate_public_findings.extend(findings)
+                if checked.typed_payload.tool == SanitizerTool.MEMCHECK:
+                    candidate_public_memcheck = checked.typed_payload
+                native_new_findings.extend(
+                    finding
+                    for finding in findings
+                    if finding_signature(finding) not in baseline_signatures
+                    or finding_signature(finding) is None
+                )
+            else:
+                native_new_findings.extend(findings)
         oracle_refs = [ref for ref in child.artifact_refs if ref.name == "oracle.json"]
         if len(oracle_refs) > 1:
             raise ValueError("evaluation verification oracle output is ambiguous")
         if oracle_refs:
-            oracle = json.loads(evaluator.read(oracle_refs[0]))
-            passed = bool(
-                oracle.get("ordinary", {}).get("passed") is True
-                and oracle.get("instrumented", {}).get("passed") is True
+            stored_oracle = json.loads(evaluator.read(oracle_refs[0]))
+            if run_model is None:
+                raise ValueError("evaluation verification oracle has no ordinary execution")
+            ordinary = oracle.check(
+                parse_output(evaluator.read(run_model.typed_payload.output_ref)), expected_output
             )
+            instrumented: list[dict[str, object]] = []
+            instrumented_results: list[OracleResult] = []
+            for checked in sanitizer_models:
+                output_ref = checked.typed_payload.program_output_ref
+                if output_ref is None:
+                    raise ValueError("evaluation verification instrumented output is missing")
+                checked_oracle = oracle.check(
+                    parse_output(evaluator.read(output_ref)), expected_output
+                )
+                instrumented_results.append(checked_oracle)
+                instrumented.append(
+                    {
+                        "tool": checked.typed_payload.tool,
+                        "result": checked_oracle.model_dump(mode="json"),
+                    }
+                )
+            expected_oracle = {
+                "expected": expected_output,
+                "ordinary": ordinary.model_dump(mode="json"),
+                "instrumented": instrumented,
+            }
+            if stored_oracle != expected_oracle:
+                raise ValueError("evaluation verification oracle result is not reproducible")
+            passed = ordinary.passed and all(item.passed for item in instrumented_results)
             if index == 0:
                 public_oracle = passed
             else:
                 private_oracles.append(passed)
+        elif run_model is not None and run_model.typed_payload.runtime_status == "SUCCESS":
+            raise ValueError("evaluation verification oracle output is missing")
+        native_passed = (
+            bool(
+                run_model is not None
+                and run_model.typed_payload.runtime_status == "SUCCESS"
+                and passed
+                and sanitizer_models
+                and all(
+                    checked.typed_payload.completed
+                    and checked.typed_payload.check_outcome == "CLEAN"
+                    for checked in sanitizer_models
+                )
+            )
+            if oracle_refs
+            else False
+        )
+        if index == 0:
+            native_public_passed += int(native_passed)
+        else:
+            native_private_passed += int(native_passed)
     if public_oracle is not None and public_oracle != result.public_oracle_passed:
         raise ValueError("public oracle projection differs from native audit")
-    if private_oracles and all(private_oracles) != observation.private_holdout_passed:
+    derived_private_oracle = (
+        None
+        if not private_oracles or (len(private_oracles) < len(holdouts) and all(private_oracles))
+        else all(private_oracles)
+    )
+    if derived_private_oracle != audit_result.observation.private_holdout_passed:
         raise ValueError("private oracle projection differs from native audit")
+    baseline_input = baseline_tool_result.typed_payload.stdin_ref
+    same_public_input = bool(
+        baseline_input is not None
+        and json.loads(public.read(baseline_input))
+        == json.loads(evaluator.read(_one_ref(children[0], "input.json")))
+    )
+    candidate_signatures = {finding_signature(item) for item in candidate_public_findings}
+    derived_original: bool | None = None
+    if same_public_input and baseline_signatures and candidate_public_memcheck is not None:
+        derived_original = bool(
+            any(
+                signature is not None and signature in candidate_signatures
+                for signature in baseline_signatures
+            )
+        )
+        if not candidate_public_memcheck.completed:
+            derived_original = None
+    if (
+        derived_original != audit_result.observation.original_finding_present
+        or native_new_findings != audit_result.observation.new_blocking_findings
+    ):
+        raise ValueError("verification findings differ from native sanitizer results")
     claimed = result.required_checks
     if (
         (claimed.get("build") == "CLEAN" and (not build_clean or not all(build_clean)))
@@ -224,6 +475,12 @@ def _validate_verification_audit(
         )
     ):
         raise ValueError("verification checks differ from native tool results")
+    if (
+        audit_result.public_passed_count != native_public_passed
+        or audit_result.private_passed_count != native_private_passed
+    ):
+        raise ValueError("verification pass counts differ from native results")
+    return audit_result
 
 
 def validate_evaluation_record(
@@ -283,8 +540,49 @@ def validate_evaluation_record(
         or public.evidence_hash != lineage.evidence_hash
     ):
         raise ValueError("evaluation evidence lineage is invalid")
-    store.read(evidence_refs[-1])
+    bundles = [EvidenceBundle.model_validate_json(store.read(ref)) for ref in evidence_refs]
+    for previous, current in zip(bundles, bundles[1:], strict=False):
+        acquired = bool(
+            previous.build_result
+            or previous.execution_result
+            or previous.sanitizer_results
+            or previous.retrieved_chunks
+        )
+        if acquired and (
+            current.environment != previous.environment
+            or current.source_snapshot != previous.source_snapshot
+            or current.limitations != previous.limitations
+        ):
+            raise ValueError("evaluation evidence base changed after acquisition")
+        if (
+            previous.build_result is not None and current.build_result != previous.build_result
+        ) or (
+            previous.execution_result is not None
+            and current.execution_result != previous.execution_result
+        ):
+            raise ValueError("evaluation evidence result was replaced")
+        if (
+            current.sanitizer_results[: len(previous.sanitizer_results)]
+            != previous.sanitizer_results
+            or current.retrieved_chunks[: len(previous.retrieved_chunks)]
+            != previous.retrieved_chunks
+            or current.source_locations[: len(previous.source_locations)]
+            != previous.source_locations
+        ):
+            raise ValueError("evaluation evidence progression is not monotone")
+        changed = sum(
+            (
+                previous.build_result != current.build_result,
+                previous.execution_result != current.execution_result,
+                len(previous.sanitizer_results) != len(current.sanitizer_results),
+                len(previous.retrieved_chunks) != len(current.retrieved_chunks),
+            )
+        )
+        if changed > 1:
+            raise ValueError("evaluation evidence progression combines acquisitions")
     bundle = EvidenceRepository(store).public_view(run.id)
+    if bundle != bundles[-1]:
+        raise ValueError("evaluation final evidence projection is invalid")
     source_refs = [ref for ref in bundle.source_snapshot if ref.name.endswith("/kernel.cu")]
     if len(source_refs) != 1 or source_refs[0].sha256 != public.input_hash:
         raise ValueError("evaluation input lineage is invalid")
@@ -300,14 +598,26 @@ def validate_evaluation_record(
     expected_controller = "fixed" if item.mode in {"A", "B", "C"} else "rule_router"
     policy_ref = _one_ref(run, "agent/acquisition-policy.json")
     decision_refs = sorted(
-        (ref for ref in run.artifact_refs if ref.name.startswith("actions/")),
+        (
+            ref
+            for ref in run.artifact_refs
+            if ref.name.startswith("actions/") and ref.name.endswith("/decision.json")
+        ),
         key=lambda ref: int(ref.name.split("/")[1]),
     )
     decisions = [PolicyDecision.model_validate_json(store.read(ref)) for ref in decision_refs]
     if any(not decision.allowed for decision in decisions):
         raise ValueError("controller route contains a rejected decision")
     acquisition_policy = json.loads(store.read(policy_ref))
-    if acquisition_policy != {"mode": item.mode}:
+    if (
+        set(acquisition_policy) != {"mode", "required_tools"}
+        or acquisition_policy["mode"] != item.mode
+        or not isinstance(acquisition_policy["required_tools"], list)
+        or any(
+            tool not in {value.value for value in SanitizerTool}
+            for tool in acquisition_policy["required_tools"]
+        )
+    ):
         raise ValueError("acquisition policy differs from scheduled mode")
     expected_trace = {
         "schema_version": 1,
@@ -368,11 +678,23 @@ def validate_evaluation_record(
         or bool(observed_retrievals) != bool(acquisition.retrieval_calls)
     ):
         raise ValueError("fixed controller evidence differs from scheduled mode")
+    required_tools = [SanitizerTool.MEMCHECK.value, *acquisition_policy["required_tools"]]
+    expected_c_tools = list(dict.fromkeys(required_tools))
+    observed_tools = [
+        result.tool_result.typed_payload.tool
+        for result in bundle.sanitizer_results
+        if result.tool_result is not None
+    ]
+    if observed_tools and observed_tools[0] == SanitizerTool.MEMCHECK.value:
+        memcheck = bundle.sanitizer_results[0]
+        if memcheck.check_outcome != "CLEAN":
+            expected_c_tools = [SanitizerTool.MEMCHECK.value]
     if item.mode == "C" and (
         observed_retrievals
         or acquisition.retrieval_calls
         or budget.rag_calls
-        or acquisition.sanitizer_calls not in {0, 1}
+        or observed_tools != expected_c_tools
+        or acquisition.sanitizer_calls != len(expected_c_tools)
         or observed_sanitizers != acquisition.sanitizer_calls
     ):
         raise ValueError("fixed controller evidence differs from scheduled mode")
@@ -389,6 +711,74 @@ def validate_evaluation_record(
         )
     ):
         raise ValueError("rule controller evidence differs from route decisions")
+    if item.mode == "D":
+        step_refs = sorted(
+            (
+                ref
+                for ref in run.artifact_refs
+                if ref.name.startswith("actions/") and ref.name.endswith("/step.json")
+            ),
+            key=lambda ref: int(ref.name.split("/")[1]),
+        )
+        if len(step_refs) != len(decision_refs):
+            raise ValueError("rule controller action steps are incomplete")
+        seen: set[str] = set()
+        previous_budget: AgentBudget | None = None
+        for index, (step_ref, decision_ref) in enumerate(
+            zip(step_refs, decision_refs, strict=True)
+        ):
+            if (
+                step_ref.name != f"actions/{index}/step.json"
+                or decision_ref.name != f"actions/{index}/decision.json"
+            ):
+                raise ValueError("rule controller action sequence is invalid")
+            step = json.loads(store.read(step_ref))
+            if (
+                set(step)
+                != {
+                    "schema_version",
+                    "action",
+                    "evidence_ref",
+                    "evidence",
+                    "budget",
+                    "seen",
+                }
+                or step["schema_version"] != 1
+            ):
+                raise ValueError("rule controller action step is invalid")
+            action = ACTION_ADAPTER.validate_python(step["action"])
+            evidence = PublicEvidence.model_validate(step["evidence"])
+            step_budget = AgentBudget.model_validate(step["budget"])
+            evidence_ref = ArtifactRef.model_validate(step["evidence_ref"])
+            if evidence_ref not in evidence_refs:
+                raise ValueError("rule controller evidence reference is invalid")
+            observed_bundle = EvidenceBundle.model_validate_json(store.read(evidence_ref))
+            if evidence != public_evidence_from_bundle(store, observed_bundle):
+                raise ValueError("rule controller evidence snapshot is invalid")
+            if step["seen"] != sorted(seen):
+                raise ValueError("rule controller seen state is invalid")
+            proposed = RuleRouter().next_action(evidence, step_budget)
+            if (
+                proposed.action_type != action.action_type
+                or proposed.typed_arguments != action.typed_arguments
+                or proposed.rationale != action.rationale
+                or (
+                    previous_budget is not None
+                    and step_budget.agent_steps != previous_budget.agent_steps + 1
+                )
+            ):
+                raise ValueError("rule controller action differs from deterministic routing")
+            expected_decision = decide_action(
+                action,
+                evidence,
+                step_budget,
+                CurrentPhase.DIAGNOSING,
+                seen,
+            )
+            if PolicyDecision.model_validate_json(store.read(decision_ref)) != expected_decision:
+                raise ValueError("rule controller policy decision is invalid")
+            seen.add(action.action_type + action.typed_arguments.model_dump_json())
+            previous_budget = step_budget
     if item.mode in {"A", "B", "C", "D"}:
         if (
             trace != expected_trace
@@ -568,7 +958,7 @@ def validate_evaluation_record(
             or public.verdict != verification.verdict.value
         ):
             raise ValueError("evaluation verification lineage is invalid")
-        _validate_verification_audit(evaluator, run.id, verification, binding)
+        _validate_verification_audit(store, evaluator, run.id, verification, binding)
     elif (
         verifications
         or lineage.candidate_run_id is not None
@@ -806,11 +1196,6 @@ class EvaluationExecutor:
             _corpus_family = CorpusFamily.configured(corpus)
         _corpus_family.require_store(corpus)
         self._corpus_family = _corpus_family
-        # Claims must survive a controller restart during durable evaluation
-        # recovery, while remaining unavailable from the public RunStore.  The
-        # corpus-family ledger key is controller-private and already pins both
-        # public and evaluator stores to one trusted namespace.
-        self.__claim_key = _corpus_family.ledger.key
 
     def _ref(self, run: RunManifest, name: str) -> ArtifactRef:
         refs = [ref for ref in run.artifact_refs if ref.name == name]
@@ -835,42 +1220,90 @@ class EvaluationExecutor:
             RunStore(self.service.evaluator_root / "runs", visibility="evaluator"),
         )
 
-    @staticmethod
-    def _claim_content(item: EvaluationScheduleItem, attempt: EvaluationAttempt) -> bytes:
-        return json.dumps(
-            {
-                "domain": "gpu-agent-evaluation-claim-v1",
-                "item": item.model_dump(mode="json"),
-                "attempt": attempt.model_dump(mode="json"),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
+    @contextmanager
+    def _unit_transaction(self, evaluation_run_id: str, ordinal: int) -> Iterator[None]:
+        del ordinal
+        path = self.service.store.root / f".evaluation-execution-{evaluation_run_id}.lock"
+        reject_symlinks(path)
+        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_mode & 0o077:
+                raise ValueError("evaluation transaction lock is unsafe")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
 
-    def _claim_scheduled(
-        self, item: EvaluationScheduleItem, attempt: EvaluationAttempt
-    ) -> _ScheduledClaim:
-        return _ScheduledClaim(
-            item=item,
-            attempt=attempt,
-            mac=hmac.new(
-                self.__claim_key, self._claim_content(item, attempt), hashlib.sha256
-            ).hexdigest(),
-        )
+    def execute_scheduled(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
+        return self._execute(evaluation_run_id, ordinal)
 
-    def execute_scheduled(self, claim: _ScheduledClaim) -> EvaluationRecord:
-        if not isinstance(claim, _ScheduledClaim) or not hmac.compare_digest(
-            claim.mac,
-            hmac.new(
-                self.__claim_key,
-                self._claim_content(claim.item, claim.attempt),
-                hashlib.sha256,
-            ).hexdigest(),
+    @_serialized_locator
+    def _execute(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
+        parent = self.service.store.load(evaluation_run_id)
+        if (
+            parent.kind != "evaluation"
+            or parent.status != RunStatus.RUNNING
+            or self.service.binding is None
+            or parent.binding != self.service.binding
         ):
-            raise ValueError("evaluation unit requires an internal runner claim")
-        item, attempt = claim.item, claim.attempt
-        if attempt.ordinal != item.ordinal:
-            raise ValueError("evaluation attempt ordinal does not match scheduled unit")
+            raise ValueError("evaluation run is not active and bound")
+        schedule_ref = self._ref(parent, "evaluation/schedule.json")
+        schedule = EvaluationSchedule.model_validate_json(self.service.store.read(schedule_ref))
+        if ordinal >= len(schedule.items) or schedule.bindings.max_unit_cost_usd is None:
+            raise ValueError("evaluation ordinal is outside the frozen schedule")
+        schedule_hash = hashlib.sha256(
+            json.dumps(
+                schedule.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        attempt_ref = self._ref(parent, f"evaluation/attempts/{ordinal}.json")
+        attempt = EvaluationAttempt.model_validate_json(self.service.store.read(attempt_ref))
+        item = schedule.items[ordinal]
+        expected_attempt = EvaluationAttempt(
+            run_id=evaluation_run_id,
+            ordinal=ordinal,
+            schedule_hash=schedule_hash,
+            idempotency_key=hashlib.sha256(
+                f"{evaluation_run_id}:{schedule_hash}:{ordinal}".encode()
+            ).hexdigest(),
+            reserved_cost_usd=schedule.bindings.max_unit_cost_usd,
+        )
+        expected_ordinals = list(range(len(schedule.items)))
+        if [scheduled.ordinal for scheduled in schedule.items] != expected_ordinals:
+            raise ValueError("evaluation schedule ordinals are not canonical")
+        attempt_ordinals: list[int] = []
+        record_ordinals: list[int] = []
+        claim_ordinals: list[int] = []
+        for ref in parent.artifact_refs:
+            for prefix, destination in (
+                ("evaluation/attempts/", attempt_ordinals),
+                ("evaluation/records/", record_ordinals),
+                ("evaluation/claims/", claim_ordinals),
+            ):
+                if ref.name.startswith(prefix):
+                    match = re.fullmatch(re.escape(prefix) + r"([0-9]+)\.json", ref.name)
+                    if match is None:
+                        raise ValueError("evaluation artifact namespace is invalid")
+                    destination.append(int(match.group(1)))
+        if (
+            sorted(attempt_ordinals) != list(range(ordinal + 1))
+            or sorted(record_ordinals) != list(range(ordinal))
+            or sorted(claim_ordinals) != list(range(ordinal))
+            or len(attempt_ordinals) != len(set(attempt_ordinals))
+            or len(record_ordinals) != len(set(record_ordinals))
+            or len(claim_ordinals) != len(set(claim_ordinals))
+        ):
+            raise ValueError("evaluation execution state is not canonical")
+        if (
+            item.ordinal != ordinal
+            or attempt != expected_attempt
+            or any(ref.name == f"evaluation/records/{ordinal}.json" for ref in parent.artifact_refs)
+            or schedule.bindings.commit != self.service.binding.repository.commit
+            or schedule.bindings.prompt_version != self.service.binding.prompt_version
+            or schedule.bindings.toolchain_hash != self.service.binding.toolchain_lock_hash
+            or schedule.bindings.model_config_hash != self.service.binding.model_config_hash
+        ):
+            raise ValueError("evaluation schedule locator is invalid")
         if item.split == "holdout":
             if self.holdout_controller is None or self.holdout_batch is None:
                 raise ValueError("private evaluation requires validated holdout authority")
@@ -891,16 +1324,25 @@ class EvaluationExecutor:
             split=item.split,
             holdout_proof=item.holdout_proof,
         )
-        return self._execute(item.case_id, item.template_id, item.mode, item.repeat, unit)
-
-    def _execute(
-        self,
-        case_id: str,
-        template_id: str,
-        mode: EvaluationMode,
-        repeat: int,
-        unit: EvaluationUnitBinding,
-    ) -> EvaluationRecord:
+        attempt_content = attempt.model_dump_json().encode()
+        claim = EvaluationExecutionClaim(
+            run_id=evaluation_run_id,
+            ordinal=ordinal,
+            schedule_hash=schedule_hash,
+            attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
+        )
+        self.service.store.put_if_absent_exact(
+            evaluation_run_id,
+            f"evaluation/claims/{ordinal}.json",
+            claim.model_dump_json().encode(),
+            "public",
+        )
+        case_id, template_id, mode, repeat = (
+            item.case_id,
+            item.template_id,
+            item.mode,
+            item.repeat,
+        )
         registered_case_id, registered_template_id = case_id, template_id
         if self.holdout_controller is not None and self.holdout_batch is not None:
             if case_id != template_id:
@@ -1022,6 +1464,7 @@ class EvaluationExecutor:
         verification_run_id: str | None = None
         public_verification_hash: str | None = None
         verification: VerificationResult | None = None
+        verification_audit: VerificationAuditResult | None = None
         finished = run.events[-1].at
         candidates = self.service.candidates(run.id)
         if len(candidates) > 1:
@@ -1058,6 +1501,13 @@ class EvaluationExecutor:
             public_verification_hash = verification_ref.sha256
             if verification.candidate_hash != candidate_hash:
                 raise ValueError("verification candidate hash mismatch")
+            verification_audit = _validate_verification_audit(
+                self.service.store,
+                RunStore(self.service.evaluator_root / "runs", visibility="evaluator"),
+                run.id,
+                verification,
+                self.service.binding,
+            )
             checks.update(
                 {
                     f"verification/{key}": value
@@ -1109,7 +1559,9 @@ class EvaluationExecutor:
                 "patch_hash": candidate_hash,
                 "oracle_passed": verification.public_oracle_passed if verification else None,
                 "private_holdout_passed": (
-                    verification.private_holdout_passed if verification else None
+                    verification_audit.observation.private_holdout_passed
+                    if verification_audit
+                    else None
                 ),
                 "patch_compile_passed": (
                     {"CLEAN": True, "FAILED": False}.get(

@@ -70,6 +70,49 @@ def test_mode_c_uses_precollected_tools_without_planner(oob_service):
     assert budget["sanitizer_calls"] == 1 and budget["rag_calls"] == 0
 
 
+@pytest.mark.parametrize(
+    "case_id,target_tool",
+    [
+        ("case_0002", "racecheck"),
+        ("case_0003", "initcheck"),
+        ("case_0004", "synccheck"),
+    ],
+)
+def test_mode_c_clean_memcheck_runs_registered_target(
+    oob_service, monkeypatch, case_id, target_tool
+):
+    from gpu_agent.execution.models import SanitizerTool
+    from gpu_agent.execution.process import ProcessCapture
+
+    service, provider, source = oob_service
+    backend_type = service._backend_factory
+    original = backend_type._container
+
+    def clean_sanitizers(self, path, operation, timeout, *, stdin=b"", cancel=None):
+        if operation in {tool.value for tool in SanitizerTool}:
+            return (
+                ProcessCapture(0, b'{"values":[3]}', b"", False),
+                b"",
+                b"========= ERROR SUMMARY: 0 errors\n",
+            )
+        return original(self, path, operation, timeout, stdin=stdin, cancel=cancel)
+
+    monkeypatch.setattr(backend_type, "_container", clean_sanitizers)
+    run = service.diagnose(
+        source,
+        mode="C",
+        required_tools=(SanitizerTool(target_tool),),
+    )
+    from gpu_agent.agent.orchestrator import public_evidence
+
+    evidence = public_evidence(service.store, run.id)
+    assert list(evidence.sanitizer_outcomes) == [
+        SanitizerTool.MEMCHECK,
+        SanitizerTool(target_tool),
+    ], case_id
+    assert provider.kinds == []
+
+
 def test_mode_d_uses_rule_router_and_never_planner(oob_service):
     service, provider, source = oob_service
     rule_retrieval_corpus(service)
@@ -213,7 +256,7 @@ def _execute_claimed_test_unit(
     runner = EvaluationRunner(
         executor.service.store,
         {case_id: template_id},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -225,6 +268,15 @@ def _execute_claimed_test_unit(
     )
     schedule = runner._schedule(mode, "development", 3)
     item = next(value for value in schedule.items if value.repeat == repeat)
+    ordered = [item, *(value for value in schedule.items if value is not item)]
+    schedule = schedule.model_copy(
+        update={
+            "items": [
+                value.model_copy(update={"ordinal": index}) for index, value in enumerate(ordered)
+            ]
+        }
+    )
+    item = schedule.items[0]
     run = runner.store.create_run("evaluation", binding=binding)
     runner.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
@@ -234,27 +286,16 @@ def _execute_claimed_test_unit(
         f"evaluation/attempts/{item.ordinal}.json",
         attempt.model_dump_json().encode(),
     )
-    return executor.execute_scheduled(executor._claim_scheduled(item, attempt))
+    return executor.execute_scheduled(run.id, item.ordinal)
 
 
-def test_executor_uses_persisted_diagnosis_candidate_and_verification(
-    oob_service, tmp_path, native_evaluation_executor
+def test_executor_rejects_verification_without_native_children(
+    oob_service, native_evaluation_executor
 ):
     executor = native_evaluation_executor
-    record = _execute_claimed_test_unit(executor, "E")
-    service, provider, _ = oob_service
-    assert record.mode == "E" and record.diagnosis["diagnostic_outcome"] == "DIAGNOSED"
-    assert record.patch_hash and record.verdict == "INCONCLUSIVE"
-    assert record.status == "INCONCLUSIVE" and record.oracle_passed is None
-    assert record.usage["physical_calls"] == 5 and record.usage["sanitizer_calls"] == 1
-    # One build, ordinary execution, sanitizer invocation, and documentation retrieval.
-    assert record.usage["diagnostic_tool_calls"] == 4
-    assert record.cost_usd is None  # No invented pricing for unpriced physical calls.
-    assert record.input_hash and record.evidence_hash
-    assert record.diagnosis == service.diagnosis(record.record_id).model_dump(mode="json")
-    assert provider.kinds == ["plan", "plan", "plan", "diagnose", "patch"]
-    wire = record.model_dump_json() + json.dumps(provider.inputs)
-    assert "PRIVATE_TRUTH_CANARY" not in wire and str(tmp_path) not in wire
+    with pytest.raises(ValueError, match="child selection"):
+        _execute_claimed_test_unit(executor, "E")
+    assert oob_service[1].kinds == ["plan", "plan", "plan", "diagnose", "patch"]
 
 
 def test_evaluation_rejects_self_authored_corpus_receipt(oob_service, tmp_path):
@@ -310,7 +351,7 @@ def test_runner_persists_only_schedule_bound_native_lineage(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version,
         toolchain_hash=binding.toolchain_lock_hash,
@@ -364,7 +405,7 @@ def test_deterministic_modes_reject_extra_controller_actions(
     result = EvaluationRunner(
         store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -406,8 +447,8 @@ def test_runner_rejects_forged_native_lineage(
 
     original = executor.execute_scheduled
 
-    def forged(item, attempt):
-        record = original(item, attempt)
+    def forged(run_id, ordinal):
+        record = original(run_id, ordinal)
         if forgery == "record_id":
             return record.model_copy(update={"record_id": "f" * 32})
         if forgery == "diagnosis_hash":
@@ -434,7 +475,7 @@ def test_runner_rejects_forged_native_lineage(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version,
         toolchain_hash=binding.toolchain_lock_hash,
@@ -565,15 +606,22 @@ def _configure_responses_provider(
     return binding, policy
 
 
-def test_test_pricing_cannot_unlock_real_provider(monkeypatch, native_evaluation_executor):
+def test_test_pricing_cannot_unlock_real_provider(
+    monkeypatch, tmp_path, native_evaluation_executor
+):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
     executor = native_evaluation_executor
     binding, _ = _configure_responses_provider(executor, monkeypatch, mock_provider=False)
+    forged = tmp_path / "caller-pricing"
+    forged.mkdir(mode=0o700)
+    (forged / "registry.key").write_bytes(b"x" * 32)
+    (forged / "attestations.json").write_text('{"schema_version":1,"attestations":[]}')
+    monkeypatch.setenv("GPU_AGENT_PRICING_REGISTRY_ROOT", str(forged))
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -602,7 +650,7 @@ def test_mode_e_binds_native_provider_policy_invocation_and_usage(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version,
         toolchain_hash=binding.toolchain_lock_hash,
@@ -634,7 +682,7 @@ def test_scheduled_repair_resolves_native_private_verification(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -649,6 +697,22 @@ def test_scheduled_repair_resolves_native_private_verification(
     assert "verification/runtime" in result.records[0].executed_checks
     assert "verification/private_oracle" not in result.records[0].executed_checks
     assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+    verification_run = executor.service.store.load(result.records[0].lineage.verification_run_id)
+    public_result = json.loads(
+        executor.service.store.read(
+            next(
+                ref
+                for ref in verification_run.artifact_refs
+                if ref.name == "verification/result.json"
+            )
+        )
+    )
+    assert {
+        "private_holdout_passed",
+        "private_passed_count",
+        "not_run_count",
+        "suite_hash",
+    }.isdisjoint(public_result)
 
 
 def test_scheduled_repair_rejects_public_only_verification_summary(
@@ -674,10 +738,8 @@ def test_scheduled_repair_rejects_public_only_verification_summary(
             reason_code="FORGED_SUMMARY",
             original_finding_present=None,
             public_oracle_passed=None,
-            private_holdout_passed=None,
             required_checks={},
             candidate_hash=candidate.patched_source_hash,
-            suite_hash="a" * 64,
         )
         child = executor.service.store.create_run("verification", run_id)
         executor.service.store.put(
@@ -694,7 +756,7 @@ def test_scheduled_repair_rejects_public_only_verification_summary(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -719,7 +781,7 @@ def test_mode_e_rejects_forged_model_config_binding(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=forged.repository.commit,
         prompt_version=forged.prompt_version,
         toolchain_hash=forged.toolchain_lock_hash,
@@ -744,7 +806,7 @@ def test_mode_e_requires_pricing_attestation_before_provider_call(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -790,7 +852,7 @@ def test_mode_e_rejects_unattested_response_policy(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -832,7 +894,7 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
     manifest = EvaluationRunner(
         executor.service.store,
         {alias: alias},
-        holdout_executor.execute_scheduled,
+        holdout_executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -876,17 +938,41 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
     assert results == [result, result]
     assert result.public_record_id == manifest.records[0].record_id
     assert result.private_case_id == "case_0100"
-    from gpu_agent.benchmark.metrics import aggregate
-
-    assert (
-        aggregate(
-            [result],
-            public_store=executor.service.store,
-            evaluator_store=evaluator,
-            run_binding=binding,
-        ).record_count
-        == 1
+    from gpu_agent.benchmark.metrics import (
+        HiddenTruth,
+        Rubric,
+        aggregate,
+        aggregate_grouped,
     )
+    from gpu_agent.benchmark.metrics import (
+        score as metric_score,
+    )
+
+    metric_kwargs = {
+        "public_store": executor.service.store,
+        "evaluator_store": evaluator,
+        "run_binding": binding,
+    }
+    summary = aggregate([result], **metric_kwargs)
+    assert summary.record_count == summary.case_count == summary.template_count == 1
+    assert summary.family_accuracy.value == summary.root_cause_accuracy.value == 1
+    assert summary.private_holdout_pass_rate.value == 1
+    grouped = aggregate_grouped([result], **metric_kwargs)
+    assert grouped.overall == summary and grouped.by_mode["D"] == summary
+    rescored = metric_score(
+        result,
+        HiddenTruth(
+            failure_family="out_of_bounds",
+            root_cause_labels=["out_of_bounds"],
+            source_path="kernel.cu",
+            line_start=1,
+            line_end=20,
+        ),
+        Rubric(),
+        **metric_kwargs,
+    )
+    assert rescored.inconclusive_correct is True
+    assert rescored.location_correct is True
     copied_run = executor.service.store.create_run("evaluation", binding=binding)
     executor.service.store.transition(copied_run.id, "RUNNING", "EXECUTING")
     original_refs = {ref.name: ref for ref in evaluation_run.artifact_refs}
@@ -991,8 +1077,8 @@ def test_deterministic_mode_rejects_unexpected_verification_child(
     assert binding is not None
     original = executor.execute_scheduled
 
-    def injected(item, attempt):
-        record = original(item, attempt)
+    def injected(run_id, ordinal):
+        record = original(run_id, ordinal)
         child = executor.service.store.create_run("verification", record.record_id)
         executor.service.store.transition(child.id, "RUNNING", "FINALIZING")
         executor.service.store.transition(child.id, "COMPLETED", None)
@@ -1002,7 +1088,7 @@ def test_deterministic_mode_rejects_unexpected_verification_child(
     result = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -1027,7 +1113,7 @@ def test_private_case_cannot_enter_public_schedule_without_holdout_alias(
     runner = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        executor.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -1108,28 +1194,9 @@ def test_executor_refuses_unregistered_or_changed_inputs(
     assert oob_service[1].kinds == []
 
 
-@pytest.mark.parametrize(
-    "verdict, status, success, build_outcome, compiled",
-    [
-        ("VERIFIED_FIXED", "COMPLETED", 1, "CLEAN", True),
-        ("NOT_FIXED", "COMPLETED", 0, "FAILED", False),
-        ("REGRESSION_DETECTED", "COMPLETED", 0, "CLEAN", True),
-        ("INCONCLUSIVE", "INCONCLUSIVE", 0, "TOOL_ERROR", None),
-        ("INCONCLUSIVE", "INCONCLUSIVE", 0, "NOT_RUN", None),
-    ],
-)
-def test_executor_verdict_aggregation(
-    oob_service,
-    tmp_path,
-    monkeypatch,
-    verdict,
-    status,
-    success,
-    build_outcome,
-    compiled,
-    native_evaluation_executor,
+def test_executor_rejects_self_authored_verification_summary(
+    oob_service, monkeypatch, native_evaluation_executor
 ):
-    from gpu_agent.benchmark.metrics import _aggregate_records as aggregate
     from gpu_agent.patching import PatchCandidate
     from gpu_agent.verification.models import VerificationResult
 
@@ -1143,15 +1210,13 @@ def test_executor_verdict_aggregation(
         )
         candidate = PatchCandidate.model_validate_json(service.store.read(candidate_ref))
         result = VerificationResult(
-            verdict=verdict,
+            verdict="VERIFIED_FIXED",
             failure_stage=None,
             reason_code="TEST_VERDICT",
-            original_finding_present=verdict == "NOT_FIXED",
-            public_oracle_passed=verdict == "VERIFIED_FIXED",
-            private_holdout_passed=verdict == "VERIFIED_FIXED",
-            required_checks={"memcheck": "CLEAN", "build": build_outcome},
+            original_finding_present=False,
+            public_oracle_passed=True,
+            required_checks={"memcheck": "CLEAN", "build": "CLEAN"},
             candidate_hash=candidate.patched_source_hash,
-            suite_hash="a" * 64,
         )
         run = service.store.create_run("verification", run_id)
         service.store.put(
@@ -1162,16 +1227,8 @@ def test_executor_verdict_aggregation(
         return result
 
     monkeypatch.setattr(service, "verify", persist_verification)
-    record = _execute_claimed_test_unit(executor, "E")
-    assert record.status == status and record.verdict == verdict
-    assert record.patch_compile_passed is compiled
-    assert record.private_holdout_passed == (verdict == "VERIFIED_FIXED")
-    assert "private_holdout_passed" not in record.public().model_dump()
-    assert record.usage["tool_calls"] is None
-    assert record.usage["total_sanitizer_calls"] is None
-    summary = aggregate([record])
-    assert summary.end_to_end_success.numerator == success
-    assert summary.failure_ids == ([] if success else [record.record_id])
+    with pytest.raises(ValueError, match="audit lineage"):
+        _execute_claimed_test_unit(executor, "E")
 
 
 def test_missing_knowledge_has_zero_physical_retrievals(

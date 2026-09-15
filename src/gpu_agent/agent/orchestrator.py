@@ -30,6 +30,7 @@ from gpu_agent.agent.provider import LLMProvider, ProviderError
 from gpu_agent.agent.rule_router import RuleRouter
 from gpu_agent.benchmark.evaluation import EvaluationMode
 from gpu_agent.contracts import ArtifactRef, CurrentPhase
+from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.execution.backend import ExecutionBackend
 from gpu_agent.execution.models import (
@@ -55,8 +56,7 @@ def _deduplicate_findings(findings: list[PublicFinding]) -> list[PublicFinding]:
     return unique
 
 
-def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
-    bundle = EvidenceRepository(store).public_view(run_id)
+def public_evidence_from_bundle(store: RunStore, bundle: EvidenceBundle) -> PublicEvidence:
     sources = [
         PublicSource(source_id=ref.id, content=store.read(ref).decode("utf-8"))
         for ref in bundle.source_snapshot
@@ -107,6 +107,10 @@ def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
         documentation=docs,
         sanitizer_outcomes=sanitizer_outcomes,
     )
+
+
+def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
+    return public_evidence_from_bundle(store, EvidenceRepository(store).public_view(run_id))
 
 
 class AgentOrchestrator:
@@ -376,6 +380,29 @@ class AgentOrchestrator:
                     action = ACTION_ADAPTER.validate_python(proposed.model_dump())
                 except ValidationError:
                     raise ProviderError("ACTION_INVALID") from None
+                manifest = self.store.load(run_id)
+                evidence_refs = [
+                    ref for ref in manifest.artifact_refs if ref.name == "evidence/bundle.json"
+                ]
+                if not evidence_refs:
+                    raise ValueError("controller action has no evidence snapshot")
+                self.store.put(
+                    run_id,
+                    f"actions/{self.budget.agent_steps}/step.json",
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "action": action.model_dump(mode="json"),
+                            "evidence_ref": evidence_refs[-1].model_dump(mode="json"),
+                            "evidence": evidence.model_dump(mode="json"),
+                            "budget": self.budget.model_dump(mode="json"),
+                            "seen": sorted(self.seen),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode(),
+                    "public",
+                )
                 decision = decide_action(
                     action, evidence, self.budget, CurrentPhase.DIAGNOSING, self.seen
                 )
@@ -433,7 +460,11 @@ class AgentOrchestrator:
                 ref for ref in manifest.artifact_refs if ref.name == "evidence/bundle.json"
             ]
             decisions = sorted(
-                (ref for ref in manifest.artifact_refs if ref.name.startswith("actions/")),
+                (
+                    ref
+                    for ref in manifest.artifact_refs
+                    if ref.name.startswith("actions/") and ref.name.endswith("/decision.json")
+                ),
                 key=lambda ref: int(ref.name.split("/")[1]),
             )
             if len(policies) != 1 or not evidence_refs:

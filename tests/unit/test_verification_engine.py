@@ -8,6 +8,16 @@ from pathlib import Path
 import pytest
 
 
+def _audit_result(tmp_path, result):
+    from gpu_agent.store import RunStore
+    from gpu_agent.verification.models import VerificationAuditResult
+
+    private = RunStore(tmp_path / "evaluator/runs", visibility="evaluator")
+    run = private.load(result.evaluator_audit_run_id)
+    ref = next(ref for ref in run.artifact_refs if ref.name == "verification/audit-result.json")
+    return VerificationAuditResult.model_validate_json(private.read(ref))
+
+
 @pytest.fixture
 def original(store, tmp_path):
     from gpu_agent.contracts import RepositorySnapshot, RunBinding, ToolResult, now
@@ -339,12 +349,13 @@ def test_evaluator_rejects_semantic_failures(
     result = engine.verify(original[0], candidate_id, "full")
     assert result.verdict.value == want
     assert result.candidate_hash == candidate.patched_source_hash
+    audit_result = _audit_result(tmp_path, result)
     if variant == "human":
-        assert result.private_passed_count >= 10
+        assert audit_result.private_passed_count >= 10
         runs = [x for x in container_boundary if x[1] == "run"]
         checks = [x for x in container_boundary if x[1] == "memcheck"]
         assert len({x[0] for x in runs}) == len(runs)
-        assert len(runs) == len(checks) == 1 + result.private_passed_count
+        assert len(runs) == len(checks) == 1 + audit_result.private_passed_count
         assert {1, 31, 32, 33, 255, 256, 257, 1023, 1024, 1025} <= {x[2]["n"] for x in runs}
         assert result.binary_hashes
         from gpu_agent.store import RunStore
@@ -371,6 +382,7 @@ def test_evaluator_rejects_semantic_failures(
             "oracle-implementation.py",
             "private-suite.json",
             "observation.json",
+            "verification/audit-result.json",
         } <= {ref.name for ref in audit.artifact_refs}
         assert all(ref.visibility == "evaluator" for ref in audit.artifact_refs)
     if variant == "syntax":
@@ -378,7 +390,7 @@ def test_evaluator_rejects_semantic_failures(
         assert result.required_checks["memcheck"] == "NOT_RUN"
     public = json.dumps(result.model_dump(mode="json"))
     assert all(x not in public for x in ("raw_ref", "expected", "seed", "input.json", "kernel.cu"))
-    assert result.not_run_count > 0 if variant != "human" else result.not_run_count == 0
+    assert audit_result.not_run_count > 0 if variant != "human" else audit_result.not_run_count == 0
     # Inspect every public artifact, not just the returned model.
     for run_dir in store.root.iterdir():
         manifest = store.load(run_dir.name)
@@ -487,7 +499,7 @@ def test_holdout_only_memcheck_finding_blocks_success(
     result = VerificationEngine(store, tmp_path / "evaluator").verify(original[0], candidate_id)
     assert result.verdict.value == "REGRESSION_DETECTED"
     assert result.new_findings == 1
-    assert result.private_holdout_passed is None
+    assert _audit_result(tmp_path, result).observation.private_holdout_passed is None
     assert result.required_checks["private_oracle"] == "INCOMPLETE"
 
 
@@ -532,7 +544,7 @@ def test_required_tool_failure_is_inconclusive(
     candidate_id, _ = register_variant(store, original, "human")
     result = VerificationEngine(store, tmp_path / "evaluator").verify(original[0], candidate_id)
     assert result.verdict.value == "INCONCLUSIVE"
-    assert result.not_run_count > 0
+    assert _audit_result(tmp_path, result).not_run_count > 0
 
 
 def test_revalidation_rejects_forged_candidate_hash(store, tmp_path, original, container_boundary):
@@ -556,7 +568,7 @@ def test_standard_mode_runs_all_holdouts(store, tmp_path, original, container_bo
     candidate_id, _ = register_variant(store, original, "human")
     engine = VerificationEngine(store, tmp_path / "evaluator")
     result = engine.verify(original[0], candidate_id, "standard")
-    assert result.private_passed_count == 13
+    assert _audit_result(tmp_path, result).private_passed_count == 13
     strict = engine.verify(original[0], candidate_id, "full")
     assert strict.verdict.value == "VERIFIED_FIXED"
     assert {tool.value for tool in strict.check_outcomes} == {

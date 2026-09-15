@@ -8,7 +8,7 @@ import random
 import re
 import stat
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Literal
 
@@ -21,6 +21,7 @@ from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.store import RunStore, reject_symlinks
 
 if TYPE_CHECKING:
+    from gpu_agent.benchmark.executor import EvaluationExecutor
     from gpu_agent.benchmark.holdout import HoldoutBatch, HoldoutController
 
 _CLAIM_GUARD = threading.Lock()
@@ -76,14 +77,13 @@ class PricingAttestation(ExecutionModel):
     """Controller-owned pricing evidence; only a private test producer exists today."""
 
     schema_version: Literal[1] = 1
-    source: Literal["TEST_ONLY", "REVIEWED_REGISTRY"]
+    source: Literal["TEST_ONLY"]
     provider: str
     model: str
     repository_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     model_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     input_usd_per_million: float = Field(ge=0)
     output_usd_per_million: float = Field(ge=0)
-    registry_signature: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
     @classmethod
     def _for_test(
@@ -118,13 +118,6 @@ class PricingAttestation(ExecutionModel):
             separators=(",", ":"),
         ).encode()
         return hashlib.sha256(content).hexdigest()
-
-    def signing_content(self) -> bytes:
-        return json.dumps(
-            self.model_dump(mode="json", exclude={"registry_signature"}),
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode()
 
 
 class PublicEvaluationRecord(ExecutionModel):
@@ -243,6 +236,16 @@ class EvaluationAttempt(ExecutionModel):
     reserved_cost_usd: float = Field(ge=0)
 
 
+class EvaluationExecutionClaim(ExecutionModel):
+    """Controller-created, durable proof that a scheduled unit began execution."""
+
+    schema_version: Literal[1] = 1
+    run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    ordinal: int = Field(ge=0)
+    schedule_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    attempt_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class EvaluationUnitBinding(ExecutionModel):
     """Frozen schedule identity persisted before diagnosis execution starts."""
 
@@ -288,7 +291,7 @@ class EvaluationRunner:
         self,
         store: RunStore,
         case_ids: dict[str, str],
-        execute: Callable[[str, str, EvaluationMode, int], EvaluationRecord],
+        executor: "EvaluationExecutor",
         *,
         commit: str,
         prompt_version: str,
@@ -303,6 +306,10 @@ class EvaluationRunner:
     ) -> None:
         if store.visibility != "public":
             raise ValueError("evaluation requires a public RunStore")
+        from gpu_agent.benchmark.executor import EvaluationExecutor
+
+        if type(executor) is not EvaluationExecutor:
+            raise ValueError("evaluation requires the native executor implementation")
         if (
             binding.purpose != "evaluation"
             or binding.repository.commit != commit
@@ -314,7 +321,7 @@ class EvaluationRunner:
         self.store = store
         self.binding = binding
         self.case_ids = dict(case_ids)
-        self.execute = execute
+        self.executor = executor
         self.bindings = EvaluationBindings(
             commit=commit,
             prompt_version=prompt_version,
@@ -497,15 +504,7 @@ class EvaluationRunner:
             )
             attempts[item.ordinal] = attempt
             try:
-                owner = getattr(self.execute, "__self__", None)
-                if (
-                    owner is None
-                    or not hasattr(owner, "execute_scheduled")
-                    or not hasattr(owner, "_claim_scheduled")
-                ):
-                    raise ValueError("evaluation requires a schedule-bound native executor")
-                claim = owner._claim_scheduled(item, attempt)
-                record = owner.execute_scheduled(claim)
+                record = self.executor.execute_scheduled(run_id, item.ordinal)
                 self._validate_record(record, item, attempt)
             except Exception:
                 return self._terminal(
@@ -625,11 +624,7 @@ class EvaluationRunner:
             item.repeat,
         ):
             raise ValueError("evaluation record does not match scheduled unit")
-        owner = getattr(self.execute, "__self__", None)
-        validator = getattr(owner, "validate_scheduled_record", None)
-        if validator is None:
-            raise ValueError("evaluation requires a native record validator")
-        validator(record, item, attempt)
+        self.executor.validate_scheduled_record(record, item, attempt)
 
     def _one_artifact(self, run_id: str, name: str) -> ArtifactRef:
         refs = [ref for ref in self.store.load(run_id).artifact_refs if ref.name == name]

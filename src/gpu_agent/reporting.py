@@ -106,14 +106,11 @@ def render_report(store: RunStore, run_id: str) -> str:
     )
     if not verifications:
         lines.append("Verification: NOT_RUN")
-        lines.append("Input-set SHA256: unavailable")
     for result in verifications:
         lines.append(f"Verification: {result.verdict.value} ({result.reason_code})")
         lines.append(f"Scope: candidate {result.candidate_hash}")
-        lines.append(f"Input-set SHA256: {result.suite_hash or 'unavailable'}")
         lines.append("Binary SHA256: " + (", ".join(result.binary_hashes) or "unavailable"))
         lines.append(f"Public passed count: {result.public_passed_count}")
-        lines.append(f"Private passed count: {result.private_passed_count}")
         lines.extend(f"- {name}: {status}" for name, status in result.required_checks.items())
         lines.append(f"Check plan: {result.check_plan_version}")
         lines.extend(
@@ -121,7 +118,6 @@ def render_report(store: RunStore, run_id: str) -> str:
             f"outcome={result.check_outcomes.get(item.tool, 'NOT_RUN')}; reason={item.reason_code}"
             for item in result.check_requirements
         )
-        lines.append(f"Not run count: {result.not_run_count}")
     usage = [r for r in manifest.artifact_refs if r.name == "agent/usage-summary.json"]
     if usage:
         summary = json.loads(store.read(usage[-1]))

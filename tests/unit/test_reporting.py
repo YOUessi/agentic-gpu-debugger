@@ -30,37 +30,31 @@ def test_report_includes_recorded_scope_counts_and_tool_versions(store):
         reason_code="TEST",
         original_finding_present=None,
         public_oracle_passed=None,
-        private_holdout_passed=None,
         required_checks={},
         candidate_hash="b" * 64,
         binary_hashes=["c" * 64],
-        suite_hash="d" * 64,
         public_passed_count=2,
-        private_passed_count=3,
-        not_run_count=4,
     )
     store.put(child.id, "verification/result.json", result.model_dump_json().encode(), "public")
     report = render_report(store, run.id)
     for expected in [
         source.sha256,
-        "d" * 64,
         "c" * 64,
         "12.8.93",
         "2025.1.0.0",
         "sm_89",
         "Public passed count: 2",
-        "Private passed count: 3",
-        "Not run count: 4",
         "Scope: candidate",
         "base_repo_digest: unavailable",
     ]:
         assert expected in report
     assert "private-canary" not in report and "private_checker" not in report
+    assert "Private passed" not in report and "Input-set" not in report
 
 
 def test_report_marks_missing_scope_and_provenance_unavailable(store):
     report = render_report(store, store.create_run("diagnosis").id)
     assert "Source SHA256: unavailable" in report
-    assert "Input-set SHA256: unavailable" in report
+    assert "Input-set SHA256" not in report
     assert "cuda_nvcc: unavailable" in report
     assert "compute_sanitizer: unavailable" in report

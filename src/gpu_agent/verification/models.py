@@ -54,7 +54,6 @@ class VerificationResult(ExecutionModel):
     reason_code: str
     original_finding_present: bool | None
     public_oracle_passed: bool | None
-    private_holdout_passed: bool | None
     required_checks: dict[str, str]
     check_requirements: list[CheckRequirement] = Field(default_factory=list)
     check_outcomes: dict[SanitizerTool, str] = Field(default_factory=dict)
@@ -64,9 +63,17 @@ class VerificationResult(ExecutionModel):
     candidate_hash: str
     binary_hashes: list[str] = Field(default_factory=list)
     public_passed_count: int = 0
-    private_passed_count: int = 0
-    not_run_count: int = 0
-    suite_hash: str
     evaluator_audit_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
-    evaluator_observation_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     limitations: list[str] = Field(default_factory=list)
+
+
+class VerificationAuditResult(ExecutionModel):
+    """Evaluator-only derived result; never serialized into the public store."""
+
+    schema_version: Literal[1] = 1
+    observation: VerificationObservation
+    public_passed_count: int = Field(ge=0)
+    private_passed_count: int = Field(ge=0)
+    not_run_count: int = Field(ge=0)
+    suite_hash: str = Field(pattern=r"^(|[a-f0-9]{64})$")
+    child_run_ids: list[str]

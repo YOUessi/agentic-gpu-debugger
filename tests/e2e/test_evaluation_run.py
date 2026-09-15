@@ -8,21 +8,31 @@ def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_e
     class ObservedExecutor:
         calls = []
 
-        def _claim_scheduled(self, item, attempt):
-            return executor._claim_scheduled(item, attempt)
-
         def validate_scheduled_record(self, record, item, attempt):
             return executor.validate_scheduled_record(record, item, attempt)
 
-        def execute_scheduled(self, claim):
-            self.calls.append((claim.item.case_id, claim.item.mode, claim.item.repeat))
-            return executor.execute_scheduled(claim)
+        def execute_scheduled(self, run_id, ordinal):
+            record = executor.execute_scheduled(run_id, ordinal)
+            self.calls.append((record.case_id, record.mode, record.repeat))
+            return record
 
     observed = ObservedExecutor()
+    native_execute = executor.execute_scheduled
+    observed.execute_scheduled = lambda run_id, ordinal: (
+        observed.calls.append(
+            (
+                (record := native_execute(run_id, ordinal)).case_id,
+                record.mode,
+                record.repeat,
+            )
+        )
+        or record
+    )
+    executor.execute_scheduled = observed.execute_scheduled
     runner = EvaluationRunner(
         executor.service.store,
         {"case_0100": "vector-add"},
-        observed.execute_scheduled,
+        executor,
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -40,26 +50,22 @@ def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_e
     ]
 
 
-def test_missing_cost_cap_stops_before_external_execution(tmp_path):
+def test_missing_cost_cap_stops_before_external_execution(native_evaluation_executor):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
-    from gpu_agent.contracts import RepositorySnapshot, RunBinding
-    from gpu_agent.store import RunStore
+
+    executor = native_evaluation_executor
+    binding = executor.service.binding
+    assert binding is not None
 
     runner = EvaluationRunner(
-        RunStore(tmp_path / "runs"),
-        {"case_0001": "index"},
-        lambda *args: (_ for _ in ()).throw(AssertionError()),
-        commit="c" * 40,
-        prompt_version="v2",
-        toolchain_hash="d" * 64,
-        model_config_hash="e" * 64,
-        binding=RunBinding(
-            repository=RepositorySnapshot(commit="c" * 40, tracked_tree_hash="f" * 64, clean=True),
-            purpose="evaluation",
-            toolchain_lock_hash="d" * 64,
-            prompt_version="v2",
-            model_config_hash="e" * 64,
-        ),
+        executor.service.store,
+        {"case_0100": "vector-add"},
+        executor,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
         max_cost_usd=None,
         max_unit_cost_usd=None,
     )
