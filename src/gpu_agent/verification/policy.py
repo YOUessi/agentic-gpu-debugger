@@ -74,10 +74,19 @@ def plan_checks(
 
 def decide_verdict(observation: VerificationObservation) -> VerificationVerdict:
     o = observation
+    requirements = {item.tool: item for item in o.check_requirements}
+    if any(item.required and item.support != "SUPPORTED" for item in requirements.values()):
+        return VerificationVerdict.INCONCLUSIVE
     if o.required_evidence_missing:
         return VerificationVerdict.INCONCLUSIVE
     if o.build_ok is False or o.original_finding_present is True:
         return VerificationVerdict.NOT_FIXED
+    if any(
+        item.required
+        and o.check_outcomes.get(item.tool) in {None, "TOOL_ERROR", "UNSUPPORTED", "NOT_RUN"}
+        for item in requirements.values()
+    ):
+        return VerificationVerdict.INCONCLUSIVE
     if o.original_finding_present is None:
         return VerificationVerdict.INCONCLUSIVE
     if o.new_blocking_findings or False in (

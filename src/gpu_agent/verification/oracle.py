@@ -3,7 +3,8 @@
 import json
 import math
 import struct
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from typing import Protocol
 
 from gpu_agent.verification.models import OracleResult
 
@@ -99,3 +100,45 @@ def _float32(value: float) -> float:
 
 def reference_add(a: list[float], b: list[float]) -> list[float]:
     return [_float32(_float32(x) + _float32(y)) for x, y in zip(a, b, strict=True)]
+
+
+class TrustedChecker(Protocol):
+    def __call__(self, actual: Sequence[object], expected: Sequence[object]) -> OracleResult: ...
+
+
+class ExpectedOutputChecker:
+    def __init__(self, expected: Sequence[object], oracle: NumericOracle) -> None:
+        self._expected, self._oracle = tuple(expected), oracle
+
+    def __call__(self, actual: Sequence[object], expected: Sequence[object] = ()) -> OracleResult:
+        return self._oracle.check(actual, self._expected)
+
+
+class CPUReferenceChecker:
+    def __init__(
+        self,
+        reference: Callable[[list[float], list[float]], list[float]],
+        oracle: NumericOracle,
+    ) -> None:
+        self._reference, self._oracle = reference, oracle
+
+    def check(self, actual: Sequence[object], a: list[float], b: list[float]) -> OracleResult:
+        return self._oracle.check(actual, self._reference(a, b))
+
+
+class TrustedCheckerRegistry:
+    """Resolve only controller-registered callables; never import user paths."""
+
+    def __init__(self, checkers: dict[str, TrustedChecker] | None = None) -> None:
+        self._checkers = dict(checkers or {})
+
+    def register(self, checker_id: str, checker: TrustedChecker) -> None:
+        if not checker_id or checker_id in self._checkers or not callable(checker):
+            raise ValueError("invalid or duplicate checker")
+        self._checkers[checker_id] = checker
+
+    def resolve(self, checker_id: str) -> TrustedChecker:
+        try:
+            return self._checkers[checker_id]
+        except KeyError as error:
+            raise ValueError("checker is not registered") from error

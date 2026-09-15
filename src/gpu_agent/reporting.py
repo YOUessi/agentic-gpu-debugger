@@ -11,6 +11,31 @@ from gpu_agent.store import RunStore
 from gpu_agent.verification.models import VerificationResult
 
 
+class ReportExporter:
+    def __init__(self, store: RunStore) -> None:
+        if store.visibility != "public":
+            raise ValueError("public exporter requires public store")
+        self.store = store
+
+    def public(self, run_id: str) -> bytes:
+        self.store.load(run_id)
+        results: list[VerificationResult] = []
+        for path in sorted(self.store.root.iterdir()):
+            if not path.is_dir() or len(path.name) != 32:
+                continue
+            child = self.store.load(path.name)
+            if child.kind != "verification" or child.parent_run_id != run_id:
+                continue
+            refs = [ref for ref in child.artifact_refs if ref.name == "verification/result.json"]
+            if len(refs) == 1:
+                results.append(VerificationResult.model_validate_json(self.store.read(refs[0])))
+        return json.dumps(
+            [result.model_dump(mode="json") for result in results],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+
+
 def render_report(store: RunStore, run_id: str) -> str:
     manifest = store.load(run_id)
     refs = [r for r in manifest.artifact_refs if r.name == "diagnosis.json"]
@@ -90,6 +115,12 @@ def render_report(store: RunStore, run_id: str) -> str:
         lines.append(f"Public passed count: {result.public_passed_count}")
         lines.append(f"Private passed count: {result.private_passed_count}")
         lines.extend(f"- {name}: {status}" for name, status in result.required_checks.items())
+        lines.append(f"Check plan: {result.check_plan_version}")
+        lines.extend(
+            f"- {item.tool.value}: required={item.required}; support={item.support}; "
+            f"outcome={result.check_outcomes.get(item.tool, 'NOT_RUN')}; reason={item.reason_code}"
+            for item in result.check_requirements
+        )
         lines.append(f"Not run count: {result.not_run_count}")
     usage = [r for r in manifest.artifact_refs if r.name == "agent/usage-summary.json"]
     if usage:

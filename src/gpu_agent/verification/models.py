@@ -37,6 +37,8 @@ class VerificationObservation(ExecutionModel):
     private_holdout_passed: bool | None = None
     required_evidence_missing: bool = False
     new_blocking_findings: list[Finding] = Field(default_factory=list)
+    check_requirements: list[CheckRequirement] = Field(default_factory=list)
+    check_outcomes: dict[SanitizerTool, str] = Field(default_factory=dict)
 
 
 class VerificationVerdict(StrEnum):
@@ -54,6 +56,10 @@ class VerificationResult(ExecutionModel):
     public_oracle_passed: bool | None
     private_holdout_passed: bool | None
     required_checks: dict[str, str]
+    check_requirements: list[CheckRequirement] = Field(default_factory=list)
+    check_outcomes: dict[SanitizerTool, str] = Field(default_factory=dict)
+    not_run_reasons: dict[SanitizerTool, str] = Field(default_factory=dict)
+    check_plan_version: Literal["verification-m4-v1"] = "verification-m4-v1"
     new_findings: int = 0
     candidate_hash: str
     binary_hashes: list[str] = Field(default_factory=list)

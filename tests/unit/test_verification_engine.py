@@ -282,7 +282,12 @@ def container_boundary(monkeypatch):
                 b" in /input/kernel.cu:10\n========= ERROR SUMMARY: 1 error\n"
             )
             return ProcessCapture(86, output, b"", False), b"", log
-        return ProcessCapture(0, output, b"", False), b"", b"========= ERROR SUMMARY: 0 errors\n"
+        clean = (
+            b"========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)\n"
+            if operation == "racecheck"
+            else b"========= ERROR SUMMARY: 0 errors\n"
+        )
+        return ProcessCapture(0, output, b"", False), b"", clean
 
     monkeypatch.setattr(IsolatedGPUBackend, "_container", container)
     return calls
@@ -516,8 +521,21 @@ def test_standard_mode_runs_all_holdouts(store, tmp_path, original, container_bo
     engine = VerificationEngine(store, tmp_path / "evaluator")
     result = engine.verify(original[0], candidate_id, "standard")
     assert result.private_passed_count == 13
-    with pytest.raises(ValueError):
-        engine.verify(original[0], candidate_id, "strict")
+    strict = engine.verify(original[0], candidate_id, "full")
+    assert strict.verdict.value == "VERIFIED_FIXED"
+    assert {tool.value for tool in strict.check_outcomes} == {
+        "memcheck",
+        "racecheck",
+        "initcheck",
+        "synccheck",
+    }
+    assert all(outcome == "CLEAN" for outcome in strict.check_outcomes.values())
+    verifications = [
+        store.load(path.name)
+        for path in store.root.iterdir()
+        if store.load(path.name).kind == "verification"
+    ]
+    assert len(verifications) == 2
 
 
 def test_changed_binary_is_rejected_before_execution(

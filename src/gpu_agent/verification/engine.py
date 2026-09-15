@@ -30,6 +30,7 @@ from gpu_agent.execution.models import (
     Finding,
     SanitizerRequest,
     SanitizerResult,
+    SanitizerTool,
     WorkspaceRequest,
 )
 from gpu_agent.patching import (
@@ -41,7 +42,12 @@ from gpu_agent.patching import (
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
 from gpu_agent.verification.models import VerificationObservation, VerificationResult
 from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
-from gpu_agent.verification.policy import decide_verdict, finding_signature, original_presence
+from gpu_agent.verification.policy import (
+    decide_verdict,
+    finding_signature,
+    original_presence,
+    plan_checks,
+)
 
 TRUTH_ROOT = Path(__file__).resolve().parents[3] / "benchmarks/development_truth/case_0001"
 Payload = TypeVar("Payload")
@@ -243,6 +249,7 @@ class VerificationEngine:
                 0,
                 "",
                 "ORACLE_OR_BASELINE_UNAVAILABLE",
+                mode,
             )
         directory = Path(tempfile.mkdtemp(prefix="verification-", dir=self._root))
         base = directory / "base"
@@ -264,6 +271,7 @@ class VerificationEngine:
                     0,
                     "",
                     "ORACLE_OR_BASELINE_UNAVAILABLE",
+                    mode,
                 )
             public_input = _Input.model_validate_json(self._store.read(input_ref))
             holdouts = self._suite(case)
@@ -305,6 +313,8 @@ class VerificationEngine:
                 public_oracle="NOT_RUN",
                 private_oracle="NOT_RUN",
             )
+            if mode == "full":
+                checks.update(racecheck="NOT_RUN", initcheck="NOT_RUN", synccheck="NOT_RUN")
             binaries: list[str] = []
             public_passed = private_passed = executed = 0
             reason = "ALL_REQUIRED_CHECKS_PASSED"
@@ -345,7 +355,31 @@ class VerificationEngine:
                             workspace_id=handle.id, stdin_ref=stdin, timeout_seconds=120
                         )
                     )
-                    self._check_provenance(build.binary_ref, stdin, ordinary.tool_result, sanitizer)
+                    sanitizers = [sanitizer]
+                    if (
+                        mode == "full"
+                        and sanitizer.completed
+                        and sanitizer.check_outcome == "CLEAN"
+                    ):
+                        sanitizers.extend(
+                            backend.run_sanitizer(
+                                SanitizerRequest(
+                                    workspace_id=handle.id,
+                                    stdin_ref=stdin,
+                                    tool=tool.value,
+                                    timeout_seconds=120,
+                                )
+                            )
+                            for tool in (
+                                SanitizerTool.RACECHECK,
+                                SanitizerTool.INITCHECK,
+                                SanitizerTool.SYNCCHECK,
+                            )
+                        )
+                    for checked in sanitizers:
+                        self._check_provenance(
+                            build.binary_ref, stdin, ordinary.tool_result, checked
+                        )
                     self._private.put(
                         run.id,
                         "provenance.json",
@@ -361,20 +395,24 @@ class VerificationEngine:
                     )
                     executed += 1
                     runtime_ok = ordinary.runtime_status == "SUCCESS"
-                    infra = _infrastructure_failure(ordinary.tool_result) or not sanitizer.completed
-                    if sanitizer.tool_result is None or _infrastructure_failure(
-                        sanitizer.tool_result
-                    ):
-                        infra = True
+                    infra = _infrastructure_failure(ordinary.tool_result) or any(
+                        not checked.completed
+                        or checked.tool_result is None
+                        or _infrastructure_failure(checked.tool_result)
+                        for checked in sanitizers
+                    )
                     checks["runtime"] = "CLEAN" if runtime_ok else "FAILED"
-                    checks["memcheck"] = sanitizer.check_outcome
+                    for checked in sanitizers:
+                        assert checked.tool_result is not None
+                        checks[checked.tool_result.typed_payload.tool] = checked.check_outcome
                     present = observation.original_finding_present
                     if index == 0:
                         present = original_presence(original, sanitizer, line_map, same_input=True)
                     original_signatures = {finding_signature(f) for f in original}
                     new_findings = [
                         f
-                        for f in sanitizer.findings
+                        for checked in sanitizers
+                        for f in checked.findings
                         if index != 0
                         or finding_signature(f) not in original_signatures
                         or finding_signature(f) is None
@@ -424,8 +462,10 @@ class VerificationEngine:
                     passed = (
                         runtime_ok
                         and numeric_ok
-                        and sanitizer.completed
-                        and sanitizer.check_outcome == "CLEAN"
+                        and all(
+                            checked.completed and checked.check_outcome == "CLEAN"
+                            for checked in sanitizers
+                        )
                     )
                     if index == 0:
                         public_passed += int(passed)
@@ -469,6 +509,7 @@ class VerificationEngine:
                 len(suite) - executed,
                 suite_hash,
                 reason,
+                mode,
             )
         finally:
             shutil.rmtree(directory)
@@ -503,7 +544,22 @@ class VerificationEngine:
         not_run: int,
         suite_hash: str,
         reason: str,
+        mode: Literal["standard", "full"] = "standard",
     ) -> VerificationResult:
+        requirements = plan_checks(
+            SanitizerTool.MEMCHECK,
+            "strict" if mode == "full" else "standard",
+            {tool: "SUPPORTED" for tool in SanitizerTool},
+        )
+        outcomes = {item.tool: checks.get(item.tool.value, "NOT_RUN") for item in requirements}
+        not_run_reasons = {
+            item.tool: "UPSTREAM_CHECK_DID_NOT_PASS"
+            for item in requirements
+            if item.required and outcomes[item.tool] == "NOT_RUN"
+        }
+        observation = observation.model_copy(
+            update={"check_requirements": requirements, "check_outcomes": outcomes}
+        )
         # Explicit allowlist construction: never dump/copy private evidence into public storage.
         result = VerificationResult(
             verdict=decide_verdict(observation),
@@ -513,6 +569,9 @@ class VerificationEngine:
             public_oracle_passed=observation.public_oracle_passed,
             private_holdout_passed=observation.private_holdout_passed,
             required_checks=dict(checks),
+            check_requirements=requirements,
+            check_outcomes=outcomes,
+            not_run_reasons=not_run_reasons,
             new_findings=len(observation.new_blocking_findings),
             candidate_hash=candidate.patched_source_hash,
             binary_hashes=sorted(set(binaries)),
