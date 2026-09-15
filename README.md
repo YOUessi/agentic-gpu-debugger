@@ -2,7 +2,10 @@
 
 面向 CUDA 故障的证据驱动诊断工具。Python 负责 Agent/CLI/证据与验证编排，CUDA C++ 负责真实 kernel 和可信 host harness。
 
-当前完成 M0（T01–T02）：环境诊断，以及登记过的 clean CUDA kernel 的真实编译运行、CPU 结果核对与证据保存。尚未实现 Agent 源码诊断、模型补丁、隔离执行或修复验证。
+当前已实现证据驱动诊断、单一模型补丁、Docker GPU 隔离、四种 Compute
+Sanitizer、public/private Oracle、strict 验证、mutation 注册门、评测记录和 release
+gate。真实 DeepSeek OOB 闭环与四工具验收已通过；完整 16+8 corpus 和五模式付费评测
+尚未完成，因此当前不是可发布版本。
 
 ## 独立环境
 
@@ -68,7 +71,7 @@ gpu-agent verify RUN_ID /absolute/path/to/candidate.diff --strict
 远程 provider 使用官方 OpenAI Python SDK Responses structured outputs，必须显式配置
 `OPENAI_BASE_URL`、`OPENAI_MODEL` 和控制器环境中的 `OPENAI_API_KEY`。本程序不自动读取
 `.env`，也不索取或打印密钥。缺少配置时保存 `LLM_UNAVAILABLE` 结果，LLM 调用数为零。
-兼容 endpoint 还须声明 `GPU_AGENT_STORE_FALSE_SUPPORTED=1`，否则 fail closed；所有
+兼容 endpoint（例如 DeepSeek）还须声明 `GPU_AGENT_STORE_FALSE_SUPPORTED=1`，否则 fail closed；所有
 实际请求发送 `store=false`，不声称这等于零数据保留。
 
 `GPU_AGENT_KNOWLEDGE_INDEX` 指向 T05 已 ingest 的本地索引，
@@ -80,6 +83,22 @@ gpu-agent verify RUN_ID /absolute/path/to/candidate.diff --strict
 最多注册一个 candidate；验证失败不再次生成补丁。未注册可信 Oracle 的 standalone
 程序验证结果为 `INCONCLUSIVE / ORACLE_UNAVAILABLE`。Fake 测试通过不能作为真实模型、
 GPU 或容器验收；M1 仍需通过带 `--require-live` 的真实 OOB 闭环。
+
+不要把 API key 写入仓库、命令历史或报告。推荐放在权限为 600 的用户配置文件中，
+仅在控制器 shell 内加载；密钥永远不会传入候选容器。
+
+## 四工具、私有 corpus 与评测
+
+`memcheck` 是 race/init/sync 的前置内存安全检查；strict 模式冻结并执行四工具集合。
+必需工具 unsupported、timeout、截断或没有完整 summary 都会阻止 `VERIFIED_FIXED`。
+私有 corpus 必须位于仓库和 public RunStore 之外，普通用户只能复现 public development
+验证。case 只有在 clean Oracle/required checks 与 mutant target finding 均有真实 run ID
+时才能注册。
+
+五组评测 A–E 的协议见 [evaluation/protocol.md](evaluation/protocol.md)。完整批次至少为
+`24×5×3=360` 个单元；没有显式 API 费用上限时 runner 在第一次外部调用前停止。
+当前状态与边界见 [验收](docs/acceptance.md)、[评测](docs/evaluation-report.md) 和
+[限制](docs/limitations.md)。
 
 ## M0：真实 clean kernel 验收
 
