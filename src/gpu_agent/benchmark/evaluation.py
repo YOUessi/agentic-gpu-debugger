@@ -7,9 +7,10 @@ import re
 from collections.abc import Callable
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, ValidationError
 
-from gpu_agent.benchmark.metrics import Score
+from gpu_agent.agent.models import DiagnosisResult
+from gpu_agent.benchmark.metrics import EvaluationLabels, Score
 from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunStatus
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.store import RunStore
@@ -51,9 +52,15 @@ class PublicEvaluationRecord(ExecutionModel):
     failure_reason: str | None = None
 
     def blind(self) -> dict[str, object]:
+        # Export only the typed diagnosis contract. Malformed legacy payloads
+        # must not smuggle model/config/truth fields through this dictionary.
+        try:
+            diagnosis = DiagnosisResult.model_validate(self.diagnosis).model_dump(mode="json")
+        except ValidationError:
+            diagnosis = {}
         return {
-            "blind_id": self.record_id,
-            "diagnosis": self.diagnosis,
+            "blind_id": hashlib.sha256(f"blind-v1:{self.record_id}".encode()).hexdigest(),
+            "diagnosis": diagnosis,
             "evidence_hash": self.evidence_hash,
         }
 
@@ -63,11 +70,31 @@ class EvaluationRecord(PublicEvaluationRecord):
 
     should_be_inconclusive: bool | None = None
     score: Score | None = None
+    evaluator_labels: EvaluationLabels | None = None
+    patch_compile_passed: bool | None = None
+    private_holdout_passed: bool | None = None
 
     def public(self) -> PublicEvaluationRecord:
-        return PublicEvaluationRecord.model_validate(
-            self.model_dump(exclude={"should_be_inconclusive", "score"})
-        )
+        public_checks = {
+            "build",
+            "runtime",
+            "public_oracle",
+            "memcheck",
+            "racecheck",
+            "initcheck",
+            "synccheck",
+        }
+        fields = {name: getattr(self, name) for name in PublicEvaluationRecord.model_fields}
+        fields["executed_checks"] = {
+            key: value
+            for key, value in self.executed_checks.items()
+            if key in public_checks
+            or (
+                key.startswith("verification/")
+                and key.removeprefix("verification/") in public_checks
+            )
+        }
+        return PublicEvaluationRecord.model_validate(fields)
 
 
 class EvaluationBindings(ExecutionModel):

@@ -11,14 +11,15 @@ def test_blind_view_excludes_mode_model_usage_and_trace():
         evidence_hash="b" * 64,
         executed_checks={"memcheck": "CLEAN"},
         status="COMPLETED",
-        diagnosis={"root_cause": "guard missing"},
+        diagnosis={"diagnostic_outcome": "DIAGNOSED", "root_cause": "guard missing"},
         usage={"tokens": 12},
         latency_ms=5,
         cost_usd=0.01,
     )
     blind = record.blind()
     assert set(blind) == {"blind_id", "diagnosis", "evidence_hash"}
-    assert "E" not in str(blind) and "tokens" not in str(blind)
+    assert "tokens" not in str(blind)
+    assert blind["diagnosis"]["root_cause"] == "guard missing"
 
 
 def test_public_evaluation_artifacts_exclude_hidden_truth_fields(tmp_path):
@@ -42,12 +43,21 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(tmp_path):
             repeat=repeat,
             input_hash="a" * 64,
             evidence_hash="b" * 64,
-            executed_checks={"memcheck": "CLEAN"},
+            executed_checks={
+                "memcheck": "CLEAN",
+                "verification/build": "CLEAN",
+                "verification/private_oracle": "PRIVATE_CHECK_CANARY",
+            },
             status="COMPLETED",
             diagnosis={},
             latency_ms=1,
             cost_usd=0.01,
             should_be_inconclusive=True,
+            private_holdout_passed=False,
+            evaluator_labels={
+                "citation_relevance": {"PRIVATE_LABEL_CANARY": True},
+                "claim_support": {"PRIVATE_SUPPORT_CANARY": False},
+            },
             score=Score(
                 family_correct=True,
                 root_cause_correct=True,
@@ -76,3 +86,56 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(tmp_path):
     assert not hasattr(record, "should_be_inconclusive") and not hasattr(record, "score")
     assert not hasattr(manifest.records[0], "should_be_inconclusive")
     assert not hasattr(result.records[0], "should_be_inconclusive")
+    for content in artifacts.values():
+        assert b"PRIVATE_LABEL_CANARY" not in content
+        assert b"PRIVATE_SUPPORT_CANARY" not in content
+        assert b"private_holdout_passed" not in content
+        assert b"evaluator_labels" not in content
+        assert b"PRIVATE_CHECK_CANARY" not in content
+        assert b"private_oracle" not in content
+    assert record.executed_checks == {"memcheck": "CLEAN", "verification/build": "CLEAN"}
+
+
+def test_blind_rejects_untyped_diagnosis_metadata():
+    from gpu_agent.benchmark.evaluation import EvaluationRecord
+
+    record = EvaluationRecord(
+        record_id="x",
+        case_id="c",
+        template_id="t",
+        mode="A",
+        repeat=0,
+        input_hash="a" * 64,
+        evidence_hash="b" * 64,
+        executed_checks={},
+        status="COMPLETED",
+        latency_ms=1,
+        diagnosis={"root_cause": "guard missing", "mode": "NESTED_MODE_CANARY"},
+    )
+    assert "NESTED_MODE_CANARY" not in str(record.blind())
+
+
+def test_blind_view_does_not_reveal_record_mapping_or_private_observations():
+    from gpu_agent.benchmark.evaluation import EvaluationRecord
+
+    record = EvaluationRecord(
+        record_id="MODE_E_MODEL_CANARY",
+        case_id="case_1",
+        template_id="t",
+        mode="E",
+        repeat=0,
+        input_hash="a" * 64,
+        evidence_hash="b" * 64,
+        executed_checks={},
+        status="COMPLETED",
+        diagnosis={"root_cause": "guard missing"},
+        latency_ms=1,
+        private_holdout_passed=True,
+        verdict="VERIFIED_FIXED",
+        evaluator_labels={"evidence_relevance": {"PRIVATE_EVIDENCE_CANARY": True}},
+    )
+    assert set(record.blind()) == {"blind_id", "diagnosis", "evidence_hash"}
+    assert record.blind()["blind_id"] != record.record_id
+    for canary in ("MODE_E_MODEL_CANARY", "PRIVATE_EVIDENCE_CANARY", "VERIFIED_FIXED"):
+        assert canary not in str(record.blind())
+    assert "private_holdout_passed" not in record.public().model_dump()

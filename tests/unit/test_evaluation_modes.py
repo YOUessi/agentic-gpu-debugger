@@ -147,6 +147,8 @@ def test_executor_uses_persisted_diagnosis_candidate_and_verification(oob_servic
     assert record.patch_hash and record.verdict == "INCONCLUSIVE"
     assert record.status == "INCONCLUSIVE" and record.oracle_passed is None
     assert record.usage["physical_calls"] == 2 and record.usage["sanitizer_calls"] == 1
+    # One build, ordinary execution, sanitizer invocation, and documentation retrieval.
+    assert record.usage["diagnostic_tool_calls"] == 4
     assert record.cost_usd is None  # No invented pricing for unpriced physical calls.
     assert record.input_hash and record.evidence_hash
     assert record.diagnosis == service.diagnosis(record.record_id).model_dump(mode="json")
@@ -180,15 +182,18 @@ def test_executor_refuses_unregistered_or_changed_inputs(oob_service, tmp_path, 
 
 
 @pytest.mark.parametrize(
-    "verdict, status, success",
+    "verdict, status, success, build_outcome, compiled",
     [
-        ("VERIFIED_FIXED", "COMPLETED", 1),
-        ("NOT_FIXED", "COMPLETED", 0),
-        ("REGRESSION_DETECTED", "COMPLETED", 0),
-        ("INCONCLUSIVE", "INCONCLUSIVE", 0),
+        ("VERIFIED_FIXED", "COMPLETED", 1, "CLEAN", True),
+        ("NOT_FIXED", "COMPLETED", 0, "FAILED", False),
+        ("REGRESSION_DETECTED", "COMPLETED", 0, "CLEAN", True),
+        ("INCONCLUSIVE", "INCONCLUSIVE", 0, "TOOL_ERROR", None),
+        ("INCONCLUSIVE", "INCONCLUSIVE", 0, "NOT_RUN", None),
     ],
 )
-def test_executor_verdict_aggregation(oob_service, tmp_path, monkeypatch, verdict, status, success):
+def test_executor_verdict_aggregation(
+    oob_service, tmp_path, monkeypatch, verdict, status, success, build_outcome, compiled
+):
     from gpu_agent.benchmark.metrics import aggregate
     from gpu_agent.patching import PatchCandidate
     from gpu_agent.verification.models import VerificationResult
@@ -209,7 +214,7 @@ def test_executor_verdict_aggregation(oob_service, tmp_path, monkeypatch, verdic
             original_finding_present=verdict == "NOT_FIXED",
             public_oracle_passed=verdict == "VERIFIED_FIXED",
             private_holdout_passed=verdict == "VERIFIED_FIXED",
-            required_checks={"memcheck": "CLEAN"},
+            required_checks={"memcheck": "CLEAN", "build": build_outcome},
             candidate_hash=candidate.patched_source_hash,
             suite_hash="a" * 64,
         )
@@ -224,6 +229,11 @@ def test_executor_verdict_aggregation(oob_service, tmp_path, monkeypatch, verdic
     monkeypatch.setattr(service, "verify", persist_verification)
     record = executor.execute("case_0100", "vector-add", "D", 0)
     assert record.status == status and record.verdict == verdict
+    assert record.patch_compile_passed is compiled
+    assert record.private_holdout_passed == (verdict == "VERIFIED_FIXED")
+    assert "private_holdout_passed" not in record.public().model_dump()
+    assert record.usage["tool_calls"] is None
+    assert record.usage["total_sanitizer_calls"] is None
     summary = aggregate([record])
     assert summary.end_to_end_success.numerator == success
     assert summary.failure_ids == ([] if success else [record.record_id])

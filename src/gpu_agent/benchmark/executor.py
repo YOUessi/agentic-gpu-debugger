@@ -120,6 +120,15 @@ class EvaluationExecutor:
             "build_calls": int(bundle.build_result is not None),
             "runtime_calls": int(bundle.execution_result is not None),
         }
+        diagnostic_tool_calls = (
+            acquisition.sanitizer_calls
+            + acquisition.retrieval_calls
+            + int(bundle.build_result is not None)
+            + int(bundle.execution_result is not None)
+        )
+        usage["diagnostic_tool_calls"] = diagnostic_tool_calls
+        usage["tool_calls"] = diagnostic_tool_calls
+        usage["total_sanitizer_calls"] = acquisition.sanitizer_calls
         invocations: dict[str, Invocation] = {}
         for ref in run.artifact_refs:
             if ref.name.startswith("provider/") and ref.name.endswith(".json"):
@@ -180,6 +189,10 @@ class EvaluationExecutor:
                 }
             )
             finished = matches[0].events[-1].at
+            # The verification result has outcomes, not physical invocation
+            # counts. Preserve diagnostic components and report totals unknown.
+            usage["tool_calls"] = None
+            usage["total_sanitizer_calls"] = None
         reason = result.limitations[0] if result.limitations else None
         status: str = "INCONCLUSIVE"
         if verification is not None:
@@ -209,6 +222,16 @@ class EvaluationExecutor:
                 "diagnosis": result.model_dump(mode="json"),
                 "patch_hash": candidate_hash,
                 "oracle_passed": verification.public_oracle_passed if verification else None,
+                "private_holdout_passed": (
+                    verification.private_holdout_passed if verification else None
+                ),
+                "patch_compile_passed": (
+                    {"CLEAN": True, "FAILED": False}.get(
+                        verification.required_checks.get("build", "")
+                    )
+                    if verification
+                    else None
+                ),
                 "verdict": verification.verdict.value if verification else None,
                 "regression_detected": bool(
                     verification and verification.verdict == VerificationVerdict.REGRESSION_DETECTED
