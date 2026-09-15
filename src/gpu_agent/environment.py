@@ -19,7 +19,7 @@ from gpu_agent.store import read_regular
 ProbeRunner = Callable[[list[str], float], subprocess.CompletedProcess[str]]
 
 
-class LockedToolchain(BaseModel):
+class ExpectedToolchain(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
     lock_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     image_id: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
@@ -29,7 +29,18 @@ class LockedToolchain(BaseModel):
     target_arch: str = Field(pattern=r"^sm_[0-9]+$")
 
 
-def load_toolchain_lock(path: Path) -> LockedToolchain:
+class RuntimeToolchainAttestation(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    lock_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    image_id: str = Field(pattern=r"^sha256:[a-f0-9]{64}$")
+    cuda_nvcc: str = Field(min_length=1, max_length=128)
+    compute_sanitizer: str = Field(min_length=1, max_length=128)
+    compute_capability: str = Field(pattern=r"^[0-9]+\.[0-9]+$")
+    target_arch: str = Field(pattern=r"^sm_[0-9]+$")
+    policy_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+def load_toolchain_lock(path: Path) -> ExpectedToolchain:
     """Load a bounded lock and verify the build inputs it hashes."""
     lock_path = path.absolute()
     raw = read_regular(lock_path, 65536)
@@ -54,7 +65,7 @@ def load_toolchain_lock(path: Path) -> LockedToolchain:
         actual = hashlib.sha256(read_regular(lock_path.with_name(name), 65536)).hexdigest()
         if actual != payload[key]:
             raise ValueError("toolchain lock input mismatch")
-    return LockedToolchain(
+    return ExpectedToolchain(
         lock_hash=hashlib.sha256(raw).hexdigest(),
         image_id=payload["image_id"],
         base_repo_digest=payload["base_repo_digest"],
@@ -65,20 +76,21 @@ def load_toolchain_lock(path: Path) -> LockedToolchain:
 
 
 def validate_runtime_toolchain(
-    lock: LockedToolchain, environment: dict[str, str], *, expected_policy: str
+    expected: ExpectedToolchain,
+    observed: RuntimeToolchainAttestation,
+    *,
+    expected_policy_hash: str,
 ) -> None:
-    """Require recorded isolated-runtime identity to exactly match the verified lock."""
-    expected = {
-        "backend": "IsolatedGPUBackend",
-        "toolchain_lock_hash": lock.lock_hash,
-        "image_id": lock.image_id,
-        "base_repo_digest": lock.base_repo_digest,
-        "cuda_nvcc": lock.cuda_nvcc,
-        "compute_sanitizer": lock.compute_sanitizer,
-        "target_arch": lock.target_arch,
-        "policy": expected_policy,
-    }
-    if environment != expected:
+    """Require actual container observations to match expected lock and host policy."""
+    if (
+        observed.lock_hash != expected.lock_hash
+        or observed.image_id != expected.image_id
+        or observed.cuda_nvcc != expected.cuda_nvcc
+        or observed.compute_sanitizer != expected.compute_sanitizer
+        or observed.target_arch != expected.target_arch
+        or observed.target_arch != "sm_" + observed.compute_capability.replace(".", "")
+        or observed.policy_hash != expected_policy_hash
+    ):
         raise ValueError("recorded runtime does not match the locked toolchain and policy")
 
 

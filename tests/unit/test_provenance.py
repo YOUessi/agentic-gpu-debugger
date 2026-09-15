@@ -28,7 +28,7 @@ class FakeGit:
         self, argv: list[str], cwd: Path, timeout_seconds: float, max_log_bytes: int
     ) -> ProcessCapture:
         self.calls.append((argv, cwd, timeout_seconds, max_log_bytes))
-        command = tuple(argv[1:])
+        command = tuple(argv[9:] if argv[1:2] == ["-c"] else argv[1:])
         callback = self.before.get(command)
         if callback is not None:
             callback()
@@ -55,6 +55,20 @@ def test_repository_snapshot_uses_fixed_bounded_git_commands(tmp_path):
     assert len(snapshot.tracked_tree_hash) == 64
     assert len(git.calls) > 6  # State is sampled again after the tracked bytes are read.
     assert all(argv[0] == "/usr/bin/git" for argv, _, _, _ in git.calls)
+    assert all(
+        argv[1:9]
+        == [
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "submodule.recurse=false",
+            "-c",
+            "status.submoduleSummary=false",
+            "-c",
+            "protocol.ext.allow=never",
+        ]
+        for argv, _, _, _ in git.calls
+    )
     assert all(cwd == repo for _, cwd, _, _ in git.calls)
     assert all(timeout <= 5 and limit <= 1024 * 1024 for _, _, timeout, limit in git.calls)
 
@@ -109,7 +123,8 @@ def test_repository_snapshot_rejects_mutable_tracked_file(tmp_path):
 
     def execute(*args, **kwargs):
         result = original_execute(*args, **kwargs)
-        if tuple(args[0][1:]) == command:
+        actual = args[0][9:] if args[0][1:2] == ["-c"] else args[0][1:]
+        if tuple(actual) == command:
             git.before[command] = mutate_on_second_listing
         return result
 
@@ -144,7 +159,11 @@ def test_repository_snapshot_rejects_head_and_index_tree_disagreement(tmp_path):
 
 
 def test_toolchain_lock_is_bounded_hash_checked_and_runtime_bound(tmp_path):
-    from gpu_agent.environment import load_toolchain_lock, validate_runtime_toolchain
+    from gpu_agent.environment import (
+        RuntimeToolchainAttestation,
+        load_toolchain_lock,
+        validate_runtime_toolchain,
+    )
 
     runner = tmp_path / "runner.py"
     dockerfile = tmp_path / "Dockerfile"
@@ -168,20 +187,21 @@ def test_toolchain_lock_is_bounded_hash_checked_and_runtime_bound(tmp_path):
     lock_path.write_bytes(raw)
     lock = load_toolchain_lock(lock_path)
     assert lock.lock_hash == hashlib.sha256(raw).hexdigest()
-    environment = {
-        "backend": "IsolatedGPUBackend",
-        "toolchain_lock_hash": lock.lock_hash,
-        "image_id": "sha256:" + "a" * 64,
-        "base_repo_digest": "nvidia/cuda@sha256:" + "b" * 64,
-        "cuda_nvcc": "12.8.93",
-        "compute_sanitizer": "2025.1.0.0",
-        "target_arch": "sm_89",
-        "policy": "trusted-policy",
-    }
-    validate_runtime_toolchain(lock, environment, expected_policy="trusted-policy")
+    observed = RuntimeToolchainAttestation(
+        lock_hash=lock.lock_hash,
+        image_id="sha256:" + "a" * 64,
+        cuda_nvcc="12.8.93",
+        compute_sanitizer="2025.1.0.0",
+        compute_capability="8.9",
+        target_arch="sm_89",
+        policy_hash="c" * 64,
+    )
+    validate_runtime_toolchain(lock, observed, expected_policy_hash="c" * 64)
     with pytest.raises(ValueError, match="runtime"):
         validate_runtime_toolchain(
-            lock, {**environment, "cuda_nvcc": "claimed-only"}, expected_policy="trusted-policy"
+            lock,
+            observed.model_copy(update={"cuda_nvcc": "claimed-only"}),
+            expected_policy_hash="c" * 64,
         )
 
 

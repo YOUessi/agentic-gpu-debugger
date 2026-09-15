@@ -6,6 +6,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 from gpu_agent.agent.models import AcquisitionUsage, AgentBudget, DiagnosisResult
 from gpu_agent.agent.orchestrator import AgentOrchestrator, public_evidence
@@ -20,6 +21,7 @@ from gpu_agent.agent.provider import (
 )
 from gpu_agent.benchmark.evaluation import EvaluationMode
 from gpu_agent.contracts import RunBinding, RunManifest
+from gpu_agent.environment import load_toolchain_lock
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.execution.backend import ExecutionBackend
@@ -39,6 +41,7 @@ from gpu_agent.patching import (
     apply_candidate,
     apply_generated_candidate,
 )
+from gpu_agent.provenance import capture_repository_snapshot
 from gpu_agent.store import RunStore, read_regular
 from gpu_agent.verification.engine import VerificationEngine, register_candidate
 from gpu_agent.verification.models import VerificationResult, VerificationVerdict
@@ -57,15 +60,19 @@ class ApplicationService:
         backend_factory: BackendFactory = IsolatedGPUBackend,
         knowledge: KnowledgeIndex | None = None,
         knowledge_version: str = "",
-        binding: RunBinding | None = None,
+        _binding: RunBinding | None = None,
     ) -> None:
         self.store, self.evaluator_root = store, evaluator_root
         self._provider, self._backend_factory = provider, backend_factory
         self.knowledge, self.knowledge_version = knowledge, knowledge_version
-        self.binding = binding
+        self._binding = _binding
+
+    @property
+    def binding(self) -> RunBinding | None:
+        return self._binding
 
     @classmethod
-    def configured(cls, *, binding: RunBinding | None = None) -> "ApplicationService":
+    def configured(cls) -> "ApplicationService":
         root = Path(os.environ.get("GPU_AGENT_RUN_ROOT", ".gpu-agent/runs")).absolute()
         evaluator = Path(os.environ.get("GPU_AGENT_EVALUATOR_ROOT", str(root.parent / "evaluator")))
         knowledge = None
@@ -79,7 +86,37 @@ class ApplicationService:
             evaluator.absolute(),
             knowledge=knowledge,
             knowledge_version=os.environ.get("GPU_AGENT_KNOWLEDGE_VERSION", ""),
-            binding=binding,
+        )
+
+    @classmethod
+    def for_release(
+        cls,
+        repository: Path,
+        *,
+        purpose: Literal["corpus_validation", "evaluation", "release_acceptance"],
+        expected_commit: str | None = None,
+        prompt_version: str | None = None,
+        model_config_hash: str | None = None,
+    ) -> "ApplicationService":
+        """Construct a bound service only from controller-observed repository state."""
+        snapshot = capture_repository_snapshot(repository, expected_commit=expected_commit)
+        toolchain = load_toolchain_lock(repository.absolute() / "containers/toolchain.lock.json")
+        binding = RunBinding(
+            repository=snapshot,
+            purpose=purpose,
+            toolchain_lock_hash=toolchain.lock_hash,
+            prompt_version=prompt_version,
+            model_config_hash=model_config_hash,
+        )
+        ordinary = cls.configured()
+        return cls(
+            ordinary.store,
+            ordinary.evaluator_root,
+            provider=ordinary._provider,
+            backend_factory=ordinary._backend_factory,
+            knowledge=ordinary.knowledge,
+            knowledge_version=ordinary.knowledge_version,
+            _binding=binding,
         )
 
     def _save_diagnosis(self, run_id: str, result: DiagnosisResult) -> None:
@@ -133,7 +170,7 @@ class ApplicationService:
         ):
             raise ValueError("registered source hash mismatch")
         text = data.decode("utf-8")
-        run = self.store.create_run("diagnosis", binding=self.binding)
+        run = self.store.create_run("diagnosis", binding=self._binding)
         self.store.transition(run.id, "RUNNING", "PREPARING")
         self.store.put(
             run.id, "agent/acquisition-policy.json", json.dumps({"mode": mode}).encode(), "public"

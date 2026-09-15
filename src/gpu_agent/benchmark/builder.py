@@ -1,6 +1,7 @@
 """Fail-closed registration for reproducible, tool-confirmed mutations."""
 
 from gpu_agent.benchmark.models import CaseExecution, CaseManifest, CaseValidation
+from gpu_agent.contracts import RunBinding, RunStatus
 from gpu_agent.store import RunStore
 
 
@@ -44,6 +45,25 @@ class BenchmarkBuilder:
 
     def register(self, validation: CaseValidation) -> CaseManifest:
         clean, mutant = validation.clean, validation.mutant
+        run_ids = [*clean.run_ids, *mutant.run_ids]
+        if len(run_ids) != len(set(run_ids)):
+            raise UnvalidatedCaseError("clean and mutant validation runs must be unique")
+        source_runs = []
+        try:
+            source_runs = [self.store.load(run_id) for run_id in run_ids]
+        except ValueError as exc:
+            raise UnvalidatedCaseError("validation run binding is unavailable") from exc
+        bindings = {run.binding for run in source_runs}
+        binding: RunBinding | None = source_runs[0].binding if source_runs else None
+        if (
+            binding is None
+            or binding.purpose != "corpus_validation"
+            or len(bindings) != 1
+            or any(run.kind not in {"case_execution", "mutation_validation"} for run in source_runs)
+            or any(run.status != RunStatus.COMPLETED for run in source_runs)
+            or binding.toolchain_lock_hash != mutant.toolchain_hash
+        ):
+            raise UnvalidatedCaseError("validation run binding is missing or inconsistent")
         valid = (
             validation.same_configuration
             and validation.target_confirmed
@@ -87,7 +107,7 @@ class BenchmarkBuilder:
             toolchain_hash=mutant.toolchain_hash,
             input_set_hash=mutant.input_set_hash,
         )
-        run = self.store.create_run("benchmark_case")
+        run = self.store.create_run("benchmark_case", binding=binding)
         self.store.put(
             run.id, "case-manifest.json", manifest.model_dump_json().encode(), self.store.visibility
         )

@@ -10,6 +10,7 @@ import binascii
 import hashlib
 import json
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import replace
@@ -21,7 +22,12 @@ from pydantic import BaseModel, ConfigDict
 
 from gpu_agent.config import Settings
 from gpu_agent.contracts import ArtifactRef, new_id
-from gpu_agent.environment import LockedToolchain, load_toolchain_lock, validate_runtime_toolchain
+from gpu_agent.environment import (
+    ExpectedToolchain,
+    RuntimeToolchainAttestation,
+    load_toolchain_lock,
+    validate_runtime_toolchain,
+)
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.evidence.sanitizer import parse_sanitizer
@@ -113,16 +119,16 @@ class IsolatedGPUBackend(LocalBackend):
         self._image: str | None = None
         self._base: str | None = None
         self._versions: dict[str, str] = {}
-        self._toolchain: LockedToolchain | None = None
+        self._expected_toolchain: ExpectedToolchain | None = None
         if LOCK_PATH.exists():
             try:
-                self._toolchain = load_toolchain_lock(LOCK_PATH)
-                self._image = self._toolchain.image_id
-                self._base = self._toolchain.base_repo_digest
+                self._expected_toolchain = load_toolchain_lock(LOCK_PATH)
+                self._image = self._expected_toolchain.image_id
+                self._base = self._expected_toolchain.base_repo_digest
                 self._versions = {
-                    "cuda_nvcc": self._toolchain.cuda_nvcc,
-                    "compute_sanitizer": self._toolchain.compute_sanitizer,
-                    "target_arch": self._toolchain.target_arch,
+                    "cuda_nvcc": self._expected_toolchain.cuda_nvcc,
+                    "compute_sanitizer": self._expected_toolchain.compute_sanitizer,
+                    "target_arch": self._expected_toolchain.target_arch,
                 }
             except (OSError, ValueError):
                 pass  # A missing/stale lock is typed CONTAINER_UNAVAILABLE at execution time.
@@ -132,9 +138,9 @@ class IsolatedGPUBackend(LocalBackend):
         run = self.store.load(request.run_id)
         if run.binding is not None:
             if (
-                self._toolchain is None
+                self._expected_toolchain is None
                 or run.binding.toolchain_lock_hash is None
-                or run.binding.toolchain_lock_hash != self._toolchain.lock_hash
+                or run.binding.toolchain_lock_hash != self._expected_toolchain.lock_hash
             ):
                 raise ValueError("release toolchain binding does not match backend lock")
         snapshots: dict[str, bytes] = {}
@@ -161,6 +167,23 @@ class IsolatedGPUBackend(LocalBackend):
         handle = WorkspaceHandle(id=new_id(), run_id=request.run_id, path=directory)
         try:
             directory.chmod(0o755)
+            attestation: RuntimeToolchainAttestation | None = None
+            attestation_ref: ArtifactRef | None = None
+            if run.binding is not None:
+                assert self._expected_toolchain is not None
+                attestation = self._attest_runtime()
+                policy_hash = hashlib.sha256(self.policy.model_dump_json().encode()).hexdigest()
+                validate_runtime_toolchain(
+                    self._expected_toolchain,
+                    attestation,
+                    expected_policy_hash=policy_hash,
+                )
+                attestation_ref = self.store.put(
+                    request.run_id,
+                    "environment/runtime-attestation.json",
+                    attestation.model_dump_json().encode(),
+                    self.store.visibility,
+                )
             refs = []
             for name, data in snapshots.items():
                 self._write_snapshot(directory / name, data)
@@ -174,20 +197,28 @@ class IsolatedGPUBackend(LocalBackend):
                 hashes={name: hashlib.sha256(data).hexdigest() for name, data in snapshots.items()},
             )
             environment = {
-                **self._versions,
+                **(
+                    {
+                        "cuda_nvcc": attestation.cuda_nvcc,
+                        "compute_sanitizer": attestation.compute_sanitizer,
+                        "target_arch": attestation.target_arch,
+                        "compute_capability": attestation.compute_capability,
+                    }
+                    if attestation is not None
+                    else self._versions
+                ),
                 "backend": "IsolatedGPUBackend",
                 "toolchain_lock_hash": (
-                    self._toolchain.lock_hash if self._toolchain is not None else "unavailable"
+                    self._expected_toolchain.lock_hash
+                    if self._expected_toolchain is not None
+                    else "unavailable"
                 ),
                 "image_id": self._image or "unavailable",
                 "base_repo_digest": self._base or "unavailable",
                 "policy": self.policy.model_dump_json(),
             }
-            if run.binding is not None:
-                assert self._toolchain is not None
-                validate_runtime_toolchain(
-                    self._toolchain, environment, expected_policy=self.policy.model_dump_json()
-                )
+            if attestation_ref is not None:
+                environment["runtime_attestation_sha256"] = attestation_ref.sha256
             self.evidence.save(
                 request.run_id,
                 EvidenceBundle(
@@ -239,6 +270,173 @@ class IsolatedGPUBackend(LocalBackend):
             cancel=cancel,
         )
 
+    def _policy_create_args(
+        self,
+        name: str,
+        operation_id: str,
+        tmpfs: str,
+        *,
+        mount: Path | None = None,
+    ) -> list[str]:
+        args = [
+            "create",
+            "--name",
+            name,
+            "--label",
+            f"{LABEL}={operation_id}",
+            "--label",
+            f"io.gpu-agent.owner={self._owner}",
+            "--user",
+            self.policy.user,
+            "--network",
+            self.policy.network,
+            "--cap-drop",
+            self.policy.capabilities,
+            "--security-opt",
+            "no-new-privileges",
+            "--read-only",
+            "--cpus",
+            str(self.policy.cpus),
+            "--memory",
+            self.policy.memory,
+            "--memory-swap",
+            self.policy.memory,
+            "--pids-limit",
+            str(self.policy.pids),
+            "--gpus",
+            self.policy.gpu,
+            "--log-driver",
+            self.policy.log_driver,
+            "--ulimit",
+            "core=0",
+            "--shm-size",
+            "16m",
+            "--tmpfs",
+            f"/tmp:rw,nosuid,nodev,size={tmpfs},mode=1777",
+        ]
+        if mount is not None:
+            args.extend(["--mount", f"type=bind,src={mount},dst=/input,readonly"])
+        return args
+
+    def _inspect_attestation_container(self, name: str, operation_id: str) -> tuple[str, str]:
+        capture = self._docker(["inspect", name], limit=65536)
+        if self._runtime_status(capture) != "SUCCESS":
+            raise ValueError("runtime container inspection failed")
+        try:
+            documents = json.loads(capture.stdout)
+            if not isinstance(documents, list) or len(documents) != 1:
+                raise ValueError
+            document = documents[0]
+            config = document["Config"]
+            host = document["HostConfig"]
+            devices = host["DeviceRequests"]
+            valid = (
+                document["Image"] == self._image
+                and config["User"] == self.policy.user
+                and config["Labels"][LABEL] == operation_id
+                and host["NetworkMode"] == self.policy.network
+                and host["CapDrop"] == [self.policy.capabilities]
+                and host["SecurityOpt"] == ["no-new-privileges"]
+                and host["ReadonlyRootfs"] is self.policy.read_only_root
+                and host["NanoCpus"] == self.policy.cpus * 1_000_000_000
+                and host["Memory"] == 4 * 1024**3
+                and host["MemorySwap"] == 4 * 1024**3
+                and host["PidsLimit"] == self.policy.pids
+                and host["LogConfig"]["Type"] == self.policy.log_driver
+                and host["Tmpfs"]["/tmp"]
+                == f"rw,nosuid,nodev,size={self.policy.run_tmpfs},mode=1777"
+                and isinstance(devices, list)
+                and len(devices) == 1
+                and devices[0]["DeviceIDs"] == ["0"]
+                and devices[0]["Capabilities"] == [["gpu"]]
+                and document["Mounts"] == []
+            )
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError("runtime container policy attestation is malformed") from exc
+        if not valid:
+            raise ValueError("runtime container image or policy mismatch")
+        return document["Image"], hashlib.sha256(self.policy.model_dump_json().encode()).hexdigest()
+
+    def _fixed_container_probe(
+        self, executable: str, arguments: tuple[str, ...]
+    ) -> tuple[bytes, str, str]:
+        allowed = {
+            ("/usr/local/cuda/bin/nvcc", ("--version",)),
+            ("/usr/local/cuda/bin/compute-sanitizer", ("--version",)),
+            (
+                "/usr/bin/nvidia-smi",
+                ("--query-gpu=compute_cap", "--format=csv,noheader"),
+            ),
+        }
+        if (executable, arguments) not in allowed or self._image is None:
+            raise ValueError("unsupported runtime attestation command")
+        operation_id = new_id()
+        name = "gpu-agent-" + operation_id
+        created = False
+        try:
+            argv = self._policy_create_args(name, operation_id, self.policy.run_tmpfs) + [
+                "--entrypoint",
+                executable,
+                self._image,
+                *arguments,
+            ]
+            create = self._docker(argv, limit=65536)
+            if self._runtime_status(create) != "SUCCESS":
+                raise ValueError("runtime attestation container unavailable")
+            created = True
+            image_id, policy_hash = self._inspect_attestation_container(name, operation_id)
+            capture = self._docker(["start", "--attach", name], limit=65536)
+            if (
+                self._runtime_status(capture) != "SUCCESS"
+                or len(capture.stdout) + len(capture.stderr) > 65536
+            ):
+                raise ValueError("runtime attestation command failed")
+            return capture.stdout + b"\n" + capture.stderr, image_id, policy_hash
+        finally:
+            if created and not self._remove_container(name, operation_id):
+                raise ValueError("runtime attestation container cleanup failed")
+
+    def _attest_runtime(self) -> RuntimeToolchainAttestation:
+        if self._expected_toolchain is None:
+            raise ValueError("runtime expected configuration is unavailable")
+        nvcc, nvcc_image, nvcc_policy = self._fixed_container_probe(
+            "/usr/local/cuda/bin/nvcc", ("--version",)
+        )
+        sanitizer, sanitizer_image, sanitizer_policy = self._fixed_container_probe(
+            "/usr/local/cuda/bin/compute-sanitizer", ("--version",)
+        )
+        device, device_image, device_policy = self._fixed_container_probe(
+            "/usr/bin/nvidia-smi",
+            ("--query-gpu=compute_cap", "--format=csv,noheader"),
+        )
+        if (
+            len({nvcc_image, sanitizer_image, device_image}) != 1
+            or len({nvcc_policy, sanitizer_policy, device_policy}) != 1
+        ):
+            raise ValueError("runtime attestation containers disagree")
+        nvcc_match = re.search(rb"\bV([0-9]+\.[0-9]+\.[0-9]+)\b", nvcc)
+        sanitizer_match = re.search(
+            rb"\bversion\s+([0-9]+(?:\.[0-9]+){3}(?: \(build [0-9]+\))?)",
+            sanitizer,
+            re.IGNORECASE,
+        )
+        capability = device.strip().decode("ascii", errors="strict")
+        if (
+            nvcc_match is None
+            or sanitizer_match is None
+            or re.fullmatch(r"[0-9]+\.[0-9]+", capability) is None
+        ):
+            raise ValueError("runtime attestation output is invalid")
+        return RuntimeToolchainAttestation(
+            lock_hash=self._expected_toolchain.lock_hash,
+            image_id=nvcc_image,
+            cuda_nvcc=nvcc_match.group(1).decode("ascii"),
+            compute_sanitizer=sanitizer_match.group(1).decode("ascii"),
+            compute_capability=capability,
+            target_arch="sm_" + capability.replace(".", ""),
+            policy_hash=nvcc_policy,
+        )
+
     def _remove_container(self, name: str, operation_id: str) -> bool:
         inspected = self._docker(
             ["inspect", "--format", '{{index .Config.Labels "' + LABEL + '"}}', name]
@@ -277,43 +475,7 @@ class IsolatedGPUBackend(LocalBackend):
             if operation in {"build", "build_standalone"}
             else self.policy.run_tmpfs
         )
-        args = [
-            "create",
-            "--name",
-            name,
-            "--label",
-            f"{LABEL}={operation_id}",
-            "--label",
-            f"io.gpu-agent.owner={self._owner}",
-            "--user",
-            self.policy.user,
-            "--network",
-            "none",
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
-            "--read-only",
-            "--cpus",
-            "4",
-            "--memory",
-            "4g",
-            "--memory-swap",
-            "4g",
-            "--pids-limit",
-            "64",
-            "--gpus",
-            "device=0",
-            "--log-driver",
-            "none",
-            "--ulimit",
-            "core=0",
-            "--shm-size",
-            "16m",
-            "--tmpfs",
-            f"/tmp:rw,nosuid,nodev,size={tmpfs},mode=1777",
-            "--mount",
-            f"type=bind,src={path},dst=/input,readonly",
+        args = self._policy_create_args(name, operation_id, tmpfs, mount=path) + [
             "--interactive",
             self._image,
             operation,

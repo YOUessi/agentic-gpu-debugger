@@ -17,6 +17,7 @@ from pathlib import Path, PurePosixPath
 from gpu_agent.contracts import (
     ArtifactRef,
     CurrentPhase,
+    ExternalRunOrigin,
     RunBinding,
     RunManifest,
     RunStatus,
@@ -109,14 +110,17 @@ class RunStore:
         parent_run_id: str | None = None,
         *,
         binding: RunBinding | None = None,
+        external_origin: ExternalRunOrigin | None = None,
     ) -> RunManifest:
+        if external_origin is not None and external_origin.visibility == self.visibility:
+            raise ValueError("external origin visibility must name a different store")
         if parent_run_id is not None:
             parent = self.load(parent_run_id)
             if parent.binding is None and binding is not None:
                 raise ValueError("a child cannot add a missing parent release binding")
             if parent.binding is not None:
                 if binding is not None and binding != parent.binding:
-                    raise ValueError("child release binding differs from parent")
+                    raise ValueError("external origin child binding differs from parent")
                 binding = parent.binding
         run_id = new_id()
         directory = self._run_dir(run_id)
@@ -127,6 +131,7 @@ class RunStore:
             kind=kind,
             parent_run_id=parent_run_id,
             binding=binding,
+            external_origin=external_origin,
             events=[StateEvent(status=RunStatus.QUEUED, phase=None)],
         )
         self._save(run)

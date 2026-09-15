@@ -11,6 +11,7 @@ def store(tmp_path):
 @pytest.fixture
 def oob_service(store, tmp_path):
     import difflib
+    import hashlib
     from pathlib import Path
 
     from gpu_agent.agent.models import (
@@ -21,6 +22,7 @@ def oob_service(store, tmp_path):
         RetrieveDocsAction,
     )
     from gpu_agent.agent.provider import FakeProvider
+    from gpu_agent.environment import RuntimeToolchainAttestation
     from gpu_agent.execution.isolated import IsolatedGPUBackend
     from gpu_agent.execution.models import SourceLocation
     from gpu_agent.execution.process import ProcessCapture
@@ -30,6 +32,18 @@ def oob_service(store, tmp_path):
 
     class FakeBackend(IsolatedGPUBackend):
         """Replace only the container subprocess; keep artifact/provenance plumbing."""
+
+        def _attest_runtime(self):
+            assert self._expected_toolchain is not None
+            return RuntimeToolchainAttestation(
+                lock_hash=self._expected_toolchain.lock_hash,
+                image_id=self._expected_toolchain.image_id,
+                cuda_nvcc=self._expected_toolchain.cuda_nvcc,
+                compute_sanitizer=self._expected_toolchain.compute_sanitizer,
+                compute_capability="8.9",
+                target_arch=self._expected_toolchain.target_arch,
+                policy_hash=hashlib.sha256(self.policy.model_dump_json().encode()).hexdigest(),
+            )
 
         def _container(self, path, operation, timeout, *, stdin=b"", cancel=None):
             if operation in {"build", "build_standalone"}:

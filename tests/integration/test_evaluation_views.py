@@ -30,6 +30,7 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(tmp_path):
         PublicEvaluationRecord,
     )
     from gpu_agent.benchmark.metrics import Score
+    from gpu_agent.contracts import RepositorySnapshot, RunBinding
     from gpu_agent.store import RunStore
 
     store = RunStore(tmp_path / "runs")
@@ -74,6 +75,13 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(tmp_path):
         prompt_version="v2",
         toolchain_hash="d" * 64,
         model_config_hash="e" * 64,
+        binding=RunBinding(
+            repository=RepositorySnapshot(commit="c" * 40, tracked_tree_hash="f" * 64, clean=True),
+            purpose="evaluation",
+            toolchain_lock_hash="d" * 64,
+            prompt_version="v2",
+            model_config_hash="e" * 64,
+        ),
         max_cost_usd=1.0,
         max_unit_cost_usd=0.1,
     ).run("E", "development", 3)

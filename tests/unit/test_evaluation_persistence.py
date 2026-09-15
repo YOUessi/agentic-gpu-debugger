@@ -3,11 +3,21 @@ import json
 import pytest
 
 from gpu_agent.benchmark.evaluation import EvaluationRecord, EvaluationRunner
-from gpu_agent.contracts import RunStatus
+from gpu_agent.contracts import RepositorySnapshot, RunBinding, RunStatus
 
 COMMIT = "c" * 40
 TOOLCHAIN_HASH = "d" * 64
 MODEL_CONFIG_HASH = "e" * 64
+
+
+def _binding() -> RunBinding:
+    return RunBinding(
+        repository=RepositorySnapshot(commit=COMMIT, tracked_tree_hash="f" * 64, clean=True),
+        purpose="evaluation",
+        toolchain_lock_hash=TOOLCHAIN_HASH,
+        prompt_version="v2",
+        model_config_hash=MODEL_CONFIG_HASH,
+    )
 
 
 def _record(
@@ -38,6 +48,7 @@ def _runner(store, execute, **overrides) -> EvaluationRunner:
         "prompt_version": "v2",
         "toolchain_hash": TOOLCHAIN_HASH,
         "model_config_hash": MODEL_CONFIG_HASH,
+        "binding": _binding(),
         "max_cost_usd": 3.0,
         "max_unit_cost_usd": 1.0,
         "random_seed": 7,
@@ -90,9 +101,12 @@ def test_unit_reservation_stops_before_cost_cap_can_be_exceeded(store):
 
     assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
     assert result.executed_units == 1
-    assert EvaluationRecord.model_validate_json(
-        _artifact(store, result.run_id, "evaluation/records/0.json")
-    ).cost_usd == 0.6
+    assert (
+        EvaluationRecord.model_validate_json(
+            _artifact(store, result.run_id, "evaluation/records/0.json")
+        ).cost_usd
+        == 0.6
+    )
     assert store.load(result.run_id).status == RunStatus.COMPLETED
 
 
@@ -110,9 +124,12 @@ def test_unexpected_executor_failure_preserves_completed_records(store):
 
     assert result.stopped_reason == "EXECUTION_ERROR"
     assert result.executed_units == 1
-    assert EvaluationRecord.model_validate_json(
-        _artifact(store, result.run_id, "evaluation/records/0.json")
-    ).record_id == completed[0].record_id
+    assert (
+        EvaluationRecord.model_validate_json(
+            _artifact(store, result.run_id, "evaluation/records/0.json")
+        ).record_id
+        == completed[0].record_id
+    )
     assert "evaluation/records/1.json" not in {
         ref.name for ref in store.load(result.run_id).artifact_refs
     }
@@ -133,9 +150,7 @@ def test_resume_rejects_commit_or_schedule_mismatch(store):
 
     with pytest.raises(KeyboardInterrupt):
         original.run("E", "development", 3)
-    schedule_run_id = next(
-        run.id for run in store.recoverable_runs() if run.id != commit_run_id
-    )
+    schedule_run_id = next(run.id for run in store.recoverable_runs() if run.id != commit_run_id)
 
     with pytest.raises(ValueError):
         _runner(store, interrupt, case_ids={"case_0002": "race"}).resume(
@@ -159,9 +174,7 @@ def test_started_attempt_without_record_fails_closed_without_resume_replay(store
     with pytest.raises(KeyboardInterrupt):
         runner.run("E", "development", 3)
     run_id = store.recoverable_runs()[0].id
-    assert "evaluation/attempts/0.json" in {
-        ref.name for ref in store.load(run_id).artifact_refs
-    }
+    assert "evaluation/attempts/0.json" in {ref.name for ref in store.load(run_id).artifact_refs}
 
     monkeypatch.setattr(store, "put", put)
     result = _runner(
@@ -194,9 +207,7 @@ def test_successful_resume_continues_after_completed_ordinal(store, monkeypatch)
     with pytest.raises(KeyboardInterrupt):
         runner.run("E", "development", 3)
     run_id = store.recoverable_runs()[0].id
-    assert "evaluation/attempts/0.json" in {
-        ref.name for ref in store.load(run_id).artifact_refs
-    }
+    assert "evaluation/attempts/0.json" in {ref.name for ref in store.load(run_id).artifact_refs}
 
     monkeypatch.setattr(store, "put", put)
     result = runner.resume(run_id, "E", "development", 3)

@@ -171,6 +171,61 @@ def test_bound_execution_requires_matching_lock_and_records_runtime_evidence(
     )
     run = store.create_run("case_execution", binding=binding)
     backend = isolated.IsolatedGPUBackend(store, source, tmp_path / "tasks")
+    from gpu_agent.execution.process import ProcessCapture
+
+    entrypoints = {}
+    calls = []
+    observed_image = [backend._image]
+
+    def execute(argv, *args, **kwargs):
+        calls.append(argv)
+        command = argv[1]
+        if command == "create":
+            name = argv[argv.index("--name") + 1]
+            entrypoints[name] = argv[argv.index("--entrypoint") + 1]
+            return ProcessCapture(0, b"created", b"", False)
+        if command == "inspect" and "--format" not in argv:
+            name = argv[-1]
+            document = [
+                {
+                    "Image": observed_image[0],
+                    "Config": {
+                        "User": "65532:65532",
+                        "Labels": {isolated.LABEL: name.removeprefix("gpu-agent-")},
+                    },
+                    "HostConfig": {
+                        "NetworkMode": "none",
+                        "CapDrop": ["ALL"],
+                        "SecurityOpt": ["no-new-privileges"],
+                        "ReadonlyRootfs": True,
+                        "NanoCpus": 4_000_000_000,
+                        "Memory": 4 * 1024**3,
+                        "MemorySwap": 4 * 1024**3,
+                        "PidsLimit": 64,
+                        "LogConfig": {"Type": "none"},
+                        "Tmpfs": {"/tmp": "rw,nosuid,nodev,size=256m,mode=1777"},
+                        "DeviceRequests": [{"DeviceIDs": ["0"], "Capabilities": [["gpu"]]}],
+                    },
+                    "Mounts": [],
+                }
+            ]
+            return ProcessCapture(0, json.dumps(document).encode(), b"", False)
+        if command == "inspect":
+            name = argv[-1]
+            return ProcessCapture(0, name.removeprefix("gpu-agent-").encode(), b"", False)
+        if command == "start":
+            executable = entrypoints[argv[-1]]
+            output = {
+                "/usr/local/cuda/bin/nvcc": b"Cuda compilation tools, V12.8.93\n",
+                "/usr/local/cuda/bin/compute-sanitizer": (
+                    b"Compute Sanitizer version 2025.1.0.0 (build 35583870)\n"
+                ),
+                "/usr/bin/nvidia-smi": b"8.9\n",
+            }[executable]
+            return ProcessCapture(0, output, b"", False)
+        return ProcessCapture(0, b"", b"", False)
+
+    monkeypatch.setattr(backend._executor, "execute", execute)
     backend.prepare(
         WorkspaceRequest(
             run_id=run.id,
@@ -180,6 +235,29 @@ def test_bound_execution_requires_matching_lock_and_records_runtime_evidence(
     environment = backend.evidence.public_view(run.id).environment
     assert environment["toolchain_lock_hash"] == lock_hash
     assert json.loads(environment["policy"])["network"] == "none"
+    attestation_ref = next(
+        ref
+        for ref in store.load(run.id).artifact_refs
+        if ref.name == "environment/runtime-attestation.json"
+    )
+    attestation = json.loads(store.read(attestation_ref))
+    assert attestation["compute_capability"] == "8.9"
+    assert environment["runtime_attestation_sha256"] == attestation_ref.sha256
+    assert {argv[argv.index("--entrypoint") + 1] for argv in calls if argv[1] == "create"} == {
+        "/usr/local/cuda/bin/nvcc",
+        "/usr/local/cuda/bin/compute-sanitizer",
+        "/usr/bin/nvidia-smi",
+    }
+
+    observed_image[0] = "sha256:" + "f" * 64
+    forged = store.create_run("case_execution", binding=binding)
+    with pytest.raises(ValueError, match="image or policy mismatch"):
+        backend.prepare(
+            WorkspaceRequest(
+                run_id=forged.id,
+                source_manifest={"kernel.cu": hashlib.sha256(data).hexdigest()},
+            )
+        )
 
     wrong = binding.model_copy(update={"toolchain_lock_hash": "f" * 64})
     other = store.create_run("case_execution", binding=wrong)
@@ -187,6 +265,45 @@ def test_bound_execution_requires_matching_lock_and_records_runtime_evidence(
         backend.prepare(
             WorkspaceRequest(
                 run_id=other.id,
+                source_manifest={"kernel.cu": hashlib.sha256(data).hexdigest()},
+            )
+        )
+
+
+def test_bound_execution_rejects_observed_runtime_version_mismatch(store, tmp_path, monkeypatch):
+    from gpu_agent.contracts import RepositorySnapshot, RunBinding
+    from gpu_agent.environment import load_toolchain_lock
+    from gpu_agent.execution import isolated
+
+    source = tmp_path / "source"
+    source.mkdir()
+    data = b"int main() { return 0; }\n"
+    (source / "kernel.cu").write_bytes(data)
+    lock = load_toolchain_lock(isolated.LOCK_PATH)
+    run = store.create_run(
+        "case_execution",
+        binding=RunBinding(
+            repository=RepositorySnapshot(commit="1" * 40, tracked_tree_hash="2" * 64, clean=True),
+            purpose="corpus_validation",
+            toolchain_lock_hash=lock.lock_hash,
+            prompt_version=None,
+            model_config_hash=None,
+        ),
+    )
+    backend = isolated.IsolatedGPUBackend(store, source, tmp_path / "tasks")
+
+    def mismatch(*_args, **_kwargs):
+        return (
+            b"Cuda compilation tools, V0.0.0\n",
+            lock.image_id,
+            hashlib.sha256(backend.policy.model_dump_json().encode()).hexdigest(),
+        )
+
+    monkeypatch.setattr(backend, "_fixed_container_probe", mismatch)
+    with pytest.raises(ValueError, match="runtime"):
+        backend.prepare(
+            WorkspaceRequest(
+                run_id=run.id,
                 source_manifest={"kernel.cu": hashlib.sha256(data).hexdigest()},
             )
         )

@@ -126,6 +126,7 @@ def test_production_evaluation_requires_attested_cost_before_construction(
 def test_evaluate_uses_injected_executor_and_prints_reservation(tmp_path, monkeypatch, oob_service):
     from gpu_agent import cli
     from gpu_agent.benchmark.evaluation import EvaluationRecord, EvaluationRunner
+    from gpu_agent.contracts import RepositorySnapshot, RunBinding
     from gpu_agent.service import ApplicationService
 
     service = oob_service[0]
@@ -188,6 +189,13 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(tmp_path, monkey
         prompt_version="test",
         toolchain_hash="3" * 64,
         model_config_hash="5" * 64,
+        binding=RunBinding(
+            repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
+            purpose="evaluation",
+            toolchain_lock_hash="3" * 64,
+            prompt_version="test",
+            model_config_hash="5" * 64,
+        ),
         max_cost_usd=3,
         max_unit_cost_usd=1,
     )

@@ -18,7 +18,7 @@ from typing import Literal, TypeVar
 
 from pydantic import Field, StrictFloat, model_validator
 
-from gpu_agent.contracts import ArtifactRef, ToolResult
+from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, ToolResult
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.execution.isolated import IsolatedGPUBackend
@@ -124,10 +124,14 @@ class VerificationEngine:
         self._root.chmod(0o700)
         self._private = RunStore(self._root / "runs", visibility="evaluator")
 
-    def _candidate(self, original_run_id: str, candidate_id: str) -> PatchCandidate:
+    def _candidate(
+        self, original_run_id: str, candidate_id: str, binding: RunBinding | None
+    ) -> PatchCandidate:
         registration = self._store.load(candidate_id)
         if registration.kind != "candidate" or registration.parent_run_id != original_run_id:
             raise ValueError("candidate does not belong to original run")
+        if registration.binding != binding:
+            raise ValueError("candidate and original release bindings differ")
         refs = [r for r in registration.artifact_refs if r.name == "candidate.json"]
         if len(refs) != 1:
             raise ValueError("candidate registration must be unique")
@@ -233,7 +237,9 @@ class VerificationEngine:
     ) -> VerificationResult:
         if mode not in {"standard", "full"}:
             raise ValueError("M1 requires full public/private verification")
-        candidate = self._candidate(original_run_id, candidate_id)
+        original_manifest = self._store.load(original_run_id)
+        candidate = self._candidate(original_run_id, candidate_id, original_manifest.binding)
+        origin = ExternalRunOrigin(run_id=original_run_id, visibility="public")
         bundle = EvidenceRepository(self._store).public_view(original_run_id)
         baseline_hashes = {Path(ref.name).name: ref.sha256 for ref in bundle.source_snapshot}
         original, input_ref = self._baseline(original_run_id, bundle, baseline_hashes)
@@ -280,7 +286,11 @@ class VerificationEngine:
                 [item.model_dump() for item in holdouts], sort_keys=True
             ).encode()
             suite_hash = hashlib.sha256(suite_bytes).hexdigest()
-            audit = self._private.create_run("verification_audit")
+            audit = self._private.create_run(
+                "verification_audit",
+                binding=original_manifest.binding,
+                external_origin=origin,
+            )
             self._private.put(audit.id, "private-suite.json", suite_bytes, "evaluator")
             self._private.put(audit.id, "case.json", case.model_dump_json().encode(), "evaluator")
             self._private.put(
@@ -319,7 +329,12 @@ class VerificationEngine:
             public_passed = private_passed = executed = 0
             reason = "ALL_REQUIRED_CHECKS_PASSED"
             for index, input_data in enumerate(suite):
-                run = self._private.create_run("verification_input")
+                run = self._private.create_run(
+                    "verification_input",
+                    parent_run_id=audit.id,
+                    binding=original_manifest.binding,
+                    external_origin=origin,
+                )
                 handle = backend.prepare(
                     WorkspaceRequest(
                         run_id=run.id, source_manifest=manifest, trust_level="UNTRUSTED"

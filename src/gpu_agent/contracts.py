@@ -71,12 +71,21 @@ class RunBinding(BaseModel):
     model_config_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
+class ExternalRunOrigin(BaseModel):
+    """Typed cross-store edge; the consuming controller resolves it in the named store."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+    run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    visibility: Visibility
+
+
 class RunManifest(BaseModel):
     schema_version: Literal[1] = 1
     id: str
     kind: str
     parent_run_id: str | None = None
     binding: RunBinding | None = Field(default=None, frozen=True)
+    external_origin: ExternalRunOrigin | None = Field(default=None, frozen=True)
     status: RunStatus = RunStatus.QUEUED
     current_phase: CurrentPhase | None = None
     last_completed_phase: CurrentPhase | None = None

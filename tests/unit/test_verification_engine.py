@@ -10,9 +10,11 @@ import pytest
 
 @pytest.fixture
 def original(store, tmp_path):
-    from gpu_agent.contracts import ToolResult, now
+    from gpu_agent.contracts import RepositorySnapshot, RunBinding, ToolResult, now
+    from gpu_agent.environment import load_toolchain_lock
     from gpu_agent.evidence.models import EvidenceBundle
     from gpu_agent.evidence.repository import EvidenceRepository
+    from gpu_agent.execution.isolated import LOCK_PATH
     from gpu_agent.execution.models import (
         BuildPayload,
         BuildResult,
@@ -32,7 +34,16 @@ def original(store, tmp_path):
     ]
     root = tmp_path / "snapshot"
     root.mkdir()
-    run = store.create_run("diagnosis")
+    run = store.create_run(
+        "diagnosis",
+        binding=RunBinding(
+            repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
+            purpose="evaluation",
+            toolchain_lock_hash=load_toolchain_lock(LOCK_PATH).lock_hash,
+            prompt_version="diagnosis-v1",
+            model_config_hash="c" * 64,
+        ),
+    )
     refs, hashes = [], {}
     for path in source_paths:
         data = path.read_bytes()
@@ -249,10 +260,23 @@ def register_variant(store, original, variant):
 
 @pytest.fixture
 def container_boundary(monkeypatch):
+    from gpu_agent.environment import RuntimeToolchainAttestation
     from gpu_agent.execution.isolated import IsolatedGPUBackend
     from gpu_agent.execution.process import ProcessCapture
 
     calls = []
+
+    def attest(self):
+        assert self._expected_toolchain is not None
+        return RuntimeToolchainAttestation(
+            lock_hash=self._expected_toolchain.lock_hash,
+            image_id=self._expected_toolchain.image_id,
+            cuda_nvcc=self._expected_toolchain.cuda_nvcc,
+            compute_sanitizer=self._expected_toolchain.compute_sanitizer,
+            compute_capability="8.9",
+            target_arch=self._expected_toolchain.target_arch,
+            policy_hash=hashlib.sha256(self.policy.model_dump_json().encode()).hexdigest(),
+        )
 
     def container(self, path, operation, timeout, *, stdin=b"", cancel=None):
         source = (path / "kernel.cu").read_text()
@@ -290,6 +314,7 @@ def container_boundary(monkeypatch):
         return ProcessCapture(0, output, b"", False), b"", clean
 
     monkeypatch.setattr(IsolatedGPUBackend, "_container", container)
+    monkeypatch.setattr(IsolatedGPUBackend, "_attest_runtime", attest)
     return calls
 
 
@@ -329,6 +354,16 @@ def test_evaluator_rejects_semantic_failures(
             for path in private.root.iterdir()
             if private.load(path.name).kind == "verification_audit"
         ][0]
+        origin_binding = store.load(original[0]).binding
+        assert audit.binding == origin_binding
+        assert audit.external_origin.run_id == original[0]
+        inputs = [
+            private.load(path.name)
+            for path in private.root.iterdir()
+            if private.load(path.name).kind == "verification_input"
+        ]
+        assert inputs and all(item.binding == origin_binding for item in inputs)
+        assert all(item.external_origin.run_id == original[0] for item in inputs)
         assert {
             "case.json",
             "reference.cu",

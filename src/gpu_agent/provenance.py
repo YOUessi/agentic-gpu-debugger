@@ -16,6 +16,16 @@ GIT_OUTPUT_LIMIT = 1024 * 1024
 TRACKED_FILE_LIMIT = 64 * 1024 * 1024
 TRACKED_TOTAL_LIMIT = 256 * 1024 * 1024
 _OBJECT_ID = re.compile(rb"(?:[a-f0-9]{40}|[a-f0-9]{64})\n?\Z")
+_SAFE_GIT_CONFIG = (
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "submodule.recurse=false",
+    "-c",
+    "status.submoduleSummary=false",
+    "-c",
+    "protocol.ext.allow=never",
+)
 
 
 class RepositoryProcess(Protocol):
@@ -47,7 +57,10 @@ class _RealRepositoryProcess:
 
 def _git(process: RepositoryProcess, repo: Path, *arguments: str) -> bytes:
     capture = process.execute(
-        [GIT_EXECUTABLE, *arguments], repo, GIT_TIMEOUT_SECONDS, GIT_OUTPUT_LIMIT
+        [GIT_EXECUTABLE, *_SAFE_GIT_CONFIG, *arguments],
+        repo,
+        GIT_TIMEOUT_SECONDS,
+        GIT_OUTPUT_LIMIT,
     )
     if (
         capture.exit_code != 0

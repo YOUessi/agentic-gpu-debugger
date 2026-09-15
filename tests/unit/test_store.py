@@ -177,3 +177,33 @@ def test_child_cannot_replace_or_add_a_parent_binding(store):
 def test_legacy_unbound_manifest_loads_but_is_not_release_bound(store):
     run = store.create_run("diagnosis")
     assert store.load(run.id).binding is None
+
+
+def test_cross_store_child_origin_is_immutable_and_cannot_mix_bindings(store, tmp_path):
+    from pydantic import ValidationError
+
+    from gpu_agent.contracts import ExternalRunOrigin
+    from gpu_agent.store import RunStore
+
+    origin = store.create_run("diagnosis", binding=_binding())
+    evaluator = RunStore(tmp_path / "evaluator", visibility="evaluator")
+    relation = ExternalRunOrigin(run_id=origin.id, visibility="public")
+    audit = evaluator.create_run(
+        "verification_audit", binding=origin.binding, external_origin=relation
+    )
+    assert evaluator.load(audit.id).external_origin == relation
+    with pytest.raises(ValidationError):
+        audit.external_origin = None  # type: ignore[misc]
+    with pytest.raises(ValueError, match="external origin"):
+        evaluator.create_run(
+            "verification_input",
+            parent_run_id=audit.id,
+            binding=_binding(commit="5" * 40),
+            external_origin=relation,
+        )
+    with pytest.raises(ValueError, match="visibility"):
+        evaluator.create_run(
+            "verification_input",
+            binding=origin.binding,
+            external_origin=ExternalRunOrigin(run_id=origin.id, visibility="evaluator"),
+        )

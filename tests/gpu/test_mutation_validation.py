@@ -21,6 +21,8 @@ pytestmark = [pytest.mark.gpu, pytest.mark.container]
 def test_live_mutation_registration(tmp_path, number, tool, n, repetitions):
     from gpu_agent.benchmark.builder import BenchmarkBuilder
     from gpu_agent.benchmark.models import CaseExecution
+    from gpu_agent.contracts import RunBinding
+    from gpu_agent.environment import load_toolchain_lock
     from gpu_agent.execution.isolated import IsolatedGPUBackend
     from gpu_agent.execution.models import (
         BuildRequest,
@@ -28,6 +30,7 @@ def test_live_mutation_registration(tmp_path, number, tool, n, repetitions):
         SanitizerRequest,
         WorkspaceRequest,
     )
+    from gpu_agent.provenance import capture_repository_snapshot
     from gpu_agent.store import RunStore
     from gpu_agent.verification.oracle import parse_output
 
@@ -37,6 +40,14 @@ def test_live_mutation_registration(tmp_path, number, tool, n, repetitions):
     backend = IsolatedGPUBackend(store, public, tmp_path / "tasks")
     if not backend.availability().ready:
         pytest.skip(backend.availability().reason)
+    lock = load_toolchain_lock(root / "containers/toolchain.lock.json")
+    binding = RunBinding(
+        repository=capture_repository_snapshot(root),
+        purpose="corpus_validation",
+        toolchain_lock_hash=lock.lock_hash,
+        prompt_version=None,
+        model_config_hash=None,
+    )
     input_bytes = json.dumps({"n": n, "a": [1.0] * n, "b": [2.0] * n}).encode()
     harness_names = ["harness/vector_io.cpp", "harness/vector_api.h", "harness/vendor/json.hpp"]
     harness_hash = hashlib.sha256(
@@ -48,7 +59,7 @@ def test_live_mutation_registration(tmp_path, number, tool, n, repetitions):
         manifest = {
             name: hashlib.sha256((public / name).read_bytes()).hexdigest() for name in names
         }
-        run = store.create_run("mutation_validation")
+        run = store.create_run("mutation_validation", binding=binding)
         handle = backend.prepare(WorkspaceRequest(run_id=run.id, source_manifest=manifest))
         try:
             assert backend.build(BuildRequest(workspace_id=handle.id)).success
@@ -97,9 +108,7 @@ def test_live_mutation_registration(tmp_path, number, tool, n, repetitions):
         template_id=f"vector-add-{number}",
         split="public",
         harness_hash=harness_hash,
-        toolchain_hash=hashlib.sha256(
-            (root / "containers/toolchain.lock.json").read_bytes()
-        ).hexdigest(),
+        toolchain_hash=lock.lock_hash,
         input_set_hash=hashlib.sha256(input_bytes).hexdigest(),
         oracle_id="vector-add-cpu-v1",
         target_tool=tool,

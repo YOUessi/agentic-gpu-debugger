@@ -11,7 +11,7 @@ from pydantic import Field, ValidationError
 
 from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.benchmark.metrics import EvaluationLabels, Score
-from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunStatus
+from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunBinding, RunStatus
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.store import RunStore
 
@@ -170,13 +170,23 @@ class EvaluationRunner:
         prompt_version: str,
         toolchain_hash: str,
         model_config_hash: str,
+        binding: RunBinding,
         max_cost_usd: float | None,
         max_unit_cost_usd: float | None,
         random_seed: int = 20260915,
     ) -> None:
         if store.visibility != "public":
             raise ValueError("evaluation requires a public RunStore")
+        if (
+            binding.purpose != "evaluation"
+            or binding.repository.commit != commit
+            or binding.prompt_version != prompt_version
+            or binding.toolchain_lock_hash != toolchain_hash
+            or binding.model_config_hash != model_config_hash
+        ):
+            raise ValueError("evaluation schedule differs from its immutable run binding")
         self.store = store
+        self.binding = binding
         self.case_ids = dict(case_ids)
         self.execute = execute
         self.bindings = EvaluationBindings(
@@ -193,7 +203,7 @@ class EvaluationRunner:
         self, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
         schedule = self._schedule(mode, split, repeats)
-        run = self.store.create_run("evaluation")
+        run = self.store.create_run("evaluation", binding=self.binding)
         self.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
         self._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
         return self._execute(run.id, schedule, [], {})
@@ -204,6 +214,8 @@ class EvaluationRunner:
         run = self.store.load(run_id)
         if run.kind != "evaluation" or run.status != RunStatus.RUNNING:
             raise ValueError("only a running evaluation run may be resumed")
+        if run.binding != self.binding:
+            raise ValueError("evaluation run binding does not match controller")
         expected = self._schedule(mode, split, repeats)
         persisted = EvaluationSchedule.model_validate_json(
             self.store.read(self._one_artifact(run_id, "evaluation/schedule.json"))
@@ -277,10 +289,7 @@ class EvaluationRunner:
         records: list[PersistedOrReturnedRecord],
         attempts: dict[int, EvaluationAttempt],
     ) -> EvaluationManifest:
-        if (
-            schedule.bindings.max_cost_usd is None
-            or schedule.bindings.max_unit_cost_usd is None
-        ):
+        if schedule.bindings.max_cost_usd is None or schedule.bindings.max_unit_cost_usd is None:
             return self._terminal(
                 run_id, schedule, records, "COST_CAP_REQUIRED", RunStatus.COMPLETED
             )
@@ -383,9 +392,7 @@ class EvaluationRunner:
     def _public(record: PersistedOrReturnedRecord) -> PublicEvaluationRecord:
         return record.public() if isinstance(record, EvaluationRecord) else record
 
-    def _records(
-        self, run_id: str, schedule: EvaluationSchedule
-    ) -> list[PublicEvaluationRecord]:
+    def _records(self, run_id: str, schedule: EvaluationSchedule) -> list[PublicEvaluationRecord]:
         records: dict[int, PublicEvaluationRecord] = {}
         for ref in self.store.load(run_id).artifact_refs:
             if not ref.name.startswith("evaluation/records/"):
@@ -405,9 +412,7 @@ class EvaluationRunner:
             raise ValueError("evaluation record ordinals have a gap")
         return [records[ordinal] for ordinal in range(len(records))]
 
-    def _attempts(
-        self, run_id: str, schedule: EvaluationSchedule
-    ) -> dict[int, EvaluationAttempt]:
+    def _attempts(self, run_id: str, schedule: EvaluationSchedule) -> dict[int, EvaluationAttempt]:
         attempts: dict[int, EvaluationAttempt] = {}
         for ref in self.store.load(run_id).artifact_refs:
             if not ref.name.startswith("evaluation/attempts/"):
@@ -428,9 +433,7 @@ class EvaluationRunner:
         return attempts
 
     @staticmethod
-    def _validate_record(
-        record: PersistedOrReturnedRecord, item: EvaluationScheduleItem
-    ) -> None:
+    def _validate_record(record: PersistedOrReturnedRecord, item: EvaluationScheduleItem) -> None:
         if (record.case_id, record.template_id, record.mode, record.repeat) != (
             item.case_id,
             item.template_id,
