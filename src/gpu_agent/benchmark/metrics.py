@@ -286,7 +286,10 @@ def aggregate(records: list[EvaluationRecord], *, retrieval_k: int = 5) -> Metri
         inconclusive_precision=_metric(precision_values),
         inconclusive_recall=_metric(recall_values),
         budget_exhaustion_rate=_metric(
-            [record.failure_reason == "BUDGET_EXHAUSTED" for record in records]
+            [
+                record.failure_reason in {"AGENT_BUDGET_EXHAUSTED", "BUDGET_EXHAUSTED"}
+                for record in records
+            ]
         ),
         tool_calls_per_case=_usage_metric(records, "tool_calls"),
         sanitizer_calls_per_case=_usage_metric(records, "total_sanitizer_calls"),

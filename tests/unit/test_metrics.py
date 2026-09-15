@@ -355,6 +355,24 @@ def test_known_zero_cost_and_usage_are_measured_zero_not_missing():
     assert summary.llm_calls_per_case.model_dump() == {"value": 0.0, "n": 1, "numerator": 0}
 
 
+def test_budget_exhaustion_counts_the_production_agent_reason_code():
+    from gpu_agent.benchmark.metrics import aggregate
+
+    record = evaluation_record(
+        status="FAILED",
+        failure_reason="AGENT_BUDGET_EXHAUSTED",
+        diagnosis={
+            "diagnostic_outcome": "INCONCLUSIVE",
+            "limitations": ["AGENT_BUDGET_EXHAUSTED"],
+        },
+    )
+    assert aggregate([record]).budget_exhaustion_rate.model_dump() == {
+        "value": 1.0,
+        "n": 1,
+        "numerator": 1,
+    }
+
+
 def test_claim_support_includes_root_recommendation_and_inferences_without_llm_scoring():
     from gpu_agent.benchmark.metrics import aggregate
 
