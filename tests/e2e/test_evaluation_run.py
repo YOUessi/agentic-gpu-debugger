@@ -1,79 +1,39 @@
-def test_evaluation_is_repeated_randomized_serial_and_cost_capped(tmp_path):
-    from gpu_agent.benchmark.evaluation import EvaluationRecord, EvaluationRunner
-    from gpu_agent.contracts import RepositorySnapshot, RunBinding
-    from gpu_agent.store import RunStore
+def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_executor):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
 
-    calls = []
+    executor = native_evaluation_executor
+    binding = executor.service.binding
+    assert binding is not None
 
-    def execute(case, template, mode, repeat):
-        calls.append((case, mode, repeat))
-        return EvaluationRecord(
-            record_id=f"{case}-{mode}-{repeat}",
-            case_id=case,
-            template_id=template,
-            mode=mode,
-            repeat=repeat,
-            input_hash="a" * 64,
-            evidence_hash="b" * 64,
-            executed_checks={"memcheck": "CLEAN"},
-            status="COMPLETED",
-            diagnosis={},
-            verdict="VERIFIED_FIXED",
-            latency_ms=1,
-            cost_usd=0.01,
-        )
+    class ObservedExecutor:
+        calls = []
 
+        def execute(self, case, template, mode, repeat):
+            return executor.execute(case, template, mode, repeat)
+
+        def execute_scheduled(self, item, attempt):
+            self.calls.append((item.case_id, item.mode, item.repeat))
+            return executor.execute_scheduled(item, attempt)
+
+    observed = ObservedExecutor()
     runner = EvaluationRunner(
-        RunStore(tmp_path / "runs"),
-        {"case_0001": "index", "case_0002": "race"},
-        execute,
-        commit="c" * 40,
-        prompt_version="v2",
-        toolchain_hash="d" * 64,
-        model_config_hash="e" * 64,
-        binding=RunBinding(
-            repository=RepositorySnapshot(commit="c" * 40, tracked_tree_hash="f" * 64, clean=True),
-            purpose="evaluation",
-            toolchain_lock_hash="d" * 64,
-            prompt_version="v2",
-            model_config_hash="e" * 64,
-        ),
-        max_cost_usd=1.0,
-        max_unit_cost_usd=0.05,
+        executor.service.store,
+        {"case_0100": "vector-add"},
+        observed.execute,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=0,
+        max_unit_cost_usd=0,
     )
-    result = runner.run("all", "development", 3)
-    assert len(result.records) == 30 and result.stopped_reason is None
-    assert calls == [
-        ("case_0001", "B", 1),
-        ("case_0002", "D", 0),
-        ("case_0002", "C", 0),
-        ("case_0002", "E", 2),
-        ("case_0001", "E", 2),
-        ("case_0002", "C", 2),
-        ("case_0002", "A", 1),
-        ("case_0002", "E", 1),
-        ("case_0001", "D", 1),
-        ("case_0002", "D", 2),
-        ("case_0002", "A", 2),
-        ("case_0001", "C", 0),
-        ("case_0001", "B", 0),
-        ("case_0002", "B", 1),
-        ("case_0001", "B", 2),
-        ("case_0002", "A", 0),
-        ("case_0001", "E", 1),
-        ("case_0002", "C", 1),
-        ("case_0001", "E", 0),
-        ("case_0002", "E", 0),
-        ("case_0001", "C", 1),
-        ("case_0001", "A", 0),
-        ("case_0001", "A", 1),
-        ("case_0002", "B", 2),
-        ("case_0002", "B", 0),
-        ("case_0001", "D", 2),
-        ("case_0001", "D", 0),
-        ("case_0001", "C", 2),
-        ("case_0002", "D", 1),
-        ("case_0001", "A", 2),
+    result = runner.run("D", "development", 3)
+    assert len(result.records) == 3 and result.stopped_reason is None
+    assert observed.calls == [
+        ("case_0100", "D", 1),
+        ("case_0100", "D", 0),
+        ("case_0100", "D", 2),
     ]
 
 

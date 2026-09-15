@@ -29,10 +29,41 @@ StoppedReason = Literal[
 ]
 
 
+class EvaluationLineage(ExecutionModel):
+    diagnosis_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    diagnosis_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider_invocation_hashes: list[str]
+    candidate_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    verification_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    public_verification_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
+class EvaluationProviderPolicy(ExecutionModel):
+    """Controller-owned provider policy committed before a scheduled E-mode call."""
+
+    schema_version: Literal[1] = 1
+    provider: str = Field(min_length=1)
+    configured_model: str = Field(min_length=1)
+    allowed_response_models: list[str] = Field(min_length=1)
+    prompt_version: str = Field(min_length=1)
+    store_false_required: Literal[True] = True
+
+    def content(self) -> bytes:
+        return json.dumps(
+            self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+        ).encode()
+
+    @property
+    def sha256(self) -> str:
+        return hashlib.sha256(self.content()).hexdigest()
+
+
 class PublicEvaluationRecord(ExecutionModel):
     """The public projection of an evaluation result; it contains no hidden truth."""
 
     record_id: str
+    lineage: EvaluationLineage
     case_id: str
     template_id: str
     mode: EvaluationMode
@@ -136,6 +167,21 @@ class EvaluationAttempt(ExecutionModel):
     reserved_cost_usd: float = Field(ge=0)
 
 
+class EvaluationUnitBinding(ExecutionModel):
+    """Frozen schedule identity persisted before diagnosis execution starts."""
+
+    schema_version: Literal[1] = 1
+    evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    ordinal: int = Field(ge=0)
+    schedule_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    idempotency_key: str = Field(pattern=r"^[a-f0-9]{64}$")
+    reserved_cost_usd: float = Field(ge=0)
+    case_id: str = Field(min_length=1)
+    template_id: str = Field(min_length=1)
+    mode: EvaluationMode
+    repeat: int = Field(ge=0)
+
+
 class EvaluationManifest(ExecutionModel):
     schema_version: Literal[1] = 1
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
@@ -222,10 +268,8 @@ class EvaluationRunner:
         )
         if self._schedule_hash(persisted) != self._schedule_hash(expected) or persisted != expected:
             raise ValueError("evaluation schedule or bindings do not match")
-        records = self._records(run_id, persisted)
         attempts = self._attempts(run_id, persisted)
-        if any(ordinal not in attempts for ordinal in range(len(records))):
-            raise ValueError("completed evaluation record has no durable attempt")
+        records = self._records(run_id, persisted, attempts)
         return self._execute(run_id, persisted, records, attempts)
 
     def _schedule(
@@ -332,8 +376,11 @@ class EvaluationRunner:
             )
             attempts[item.ordinal] = attempt
             try:
-                record = self.execute(item.case_id, item.template_id, item.mode, item.repeat)
-                self._validate_record(record, item)
+                owner = getattr(self.execute, "__self__", None)
+                if owner is None or not hasattr(owner, "execute_scheduled"):
+                    raise ValueError("evaluation requires a schedule-bound native executor")
+                record = owner.execute_scheduled(item, attempt)
+                self._validate_record(record, item, attempt)
             except Exception:
                 return self._terminal(
                     run_id, schedule, records, "EXECUTION_ERROR", RunStatus.FAILED
@@ -392,7 +439,12 @@ class EvaluationRunner:
     def _public(record: PersistedOrReturnedRecord) -> PublicEvaluationRecord:
         return record.public() if isinstance(record, EvaluationRecord) else record
 
-    def _records(self, run_id: str, schedule: EvaluationSchedule) -> list[PublicEvaluationRecord]:
+    def _records(
+        self,
+        run_id: str,
+        schedule: EvaluationSchedule,
+        attempts: dict[int, EvaluationAttempt],
+    ) -> list[PublicEvaluationRecord]:
         records: dict[int, PublicEvaluationRecord] = {}
         for ref in self.store.load(run_id).artifact_refs:
             if not ref.name.startswith("evaluation/records/"):
@@ -405,8 +457,10 @@ class EvaluationRunner:
                 raise ValueError("duplicate evaluation record ordinal")
             if ordinal >= len(schedule.items):
                 raise ValueError("evaluation record ordinal is out of range")
+            if ordinal not in attempts:
+                raise ValueError("completed evaluation record has no durable attempt")
             record = PublicEvaluationRecord.model_validate_json(self.store.read(ref))
-            self._validate_record(record, schedule.items[ordinal])
+            self._validate_record(record, schedule.items[ordinal], attempts[ordinal])
             records[ordinal] = record
         if set(records) != set(range(len(records))):
             raise ValueError("evaluation record ordinals have a gap")
@@ -432,8 +486,12 @@ class EvaluationRunner:
             attempts[ordinal] = attempt
         return attempts
 
-    @staticmethod
-    def _validate_record(record: PersistedOrReturnedRecord, item: EvaluationScheduleItem) -> None:
+    def _validate_record(
+        self,
+        record: PersistedOrReturnedRecord,
+        item: EvaluationScheduleItem,
+        attempt: EvaluationAttempt,
+    ) -> None:
         if (record.case_id, record.template_id, record.mode, record.repeat) != (
             item.case_id,
             item.template_id,
@@ -441,6 +499,9 @@ class EvaluationRunner:
             item.repeat,
         ):
             raise ValueError("evaluation record does not match scheduled unit")
+        from gpu_agent.benchmark.executor import validate_evaluation_record
+
+        validate_evaluation_record(self.store, record, item, attempt, self.binding)
 
     def _one_artifact(self, run_id: str, name: str) -> ArtifactRef:
         refs = [ref for ref in self.store.load(run_id).artifact_refs if ref.name == name]

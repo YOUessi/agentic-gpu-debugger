@@ -115,6 +115,12 @@ def test_completed_workflow_without_verified_repair_is_a_benchmark_failure(verdi
 
     record = EvaluationRecord(
         record_id="unsuccessful",
+        lineage={
+            "diagnosis_run_id": "a" * 32,
+            "diagnosis_hash": "c" * 64,
+            "evidence_hash": "b" * 64,
+            "provider_invocation_hashes": [],
+        },
         case_id="case_0100",
         template_id="vector-add",
         mode="D",
@@ -139,6 +145,12 @@ def evaluation_record(**updates):
     return EvaluationRecord.model_validate(
         {
             "record_id": "record",
+            "lineage": {
+                "diagnosis_run_id": "a" * 32,
+                "diagnosis_hash": "c" * 64,
+                "evidence_hash": "b" * 64,
+                "provider_invocation_hashes": [],
+            },
             "case_id": "case_1",
             "template_id": "template_1",
             "mode": "A",

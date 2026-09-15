@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 
@@ -143,6 +145,95 @@ def oob_service(store, tmp_path):
         knowledge_version="cuda=13.0;compute-sanitizer=13.0",
     )
     return service, provider, source
+
+
+@pytest.fixture
+def native_evaluation_executor(oob_service, tmp_path):
+    """Fast native evaluation producer backed by the real store/orchestrator schemas."""
+    import hashlib
+
+    from gpu_agent.agent.prompts import PROMPT_VERSION
+    from gpu_agent.benchmark.executor import EvaluationExecutor
+    from gpu_agent.benchmark.models import CaseManifest
+    from gpu_agent.contracts import RepositorySnapshot, RunBinding
+    from gpu_agent.environment import load_toolchain_lock
+    from gpu_agent.execution.isolated import LOCK_PATH
+    from gpu_agent.knowledge.models import make_chunk
+    from gpu_agent.knowledge.retrieve import KnowledgeIndex
+    from gpu_agent.store import RunStore
+
+    service, _, source = oob_service
+    chunk = service.knowledge.chunks[0]
+    fields = chunk.model_dump(exclude={"chunk_id", "content_hash", "text"})
+    service.knowledge = KnowledgeIndex(
+        [
+            make_chunk(
+                **fields,
+                text=chunk.text + " Invalid __global__ write is a memcheck finding.",
+            )
+        ]
+    )
+    toolchain_hash = load_toolchain_lock(LOCK_PATH).lock_hash
+    service._binding = RunBinding(
+        repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
+        purpose="evaluation",
+        toolchain_lock_hash=toolchain_hash,
+        prompt_version=PROMPT_VERSION,
+        model_config_hash="5" * 64,
+    )
+    corpus = RunStore(tmp_path / "corpus", visibility="evaluator")
+    corpus_binding = RunBinding(
+        repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
+        purpose="corpus_validation",
+        toolchain_lock_hash=toolchain_hash,
+        case_registry_hash="6" * 64,
+        corpus_ledger_namespace_hash="7" * 64,
+    )
+    manifest = CaseManifest(
+        id="case_0100",
+        source_hash=hashlib.sha256((source / "kernel.cu").read_bytes()).hexdigest(),
+        harness_hash="2" * 64,
+        mutation_id="delete-guard",
+        template_id="vector-add",
+        split="private",
+        oracle_id="vector-add-cpu-v1",
+        target_tool="memcheck",
+        expected_finding="PRIVATE_TRUTH_CANARY",
+        validation_run_ids=["a" * 32, "b" * 32],
+        toolchain_hash=toolchain_hash,
+        input_set_hash="4" * 64,
+        ledger_namespace_hash="7" * 64,
+        case_identity_hash="8" * 64,
+        template_identity_hash="9" * 64,
+        source_pair_hash="0" * 64,
+    )
+    registration = corpus.create_run("benchmark_case", binding=corpus_binding)
+    manifest_bytes = manifest.model_dump_json().encode()
+    corpus.put(
+        registration.id,
+        "validation/ledger-transaction.json",
+        json.dumps(
+            {
+                "schema_version": 2,
+                "transaction_id": "1" * 32,
+                "owner_id": "2" * 32,
+                "ledger_namespace_hash": "7" * 64,
+                "case_identity_hash": "8" * 64,
+                "template_identity_hash": "9" * 64,
+                "source_pair_hash": "0" * 64,
+                "target_store_hash": "3" * 64,
+                "visibility": "evaluator",
+                "expected_manifest_hash": hashlib.sha256(manifest_bytes).hexdigest(),
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode(),
+        "evaluator",
+    )
+    corpus.put(registration.id, "case-manifest.json", manifest_bytes, "evaluator")
+    corpus.transition(registration.id, "RUNNING", "FINALIZING")
+    corpus.transition(registration.id, "COMPLETED", None)
+    return EvaluationExecutor(service, corpus, {"case_0100": source})
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

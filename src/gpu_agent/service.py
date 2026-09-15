@@ -19,7 +19,11 @@ from gpu_agent.agent.provider import (
     OpenAIResponsesProvider,
     ProviderError,
 )
-from gpu_agent.benchmark.evaluation import EvaluationMode
+from gpu_agent.benchmark.evaluation import (
+    EvaluationMode,
+    EvaluationProviderPolicy,
+    EvaluationUnitBinding,
+)
 from gpu_agent.benchmark.ledger import CorpusFamily
 from gpu_agent.contracts import RunBinding, RunManifest
 from gpu_agent.environment import load_toolchain_lock
@@ -49,6 +53,28 @@ from gpu_agent.verification.models import VerificationResult, VerificationVerdic
 
 BackendFactory = Callable[[RunStore, Path, Path], ExecutionBackend]
 BENCHMARK_ROOT = Path(__file__).resolve().parents[2] / "benchmarks"
+
+
+class _ControllerOnlyProvider:
+    """Local gate carrier for deterministic A-D evaluation; inference is forbidden."""
+
+    provider_name = "deterministic-controller"
+    model_name = None
+
+    def __init__(self, gate: LLMCallGate) -> None:
+        self.gate = gate
+
+    def ensure_available(self) -> None:
+        return None
+
+    def plan(self, *_args: object, **_kwargs: object) -> object:
+        raise ProviderError("PROVIDER_FORBIDDEN")
+
+    def diagnose(self, *_args: object, **_kwargs: object) -> DiagnosisResult:
+        raise ProviderError("PROVIDER_FORBIDDEN")
+
+    def propose_patch(self, *_args: object, **_kwargs: object) -> str:
+        raise ProviderError("PROVIDER_FORBIDDEN")
 
 
 class ApplicationService:
@@ -183,6 +209,7 @@ class ApplicationService:
         mode: EvaluationMode = "E",
         required_tools: tuple[SanitizerTool, ...] = (SanitizerTool.MEMCHECK,),
         expected_source_hash: str | None = None,
+        evaluation_unit: EvaluationUnitBinding | None = None,
     ) -> RunManifest:
         if mode not in {"A", "B", "C", "D", "E"}:
             raise ValueError("invalid acquisition mode")
@@ -194,8 +221,25 @@ class ApplicationService:
         ):
             raise ValueError("registered source hash mismatch")
         text = data.decode("utf-8")
-        run = self.store.create_run("diagnosis", binding=self._binding)
+        if evaluation_unit is not None and (
+            self._binding is None
+            or self._binding.purpose != "evaluation"
+            or evaluation_unit.mode != mode
+        ):
+            raise ValueError("evaluation unit requires an evaluation-bound service")
+        run = self.store.create_run(
+            "diagnosis",
+            parent_run_id=(evaluation_unit.evaluation_run_id if evaluation_unit else None),
+            binding=self._binding,
+        )
         self.store.transition(run.id, "RUNNING", "PREPARING")
+        if evaluation_unit is not None:
+            self.store.put(
+                run.id,
+                "evaluation/unit.json",
+                evaluation_unit.model_dump_json().encode(),
+                "public",
+            )
         self.store.put(
             run.id, "agent/acquisition-policy.json", json.dumps({"mode": mode}).encode(), "public"
         )
@@ -213,8 +257,10 @@ class ApplicationService:
             IsolatedGPUBackend._write_snapshot(root / "kernel.cu", data)
             try:
                 # Explicitly injected fakes are test-only; ambient config cannot select them.
-                provider = self._provider
-                if provider is None:
+                provider: LLMProvider
+                if mode != "E":
+                    provider = _ControllerOnlyProvider(gate)  # type: ignore[assignment]
+                elif self._provider is None:
                     provider = OpenAIResponsesProvider(
                         OpenAIProviderSettings.from_environment(),
                         gate,
@@ -222,8 +268,31 @@ class ApplicationService:
                         run.id,
                         diff_validator=lambda diff: apply_generated_candidate(snapshot, diff),
                     )
-                elif isinstance(provider, FakeProvider):
+                else:
+                    provider = self._provider
+                if isinstance(provider, FakeProvider):
                     provider.gate = gate
+                if mode == "E" and evaluation_unit is not None:
+                    if (
+                        self._binding is None
+                        or self._binding.prompt_version != PROMPT_VERSION
+                        or not provider.model_name
+                    ):
+                        raise ProviderError("MODEL_CONFIG_MISMATCH")
+                    policy = EvaluationProviderPolicy(
+                        provider=provider.provider_name,
+                        configured_model=provider.model_name,
+                        allowed_response_models=[provider.model_name],
+                        prompt_version=PROMPT_VERSION,
+                    )
+                    if policy.sha256 != self._binding.model_config_hash:
+                        raise ProviderError("MODEL_CONFIG_MISMATCH")
+                    self.store.put(
+                        run.id,
+                        "agent/provider-policy.json",
+                        policy.content(),
+                        "public",
+                    )
                 provider.ensure_available()
                 gate = provider.gate
                 vector = '#include "vector_api.h"' in text
@@ -273,7 +342,7 @@ class ApplicationService:
                     self.knowledge,
                     self.knowledge_version,
                 ).investigate(run.id, mode=mode, required_tools=required_tools)
-                if result.diagnostic_outcome == "DIAGNOSED":
+                if result.diagnostic_outcome == "DIAGNOSED" and mode == "E":
                     self.store.transition(run.id, "RUNNING", "PATCH_GENERATING")
                     public_source = public_evidence(self.store, run.id).sources[0]
                     diff = provider.propose_patch(public_source, result)

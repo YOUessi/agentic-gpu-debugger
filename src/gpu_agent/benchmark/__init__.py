@@ -3,12 +3,16 @@
 from gpu_agent.benchmark.builder import BenchmarkBuilder, UnvalidatedCaseError
 from gpu_agent.benchmark.evaluation import (
     EvaluationAttempt,
+    EvaluationLineage,
     EvaluationManifest,
+    EvaluationProviderPolicy,
     EvaluationRecord,
     EvaluationRunner,
     EvaluationScheduleItem,
+    EvaluationUnitBinding,
     PublicEvaluationRecord,
 )
+from gpu_agent.benchmark.holdout import EvaluatorRecordBinding, HoldoutBatch, HoldoutController
 from gpu_agent.benchmark.models import (
     CaseExecution,
     CaseExecutionObservation,
@@ -29,10 +33,16 @@ __all__ = [
     "CaseValidationArtifact",
     "CaseValidationController",
     "EvaluationAttempt",
+    "EvaluationLineage",
     "EvaluationManifest",
+    "EvaluationProviderPolicy",
     "EvaluationRecord",
     "EvaluationRunner",
     "EvaluationScheduleItem",
+    "EvaluationUnitBinding",
+    "EvaluatorRecordBinding",
+    "HoldoutBatch",
+    "HoldoutController",
     "PublicEvaluationRecord",
     "UnvalidatedCaseError",
 ]

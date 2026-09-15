@@ -1,8 +1,20 @@
+def _lineage():
+    from gpu_agent.benchmark.evaluation import EvaluationLineage
+
+    return EvaluationLineage(
+        diagnosis_run_id="a" * 32,
+        diagnosis_hash="b" * 64,
+        evidence_hash="c" * 64,
+        provider_invocation_hashes=[],
+    )
+
+
 def test_blind_view_excludes_mode_model_usage_and_trace():
     from gpu_agent.benchmark.evaluation import EvaluationRecord
 
     record = EvaluationRecord(
         record_id="blind-1",
+        lineage=_lineage(),
         case_id="case_0001",
         template_id="index",
         mode="E",
@@ -22,69 +34,60 @@ def test_blind_view_excludes_mode_model_usage_and_trace():
     assert blind["diagnosis"]["root_cause"] == "guard missing"
 
 
-def test_public_evaluation_artifacts_exclude_hidden_truth_fields(tmp_path):
+def test_public_evaluation_artifacts_exclude_hidden_truth_fields(native_evaluation_executor):
     from gpu_agent.benchmark.evaluation import (
         EvaluationManifest,
-        EvaluationRecord,
         EvaluationRunner,
         PublicEvaluationRecord,
     )
     from gpu_agent.benchmark.metrics import Score
-    from gpu_agent.contracts import RepositorySnapshot, RunBinding
-    from gpu_agent.store import RunStore
 
-    store = RunStore(tmp_path / "runs")
+    executor = native_evaluation_executor
+    store = executor.service.store
+    binding = executor.service.binding
+    assert binding is not None
 
-    def execute(case, template, mode, repeat):
-        return EvaluationRecord(
-            record_id=f"{case}-{repeat}",
-            case_id=case,
-            template_id=template,
-            mode=mode,
-            repeat=repeat,
-            input_hash="a" * 64,
-            evidence_hash="b" * 64,
-            executed_checks={
-                "memcheck": "CLEAN",
-                "verification/build": "CLEAN",
-                "verification/private_oracle": "PRIVATE_CHECK_CANARY",
-            },
-            status="COMPLETED",
-            diagnosis={},
-            latency_ms=1,
-            cost_usd=0.01,
-            should_be_inconclusive=True,
-            private_holdout_passed=False,
-            evaluator_labels={
-                "citation_relevance": {"PRIVATE_LABEL_CANARY": True},
-                "claim_support": {"PRIVATE_SUPPORT_CANARY": False},
-            },
-            score=Score(
-                family_correct=True,
-                root_cause_correct=True,
-                location_correct=True,
-                inconclusive_correct=True,
-            ),
-        )
+    class PrivateScoringProjection:
+        def execute(self, case, template, mode, repeat):
+            return executor.execute(case, template, mode, repeat)
+
+        def execute_scheduled(self, item, attempt):
+            record = executor.execute_scheduled(item, attempt)
+            return record.model_copy(
+                update={
+                    "executed_checks": {
+                        **record.executed_checks,
+                        "verification/private_oracle": "PRIVATE_CHECK_CANARY",
+                    },
+                    "should_be_inconclusive": True,
+                    "private_holdout_passed": False,
+                    "evaluator_labels": {
+                        "citation_relevance": {"PRIVATE_LABEL_CANARY": True},
+                        "claim_support": {"PRIVATE_SUPPORT_CANARY": False},
+                    },
+                    "score": Score(
+                        family_correct=True,
+                        root_cause_correct=True,
+                        location_correct=True,
+                        inconclusive_correct=True,
+                    ),
+                }
+            )
+
+    projection = PrivateScoringProjection()
 
     result = EvaluationRunner(
         store,
-        {"case_0001": "index"},
-        execute,
-        commit="c" * 40,
-        prompt_version="v2",
-        toolchain_hash="d" * 64,
-        model_config_hash="e" * 64,
-        binding=RunBinding(
-            repository=RepositorySnapshot(commit="c" * 40, tracked_tree_hash="f" * 64, clean=True),
-            purpose="evaluation",
-            toolchain_lock_hash="d" * 64,
-            prompt_version="v2",
-            model_config_hash="e" * 64,
-        ),
-        max_cost_usd=1.0,
-        max_unit_cost_usd=0.1,
-    ).run("E", "development", 3)
+        {"case_0100": "vector-add"},
+        projection.execute,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=0,
+        max_unit_cost_usd=0,
+    ).run("D", "development", 3)
 
     artifacts = {ref.name: store.read(ref) for ref in store.load(result.run_id).artifact_refs}
     public_bytes = artifacts["evaluation/records/0.json"] + artifacts["evaluation/manifest.json"]
@@ -101,7 +104,7 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(tmp_path):
         assert b"evaluator_labels" not in content
         assert b"PRIVATE_CHECK_CANARY" not in content
         assert b"private_oracle" not in content
-    assert record.executed_checks == {"memcheck": "CLEAN", "verification/build": "CLEAN"}
+    assert record.executed_checks == {"memcheck": "FINDING"}
 
 
 def test_blind_rejects_untyped_diagnosis_metadata():
@@ -109,6 +112,7 @@ def test_blind_rejects_untyped_diagnosis_metadata():
 
     record = EvaluationRecord(
         record_id="x",
+        lineage=_lineage(),
         case_id="c",
         template_id="t",
         mode="A",
@@ -128,6 +132,7 @@ def test_blind_view_does_not_reveal_record_mapping_or_private_observations():
 
     record = EvaluationRecord(
         record_id="MODE_E_MODEL_CANARY",
+        lineage=_lineage(),
         case_id="case_1",
         template_id="t",
         mode="E",

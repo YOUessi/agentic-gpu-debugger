@@ -135,81 +135,43 @@ def test_production_evaluation_requires_attested_cost_before_construction(
     assert "Hard maximum" not in result.output
 
 
-def test_evaluate_uses_injected_executor_and_prints_reservation(tmp_path, monkeypatch, oob_service):
+def test_evaluate_uses_injected_executor_and_prints_reservation(
+    tmp_path, monkeypatch, native_evaluation_executor
+):
     from gpu_agent import cli
-    from gpu_agent.benchmark.evaluation import EvaluationRecord, EvaluationRunner
-    from gpu_agent.contracts import RepositorySnapshot, RunBinding
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
     from gpu_agent.service import ApplicationService
 
-    service = oob_service[0]
+    executor = native_evaluation_executor
+    service = executor.service
+    binding = service.binding
+    assert binding is not None
     calls = []
 
     class InjectedExecutor:
-        def __init__(self, service, corpus, sources):
-            pass
-
         def execute(self, case_id, template_id, mode, repeat):
-            calls.append((case_id, template_id, mode, repeat))
-            return EvaluationRecord(
-                record_id=str(repeat),
-                case_id=case_id,
-                template_id=template_id,
-                mode=mode,
-                repeat=repeat,
-                input_hash="a" * 64,
-                evidence_hash="b" * 64,
-                executed_checks={},
-                status="INCONCLUSIVE",
-                diagnosis={},
-                latency_ms=1,
-                cost_usd=0.1,
-            )
+            return executor.execute(case_id, template_id, mode, repeat)
 
-    from gpu_agent.benchmark.models import CaseManifest
-    from gpu_agent.store import RunStore
-
-    corpus = RunStore(tmp_path / "corpus")
-    run = corpus.create_run("benchmark_case")
-    case = CaseManifest(
-        id="case_0100",
-        source_hash="1" * 64,
-        harness_hash="2" * 64,
-        mutation_id="delete-guard",
-        template_id="vector-add",
-        split="public",
-        oracle_id="vector-add-cpu-v1",
-        target_tool="memcheck",
-        expected_finding="out of bounds",
-        validation_run_ids=["a", "b"],
-        toolchain_hash="3" * 64,
-        input_set_hash="4" * 64,
-    )
-    corpus.put(run.id, "case-manifest.json", case.model_dump_json().encode(), "public")
-    corpus.transition(run.id, "RUNNING", "FINALIZING")
-    corpus.transition(run.id, "COMPLETED", None)
+        def execute_scheduled(self, item, attempt):
+            calls.append((item.case_id, item.template_id, item.mode, item.repeat))
+            return executor.execute_scheduled(item, attempt)
 
     def forbidden():
         raise AssertionError("offline path cannot construct configured services")
 
     monkeypatch.setattr(ApplicationService, "configured", forbidden)
-    executor = InjectedExecutor(service, corpus, {})
+    injected = InjectedExecutor()
     runner = EvaluationRunner(
         service.store,
         {"case_0100": "vector-add"},
-        executor.execute,
-        commit="a" * 40,
-        prompt_version="test",
-        toolchain_hash="3" * 64,
-        model_config_hash="5" * 64,
-        binding=RunBinding(
-            repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
-            purpose="evaluation",
-            toolchain_lock_hash="3" * 64,
-            prompt_version="test",
-            model_config_hash="5" * 64,
-        ),
-        max_cost_usd=3,
-        max_unit_cost_usd=1,
+        injected.execute,
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=0,
+        max_unit_cost_usd=0,
     )
     result = CliRunner().invoke(
         cli.app,
@@ -223,11 +185,11 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(tmp_path, monkey
             "--repeats",
             "3",
             "--max-cost-usd",
-            "3",
+            "0",
             "--max-unit-cost-usd",
-            "1",
+            "0",
             "--corpus-root",
-            str(corpus.root),
+            str(executor.corpus.root),
             "--case-root",
             str(tmp_path / "sources"),
             "--commit",
@@ -241,6 +203,6 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(tmp_path, monkey
     )
     assert result.exit_code == 0, result.output
     assert "1 case × 1 mode × 3 repeats = 3 units" in result.output
-    assert "Cost reservation: $3.00" in result.output
+    assert "Cost reservation: $0.00" in result.output
     assert "Hard maximum" not in result.output
     assert len(calls) == 3 and {call[3] for call in calls} == {0, 1, 2}

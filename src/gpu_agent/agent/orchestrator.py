@@ -275,6 +275,31 @@ class AgentOrchestrator:
             return DiagnosisResult.inconclusive("INVALID_DIAGNOSIS_EVIDENCE")
         return result
 
+    @staticmethod
+    def _deterministic_diagnosis(evidence: PublicEvidence) -> DiagnosisResult:
+        if not evidence.tool_findings:
+            return DiagnosisResult.inconclusive("DETERMINISTIC_NO_FINDING")
+        finding = evidence.tool_findings[0]
+        result = DiagnosisResult(
+            diagnostic_outcome="DIAGNOSED",
+            failure_family=finding.category,
+            root_cause=finding.category,
+            source_locations=[finding.source_location] if finding.source_location else [],
+            observed_facts=evidence.observed_facts,
+            tool_findings=[
+                EvidenceClaim(text=finding.category, citation_ids=[finding.artifact_id])
+            ],
+            documentation_evidence=[
+                EvidenceClaim(text=item.text[:2000], citation_ids=[item.chunk_id])
+                for item in evidence.documentation
+            ],
+            recommended_change="Review the controller-observed sanitizer finding.",
+            confidence_label="medium",
+        )
+        if not validate_diagnosis(result, evidence):
+            return DiagnosisResult.inconclusive("INVALID_DIAGNOSIS_EVIDENCE")
+        return result
+
     def investigate(
         self,
         run_id: str,
@@ -323,7 +348,7 @@ class AgentOrchestrator:
                         raise
                     self.ledger.settle(reservation)
             if mode in {"A", "B", "C"}:
-                return self._diagnose(public_evidence(self.store, run_id))
+                return self._deterministic_diagnosis(public_evidence(self.store, run_id))
             while True:
                 evidence = public_evidence(self.store, run_id)
                 self.budget = self.budget.model_copy(
@@ -370,7 +395,11 @@ class AgentOrchestrator:
                 if action.action_type == "declare_inconclusive":
                     return DiagnosisResult.inconclusive("MODEL_DECLARED_INCONCLUSIVE")
                 if action.action_type == "finish_diagnosis":
-                    return self._diagnose(evidence)
+                    return (
+                        self._deterministic_diagnosis(evidence)
+                        if mode == "D"
+                        else self._diagnose(evidence)
+                    )
                 self.registry[action.action_type](action)
         except ProviderError as exc:
             return DiagnosisResult.inconclusive(exc.code)
@@ -394,5 +423,51 @@ class AgentOrchestrator:
                 run_id,
                 "agent/budget-audit.json",
                 json.dumps(self.ledger.audit).encode(),
+                "public",
+            )
+            manifest = self.store.load(run_id)
+            policies = [
+                ref for ref in manifest.artifact_refs if ref.name == "agent/acquisition-policy.json"
+            ]
+            evidence_refs = [
+                ref for ref in manifest.artifact_refs if ref.name == "evidence/bundle.json"
+            ]
+            decisions = sorted(
+                (ref for ref in manifest.artifact_refs if ref.name.startswith("actions/")),
+                key=lambda ref: int(ref.name.split("/")[1]),
+            )
+            if len(policies) != 1 or not evidence_refs:
+                raise ValueError("controller lineage inputs are missing or ambiguous")
+            self.store.put(
+                run_id,
+                "agent/controller-lineage.json",
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "mode": mode,
+                        "controller": (
+                            "fixed"
+                            if mode in {"A", "B", "C"}
+                            else "rule_router"
+                            if mode == "D"
+                            else "planner"
+                        ),
+                        "provider_calls_allowed": mode == "E",
+                        "acquisition_policy_ref": {
+                            "id": policies[0].id,
+                            "sha256": policies[0].sha256,
+                        },
+                        "evidence_ref": {
+                            "id": evidence_refs[-1].id,
+                            "sha256": evidence_refs[-1].sha256,
+                        },
+                        "route_decision_refs": [
+                            {"id": ref.id, "name": ref.name, "sha256": ref.sha256}
+                            for ref in decisions
+                        ],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode(),
                 "public",
             )

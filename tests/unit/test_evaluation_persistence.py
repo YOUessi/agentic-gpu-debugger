@@ -2,55 +2,25 @@ import json
 
 import pytest
 
-from gpu_agent.benchmark.evaluation import EvaluationRecord, EvaluationRunner
-from gpu_agent.contracts import RepositorySnapshot, RunBinding, RunStatus
-
-COMMIT = "c" * 40
-TOOLCHAIN_HASH = "d" * 64
-MODEL_CONFIG_HASH = "e" * 64
+from gpu_agent.benchmark.evaluation import EvaluationRunner, PublicEvaluationRecord
+from gpu_agent.contracts import RunStatus
 
 
-def _binding() -> RunBinding:
-    return RunBinding(
-        repository=RepositorySnapshot(commit=COMMIT, tracked_tree_hash="f" * 64, clean=True),
-        purpose="evaluation",
-        toolchain_lock_hash=TOOLCHAIN_HASH,
-        prompt_version="v2",
-        model_config_hash=MODEL_CONFIG_HASH,
-    )
-
-
-def _record(
-    case: str, template: str, mode: str, repeat: int, cost: float | None
-) -> EvaluationRecord:
-    return EvaluationRecord(
-        record_id=f"{case}-{mode}-{repeat}",
-        case_id=case,
-        template_id=template,
-        mode=mode,
-        repeat=repeat,
-        input_hash="a" * 64,
-        evidence_hash="b" * 64,
-        executed_checks={"memcheck": "CLEAN"},
-        status="COMPLETED",
-        diagnosis={},
-        latency_ms=1,
-        cost_usd=cost,
-    )
-
-
-def _runner(store, execute, **overrides) -> EvaluationRunner:
+def _runner(executor, execute_owner=None, **overrides) -> EvaluationRunner:
+    binding = executor.service.binding
+    assert binding is not None
+    owner = execute_owner or executor
     options = {
-        "store": store,
-        "case_ids": {"case_0001": "index"},
-        "execute": execute,
-        "commit": COMMIT,
-        "prompt_version": "v2",
-        "toolchain_hash": TOOLCHAIN_HASH,
-        "model_config_hash": MODEL_CONFIG_HASH,
-        "binding": _binding(),
-        "max_cost_usd": 3.0,
-        "max_unit_cost_usd": 1.0,
+        "store": executor.service.store,
+        "case_ids": {"case_0100": "vector-add"},
+        "execute": owner.execute,
+        "commit": binding.repository.commit,
+        "prompt_version": binding.prompt_version,
+        "toolchain_hash": binding.toolchain_lock_hash,
+        "model_config_hash": binding.model_config_hash,
+        "binding": binding,
+        "max_cost_usd": 0.0,
+        "max_unit_cost_usd": 0.0,
         "random_seed": 7,
     }
     options.update(overrides)
@@ -62,139 +32,120 @@ def _artifact(store, run_id: str, name: str) -> bytes:
     return store.read(ref)
 
 
-def test_record_is_durable_before_next_unit(store):
-    completed = []
+class _Proxy:
+    def __init__(self, executor):
+        self.executor = executor
+        self.calls = []
 
-    def execute(case, template, mode, repeat):
-        active = store.recoverable_runs()
-        if completed:
-            persisted = EvaluationRecord.model_validate_json(
-                _artifact(store, active[0].id, "evaluation/records/0.json")
-            )
-            assert persisted.record_id == completed[0].record_id
-        record = _record(case, template, mode, repeat, 1.0)
-        completed.append(record)
-        return record
+    def execute(self, case, template, mode, repeat):
+        return self.executor.execute(case, template, mode, repeat)
 
-    result = _runner(store, execute).run("E", "development", 3)
+    def execute_scheduled(self, item, attempt):
+        self.calls.append(item.repeat)
+        return self.executor.execute_scheduled(item, attempt)
 
-    run = store.load(result.run_id)
+
+def test_record_is_durable_before_next_unit(native_evaluation_executor):
+    executor = native_evaluation_executor
+
+    class Observer(_Proxy):
+        def execute_scheduled(self, item, attempt):
+            active = executor.service.store.recoverable_runs()
+            if self.calls:
+                persisted = PublicEvaluationRecord.model_validate_json(
+                    _artifact(
+                        executor.service.store,
+                        active[0].id,
+                        f"evaluation/records/{len(self.calls) - 1}.json",
+                    )
+                )
+                assert persisted.repeat == self.calls[-1]
+            return super().execute_scheduled(item, attempt)
+
+    result = _runner(executor, Observer(executor)).run("D", "development", 3)
+    run = executor.service.store.load(result.run_id)
     names = {ref.name for ref in run.artifact_refs}
     assert {"evaluation/schedule.json", "evaluation/manifest.json"} <= names
-    assert {
-        "evaluation/records/0.json",
-        "evaluation/records/1.json",
-        "evaluation/records/2.json",
-    } <= names
-    manifest = json.loads(_artifact(store, result.run_id, "evaluation/manifest.json"))
-    assert manifest["executed_units"] == 3
+    assert {f"evaluation/records/{index}.json" for index in range(3)} <= names
+    assert (
+        json.loads(_artifact(executor.service.store, result.run_id, "evaluation/manifest.json"))[
+            "executed_units"
+        ]
+        == 3
+    )
     assert run.status == RunStatus.COMPLETED
 
 
-def test_unit_reservation_stops_before_cost_cap_can_be_exceeded(store):
+def test_unit_reservation_stops_before_cost_cap_can_be_exceeded(native_evaluation_executor):
+    proxy = _Proxy(native_evaluation_executor)
     result = _runner(
-        store,
-        lambda case, template, mode, repeat: _record(case, template, mode, repeat, 0.6),
-        max_cost_usd=1.0,
+        native_evaluation_executor,
+        proxy,
+        max_cost_usd=0.5,
         max_unit_cost_usd=0.6,
-    ).run("E", "development", 3)
-
+    ).run("D", "development", 3)
     assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
-    assert result.executed_units == 1
-    assert (
-        EvaluationRecord.model_validate_json(
-            _artifact(store, result.run_id, "evaluation/records/0.json")
-        ).cost_usd
-        == 0.6
-    )
-    assert store.load(result.run_id).status == RunStatus.COMPLETED
+    assert result.executed_units == 0 and proxy.calls == []
 
 
-def test_unexpected_executor_failure_preserves_completed_records(store):
-    completed = []
+def test_unexpected_executor_failure_preserves_completed_records(native_evaluation_executor):
+    class FailsSecond(_Proxy):
+        def execute_scheduled(self, item, attempt):
+            if self.calls:
+                raise RuntimeError("executor died")
+            return super().execute_scheduled(item, attempt)
 
-    def execute(case, template, mode, repeat):
-        if completed:
-            raise RuntimeError("executor died")
-        record = _record(case, template, mode, repeat, 1.0)
-        completed.append(record)
-        return record
-
-    result = _runner(store, execute).run("E", "development", 3)
-
-    assert result.stopped_reason == "EXECUTION_ERROR"
-    assert result.executed_units == 1
-    assert (
-        EvaluationRecord.model_validate_json(
-            _artifact(store, result.run_id, "evaluation/records/0.json")
-        ).record_id
-        == completed[0].record_id
-    )
+    executor = native_evaluation_executor
+    result = _runner(executor, FailsSecond(executor)).run("D", "development", 3)
+    assert result.stopped_reason == "EXECUTION_ERROR" and result.executed_units == 1
     assert "evaluation/records/1.json" not in {
-        ref.name for ref in store.load(result.run_id).artifact_refs
+        ref.name for ref in executor.service.store.load(result.run_id).artifact_refs
     }
-    assert store.load(result.run_id).status == RunStatus.FAILED
+    assert executor.service.store.load(result.run_id).status == RunStatus.FAILED
 
 
-def test_resume_rejects_commit_or_schedule_mismatch(store):
-    def interrupt(*_args):
-        raise KeyboardInterrupt
-
-    original = _runner(store, interrupt)
-    with pytest.raises(KeyboardInterrupt):
-        original.run("E", "development", 3)
-    commit_run_id = store.recoverable_runs()[0].id
-
-    with pytest.raises(ValueError):
-        _runner(store, interrupt, commit="d" * 40).resume(commit_run_id, "E", "development", 3)
-
-    with pytest.raises(KeyboardInterrupt):
-        original.run("E", "development", 3)
-    schedule_run_id = next(run.id for run in store.recoverable_runs() if run.id != commit_run_id)
-
-    with pytest.raises(ValueError):
-        _runner(store, interrupt, case_ids={"case_0002": "race"}).resume(
-            schedule_run_id, "E", "development", 3
-        )
-
-
-def test_started_attempt_without_record_fails_closed_without_resume_replay(store, monkeypatch):
-    runner = _runner(
-        store,
-        lambda case, template, mode, repeat: _record(case, template, mode, repeat, 1.0),
-    )
-    put = store.put
-
-    def interrupt_record(run_id, name, content, visibility):
-        if name == "evaluation/records/0.json":
+def test_resume_rejects_commit_or_schedule_mismatch(native_evaluation_executor):
+    class Interrupt(_Proxy):
+        def execute_scheduled(self, item, attempt):
             raise KeyboardInterrupt
-        return put(run_id, name, content, visibility)
 
-    monkeypatch.setattr(store, "put", interrupt_record)
+    executor = native_evaluation_executor
+    original = _runner(executor, Interrupt(executor))
     with pytest.raises(KeyboardInterrupt):
-        runner.run("E", "development", 3)
-    run_id = store.recoverable_runs()[0].id
-    assert "evaluation/attempts/0.json" in {ref.name for ref in store.load(run_id).artifact_refs}
+        original.run("D", "development", 3)
+    run_id = executor.service.store.recoverable_runs()[0].id
+    with pytest.raises(ValueError):
+        _runner(executor, Interrupt(executor), commit="d" * 40).resume(
+            run_id, "D", "development", 3
+        )
+    with pytest.raises(ValueError):
+        original.resume(run_id, "D", "holdout", 3)
 
-    monkeypatch.setattr(store, "put", put)
-    result = _runner(
-        store,
-        lambda *_args: (_ for _ in ()).throw(AssertionError("must not replay")),
-    ).resume(run_id, "E", "development", 3)
 
+def test_started_attempt_without_record_fails_closed_without_resume_replay(
+    native_evaluation_executor,
+):
+    class Interrupt(_Proxy):
+        def execute_scheduled(self, item, attempt):
+            raise KeyboardInterrupt
+
+    executor = native_evaluation_executor
+    with pytest.raises(KeyboardInterrupt):
+        _runner(executor, Interrupt(executor)).run("D", "development", 3)
+    run_id = executor.service.store.recoverable_runs()[0].id
+    result = _runner(executor, _Proxy(executor)).resume(run_id, "D", "development", 3)
     assert result.stopped_reason == "AMBIGUOUS_STARTED_ATTEMPT"
     assert result.executed_units == 0
-    assert store.load(run_id).status == RunStatus.FAILED
+    assert executor.service.store.load(run_id).status == RunStatus.FAILED
 
 
-def test_successful_resume_continues_after_completed_ordinal(store, monkeypatch):
-    calls = []
-
-    def execute(case, template, mode, repeat):
-        calls.append(repeat)
-        return _record(case, template, mode, repeat, 1.0)
-
-    runner = _runner(store, execute)
+def test_successful_resume_continues_after_completed_ordinal(
+    native_evaluation_executor, monkeypatch
+):
+    executor = native_evaluation_executor
+    proxy = _Proxy(executor)
+    runner = _runner(executor, proxy)
+    store = executor.service.store
     put = store.put
 
     def interrupt_after_first_record(run_id, name, content, visibility):
@@ -205,40 +156,97 @@ def test_successful_resume_continues_after_completed_ordinal(store, monkeypatch)
 
     monkeypatch.setattr(store, "put", interrupt_after_first_record)
     with pytest.raises(KeyboardInterrupt):
-        runner.run("E", "development", 3)
+        runner.run("D", "development", 3)
     run_id = store.recoverable_runs()[0].id
-    assert "evaluation/attempts/0.json" in {ref.name for ref in store.load(run_id).artifact_refs}
-
     monkeypatch.setattr(store, "put", put)
-    result = runner.resume(run_id, "E", "development", 3)
-
-    assert calls == [2, 0, 1]
+    result = runner.resume(run_id, "D", "development", 3)
+    assert proxy.calls == [2, 0, 1]
     assert [record.repeat for record in result.records] == [2, 0, 1]
     assert result.executed_units == 3 and result.stopped_reason is None
-    assert {
-        "evaluation/records/0.json",
-        "evaluation/records/1.json",
-        "evaluation/records/2.json",
-    } <= {ref.name for ref in store.load(run_id).artifact_refs}
 
 
-def test_record_serialization_failure_persists_failed_terminal_manifest(store):
-    def execute(case, template, mode, repeat):
-        return _record(case, template, mode, repeat, 1.0).model_copy(
-            update={"diagnosis": {"unserializable": object()}}
-        )
+def test_record_serialization_failure_persists_failed_terminal_manifest(
+    native_evaluation_executor, monkeypatch
+):
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    put = runner._put
 
-    result = _runner(store, execute).run("E", "development", 3)
+    def fail_record(run_id, name, content):
+        if name == "evaluation/records/0.json":
+            raise TypeError("serialization failed")
+        return put(run_id, name, content)
 
+    monkeypatch.setattr(runner, "_put", fail_record)
+    result = runner.run("D", "development", 3)
     assert result.stopped_reason == "RECORD_PERSISTENCE_ERROR"
     assert result.records == [] and result.executed_units == 0
-    persisted = json.loads(_artifact(store, result.run_id, "evaluation/manifest.json"))
-    assert persisted["stopped_reason"] == "RECORD_PERSISTENCE_ERROR"
-    assert store.load(result.run_id).status == RunStatus.FAILED
+    assert executor.service.store.load(result.run_id).status == RunStatus.FAILED
 
 
-def test_runner_rejects_non_public_store(tmp_path):
+def test_native_record_cannot_be_replayed_for_another_schedule_unit(
+    native_evaluation_executor,
+):
+    class Replay(_Proxy):
+        record = None
+
+        def execute_scheduled(self, item, attempt):
+            if self.record is None:
+                self.record = super().execute_scheduled(item, attempt)
+            else:
+                self.calls.append(item.repeat)
+            return self.record
+
+    executor = native_evaluation_executor
+    replay = Replay(executor)
+    result = _runner(executor, replay).run("D", "development", 3)
+    assert result.stopped_reason == "EXECUTION_ERROR"
+    assert result.executed_units == 1
+
+
+@pytest.mark.parametrize("fault", ["reservation", "extra_attempt", "record_without_attempt"])
+def test_resume_recomputes_exact_attempt_set(native_evaluation_executor, fault):
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    schedule = runner._schedule("D", "development", 3)
+    store = executor.service.store
+    run = store.create_run("evaluation", binding=executor.service.binding)
+    store.transition(run.id, RunStatus.RUNNING, "EXECUTING")
+    runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+    attempt = runner._attempt(run.id, schedule, schedule.items[0])
+    if fault == "reservation":
+        attempt = attempt.model_copy(update={"reserved_cost_usd": 1})
+        runner._put(run.id, "evaluation/attempts/0.json", attempt.model_dump_json().encode())
+    elif fault == "extra_attempt":
+        extra = attempt.model_copy(update={"ordinal": len(schedule.items)})
+        runner._put(
+            run.id,
+            f"evaluation/attempts/{len(schedule.items)}.json",
+            extra.model_dump_json().encode(),
+        )
+    else:
+        record = executor.execute_scheduled(schedule.items[0], attempt)
+        runner._put(run.id, "evaluation/records/0.json", record.public().model_dump_json().encode())
+    with pytest.raises(ValueError):
+        runner.resume(run.id, "D", "development", 3)
+
+
+def test_runner_rejects_non_public_store(tmp_path, native_evaluation_executor):
     from gpu_agent.store import RunStore
 
+    executor = native_evaluation_executor
+    binding = executor.service.binding
+    assert binding is not None
     with pytest.raises(ValueError):
-        _runner(RunStore(tmp_path / "evaluator", visibility="evaluator"), lambda *_args: None)
+        EvaluationRunner(
+            RunStore(tmp_path / "evaluator", visibility="evaluator"),
+            {"case_0100": "vector-add"},
+            executor.execute,
+            commit=binding.repository.commit,
+            prompt_version=binding.prompt_version or "",
+            toolchain_hash=binding.toolchain_lock_hash or "",
+            model_config_hash=binding.model_config_hash or "",
+            binding=binding,
+            max_cost_usd=0,
+            max_unit_cost_usd=0,
+        )
