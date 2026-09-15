@@ -84,7 +84,7 @@ This API scopes artifact reads for the supplied run; role authorization must bin
 run ID before exposing a view to an agent. Source paths in findings are observations,
 not file-access authority.
 
-## Live acceptance status
+## Live acceptance and current blocker
 
 `case_0001` intentionally allocates exactly 257 float elements, launches 256-thread
 blocks, and omits the index guard. Ordinary execution may succeed or fail; memcheck
@@ -98,18 +98,17 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/you/conda_env/agentic-gpu-debugger/bin/py
 
 Ordinary tests skip when image/runtime/GPU support is unavailable. `--require-live`
 turns those skips into failures. Skipped tests and CPU-only benign probes cannot satisfy
-M1 acceptance. The initial 2026-09-15 probe found no NVIDIA runtime; the operator then
-installed/configured NVIDIA Container Toolkit 1.20.0. The immutable CUDA image subsequently
-ran on the RTX 4090 Laptop, and the isolation/OOB, four-tool and strict verification live
-acceptance slices passed. These runs prove their recorded commits only; they are not
-current-commit Portfolio Release evidence.
+M1 acceptance. As observed on 2026-09-15: Ubuntu 22.04.5 x86_64, Docker 29.1.3,
+only `runc`/`io.containerd.runc.v2` runtimes, no NVIDIA Container Toolkit, and no running
+containers before work. Docker's GPU request fails. M1 remains blocked until runtime
+installation and both live acceptance commands succeed with real GPU evidence.
 
-## Operator-only NVIDIA runtime setup record
+## Operator-only NVIDIA runtime setup
 
-The following operator-reviewed procedure was used to install the runtime after the initial
-blocked probe. `sudo` requires the operator password. Use the
-[official NVIDIA installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
-when reproducing because repository/package instructions may change:
+No host packages/configuration were changed by T03. `sudo` needs an operator password.
+Use the [official NVIDIA installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+to configure the apt keyring/repository and install the reviewed package version. The
+guide inspected on 2026-09-15 specifies:
 
 ```bash
 sudo apt-get update && sudo apt-get install -y --no-install-recommends \

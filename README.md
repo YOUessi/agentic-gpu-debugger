@@ -49,7 +49,7 @@ python -I -m mypy src/gpu_agent
 python -I -m pip check
 ```
 
-已注册 `gpu`、`container`、`live_llm`、`release` 标记。`--require-live` 将带这些标记的 skipped 测试变为失败；收集阶段 skip 也失败，防止缺少必需环境时假通过。release 选择面覆盖隔离、四工具、private Oracle、live LLM、A–E、corpus 和 manifest；计数由保存的 pytest JUnit 结果派生。当前 release manifest 不存在，离线测试只证明缺证据时门禁正确关闭。
+已注册 `gpu`、`container`、`live_llm`、`release` 标记。`--require-live` 将带这些标记的 skipped 测试变为失败；收集阶段 skip 也失败，防止缺少必需环境时假通过。完整的发布覆盖计数门禁留待 T12；目前单元测试通过不代表 GPU/模型功能通过。
 
 ## T06 诊断与单候选工作流
 
@@ -99,12 +99,6 @@ GPU 或容器验收；M1 仍需通过带 `--require-live` 的真实 OOB 闭环�
 `24×5×3=360` 个单元；没有显式 API 费用上限时 runner 在第一次外部调用前停止。
 当前状态与边界见 [验收](docs/acceptance.md)、[评测](docs/evaluation-report.md) 和
 [限制](docs/limitations.md)。
-
-发布声明不能只填写一个 JSON：`ReleaseEvidenceIndex` 会重新读取 public/evaluator
-RunStore，验证终态、artifact hash、当前 commit、toolchain/corpus/model config、完整
-schedule/attempt/record 和真实 pytest 结果。private holdout 在 public store 中只能使用
-opaque alias；映射保存在 evaluator store。当前 corpus、alias 生产路径、价格证明和付费
-批次都未完成，所以项目是可运行原型与评测基础，不是 Portfolio-ready release。
 
 ## M0：真实 clean kernel 验收
 

@@ -1,6 +1,6 @@
 # Agentic GPU Debugger V2 实施计划
 
-**状态：** T01–T10 的实现与对应纵向 live slice 已完成；T11–T12 的零成本执行、指标和证据门禁已实现。M6/Portfolio Release 仍未完成：仓库只有 4 个已验证 public mutation，尚缺 16 public + 8 private corpus、private alias 映射、价格证明和经批准费用上限下的 360 单元五模式批次。记录见 [验收状态](docs/acceptance.md)；旧提交的 live run 不能作为当前提交的发布证据。
+**状态：** T01、T02 完成，M0 的真实 clean kernel 编译运行与证据验收通过。T03 尚未开始。记录见 [T01 验证记录](docs/t01-validation.md)、[T02/M0 验证记录](docs/t02-validation.md)。M0 不代表隔离执行或修复功能完成。
 
 **Goal：** 在真实 RTX 4090 Laptop 上完成可复现的 CUDA 诊断、单次候选补丁、隔离验证和五组评测。
 
@@ -10,7 +10,7 @@
 
 **Spec：** [PROJECT_SPEC_CN_V2.md](PROJECT_SPEC_CN_V2.md)，基准提交 `33a6f23`。
 
-**执行方式：** 按任务执行测试、独立审查与本地提交；可在边界清晰时使用并行 Agent。开发模型与产品运行模型独立配置。
+**执行方式：** 当前对话串行维护主线，使用 `superpowers:executing-plans`，按任务完成测试、检查与本地提交。开发模型采用用户选择的 Astra/high；产品运行模型独立配置。无需为了每个任务创建新对话或并行 Agent。
 
 **推进规则：** 按依赖与验收推进；不设置日程。M0、M1 及后续各里程碑交付可运行结果后评审。实际安装、模型调用和 GPU 实验产生的结果才能标记完成。
 
@@ -555,8 +555,6 @@ gpu-agent benchmark validate
 
 ## T11 / M6：五组实验、指标与 RAG 比较
 
-**当前执行状态：** A–E 获取策略、持久化 schedule/attempt/record、成本 fail-closed、盲评投影与 §19.4 指标已完成零成本测试。生产付费入口在价格上界未被证明前返回 `COST_BOUND_UNAVAILABLE`。private holdout 的公开 schedule/record 必须使用 opaque alias，并由 evaluator-only identity map 绑定；现有 runner 尚未生成该映射，因此不能开始或宣称 holdout 批次完成。
-
 **依赖：** T10。
 
 **创建：** `benchmark/{evaluation,metrics}.py`、`evaluation/{modes.json,rubric.md,protocol.md}`、`tests/unit/test_metrics.py`、`tests/integration/test_evaluation_views.py`、`tests/e2e/test_evaluation_run.py`；检索候选实现放 `knowledge/semantic.py`，只在依赖锁定后创建。
@@ -596,15 +594,13 @@ python -m pytest tests/e2e/test_evaluation_run.py --require-live -q
 
 ## T12 / M6：发布文档与可重跑验收
 
-**当前执行状态：** Release gate 已改为从 public/evaluator RunStore 的终态、哈希校验 artifact 派生，不再相信 manifest 的非空字符串或自报计数；release marker 覆盖隔离、四工具、private Oracle、live LLM、五模式、corpus 与最终 manifest。当前没有同提交 16+8/360 证据，也没有生成 `evaluation/release-manifest.json`，因此门禁按设计关闭。
-
 **依赖：** T11。
 
 **创建：** `docs/{architecture,demo,limitations,evaluation-report,acceptance}.md`、`src/gpu_agent/benchmark/release.py`、`tests/e2e/test_release_gate.py`；修改 `README.md`；固定依赖及 toolchain locks。
 
 **契约：** `ReleaseManifest(commit, toolchain_hash, corpus_hash, model_config_hash, test_counts, evidence_run_ids, unresolved_items)`；由验收 runner 使用实际数据生成。
 
-`benchmark/release.py` 定义以上 schema、`ReleaseEvidenceIndex.derive(public, evaluator, current_commit=...)` 与 `ReleaseGate.check(manifest, evidence) -> ReleaseGateResult`；`test_counts` 由保存的 pytest JUnit artifact 重算，具有 expected、executed、skipped_required 等类型化字段。
+`benchmark/release.py` 定义以上 schema、`ReleaseGate.check(manifest) -> ReleaseGateResult(passed: bool, reason_codes: list[str])`；`test_counts` 具有 expected、executed、skipped_required 等类型化计数字段。
 
 - [ ] 先写缺 live run、SKIPPED、private Oracle 不可用或 corpus 数量不足都不能通过 release gate 的测试。
 
@@ -622,9 +618,7 @@ def test_skipped_live_case_blocks_release(release_gate, manifest):
 
 ```bash
 python -m pytest tests/unit tests/integration -m 'not live_llm and not gpu and not container' -q
-mkdir -p .gpu-agent
-python -m pytest tests -m release --require-live -q \
-  --junitxml=.gpu-agent/release-results.xml
+python -m pytest tests/gpu tests/e2e -m release --require-live -q
 python -m ruff check src tests
 python -m mypy src/gpu_agent
 git diff --check
@@ -666,7 +660,7 @@ git diff --check
 - [x] 用户评审并批准开始执行本计划。
 - [x] 开始 T01，并只根据真实结果勾选任务。
 
-本计划中的命令与测试代码是执行规范；计划文件存在不表示发布验收已通过。当前下一项是补齐并验证 16+8 corpus、实现 private alias 生产写入、冻结价格证明，在用户明确批准费用上限后执行 360 单元批次，再生成同提交 release manifest。
+本计划中的命令与测试代码是执行规范；计划文件存在不表示这些测试已通过。T01、T02 的真实结果见验证记录；下一项执行是 T03，后续未执行任务仍保持未完成。
 
 ## 7. 官方实现依据
 
