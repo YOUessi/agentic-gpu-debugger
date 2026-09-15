@@ -313,6 +313,54 @@ def test_ambiguous_probe_create_always_attempts_label_checked_cleanup(store, tmp
     assert [argv[1] for argv in calls] == ["create", "inspect", "stop", "rm"]
 
 
+@pytest.mark.parametrize("stage", ["inspect", "stop", "rm"])
+@pytest.mark.parametrize(
+    "uncertain",
+    [
+        {"timed_out": True},
+        {"cancelled": True},
+        {"truncated": True},
+        {"tool_error": "DOCKER_TRANSPORT_ERROR"},
+    ],
+)
+def test_container_cleanup_rejects_ambiguous_command_success(
+    store, tmp_path, monkeypatch, stage, uncertain
+):
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+    from gpu_agent.execution.process import ProcessCapture
+
+    backend = IsolatedGPUBackend(store, tmp_path, tmp_path / "tasks")
+    operation_id = "1" * 32
+
+    def execute(argv, *_args, **_kwargs):
+        command = argv[1]
+        output = operation_id.encode() if command == "inspect" else b""
+        fields = {
+            "exit_code": 0,
+            "stdout": output,
+            "stderr": b"",
+            "timed_out": False,
+            **(uncertain if command == stage else {}),
+        }
+        return ProcessCapture(**fields)
+
+    monkeypatch.setattr(backend._executor, "execute", execute)
+    assert not backend._remove_container("gpu-agent-" + operation_id, operation_id)
+
+
+def test_container_cleanup_does_not_trust_ambiguous_no_such(store, tmp_path, monkeypatch):
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+    from gpu_agent.execution.process import ProcessCapture
+
+    backend = IsolatedGPUBackend(store, tmp_path, tmp_path / "tasks")
+    monkeypatch.setattr(
+        backend._executor,
+        "execute",
+        lambda *_args, **_kwargs: ProcessCapture(1, b"", b"Error: No such object", True),
+    )
+    assert not backend._remove_container("gpu-agent-" + "1" * 32, "1" * 32)
+
+
 def test_bound_execution_rejects_observed_runtime_version_mismatch(store, tmp_path, monkeypatch):
     from gpu_agent.contracts import RepositorySnapshot, RunBinding
     from gpu_agent.environment import load_toolchain_lock

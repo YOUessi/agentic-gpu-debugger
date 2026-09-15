@@ -454,14 +454,22 @@ class IsolatedGPUBackend(LocalBackend):
         inspected = self._docker(
             ["inspect", "--format", '{{index .Config.Labels "' + LABEL + '"}}', name]
         )
-        if inspected.exit_code != 0:
+        inspect_status = self._runtime_status(inspected)
+        if inspect_status != "SUCCESS":
             # A missing container is clean; other daemon failures are not proof of cleanup.
-            return b"No such" in inspected.stderr
-        if inspected.stdout.decode().strip() != operation_id:
+            return inspect_status == "FAILED" and b"No such" in inspected.stderr
+        try:
+            owner = inspected.stdout.decode("ascii").strip()
+        except UnicodeDecodeError:
             return False
-        self._docker(["stop", "--time", "0", name])
+        if owner != operation_id:
+            return False
+        stopped = self._docker(["stop", "--time", "0", name])
         removed = self._docker(["rm", "-f", name])
-        return removed.exit_code == 0
+        return (
+            self._runtime_status(stopped) == "SUCCESS"
+            and self._runtime_status(removed) == "SUCCESS"
+        )
 
     def _container(
         self,
