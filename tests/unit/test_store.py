@@ -118,6 +118,29 @@ def test_independent_store_instances_do_not_lose_artifact_updates(store):
     assert set(ref.id for ref in store.load(run.id).artifact_refs) == {ref.id for ref in refs}
 
 
+def test_put_if_absent_exact_is_atomic_across_store_instances(store):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from gpu_agent.store import RunStore
+
+    run = store.create_run("benchmark_case")
+    other = RunStore(store.root)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                selected.put_if_absent_exact,
+                run.id,
+                "case-manifest.json",
+                b"same immutable manifest",
+                "public",
+            )
+            for selected in (store, other)
+        ]
+        refs = [future.result() for future in futures]
+    assert refs[0] == refs[1]
+    assert [ref.name for ref in store.load(run.id).artifact_refs] == ["case-manifest.json"]
+
+
 def test_special_lock_file_is_rejected_without_writing_outside(store):
     import os
 

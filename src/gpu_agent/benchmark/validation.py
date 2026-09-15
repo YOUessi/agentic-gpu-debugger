@@ -335,7 +335,9 @@ class CaseValidationController:
         except BaseException as primary_error:
             if handle is not None:
                 try:
-                    self.backend.cleanup(handle)
+                    cleaned = self.backend.cleanup(handle)
+                    if not cleaned.removed:
+                        self._record_cleanup_error(run.id, cleaned)
                 except BaseException as cleanup_error:
                     try:
                         self._record_cleanup_error(run.id, cleanup_error)

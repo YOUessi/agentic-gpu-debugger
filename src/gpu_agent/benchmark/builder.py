@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections import Counter
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -180,7 +181,25 @@ class BenchmarkBuilder:
                 for index in range(len(observation.sanitizer_oracle_refs))
             ]
         )
+        expected_validation_paths = [
+            "validation/case-spec.json",
+            "validation/execution-plan.json",
+            "validation/build-result.json",
+            "validation/runtime-result.json",
+            "validation/input.json",
+            "validation/oracle-result.json",
+            "validation/case-execution-observation.json",
+            *[f"validation/sanitizer-{index:02d}.json" for index in range(len(sanitizers))],
+            *[
+                f"validation/sanitizer-oracle-{index:02d}.json"
+                for index in range(len(sanitizer_oracles))
+            ],
+        ]
+        validation_paths_exact = Counter(
+            ref.name for ref in run.artifact_refs if ref.name.startswith("validation/")
+        ) == Counter(expected_validation_paths)
         observed_sources = [ref for ref in run.artifact_refs if ref.name.startswith("sources/")]
+        source_ref_counts = Counter(PurePosixPath(ref.name).name for ref in observed_sources)
         source_refs = {PurePosixPath(ref.name).name: ref.sha256 for ref in observed_sources}
         build_sources = {
             PurePosixPath(name).name: digest
@@ -251,7 +270,7 @@ class BenchmarkBuilder:
         sanitizer_invocations_unique = len(sanitizer_request_ids) == len(sanitizers) and len(
             set(sanitizer_request_ids)
         ) == len(sanitizer_request_ids)
-        expected_native_paths = {
+        expected_native_paths = [
             f"build/{build.tool_result.request_id}/binary",
             f"build/{build.tool_result.request_id}/result.json",
             f"build/{build.tool_result.request_id}/stdout",
@@ -259,24 +278,26 @@ class BenchmarkBuilder:
             f"run/{runtime.tool_result.request_id}/stdout",
             f"run/{runtime.tool_result.request_id}/stderr",
             f"run/{runtime.tool_result.request_id}/result.json",
-        }
+        ]
         for result in sanitizers:
             if result.tool_result is not None:
                 prefix = f"sanitizer/{result.tool_result.request_id}"
-                expected_native_paths.update(
-                    {
+                expected_native_paths.extend(
+                    [
                         f"{prefix}/program.stdout",
                         f"{prefix}/program.stderr",
                         f"{prefix}/{observation.target_tool.value}.log",
                         f"{prefix}/result.json",
-                    }
+                    ]
                 )
-        observed_native_paths = {
+        observed_native_paths = [
             ref.name
             for ref in run.artifact_refs
             if ref.name.startswith(("build/", "run/", "sanitizer/"))
-        }
-        native_invocation_paths_exact = observed_native_paths == expected_native_paths
+        ]
+        native_invocation_paths_exact = Counter(observed_native_paths) == Counter(
+            expected_native_paths
+        )
         native_result_models_exact = (
             self.store.read(self._one(run, f"build/{build.tool_result.request_id}/result.json"))
             == build.tool_result.model_dump_json().encode()
@@ -348,8 +369,10 @@ class BenchmarkBuilder:
         if not (
             self.store.visibility == visibility
             and expected_result_refs
+            and validation_paths_exact
             and plan_ok
             and len(observed_sources) == 4
+            and source_ref_counts == Counter(build_sources.keys())
             and source_refs == build_sources
             and runtime_attestation is not None
             and runtime_attestation.lock_hash == binding.toolchain_lock_hash
@@ -538,20 +561,19 @@ class BenchmarkBuilder:
                 store=self.store,
                 manifest_hash=hashlib.sha256(manifest_bytes).hexdigest(),
             )
-            self._complete_registration(transaction, binding, manifest_bytes)
-            if transaction.state == "PREPARED":
-                ledger.commit(transaction)
+            with ledger.registration_lock(transaction) as current:
+                self._complete_registration(current, binding, manifest_bytes)
+                if current.state == "PREPARED":
+                    ledger.commit(current)
         except ValueError as exc:
             raise UnvalidatedCaseError(str(exc)) from exc
         return manifest
 
     def _put_exact(self, run_id: str, name: str, content: bytes) -> None:
-        run = self.store.load(run_id)
-        refs = [ref for ref in run.artifact_refs if ref.name == name]
-        if len(refs) > 1 or (refs and self.store.read(refs[0]) != content):
-            raise ValueError("registration recovery artifact mismatch")
-        if not refs:
-            self.store.put(run_id, name, content, self.store.visibility)
+        try:
+            self.store.put_if_absent_exact(run_id, name, content, self.store.visibility)
+        except ValueError as exc:
+            raise ValueError("registration recovery artifact mismatch") from exc
 
     def _complete_registration(
         self, transaction: CorpusTransaction, binding: RunBinding, manifest_bytes: bytes
@@ -601,7 +623,7 @@ class BenchmarkBuilder:
             "validation/ledger-transaction.json": reservation,
             "case-manifest.json": manifest_bytes,
         }
-        if {ref.name for ref in run.artifact_refs} != set(expected):
+        if Counter(ref.name for ref in run.artifact_refs) != Counter(expected.keys()):
             raise ValueError("registration recovery artifacts are ambiguous")
         for name, content in expected.items():
             ref = self._one(run, name)

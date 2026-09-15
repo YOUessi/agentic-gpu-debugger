@@ -231,7 +231,7 @@ class RunStore:
             self._save(run)
             return run
 
-    def put(self, run_id: str, name: str, content: bytes, visibility: Visibility) -> ArtifactRef:
+    def _validate_put(self, name: str, content: bytes, visibility: Visibility) -> None:
         label = PurePosixPath(name)
         if not name or label.is_absolute() or ".." in label.parts or "\\" in name:
             raise ValueError("invalid artifact name")
@@ -239,43 +239,71 @@ class RunStore:
             raise ValueError("artifact visibility requires a separate store")
         if len(content) > 64 * 1024 * 1024:
             raise ValueError("artifact too large")
+
+    def _put_locked(
+        self,
+        run: RunManifest,
+        name: str,
+        content: bytes,
+        visibility: Visibility,
+    ) -> ArtifactRef:
+        if run.status not in {RunStatus.QUEUED, RunStatus.RUNNING}:
+            raise ValueError("terminal run is immutable")
+        artifact_id = new_id()
+        relative = f"{run.id}/artifacts/{artifact_id}"
+        target = self.root / relative
+        reject_symlinks(target)
+        ref = ArtifactRef(
+            id=artifact_id,
+            run_id=run.id,
+            name=name,
+            sha256=hashlib.sha256(content).hexdigest(),
+            visibility=visibility,
+            relative_path=relative,
+            byte_count=len(content),
+        )
+        fd, temporary = tempfile.mkstemp(prefix=".blob-", dir=target.parent)
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(content)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.chmod(temporary, 0o400)
+            os.link(temporary, target)  # exclusive atomic publication, never overwrite
+            sync_directory(target.parent)
+            run.artifact_refs.append(ref)
+            try:
+                self._save(run)
+            except OSError:
+                # If replace succeeded but directory fsync failed, keep the registered blob.
+                if ref not in self.load(run.id).artifact_refs:
+                    target.unlink()
+                raise
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        return ref
+
+    def put(self, run_id: str, name: str, content: bytes, visibility: Visibility) -> ArtifactRef:
+        self._validate_put(name, content, visibility)
         with self._lock(run_id):
             run = self.load(run_id)
-            if run.status not in {RunStatus.QUEUED, RunStatus.RUNNING}:
-                raise ValueError("terminal run is immutable")
-            artifact_id = new_id()
-            relative = f"{run_id}/artifacts/{artifact_id}"
-            target = self.root / relative
-            reject_symlinks(target)
-            ref = ArtifactRef(
-                id=artifact_id,
-                run_id=run_id,
-                name=name,
-                sha256=hashlib.sha256(content).hexdigest(),
-                visibility=visibility,
-                relative_path=relative,
-                byte_count=len(content),
-            )
-            fd, temporary = tempfile.mkstemp(prefix=".blob-", dir=target.parent)
-            try:
-                with os.fdopen(fd, "wb") as stream:
-                    stream.write(content)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                os.chmod(temporary, 0o400)
-                os.link(temporary, target)  # exclusive atomic publication, never overwrite
-                sync_directory(target.parent)
-                run.artifact_refs.append(ref)
-                try:
-                    self._save(run)
-                except OSError:
-                    # If replace succeeded but directory fsync failed, keep the registered blob.
-                    if ref not in self.load(run_id).artifact_refs:
-                        target.unlink()
-                    raise
-            finally:
-                Path(temporary).unlink(missing_ok=True)
-            return ref
+            return self._put_locked(run, name, content, visibility)
+
+    def put_if_absent_exact(
+        self, run_id: str, name: str, content: bytes, visibility: Visibility
+    ) -> ArtifactRef:
+        """Atomically install one named artifact or verify the existing exact value."""
+        self._validate_put(name, content, visibility)
+        with self._lock(run_id):
+            run = self.load(run_id)
+            refs = [ref for ref in run.artifact_refs if ref.name == name]
+            if len(refs) > 1:
+                raise ValueError("artifact name is ambiguous")
+            if refs:
+                if self.read(refs[0]) != content:
+                    raise ValueError("existing artifact differs")
+                return refs[0]
+            return self._put_locked(run, name, content, visibility)
 
     def read(self, ref: ArtifactRef) -> bytes:
         if ref.visibility != self.visibility or ref not in self.load(ref.run_id).artifact_refs:

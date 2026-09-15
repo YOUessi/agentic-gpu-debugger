@@ -4,6 +4,7 @@ import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Lock
 
 import pytest
 
@@ -393,6 +394,27 @@ def test_hidden_second_sanitizer_invocation_cannot_be_spliced_in(native_case, mo
         BenchmarkBuilder(store).validate(clean_id, mutant_id)
 
 
+def test_duplicate_validation_wrapper_cannot_hide_ambiguous_evidence(native_case, monkeypatch):
+    import gpu_agent.benchmark.validation as validation_module
+    from gpu_agent.benchmark.builder import BenchmarkBuilder
+    from gpu_agent.benchmark.validation import CaseExecutionAttestationUnavailable
+
+    store, _, execute, _ = native_case
+    original = validation_module._put_model
+
+    def duplicate_runtime_wrapper(store, run_id, name, value):
+        ref = original(store, run_id, name, value)
+        if name == "validation/runtime-result.json":
+            original(store, run_id, name, value)
+        return ref
+
+    monkeypatch.setattr(validation_module, "_put_model", duplicate_runtime_wrapper)
+    clean_id = execute("clean")
+    mutant_id = execute("mutant")
+    with pytest.raises(CaseExecutionAttestationUnavailable):
+        BenchmarkBuilder(store).validate(clean_id, mutant_id)
+
+
 def test_runtime_request_id_must_match_output_and_log_paths(native_case, monkeypatch):
     from gpu_agent.benchmark.builder import BenchmarkBuilder
     from gpu_agent.benchmark.validation import CaseExecutionAttestationUnavailable
@@ -452,6 +474,31 @@ def test_cleanup_exception_does_not_replace_primary_execution_failure(native_cas
 
     monkeypatch.setattr(controller.backend, "build", broken_build)
     monkeypatch.setattr(controller.backend, "cleanup", broken_cleanup)
+    with pytest.raises(ValueError, match="primary build failure"):
+        execute("clean")
+    failed = [
+        store.load(path.name)
+        for path in store.root.iterdir()
+        if len(path.name) == 32 and store.load(path.name).status.value == "FAILED"
+    ]
+    assert len(failed) == 1
+    assert any(ref.name == "validation/cleanup-error.json" for ref in failed[0].artifact_refs)
+
+
+def test_cleanup_removed_false_does_not_replace_primary_execution_failure(native_case, monkeypatch):
+    from gpu_agent.execution.models import CleanupResult
+
+    store, controller, execute, _ = native_case
+
+    def broken_build(_request):
+        raise ValueError("primary build failure")
+
+    monkeypatch.setattr(controller.backend, "build", broken_build)
+    monkeypatch.setattr(
+        controller.backend,
+        "cleanup",
+        lambda handle: CleanupResult(workspace_id=handle.id, removed=False),
+    )
     with pytest.raises(ValueError, match="primary build failure"):
         execute("clean")
     failed = [
@@ -663,7 +710,7 @@ def test_registration_transaction_recovers_each_crash_point(native_case, monkeyp
 
         monkeypatch.setattr(store, "create_run", crash_after_create)
     elif crash_point == "put":
-        original_put = store.put
+        original_put = store.put_if_absent_exact
 
         def crash_after_put(run_id, name, content, visibility):
             nonlocal crashed
@@ -673,7 +720,7 @@ def test_registration_transaction_recovers_each_crash_point(native_case, monkeyp
                 raise RuntimeError("simulated put crash")
             return result
 
-        monkeypatch.setattr(store, "put", crash_after_put)
+        monkeypatch.setattr(store, "put_if_absent_exact", crash_after_put)
     elif crash_point == "terminalized":
         original_transition = store.transition
 
@@ -711,6 +758,119 @@ def test_registration_transaction_recovers_each_crash_point(native_case, monkeyp
     assert registrations[0].status.value == "COMPLETED"
     state = json.loads((builder.family.ledger.root / "transactions.json").read_bytes())
     assert state["transactions"][0]["state"] == "COMMITTED"
+
+
+def test_concurrent_exact_registration_has_one_serial_completion(native_case, monkeypatch):
+    from gpu_agent.benchmark.builder import BenchmarkBuilder
+    from gpu_agent.benchmark.ledger import CorpusLedger
+
+    store, _, execute, _ = native_case
+    builder = BenchmarkBuilder(store)
+    validation = builder.validate(execute("clean"), execute("mutant"))
+    callers_ready = Barrier(2)
+    active_lock = Lock()
+    active = 0
+    maximum_active = 0
+    original_prepare = CorpusLedger.prepare
+    original_complete = BenchmarkBuilder._complete_registration
+
+    def synchronized_prepare(self, *args, **kwargs):
+        transaction = original_prepare(self, *args, **kwargs)
+        callers_ready.wait(timeout=5)
+        return transaction
+
+    def observed_complete(self, *args, **kwargs):
+        nonlocal active, maximum_active
+        with active_lock:
+            active += 1
+            maximum_active = max(maximum_active, active)
+        try:
+            return original_complete(self, *args, **kwargs)
+        finally:
+            with active_lock:
+                active -= 1
+
+    monkeypatch.setattr(CorpusLedger, "prepare", synchronized_prepare)
+    monkeypatch.setattr(BenchmarkBuilder, "_complete_registration", observed_complete)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(BenchmarkBuilder(store).register, validation) for _ in range(2)]
+        manifests = [future.result() for future in futures]
+    assert manifests[0] == manifests[1]
+    assert maximum_active == 1
+    registrations = [
+        store.load(path.name)
+        for path in store.root.iterdir()
+        if len(path.name) == 32 and store.load(path.name).kind == "benchmark_case"
+    ]
+    assert len(registrations) == 1
+    assert [ref.name for ref in registrations[0].artifact_refs].count("case-manifest.json") == 1
+    assert [ref.name for ref in registrations[0].artifact_refs].count(
+        "validation/ledger-transaction.json"
+    ) == 1
+
+
+def test_concurrent_recovery_after_prepared_failure_is_serial(native_case, monkeypatch):
+    from gpu_agent.benchmark.builder import BenchmarkBuilder
+    from gpu_agent.benchmark.ledger import CorpusLedger
+
+    store, _, execute, _ = native_case
+    builder = BenchmarkBuilder(store)
+    validation = builder.validate(execute("clean"), execute("mutant"))
+    original_complete = BenchmarkBuilder._complete_registration
+    failed = False
+
+    def fail_once(self, *args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("simulated prepared crash")
+        return original_complete(self, *args, **kwargs)
+
+    monkeypatch.setattr(BenchmarkBuilder, "_complete_registration", fail_once)
+    with pytest.raises(RuntimeError, match="prepared crash"):
+        builder.register(validation)
+
+    monkeypatch.setattr(BenchmarkBuilder, "_complete_registration", original_complete)
+    callers_ready = Barrier(2)
+    original_prepare = CorpusLedger.prepare
+
+    def synchronized_prepare(self, *args, **kwargs):
+        transaction = original_prepare(self, *args, **kwargs)
+        callers_ready.wait(timeout=5)
+        return transaction
+
+    monkeypatch.setattr(CorpusLedger, "prepare", synchronized_prepare)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(BenchmarkBuilder(store).register, validation) for _ in range(2)]
+        manifests = [future.result() for future in futures]
+    assert manifests[0] == manifests[1]
+    state = json.loads((builder.family.ledger.root / "transactions.json").read_bytes())
+    assert len(state["transactions"]) == 1
+    assert state["transactions"][0]["state"] == "COMMITTED"
+
+
+def test_transaction_lock_rejects_competing_owner(native_case, monkeypatch):
+    from gpu_agent.benchmark.builder import BenchmarkBuilder
+    from gpu_agent.benchmark.ledger import CorpusTransaction
+
+    store, _, execute, _ = native_case
+    builder = BenchmarkBuilder(store)
+    validation = builder.validate(execute("clean"), execute("mutant"))
+    original_complete = BenchmarkBuilder._complete_registration
+
+    def fail_prepared(_self, *_args, **_kwargs):
+        raise RuntimeError("leave prepared")
+
+    monkeypatch.setattr(BenchmarkBuilder, "_complete_registration", fail_prepared)
+    with pytest.raises(RuntimeError, match="leave prepared"):
+        builder.register(validation)
+    monkeypatch.setattr(BenchmarkBuilder, "_complete_registration", original_complete)
+    state = json.loads((builder.family.ledger.root / "transactions.json").read_bytes())
+    transaction = CorpusTransaction.model_validate(state["transactions"][0])
+    competitor = transaction.model_copy(update={"owner_id": "f" * 32})
+    with pytest.raises(ValueError, match="owner"):
+        with builder.family.ledger.registration_lock(competitor):
+            pass
 
 
 def test_private_plan_cannot_write_to_public_store(native_case):

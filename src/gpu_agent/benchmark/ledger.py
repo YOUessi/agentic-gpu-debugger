@@ -6,6 +6,8 @@ import hmac
 import json
 import os
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Literal
 
@@ -246,6 +248,48 @@ class CorpusLedger:
             return CorpusTransaction.model_validate(value)
         except ValueError as exc:
             raise ValueError("corpus transaction is malformed") from exc
+
+    def _get_transaction(self, transaction_id: str) -> CorpusTransaction:
+        fd, state = self._locked_state()
+        try:
+            transactions = state["transactions"]
+            assert isinstance(transactions, list)
+            for raw in transactions:
+                observed = self._transaction(raw)
+                if observed.transaction_id == transaction_id:
+                    return observed
+            raise ValueError("corpus transaction is unavailable")
+        finally:
+            os.close(fd)
+
+    @contextmanager
+    def registration_lock(self, transaction: CorpusTransaction) -> Iterator[CorpusTransaction]:
+        """Serialize one transaction's RunStore completion and ledger commit.
+
+        The per-transaction flock is released by the kernel if a controller dies. The
+        shared ledger lock is acquired only briefly to reload state, then released
+        before any RunStore operation, so the lock order cannot invert.
+        """
+        lock_path = self.root / f".transaction-{transaction.transaction_id}.lock"
+        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        try:
+            if os.fstat(fd).st_mode & 0o077:
+                raise ValueError("corpus transaction lock has unsafe permissions")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            observed = self._get_transaction(transaction.transaction_id)
+            if observed.owner_id != transaction.owner_id:
+                raise ValueError("corpus transaction owner changed")
+            exact = observed == transaction
+            committed_while_waiting = (
+                transaction.state == "PREPARED"
+                and observed.state == "COMMITTED"
+                and observed.model_copy(update={"state": "PREPARED"}) == transaction
+            )
+            if not exact and not committed_while_waiting:
+                raise ValueError("corpus transaction changed before recovery")
+            yield observed
+        finally:
+            os.close(fd)
 
     def prepare(
         self,
