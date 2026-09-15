@@ -27,7 +27,7 @@ gpu_agent = ["execution/trusted_sources.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--strict-markers"
+addopts = "--strict-markers --import-mode=importlib"
 markers = [
   "gpu: requires a real CUDA GPU",
   "container: requires the isolated GPU container backend",
