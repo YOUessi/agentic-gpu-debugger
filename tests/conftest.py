@@ -88,7 +88,9 @@ def oob_service(store, tmp_path):
     (source / "reference.cu").write_text("secret-canary fixed reference")
     (source / "case.json").write_text('{"ground_truth":"secret-canary","private_seed":42}')
     (source / "checker.py").write_text("evaluation_label = 'secret-canary'\n")
-    fixed = original.replace("out[i] = a[i] + b[i];", "if (i < n) out[i] = a[i] + b[i];")
+    fixed = original.replace("out[i] = a[i] + b[i];", "if (i < n) out[i] = a[i] + b[i];").replace(
+        "n != 257", "n == 0"
+    )
     diff = "".join(
         difflib.unified_diff(
             original.splitlines(True),

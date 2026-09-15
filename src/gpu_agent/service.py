@@ -31,7 +31,12 @@ from gpu_agent.execution.models import (
 )
 from gpu_agent.knowledge.models import KnowledgeError
 from gpu_agent.knowledge.retrieve import KnowledgeIndex
-from gpu_agent.patching import PatchCandidate, SourceSnapshot, apply_candidate
+from gpu_agent.patching import (
+    PatchCandidate,
+    SourceSnapshot,
+    apply_candidate,
+    apply_generated_candidate,
+)
 from gpu_agent.store import RunStore, read_regular
 from gpu_agent.verification.engine import VerificationEngine, register_candidate
 from gpu_agent.verification.models import VerificationResult, VerificationVerdict
@@ -132,7 +137,7 @@ class ApplicationService:
                         gate,
                         self.store,
                         run.id,
-                        diff_validator=lambda diff: apply_candidate(snapshot, diff, ["kernel.cu"]),
+                        diff_validator=lambda diff: apply_generated_candidate(snapshot, diff),
                     )
                 elif isinstance(provider, FakeProvider):
                     provider.gate = gate
@@ -190,7 +195,7 @@ class ApplicationService:
                     public_source = public_evidence(self.store, run.id).sources[0]
                     diff = provider.propose_patch(public_source, result)
                     try:
-                        candidate = apply_candidate(snapshot, diff, ["kernel.cu"])
+                        candidate = apply_generated_candidate(snapshot, diff)
                     except ValueError:
                         raise ProviderError("LLM_INVALID_OUTPUT") from None
                     candidate = candidate.model_copy(

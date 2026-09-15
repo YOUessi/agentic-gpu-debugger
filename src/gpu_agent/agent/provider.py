@@ -23,10 +23,11 @@ from gpu_agent.agent.models import (
     PublicEvidence,
     PublicSource,
 )
-from gpu_agent.agent.policy import CallKind, LLMCallGate
+from gpu_agent.agent.policy import CallKind, LLMCallGate, validate_diagnosis
 from gpu_agent.agent.prompts import PROMPT_VERSION, PROMPTS
 from gpu_agent.contracts import new_id, now
 from gpu_agent.execution.models import ExecutionModel
+from gpu_agent.patching import normalize_unified_diff_offsets
 from gpu_agent.store import RunStore
 
 __all__ = [
@@ -169,6 +170,35 @@ class ResponsesPort(Protocol):
     def call(self, request: WorkerRequest) -> SDKResult: ...
 
 
+def _is_deepseek_endpoint(endpoint: str) -> bool:
+    return urlsplit(endpoint).hostname == "api.deepseek.com"
+
+
+def _deepseek_json_value(
+    envelope: dict[str, object], output_model: type[BaseModel]
+) -> dict[str, object]:
+    output = envelope.get("output")
+    if not isinstance(output, list):
+        raise ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
+    text_parts: list[str] = []
+    for item in output:
+        if not isinstance(item, dict) or item.get("type") != "message":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if (
+                isinstance(part, dict)
+                and part.get("type") == "output_text"
+                and isinstance(part.get("text"), str)
+            ):
+                text_parts.append(part["text"])
+    if not text_parts:
+        raise ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
+    return output_model.model_validate(json.loads("".join(text_parts))).model_dump(mode="json")
+
+
 def invoke_sdk(
     request: WorkerRequest, client_factory: Callable[..., Any] = openai.OpenAI
 ) -> SDKResult:
@@ -197,21 +227,39 @@ def invoke_sdk(
             timeout=request.timeout_seconds,
             max_retries=0,
         )
-        raw = client.responses.with_raw_response.parse(
-            model=request.model,
-            instructions=PROMPTS[request.kind]
-            + (
-                "\nPrevious output failed schema/scope validation; correct its format."
-                if request.attempt
-                else ""
-            ),
-            input=json.dumps({"untrusted_data": request.payload}, ensure_ascii=False),
-            text_format=output_model,
-            store=False,
-            max_output_tokens=4096,
-            timeout=request.timeout_seconds,
-            extra_headers={"X-Client-Request-Id": request.client_request_id},
-        )
+        correction = ""
+        if request.attempt:
+            correction = "\nPrevious output failed schema/scope validation; correct its format."
+            if request.kind == "patch":
+                correction += " Re-check that no n != integer fixed-length guard remains."
+        instructions = PROMPTS[request.kind] + correction
+        common = {
+            "model": request.model,
+            "input": json.dumps({"untrusted_data": request.payload}, ensure_ascii=False),
+            "store": False,
+            "max_output_tokens": 4096,
+            "timeout": request.timeout_seconds,
+            "extra_headers": {"X-Client-Request-Id": request.client_request_id},
+        }
+        deepseek = _is_deepseek_endpoint(request.endpoint)
+        if deepseek:
+            schema = json.dumps(
+                output_model.model_json_schema(), ensure_ascii=True, separators=(",", ":")
+            )
+            raw = client.responses.with_raw_response.create(
+                **common,
+                instructions=instructions
+                + "\nReturn only one JSON object validating against this JSON Schema: "
+                + schema,
+                text={"format": {"type": "json_object"}},
+                reasoning={"effort": "none"},
+            )
+        else:
+            raw = client.responses.with_raw_response.parse(
+                **common,
+                instructions=instructions,
+                text_format=output_model,
+            )
         metadata["provider_request_id"] = raw.request_id
         envelope = json.loads(raw.content)
         metadata.update(OpenAIResponsesProvider._metadata(envelope))
@@ -227,8 +275,12 @@ def invoke_sdk(
             or envelope.get("incomplete_details")
         ):
             raise ProviderError("LLM_INCOMPLETE", state="FAILED")
-        value = output_model.model_validate(getattr(raw.parse(), "output_parsed", None)).model_dump(
-            mode="json"
+        value = (
+            _deepseek_json_value(envelope, output_model)
+            if deepseek
+            else output_model.model_validate(
+                getattr(raw.parse(), "output_parsed", None)
+            ).model_dump(mode="json")
         )
     except openai.APITimeoutError:
         error = ProviderError("LLM_TIMEOUT", state="UNCERTAIN")
@@ -294,6 +346,8 @@ class OpenAIResponsesProvider:
     ) -> None:
         self.settings, self.gate, self.store, self.run_id = settings, gate, store, run_id
         self.model_name = settings.model
+        if settings.endpoint and _is_deepseek_endpoint(settings.endpoint):
+            self.provider_name = "deepseek-responses"
         from gpu_agent.agent.provider_process import ProviderProcessPort
 
         self._port = port if port is not None else ProviderProcessPort(cancel=cancel)
@@ -355,7 +409,7 @@ class OpenAIResponsesProvider:
         kind: CallKind,
         payload: dict[str, object],
         output_model: type[Output],
-        validate: Callable[[Output], object] | None = None,
+        validate: Callable[[Output], Output] | None = None,
     ) -> Output:
         self.ensure_available()
         if self._cancel is not None and self._cancel.is_set():
@@ -420,7 +474,7 @@ class OpenAIResponsesProvider:
                     raise ProviderError("LLM_WORKER_ERROR", state="UNCERTAIN")
                 value = output_model.model_validate(result.value)
                 if validate is not None:
-                    validate(value)
+                    value = validate(value)
             except (ValidationError, json.JSONDecodeError):
                 error = ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
             except ProviderError as exc:
@@ -456,21 +510,33 @@ class OpenAIResponsesProvider:
         ).action
 
     def diagnose(self, evidence: PublicEvidence) -> DiagnosisResult:
+        def validate(value: DiagnosisResult) -> DiagnosisResult:
+            if not validate_diagnosis(value, evidence):
+                raise ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
+            return value
+
         return self._call(
-            "diagnose", {"evidence": evidence.model_dump(mode="json")}, DiagnosisResult
+            "diagnose",
+            {"evidence": evidence.model_dump(mode="json")},
+            DiagnosisResult,
+            validate,
         )
 
     def propose_patch(self, public_source: PublicSource, diagnosis: DiagnosisResult) -> str:
-        def validate(value: PatchOutput) -> None:
+        def validate(value: PatchOutput) -> PatchOutput:
             try:
                 if not value.unified_diff.startswith(
                     ("--- a/kernel.cu\n", "diff --git a/kernel.cu ")
                 ):
                     raise ValueError("invalid unified diff")
+                normalized = normalize_unified_diff_offsets(
+                    public_source.content, value.unified_diff
+                )
                 if self._diff_validator is not None:
-                    self._diff_validator(value.unified_diff)
+                    self._diff_validator(normalized)
             except ValueError:
                 raise ProviderError("LLM_INVALID_OUTPUT", state="FAILED") from None
+            return value.model_copy(update={"unified_diff": normalized})
 
         return self._call(
             "patch",

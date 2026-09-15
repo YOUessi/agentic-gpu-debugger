@@ -13,6 +13,10 @@ OOB = (
     b"=========     by thread (1,0,0) in block (1,0,0)\n"
     b"========= ERROR SUMMARY: 1 error\n"
 )
+OOB_WITH_PRINT_LIMIT = OOB + (
+    b"========= ERROR SUMMARY: 31 errors were not printed. "
+    b"Use --print-limit option to adjust the number of printed errors\n"
+)
 
 
 @pytest.mark.parametrize(
@@ -22,6 +26,7 @@ OOB = (
         (CLEAN, 0, {}, "CLEAN", True),
         (OOB, 0, {}, "FINDING", True),
         (OOB, 86, {}, "FINDING", True),
+        (OOB_WITH_PRINT_LIMIT, 86, {}, "FINDING", True),
         (OOB, 1, {}, "FINDING", True),
         (OOB, -11, {}, "FINDING", False),
         (CLEAN, 1, {}, "TOOL_ERROR", False),

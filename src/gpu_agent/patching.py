@@ -133,6 +133,83 @@ def _apply(source: bytes, diff: str) -> tuple[bytes, dict[int, int | None]]:
     return patched.encode(), mapping
 
 
+def normalize_unified_diff_offsets(source: str, diff: str) -> str:
+    """Repair only hunk coordinates/counts from one unique exact source context."""
+    lines = diff.splitlines(keepends=True)
+    index = 0
+    if lines[:1] == ["diff --git a/kernel.cu b/kernel.cu\n"]:
+        index = 1
+        if index < len(lines) and re.fullmatch(
+            r"index [a-f0-9]{7,40}\.\.[a-f0-9]{7,40}(?: 100644)?\n", lines[index]
+        ):
+            index += 1
+    if lines[index : index + 2] != ["--- a/kernel.cu\n", "+++ b/kernel.cu\n"]:
+        raise ValueError("only existing kernel.cu unified diffs are supported")
+    index += 2
+    original = source.splitlines(keepends=True)
+    normalized = lines[:index]
+    cursor = 0
+    delta = 0
+    hunks = 0
+    while index < len(lines):
+        match = re.fullmatch(
+            r"@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@([^\n]*)\n",
+            lines[index],
+        )
+        if not match:
+            raise ValueError("unsupported hunk header")
+        old_start = int(match[1])
+        suffix = match[5]
+        index += 1
+        body_start = index
+        old_chunk: list[str] = []
+        removed = added = 0
+        while index < len(lines) and not lines[index].startswith("@@ "):
+            line = lines[index]
+            if not line.endswith("\n") or line[:1] not in {" ", "+", "-"}:
+                raise ValueError("unsupported hunk content")
+            if line[0] in {" ", "-"}:
+                old_chunk.append(line[1:])
+                removed += 1
+            if line[0] in {" ", "+"}:
+                added += 1
+            index += 1
+        old_count, new_count = removed, added
+        declared = old_start - 1 if old_count else old_start
+        if (
+            declared >= cursor
+            and declared + old_count <= len(original)
+            and original[declared : declared + old_count] == old_chunk
+        ):
+            actual = declared
+        else:
+            candidates = [
+                start
+                for start in range(cursor, len(original) - old_count + 1)
+                if original[start : start + old_count] == old_chunk
+            ]
+            if len(candidates) != 1:
+                raise ValueError("hunk context does not have one unique exact location")
+            actual = candidates[0]
+        normalized_old_start = actual + 1 if old_count else actual
+        normalized_new_start = actual + delta + (1 if new_count else 0)
+        old_suffix = "" if old_count == 1 else f",{old_count}"
+        new_suffix = "" if new_count == 1 else f",{new_count}"
+        normalized.append(
+            f"@@ -{normalized_old_start}{old_suffix} "
+            f"+{normalized_new_start}{new_suffix} @@{suffix}\n"
+        )
+        normalized.extend(lines[body_start:index])
+        cursor = actual + old_count
+        delta += new_count - old_count
+        hunks += 1
+    if not hunks:
+        raise ValueError("empty candidate")
+    result = "".join(normalized)
+    _apply(source.encode(), result)
+    return result
+
+
 def _include_directives(text: str) -> list[str]:
     """Lex comments after line splicing; comment markers inside literals are inert.
 
@@ -191,6 +268,17 @@ def apply_candidate(
         unified_diff=diff,
         allowed_paths=allowed_paths,
     )
+
+
+def apply_generated_candidate(source_snapshot: SourceSnapshot, diff: str) -> PatchCandidate:
+    """Apply agent output plus the public anti-overfitting contract for vector length."""
+    candidate = apply_candidate(source_snapshot, diff, ["kernel.cu"])
+    sources = read_snapshot(source_snapshot)
+    patched, _ = _apply(sources["kernel.cu"], candidate.unified_diff)
+    text = patched.decode("utf-8")
+    if re.search(r"^[ \t]*if\s*\([^\n)]*\bn\s*!=\s*\d+[uUlL]*\b", text, re.MULTILINE):
+        raise ValueError("generated patch retains a fixed input length")
+    return candidate
 
 
 def materialize_candidate(snapshot: SourceSnapshot, candidate: PatchCandidate) -> dict[str, bytes]:

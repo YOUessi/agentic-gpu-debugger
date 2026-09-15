@@ -18,3 +18,4 @@ private/
 *.key
 .worktrees/
 .cache/gpu-agent/knowledge/
+.gpu-agent/

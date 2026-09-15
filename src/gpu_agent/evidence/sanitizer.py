@@ -44,7 +44,13 @@ def parse_sanitizer(tool: SanitizerTool, capture: ProcessCapture) -> SanitizerRe
     if errors and not findings:
         findings.append(Finding(tool=tool, category="MEMCHECK_ERROR_SUMMARY"))
     complete_summary = bool(
-        re.search(r"^========= ERROR SUMMARY: \d+ errors?\s*\Z", log, re.MULTILINE)
+        re.search(
+            r"^========= ERROR SUMMARY: \d+ errors?\n"
+            r"(?:========= ERROR SUMMARY: \d+ errors were not printed\. "
+            r"Use --print-limit option to adjust the number of printed errors\n)?\Z",
+            log,
+            re.MULTILINE,
+        )
     )
     normal = not (capture.timed_out or capture.cancelled or capture.truncated or capture.tool_error)
     # --error-exitcode applies only when the target succeeds. A reported CUDA

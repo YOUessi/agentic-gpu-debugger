@@ -338,6 +338,7 @@ def test_invalid_patch_format_is_retried_only_once(provider_factory, diff):
             DiagnosisResult.inconclusive("TEST"),
         )
     assert len(calls) == 2 and provider.gate.snapshot().llm_calls == 2
+    assert "no n != integer fixed-length guard remains" in calls[1]["instructions"]
 
 
 def test_diff_scope_validator_runs_before_acceptance(provider_factory):
@@ -360,6 +361,41 @@ def test_diff_scope_validator_runs_before_acceptance(provider_factory):
         )
     assert len(calls) == 2
     assert "private host error details" not in str(calls)
+
+
+def test_model_patch_unique_context_repairs_only_hunk_offsets(provider_factory):
+    from gpu_agent.agent.models import DiagnosisResult, PublicSource
+
+    good = "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -1 +1 @@\n-int x;\n+int y;\n"
+    wrong_offset = good.replace("@@ -1 +1 @@", "@@ -2 +2 @@")
+    provider, calls, _ = provider_factory([response({"unified_diff": wrong_offset})])
+
+    def exact_scope_check(diff):
+        if diff != good:
+            raise ValueError("offset was not normalized")
+
+    provider._diff_validator = exact_scope_check
+    result = provider.propose_patch(
+        PublicSource(source_id="a" * 32, content="int x;\n"),
+        DiagnosisResult.inconclusive("TEST"),
+    )
+
+    assert result == good
+    assert len(calls) == 1
+
+
+def test_invalid_diagnosis_evidence_uses_the_single_format_retry(provider_factory):
+    from gpu_agent.agent.models import DiagnosisResult, PublicEvidence
+
+    invalid = DiagnosisResult(diagnostic_outcome="DIAGNOSED")
+    corrected = DiagnosisResult.inconclusive("CORRECTED_FORMAT")
+    provider, calls, _ = provider_factory([response(invalid), response(corrected)])
+
+    result = provider.diagnose(PublicEvidence())
+
+    assert result == corrected
+    assert len(calls) == 2
+    assert provider.gate.snapshot().llm_calls == 2
 
 
 def test_real_sdk_offline_transport_sends_strict_schema_and_parses_result(store):
@@ -436,6 +472,91 @@ def test_real_sdk_offline_transport_sends_strict_schema_and_parses_result(store)
     assert '"discriminator"' not in json.dumps(schema)
     assert requests[0]["store"] is False
     assert provider.invocations()[-1].provider_request_id == "req_transport"
+
+
+def test_deepseek_responses_uses_json_object_then_local_domain_validation(store):
+    """DeepSeek rejects the domain union's nested anyOf JSON schema."""
+    import json
+
+    import httpx2
+    import openai
+
+    from gpu_agent.agent.models import AgentBudget, PublicEvidence
+    from gpu_agent.agent.policy import LLMCallGate
+    from gpu_agent.agent.provider import OpenAIProviderSettings, OpenAIResponsesProvider
+
+    requests = []
+
+    def handler(request):
+        requests.append(json.loads(request.content))
+        return httpx2.Response(
+            200,
+            json={
+                "id": "resp_deepseek",
+                "object": "response",
+                "created_at": 123,
+                "status": "completed",
+                "model": "deepseek-v4-pro",
+                "error": None,
+                "incomplete_details": None,
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+                "output": [
+                    {
+                        "id": "msg_1",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": '{"action":{"action_type":"run_memcheck",'
+                                '"typed_arguments":{}}}',
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+                "usage": {
+                    "input_tokens": 10,
+                    "output_tokens": 5,
+                    "total_tokens": 15,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                },
+                "store": False,
+                "previous_response_id": None,
+            },
+            headers={"x-request-id": "req_deepseek"},
+        )
+
+    def factory(**kwargs):
+        return openai.OpenAI(
+            **kwargs, http_client=httpx2.Client(transport=httpx2.MockTransport(handler))
+        )
+
+    run = store.create_run("offline-deepseek-transport")
+    provider = OpenAIResponsesProvider(
+        OpenAIProviderSettings(
+            endpoint="https://api.deepseek.com",
+            model="deepseek-v4-pro",
+            api_key=SecretStr("offline-placeholder"),
+            supports_store_false=True,
+        ),
+        LLMCallGate(),
+        store,
+        run.id,
+        port=SDKContractPort(factory),
+    )
+    assert provider.plan(PublicEvidence(), AgentBudget()).action_type == "run_memcheck"
+    assert requests[0]["text"]["format"] == {"type": "json_object"}
+    assert requests[0]["reasoning"] == {"effort": "none"}
+    assert requests[0]["store"] is False
+    assert provider.provider_name == "deepseek-responses"
+    record = provider.invocations()[-1]
+    assert record.provider_request_id == "req_deepseek"
+    assert record.usage.total_tokens == 15
 
 
 def test_sdk_format_failure_keeps_response_id_request_id_and_usage(store):

@@ -81,6 +81,57 @@ def test_exact_patch_is_auditable_and_does_not_mutate_base(snapshot):
         )
 
 
+def test_model_hunk_offsets_can_be_normalized_only_from_unique_exact_context():
+    from gpu_agent.patching import normalize_unified_diff_offsets
+
+    wrong_offset = GOOD.replace("@@ -1 +1 @@", "@@ -2 +2 @@")
+    wrong_counts = GOOD.replace("@@ -1 +1 @@", "@@ -2,7 +2,9 @@")
+
+    assert normalize_unified_diff_offsets("int value = 1;\n", wrong_offset) == GOOD
+    assert normalize_unified_diff_offsets("int value = 1;\n", wrong_counts) == GOOD
+
+    with pytest.raises(ValueError, match="unique"):
+        normalize_unified_diff_offsets(
+            "int value = 1;\nint value = 1;\n",
+            wrong_offset.replace("@@ -2 +2 @@", "@@ -3 +3 @@"),
+        )
+
+
+def test_generated_candidate_cannot_keep_a_fixed_vector_length_contract(tmp_path):
+    from gpu_agent.patching import SourceSnapshot, apply_generated_candidate
+
+    source = b"if (n != 257) return 1;\nint value = 1;\n"
+    (tmp_path / "kernel.cu").write_bytes(source)
+    generated_snapshot = SourceSnapshot(
+        parent_run_id="a" * 32,
+        root=tmp_path,
+        hashes={"kernel.cu": hashlib.sha256(source).hexdigest()},
+    )
+    still_fixed = "".join(
+        difflib.unified_diff(
+            source.decode().splitlines(True),
+            source.decode().replace("value = 1", "value = 2").splitlines(True),
+            fromfile="a/kernel.cu",
+            tofile="b/kernel.cu",
+        )
+    )
+    generalized = "".join(
+        difflib.unified_diff(
+            source.decode().splitlines(True),
+            source.decode()
+            .replace("n != 257", "n == 0")
+            .replace("value = 1", "value = 2")
+            .splitlines(True),
+            fromfile="a/kernel.cu",
+            tofile="b/kernel.cu",
+        )
+    )
+
+    with pytest.raises(ValueError, match="fixed input length"):
+        apply_generated_candidate(generated_snapshot, still_fixed)
+    assert apply_generated_candidate(generated_snapshot, generalized).scope_validation == "VALID"
+
+
 @pytest.mark.parametrize(
     "diff",
     [

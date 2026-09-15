@@ -26,6 +26,17 @@ from gpu_agent.knowledge.retrieve import KnowledgeIndex
 from gpu_agent.store import RunStore
 
 
+def _deduplicate_findings(findings: list[PublicFinding]) -> list[PublicFinding]:
+    unique: list[PublicFinding] = []
+    seen: set[str] = set()
+    for finding in findings:
+        signature = finding.model_dump_json()
+        if signature not in seen:
+            seen.add(signature)
+            unique.append(finding)
+    return unique
+
+
 def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
     bundle = EvidenceRepository(store).public_view(run_id)
     sources = [
@@ -67,7 +78,10 @@ def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
             )
     docs = [DocumentChunk.model_validate_json(store.read(ref)) for ref in bundle.retrieved_chunks]
     return PublicEvidence(
-        sources=sources, observed_facts=facts, tool_findings=findings, documentation=docs
+        sources=sources,
+        observed_facts=facts,
+        tool_findings=_deduplicate_findings(findings),
+        documentation=docs,
     )
 
 

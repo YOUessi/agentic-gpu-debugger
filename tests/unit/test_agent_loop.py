@@ -52,6 +52,48 @@ def test_provider_public_projection_excludes_private_and_controller_data(oob_ser
     assert "kernel.cu" in wire and "Invalid __global__ write" in wire
 
 
+def test_public_projection_deduplicates_repeated_identical_findings():
+    from gpu_agent.agent.models import PublicFinding
+    from gpu_agent.agent.orchestrator import _deduplicate_findings
+    from gpu_agent.execution.models import SourceLocation
+
+    repeated = PublicFinding(
+        artifact_id="a" * 32,
+        category="Invalid __global__ read",
+        source_location=SourceLocation(path="kernel.cu", line=9),
+    )
+
+    assert _deduplicate_findings([repeated, repeated]) == [repeated]
+
+
+def test_plan_prompt_gives_an_unambiguous_mandatory_evidence_sequence():
+    from gpu_agent.agent.prompts import PROMPTS
+
+    prompt = PROMPTS["plan"]
+    assert "If tool_findings is empty, choose run_memcheck" in prompt
+    assert "if documentation is empty, choose retrieve_official_docs" in prompt
+    assert "otherwise choose finish_diagnosis" in prompt
+
+
+def test_diagnosis_prompt_names_the_exact_citation_and_location_constraints():
+    from gpu_agent.agent.prompts import PROMPTS
+
+    prompt = PROMPTS["diagnose"]
+    assert "tool_findings may cite only artifact_id" in prompt
+    assert "documentation_evidence may cite only chunk_id" in prompt
+    assert "source_locations must copy a non-null tool finding location" in prompt
+
+
+def test_patch_prompt_forbids_observed_input_size_hardcoding():
+    from gpu_agent.agent.prompts import PROMPTS
+
+    prompt = PROMPTS["patch"]
+    assert "Inspect the entire public source" in prompt
+    assert "must not hard-code the observed input length" in prompt
+    assert "general valid positive lengths" in prompt
+    assert "n != integer" in prompt
+
+
 def test_repeated_no_benefit_action_stops_without_second_tool(oob_service):
     from gpu_agent.agent.models import MemcheckAction
 
