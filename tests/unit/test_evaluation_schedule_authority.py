@@ -1,10 +1,17 @@
+import hashlib
 import json
+import shutil
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from schedule_authority_support import TestScheduleCommitClient, schedule_client_for_test
 
-from gpu_agent.benchmark.evaluation import EvaluationRunner, EvaluationUnitBinding
+from gpu_agent.benchmark.evaluation import (
+    EvaluationExecutionClaim,
+    EvaluationRunner,
+    EvaluationUnitBinding,
+)
 from gpu_agent.benchmark.schedule_authority import (
     EvaluationScheduleReceipt,
     EvaluationScheduleVerifier,
@@ -13,6 +20,7 @@ from gpu_agent.benchmark.schedule_authority import (
     seal_schedule,
 )
 from gpu_agent.contracts import CurrentPhase, RunStatus
+from gpu_agent.store import RunStore
 
 
 def _runner(executor, *, client=True):
@@ -45,6 +53,172 @@ def _queued_schedule(executor):
     return runner, binding, schedule, run
 
 
+def _activate_claimed_first_unit(executor):
+    runner, binding, schedule, run = _queued_schedule(executor)
+    seal_schedule(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        schedule,
+        binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
+    )
+    activate_schedule(runner.store, executor._schedule_verifier, run.id)
+    item = schedule.items[0]
+    attempt = runner._attempt(run.id, schedule, item)
+    attempt_content = attempt.model_dump_json().encode()
+    runner._put(run.id, "evaluation/attempts/0.json", attempt_content)
+    claim = EvaluationExecutionClaim(
+        run_id=run.id,
+        ordinal=0,
+        schedule_hash=attempt.schedule_hash,
+        attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
+    )
+    runner._put(run.id, "evaluation/claims/0.json", claim.model_dump_json().encode())
+    unit = EvaluationUnitBinding(
+        evaluation_run_id=run.id,
+        ordinal=0,
+        schedule_hash=attempt.schedule_hash,
+        idempotency_key=attempt.idempotency_key,
+        reserved_cost_usd=attempt.reserved_cost_usd,
+        case_id=item.case_id,
+        template_id=item.template_id,
+        mode=item.mode,
+        repeat=item.repeat,
+        split=item.split,
+        holdout_proof=item.holdout_proof,
+    )
+    return runner, schedule, run, item, unit
+
+
+def test_verifier_is_pinned_to_exact_store_identity(native_evaluation_executor, tmp_path):
+    executor = native_evaluation_executor
+    verifier = executor._schedule_verifier
+    verifier.require_store(executor.service.store)
+    _runner_value, binding, _schedule, source_run = _queued_schedule(executor)
+
+    other = RunStore(tmp_path / "other-public")
+    other.create_run("evaluation", binding=binding, _run_id=source_run.id)
+    with pytest.raises(ValueError, match="store identity"):
+        other.bind_evaluation_verifier(verifier)
+    with pytest.raises(ValueError, match="store identity"):
+        activate_schedule(other, verifier, source_run.id)
+
+    copied_root = tmp_path / "copied-public"
+    shutil.copytree(executor.service.store.root, copied_root)
+    copied = RunStore(copied_root)
+    with pytest.raises(ValueError, match="store identity"):
+        verifier.require_store(copied)
+
+    wrong_visibility = RunStore(executor.service.store.root, visibility="evaluator")
+    with pytest.raises(ValueError, match="store identity"):
+        verifier.require_store(wrong_visibility)
+
+    symlink = tmp_path / "store-link"
+    symlink.symlink_to(executor.service.store.root, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        RunStore(symlink)
+
+
+def test_concurrent_direct_service_calls_reserve_one_evaluation_child(
+    native_evaluation_executor, monkeypatch
+):
+    executor = native_evaluation_executor
+    runner, _schedule, run, item, unit = _activate_claimed_first_unit(executor)
+    original_factory = executor.service._backend_factory
+    calls = 0
+    guard = threading.Lock()
+    start = threading.Barrier(2)
+    validation_barrier = threading.Barrier(2)
+    from gpu_agent.benchmark import schedule_authority
+
+    native_validate = schedule_authority.validate_evaluation_unit
+
+    def synchronized_validate(*args, **kwargs):
+        native_validate(*args, **kwargs)
+        validation_barrier.wait()
+
+    monkeypatch.setattr(schedule_authority, "validate_evaluation_unit", synchronized_validate)
+
+    def counted_factory(*args, **kwargs):
+        nonlocal calls
+        with guard:
+            calls += 1
+        return original_factory(*args, **kwargs)
+
+    executor.service._backend_factory = counted_factory
+
+    def diagnose():
+        start.wait()
+        return executor.service.diagnose(
+            executor.sources[item.case_id], mode=item.mode, evaluation_unit=unit
+        )
+
+    outcomes = []
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(diagnose) for _ in range(2)]
+        for future in futures:
+            try:
+                outcomes.append(future.result())
+            except ValueError:
+                pass
+
+    children = runner.store.children(run.id)
+    assert len(outcomes) == 1
+    assert calls == 1
+    assert len(children) == 1
+    assert children[0].kind == "diagnosis"
+
+
+def test_parent_state_change_prevents_evaluation_child(native_evaluation_executor):
+    executor = native_evaluation_executor
+    runner, _schedule, run, item, unit = _activate_claimed_first_unit(executor)
+    runner.store.transition(run.id, RunStatus.FAILED, None)
+
+    with pytest.raises(ValueError, match="not RUNNING"):
+        executor.service.diagnose(
+            executor.sources[item.case_id], mode=item.mode, evaluation_unit=unit
+        )
+    assert not runner.store.children(run.id)
+
+
+def test_concurrent_activation_is_exactly_once_and_wrong_phases_fail(
+    native_evaluation_executor,
+):
+    executor = native_evaluation_executor
+    runner, binding, schedule, run = _queued_schedule(executor)
+    seal_schedule(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        schedule,
+        binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
+    )
+
+    with pytest.raises(ValueError):
+        runner.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.PREPARING)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(
+            pool.map(
+                lambda _: activate_schedule(runner.store, executor._schedule_verifier, run.id),
+                range(2),
+            )
+        )
+    assert results[0] == results[1]
+    active = runner.store.load(run.id)
+    assert active.status == RunStatus.RUNNING
+    assert active.current_phase == CurrentPhase.EXECUTING
+    assert [event.status for event in active.events].count(RunStatus.RUNNING) == 1
+    with pytest.raises(ValueError):
+        runner.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.PREPARING)
+    runner.store.transition(run.id, RunStatus.FAILED, None)
+    with pytest.raises(ValueError, match="activatable"):
+        activate_schedule(runner.store, executor._schedule_verifier, run.id)
+
+
 def test_signing_request_requires_queued_parent(native_evaluation_executor):
     executor = native_evaluation_executor
     runner, binding, schedule, run = _queued_schedule(executor)
@@ -71,7 +245,7 @@ def test_queued_evaluation_rejects_children_and_running_without_receipt(
 
     with pytest.raises(ValueError, match="signed schedule activation"):
         runner.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
-    with pytest.raises(ValueError, match="QUEUED evaluation"):
+    with pytest.raises(ValueError, match="atomic authority"):
         runner.store.create_run("diagnosis", parent_run_id=run.id)
     ordinary = runner.store.create_run("development")
     child = runner.store.create_run("diagnosis", parent_run_id=ordinary.id)
@@ -246,7 +420,7 @@ def test_resume_recovers_receipt_before_running_and_running_before_work(
         assert runner.store.load(run.id).status == RunStatus.COMPLETED
 
 
-def test_service_rejects_extra_child_before_claimed_unit(native_evaluation_executor):
+def test_generic_child_entry_rejects_active_evaluation(native_evaluation_executor):
     executor = native_evaluation_executor
     runner, binding, schedule, run = _queued_schedule(executor)
     seal_schedule(
@@ -259,12 +433,8 @@ def test_service_rejects_extra_child_before_claimed_unit(native_evaluation_execu
         executor._schedule_verifier,
     )
     activate_schedule(runner.store, executor._schedule_verifier, run.id)
-    attempt = runner._attempt(run.id, schedule, schedule.items[0])
-    runner._put(run.id, "evaluation/attempts/0.json", attempt.model_dump_json().encode())
-    runner.store.create_run("diagnosis", parent_run_id=run.id)
-
-    with pytest.raises(ValueError, match="unexpected child"):
-        executor.execute_scheduled(run.id, 0)
+    with pytest.raises(ValueError, match="atomic authority"):
+        runner.store.create_run("diagnosis", parent_run_id=run.id)
 
 
 def test_post_execution_schedule_sealing_is_rejected(native_evaluation_executor):

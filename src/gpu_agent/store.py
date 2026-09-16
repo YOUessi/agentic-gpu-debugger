@@ -13,6 +13,7 @@ import stat
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
 
@@ -29,7 +30,16 @@ from gpu_agent.contracts import (
 )
 
 if TYPE_CHECKING:
+    from gpu_agent.benchmark.evaluation import EvaluationUnitBinding
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+
+@dataclass(frozen=True)
+class RunStoreIdentity:
+    resolved_root: str
+    device: int
+    inode: int
+    visibility: Visibility
 
 
 def reject_symlinks(path: Path) -> None:
@@ -77,11 +87,25 @@ class RunStore:
         self.visibility = visibility
         self._evaluation_verifier: EvaluationScheduleVerifier | None = None
 
+    @property
+    def identity(self) -> RunStoreIdentity:
+        reject_symlinks(self.root)
+        info = self.root.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("run store root must remain a directory")
+        return RunStoreIdentity(
+            resolved_root=str(self.root.resolve(strict=True)),
+            device=info.st_dev,
+            inode=info.st_ino,
+            visibility=self.visibility,
+        )
+
     def bind_evaluation_verifier(self, verifier: "EvaluationScheduleVerifier") -> None:
         from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
         if type(verifier) is not EvaluationScheduleVerifier:
             raise ValueError("evaluation store requires the native schedule verifier")
+        verifier.require_store(self)
         if self._evaluation_verifier is not None and self._evaluation_verifier is not verifier:
             raise ValueError("evaluation store authority is already bound")
         self._evaluation_verifier = verifier
@@ -158,9 +182,8 @@ class RunStore:
                 parent.kind == "evaluation"
                 and parent.binding is not None
                 and parent.binding.purpose == "evaluation"
-                and parent.status == RunStatus.QUEUED
             ):
-                raise ValueError("children cannot be created under a QUEUED evaluation")
+                raise ValueError("evaluation children require atomic authority validation")
             if parent.binding is None and binding is not None:
                 raise ValueError("a child cannot add a missing parent release binding")
             if parent.binding is not None:
@@ -254,20 +277,12 @@ class RunStore:
             ):
                 raise ValueError("invalid transition")
             if (
-                run.status == RunStatus.QUEUED
-                and target == RunStatus.RUNNING
+                target == RunStatus.RUNNING
                 and run.kind == "evaluation"
                 and run.binding is not None
                 and run.binding.purpose == "evaluation"
             ):
-                if self._evaluation_verifier is None:
-                    raise ValueError("evaluation RUNNING requires signed schedule activation")
-                from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
-
-                try:
-                    EvaluationScheduleVerifier.verify(self._evaluation_verifier, run_id)
-                except (OSError, ValueError):
-                    raise ValueError("evaluation signed schedule activation failed") from None
+                raise ValueError("evaluation RUNNING requires signed schedule activation")
             if run.status == RunStatus.RUNNING and (
                 target == RunStatus.COMPLETED
                 or (target == RunStatus.RUNNING and active != run.current_phase)
@@ -277,6 +292,77 @@ class RunStore:
             run.events.append(StateEvent(status=target, phase=active))
             self._save(run)
             return run
+
+    def activate_evaluation(
+        self, verifier: "EvaluationScheduleVerifier", run_id: str
+    ) -> RunManifest:
+        """Atomically verify and perform the only evaluation activation transition."""
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        if type(verifier) is not EvaluationScheduleVerifier:
+            raise ValueError("evaluation activation requires the native verifier")
+        verifier.require_store(self)
+        if self._evaluation_verifier is not verifier:
+            raise ValueError("evaluation activation verifier is not store-bound")
+        with self._lock(run_id):
+            run = self.load(run_id)
+            if (
+                run.kind != "evaluation"
+                or run.binding is None
+                or run.binding.purpose != "evaluation"
+            ):
+                raise ValueError("run is not a bound evaluation")
+            if run.status == RunStatus.RUNNING and run.current_phase == CurrentPhase.EXECUTING:
+                EvaluationScheduleVerifier.verify(verifier, run_id)
+                return run
+            if run.status != RunStatus.QUEUED or run.current_phase is not None:
+                raise ValueError("evaluation is not in the activatable QUEUED state")
+            EvaluationScheduleVerifier.verify(verifier, run_id)
+            run.status = RunStatus.RUNNING
+            run.current_phase = CurrentPhase.EXECUTING
+            run.events.append(StateEvent(status=RunStatus.RUNNING, phase=CurrentPhase.EXECUTING))
+            self._save(run)
+            return run
+
+    def validate_and_create_evaluation_child(
+        self,
+        verifier: "EvaluationScheduleVerifier",
+        unit: "EvaluationUnitBinding",
+    ) -> RunManifest:
+        """Validate and reserve one diagnosis child while holding the parent lock."""
+        from gpu_agent.benchmark.evaluation import EvaluationUnitBinding
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        if (
+            type(verifier) is not EvaluationScheduleVerifier
+            or type(unit) is not EvaluationUnitBinding
+        ):
+            raise ValueError("evaluation child requires native authority models")
+        verifier.require_store(self)
+        if self._evaluation_verifier is not verifier:
+            raise ValueError("evaluation child verifier is not store-bound")
+        with self._lock(unit.evaluation_run_id):
+            EvaluationScheduleVerifier.validate_unit(verifier, self, unit)
+            parent = self.load(unit.evaluation_run_id)
+            child_id = hashlib.sha256(
+                f"evaluation-diagnosis-v1:{parent.id}:{unit.ordinal}".encode()
+            ).hexdigest()[:32]
+            child = RunManifest(
+                id=child_id,
+                kind="diagnosis",
+                parent_run_id=parent.id,
+                binding=parent.binding,
+                external_origin=parent.external_origin,
+                events=[StateEvent(status=RunStatus.QUEUED, phase=None)],
+            )
+            self._create_atomic_run(child)
+            self.put(
+                child.id,
+                "evaluation/unit.json",
+                unit.model_dump_json().encode(),
+                self.visibility,
+            )
+            return self.load(child.id)
 
     def _validate_put(self, name: str, content: bytes, visibility: Visibility) -> None:
         label = PurePosixPath(name)

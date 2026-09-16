@@ -104,6 +104,7 @@ class ApplicationService:
         self._pricing_attestation: PricingAttestation | None = None
 
     def _bind_evaluation_schedule_verifier(self, verifier: "EvaluationScheduleVerifier") -> None:
+        verifier.require_store(self.store)
         if (
             self._evaluation_schedule_verifier is not None
             and self._evaluation_schedule_verifier is not verifier
@@ -247,24 +248,12 @@ class ApplicationService:
         if evaluation_unit is not None:
             if self._evaluation_schedule_verifier is None:
                 raise ValueError("evaluation unit requires signed schedule authority")
-            from gpu_agent.benchmark.schedule_authority import validate_evaluation_unit
-
-            validate_evaluation_unit(
-                self.store, self._evaluation_schedule_verifier, evaluation_unit
+            run = self.store.validate_and_create_evaluation_child(
+                self._evaluation_schedule_verifier, evaluation_unit
             )
-        run = self.store.create_run(
-            "diagnosis",
-            parent_run_id=(evaluation_unit.evaluation_run_id if evaluation_unit else None),
-            binding=self._binding,
-        )
+        else:
+            run = self.store.create_run("diagnosis", binding=self._binding)
         self.store.transition(run.id, "RUNNING", "PREPARING")
-        if evaluation_unit is not None:
-            self.store.put(
-                run.id,
-                "evaluation/unit.json",
-                evaluation_unit.model_dump_json().encode(),
-                "public",
-            )
         self.store.put(
             run.id,
             "agent/acquisition-policy.json",

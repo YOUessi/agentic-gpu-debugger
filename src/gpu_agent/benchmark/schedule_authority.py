@@ -27,7 +27,7 @@ from gpu_agent.benchmark.evaluation import (
 from gpu_agent.benchmark.ledger import CorpusFamily, CorpusTransaction
 from gpu_agent.benchmark.models import CaseManifest
 from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunBinding, RunManifest, RunStatus
-from gpu_agent.store import RunStore, reject_symlinks
+from gpu_agent.store import RunStore, RunStoreIdentity, reject_symlinks
 
 _OPENSSL = Path("/usr/bin/openssl")
 _SIGNING_DOMAIN = b"gpu-agent-evaluation-schedule-v2\0"
@@ -484,6 +484,7 @@ class EvaluationScheduleVerifier:
             raise ValueError("production schedule authority is not configured")
         self.__family_root = family.root
         self.__store = store
+        self.__store_identity = store.identity
         self.__profile = profile
         self.__key_hash = family.schedule_public_key_hash
         self.__public_key = family.schedule_public_key_path
@@ -496,7 +497,16 @@ class EvaluationScheduleVerifier:
     def _for_test(cls, family: CorpusFamily, store: RunStore) -> EvaluationScheduleVerifier:
         return cls(family, store, allow_test=True)
 
+    @property
+    def store_identity(self) -> RunStoreIdentity:
+        return self.__store_identity
+
+    def require_store(self, store: RunStore) -> None:
+        if type(store) is not RunStore or store.identity != self.__store_identity:
+            raise ValueError("evaluation verifier store identity differs")
+
     def verify(self, run_id: str) -> EvaluationScheduleReceipt:
+        self.require_store(self.__store)
         family = CorpusFamily.open(self.__family_root)
         run = self.__store.load(run_id)
         schedule_refs = [ref for ref in run.artifact_refs if ref.name == "evaluation/schedule.json"]
@@ -531,6 +541,9 @@ class EvaluationScheduleVerifier:
             raise ValueError("schedule receipt differs from native authority inputs")
         return receipt
 
+    def validate_unit(self, store: RunStore, unit: EvaluationUnitBinding) -> None:
+        _validate_evaluation_unit(store, self, unit)
+
 
 def _one_ref(run: RunManifest, name: str) -> ArtifactRef:
     refs = [ref for ref in run.artifact_refs if ref.name == name]
@@ -553,12 +566,13 @@ def _ordinal_inventory(run: RunManifest, prefix: str) -> list[int]:
     return sorted(result)
 
 
-def validate_evaluation_unit(
+def _validate_evaluation_unit(
     store: RunStore,
     verifier: EvaluationScheduleVerifier,
     unit: EvaluationUnitBinding,
 ) -> None:
     """Revalidate one claimed unit immediately before creating physical work."""
+    verifier.require_store(store)
     EvaluationScheduleVerifier.verify(verifier, unit.evaluation_run_id)
     parent = store.load(unit.evaluation_run_id)
     if parent.status != RunStatus.RUNNING or parent.current_phase != CurrentPhase.EXECUTING:
@@ -629,14 +643,24 @@ def validate_evaluation_unit(
         raise ValueError("evaluation parent has extra or missing diagnosis children")
 
 
+def validate_evaluation_unit(
+    store: RunStore,
+    verifier: EvaluationScheduleVerifier,
+    unit: EvaluationUnitBinding,
+) -> None:
+    """Compatibility entry that still dispatches through the concrete verifier."""
+    EvaluationScheduleVerifier.validate_unit(verifier, store, unit)
+
+
 def activate_schedule(
     store: RunStore,
     verifier: EvaluationScheduleVerifier,
     run_id: str,
 ) -> EvaluationScheduleReceipt:
     """Verify the committed receipt, atomically activate, then verify the active prefix."""
+    verifier.require_store(store)
     receipt = EvaluationScheduleVerifier.verify(verifier, run_id)
-    store.transition(run_id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
+    store.activate_evaluation(verifier, run_id)
     active = EvaluationScheduleVerifier.verify(verifier, run_id)
     if active != receipt:
         raise ValueError("evaluation receipt changed during activation")
@@ -654,6 +678,7 @@ def seal_schedule(
 ) -> EvaluationScheduleReceipt:
     if client is None:
         raise ValueError("external schedule authority is required")
+    verifier.require_store(store)
     request = build_signing_request(family, store, run_id, schedule, binding)
     receipt = client.commit(request)
     if receipt.request != request or receipt.state != "COMMITTED":
