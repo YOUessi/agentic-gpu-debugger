@@ -1,3 +1,6 @@
+from schedule_authority_support import schedule_client_for_test
+
+
 def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_executor):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
@@ -29,13 +32,19 @@ def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_e
         or record
     )
     executor.execute_scheduled = observed.execute_scheduled
+    executor._execute = lambda *args: (_ for _ in ()).throw(
+        AssertionError("instance internal monkeypatch must not run")
+    )
+    executor._schedule_verifier.verify = lambda *args: (_ for _ in ()).throw(
+        AssertionError("instance schedule verifier monkeypatch must not run")
+    )
     executor.validate_scheduled_record = lambda *args: (_ for _ in ()).throw(
         AssertionError("instance validator monkeypatch must not run")
     )
     runner = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -66,8 +75,8 @@ def test_missing_cost_cap_stops_before_external_execution(native_evaluation_exec
 
     runner = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",

@@ -500,7 +500,7 @@ def test_holdout_only_memcheck_finding_blocks_success(
     assert result.verdict.value == "REGRESSION_DETECTED"
     assert result.new_findings == 1
     assert _audit_result(tmp_path, result).observation.private_holdout_passed is None
-    assert result.required_checks["private_oracle"] == "INCOMPLETE"
+    assert "private_oracle" not in result.required_checks
 
 
 def test_unregistered_program_never_acquires_benchmark_oracle(
@@ -525,7 +525,7 @@ def test_unregistered_program_never_acquires_benchmark_oracle(
     assert not container_boundary
 
 
-@pytest.mark.parametrize("operation", ["build", "memcheck"])
+@pytest.mark.parametrize("operation", ["build", "run", "memcheck"])
 def test_required_tool_failure_is_inconclusive(
     store, tmp_path, original, container_boundary, monkeypatch, operation
 ):
@@ -544,7 +544,22 @@ def test_required_tool_failure_is_inconclusive(
     candidate_id, _ = register_variant(store, original, "human")
     result = VerificationEngine(store, tmp_path / "evaluator").verify(original[0], candidate_id)
     assert result.verdict.value == "INCONCLUSIVE"
-    assert _audit_result(tmp_path, result).not_run_count > 0
+    audit = _audit_result(tmp_path, result)
+    assert audit.not_run_count > 0
+    assert result.public_passed_count == 0
+    assert result.failure_stage == "verification"
+    if operation == "build":
+        assert result.required_checks["build"] == "TOOL_ERROR"
+        assert result.required_checks["runtime"] == "NOT_RUN"
+        assert result.reason_code == "BUILD_TOOL_ERROR"
+    elif operation == "run":
+        assert result.required_checks["runtime"] == "TOOL_ERROR"
+        assert result.required_checks["public_oracle"] == "NOT_RUN"
+        assert result.reason_code == "REQUIRED_EVIDENCE_MISSING"
+    else:
+        assert result.required_checks["memcheck"] == "TOOL_ERROR"
+        assert result.required_checks["public_oracle"] == "NOT_RUN"
+        assert result.reason_code == "REQUIRED_EVIDENCE_MISSING"
 
 
 def test_revalidation_rejects_forged_candidate_hash(store, tmp_path, original, container_boundary):

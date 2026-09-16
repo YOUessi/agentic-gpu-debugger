@@ -332,7 +332,7 @@ class VerificationEngine:
             if mode == "full":
                 checks.update(racecheck="NOT_RUN", initcheck="NOT_RUN", synccheck="NOT_RUN")
             binaries: list[str] = []
-            public_passed = private_passed = executed = 0
+            public_passed = private_passed = 0
             child_run_ids: list[str] = []
             reason = "ALL_REQUIRED_CHECKS_PASSED"
             for index, input_data in enumerate(suite):
@@ -427,18 +427,25 @@ class VerificationEngine:
                         self._check_provenance(
                             build.binary_ref, stdin, ordinary.tool_result, checked
                         )
-                    executed += 1
                     runtime_ok = ordinary.runtime_status == "SUCCESS"
-                    infra = _infrastructure_failure(ordinary.tool_result) or any(
+                    runtime_infra = _infrastructure_failure(ordinary.tool_result)
+                    sanitizer_infra = any(
                         not checked.completed
                         or checked.tool_result is None
                         or _infrastructure_failure(checked.tool_result)
                         for checked in sanitizers
                     )
-                    checks["runtime"] = "CLEAN" if runtime_ok else "FAILED"
+                    infra = runtime_infra or sanitizer_infra
+                    checks["runtime"] = (
+                        "TOOL_ERROR" if runtime_infra else "CLEAN" if runtime_ok else "FAILED"
+                    )
                     for checked in sanitizers:
                         assert checked.tool_result is not None
-                        checks[checked.tool_result.typed_payload.tool] = checked.check_outcome
+                        checks[checked.tool_result.typed_payload.tool] = (
+                            "TOOL_ERROR"
+                            if not checked.completed or _infrastructure_failure(checked.tool_result)
+                            else checked.check_outcome
+                        )
                     present = observation.original_finding_present
                     if index == 0:
                         present = original_presence(original, sanitizer, line_map, same_input=True)
@@ -451,8 +458,8 @@ class VerificationEngine:
                         or finding_signature(f) not in original_signatures
                         or finding_signature(f) is None
                     ]
-                    numeric_ok = False
-                    if runtime_ok:
+                    numeric_ok: bool | None = None
+                    if runtime_ok and not infra:
                         try:
                             regular_check = oracle.check(
                                 parse_output(self._private.read(ordinary.output_ref)), expected
@@ -496,7 +503,13 @@ class VerificationEngine:
                         except ValueError:
                             numeric_ok = False
                     key = "public_oracle" if index == 0 else "private_oracle"
-                    checks[key] = "CLEAN" if numeric_ok else "FAILED"
+                    checks[key] = (
+                        "CLEAN"
+                        if numeric_ok is True
+                        else "FAILED"
+                        if numeric_ok is False
+                        else "NOT_RUN"
+                    )
                     updates: dict[str, object] = {
                         "runtime_ok": runtime_ok,
                         "original_finding_present": present,
@@ -512,7 +525,7 @@ class VerificationEngine:
                     observation = observation.model_copy(update=updates)
                     passed = (
                         runtime_ok
-                        and numeric_ok
+                        and numeric_ok is True
                         and all(
                             checked.completed and checked.check_outcome == "CLEAN"
                             for checked in sanitizers
@@ -535,13 +548,15 @@ class VerificationEngine:
                             else "RUNTIME_FAILED"
                             if not runtime_ok
                             else "ORACLE_FAILED"
+                            if numeric_ok is False
+                            else "ORACLE_NOT_RUN"
                         )
                         break
                 finally:
                     backend.cleanup(handle)
                     self._private.transition(run.id, "RUNNING", "FINALIZING")
                     self._private.transition(run.id, "COMPLETED", None)
-            if executed < len(suite) and observation.private_holdout_passed is True:
+            if len(child_run_ids) < len(suite) and observation.private_holdout_passed is True:
                 observation = observation.model_copy(update={"private_holdout_passed": None})
                 checks["private_oracle"] = "INCOMPLETE"
             observation = self._with_check_plan(observation, checks, mode)
@@ -550,7 +565,7 @@ class VerificationEngine:
                 observation,
                 public_passed,
                 private_passed,
-                len(suite) - executed,
+                len(suite) - len(child_run_ids),
                 suite_hash,
                 child_run_ids,
             )
@@ -613,7 +628,9 @@ class VerificationEngine:
             reason_code=reason,
             original_finding_present=observation.original_finding_present,
             public_oracle_passed=observation.public_oracle_passed,
-            required_checks=dict(checks),
+            required_checks={
+                key: value for key, value in checks.items() if key != "private_oracle"
+            },
             check_requirements=requirements,
             check_outcomes=outcomes,
             not_run_reasons=not_run_reasons,

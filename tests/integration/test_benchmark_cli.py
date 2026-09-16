@@ -1,6 +1,7 @@
 """Controller commands fail closed before provider construction and use durable scheduling."""
 
 import pytest
+from schedule_authority_support import schedule_client_for_test
 from typer.testing import CliRunner
 
 
@@ -166,8 +167,8 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(
     executor.execute_scheduled = injected.execute_scheduled
     runner = EvaluationRunner(
         service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",

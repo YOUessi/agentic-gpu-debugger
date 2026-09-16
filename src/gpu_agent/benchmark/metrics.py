@@ -14,6 +14,7 @@ from gpu_agent.execution.models import ExecutionModel
 if TYPE_CHECKING:
     from gpu_agent.benchmark.evaluation import EvaluationRecord
     from gpu_agent.benchmark.holdout import EvaluatorRecordBinding
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
     from gpu_agent.contracts import RunBinding
     from gpu_agent.store import RunStore
 
@@ -115,6 +116,7 @@ def _load_records(
     public_store: RunStore | None,
     evaluator_store: RunStore | None,
     run_binding: RunBinding | None,
+    schedule_verifier: EvaluationScheduleVerifier | None = None,
 ) -> list[EvaluationRecord]:
     from gpu_agent.benchmark.holdout import EvaluatorRecordBinding, HoldoutController
 
@@ -125,7 +127,12 @@ def _load_records(
         or any(not isinstance(record, EvaluatorRecordBinding) for record in records)
     ):
         raise ValueError("metrics require persisted evaluator record bindings")
-    controller = HoldoutController(public_store, evaluator_store, binding=run_binding)
+    controller = HoldoutController(
+        public_store,
+        evaluator_store,
+        binding=run_binding,
+        _schedule_verifier=schedule_verifier,
+    )
     return [controller._load_metric_record(record) for record in records]
 
 
@@ -137,8 +144,11 @@ def score(
     public_store: RunStore | None = None,
     evaluator_store: RunStore | None = None,
     run_binding: RunBinding | None = None,
+    schedule_verifier: EvaluationScheduleVerifier | None = None,
 ) -> Score:
-    loaded = _load_records([record], public_store, evaluator_store, run_binding)[0]
+    loaded = _load_records([record], public_store, evaluator_store, run_binding, schedule_verifier)[
+        0
+    ]
     diagnosis = loaded.diagnosis
     inconclusive = diagnosis.get("diagnostic_outcome") != "DIAGNOSED"
     family = (
@@ -171,9 +181,10 @@ def aggregate(
     public_store: RunStore | None = None,
     evaluator_store: RunStore | None = None,
     run_binding: RunBinding | None = None,
+    schedule_verifier: EvaluationScheduleVerifier | None = None,
     retrieval_k: int = 5,
 ) -> MetricSummary:
-    loaded = _load_records(records, public_store, evaluator_store, run_binding)
+    loaded = _load_records(records, public_store, evaluator_store, run_binding, schedule_verifier)
     if retrieval_k < 1:
         raise ValueError("retrieval_k must be positive")
 
@@ -338,9 +349,10 @@ def aggregate_grouped(
     public_store: RunStore | None = None,
     evaluator_store: RunStore | None = None,
     run_binding: RunBinding | None = None,
+    schedule_verifier: EvaluationScheduleVerifier | None = None,
     retrieval_k: int = 5,
 ) -> GroupedMetricSummary:
-    loaded = _load_records(records, public_store, evaluator_store, run_binding)
+    loaded = _load_records(records, public_store, evaluator_store, run_binding, schedule_verifier)
 
     def grouped(field: str, mode: str | None = None) -> dict[str, MetricSummary]:
         groups: dict[str, list[EvaluatorRecordBinding]] = defaultdict(list)
@@ -353,6 +365,7 @@ def aggregate_grouped(
                 public_store=public_store,
                 evaluator_store=evaluator_store,
                 run_binding=run_binding,
+                schedule_verifier=schedule_verifier,
                 retrieval_k=retrieval_k,
             )
             for key, group in sorted(groups.items())
@@ -365,6 +378,7 @@ def aggregate_grouped(
             public_store=public_store,
             evaluator_store=evaluator_store,
             run_binding=run_binding,
+            schedule_verifier=schedule_verifier,
             retrieval_k=retrieval_k,
         ),
         by_mode=grouped("mode"),

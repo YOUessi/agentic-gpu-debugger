@@ -1,3 +1,6 @@
+from schedule_authority_support import schedule_client_for_test
+
+
 def _lineage():
     from gpu_agent.benchmark.evaluation import EvaluationLineage
 
@@ -80,8 +83,8 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(native_evaluati
 
     result = EvaluationRunner(
         store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",

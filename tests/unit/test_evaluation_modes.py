@@ -5,6 +5,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
+from schedule_authority_support import schedule_client_for_test
 
 
 def rule_retrieval_corpus(service):
@@ -255,8 +256,8 @@ def _execute_claimed_test_unit(
     assert binding is not None
     runner = EvaluationRunner(
         executor.service.store,
-        {case_id: template_id},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -267,6 +268,15 @@ def _execute_claimed_test_unit(
         random_seed=7,
     )
     schedule = runner._schedule(mode, "development", 3)
+    if case_id != "case_0100" or template_id != "vector-add":
+        schedule = schedule.model_copy(
+            update={
+                "items": [
+                    value.model_copy(update={"case_id": case_id, "template_id": template_id})
+                    for value in schedule.items
+                ]
+            }
+        )
     item = next(value for value in schedule.items if value.repeat == repeat)
     ordered = [item, *(value for value in schedule.items if value is not item)]
     schedule = schedule.model_copy(
@@ -280,10 +290,16 @@ def _execute_claimed_test_unit(
     run = runner.store.create_run("evaluation", binding=binding)
     runner.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
-    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleAuthority
+    from gpu_agent.benchmark.schedule_authority import seal_schedule
 
-    EvaluationScheduleAuthority.for_family(executor._corpus_family, runner.store).seal(
-        runner.store, run.id, schedule, binding
+    seal_schedule(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        schedule,
+        binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
     )
     attempt = runner._attempt(run.id, schedule, item)
     runner._put(
@@ -355,8 +371,8 @@ def test_runner_persists_only_schedule_bound_native_lineage(
     assert binding.toolchain_lock_hash is not None and binding.model_config_hash is not None
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version,
         toolchain_hash=binding.toolchain_lock_hash,
@@ -409,8 +425,8 @@ def test_deterministic_modes_reject_extra_controller_actions(
     monkeypatch.setattr(store, "put", add_extra)
     result = EvaluationRunner(
         store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -479,8 +495,8 @@ def test_runner_rejects_forged_native_lineage(
     monkeypatch.setattr(executor, "execute_scheduled", forged)
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version,
         toolchain_hash=binding.toolchain_lock_hash,
@@ -625,8 +641,8 @@ def test_test_pricing_cannot_unlock_real_provider(
     monkeypatch.setenv("GPU_AGENT_PRICING_REGISTRY_ROOT", str(forged))
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -654,8 +670,8 @@ def test_mode_e_binds_native_provider_policy_invocation_and_usage(
     binding, policy = _configure_responses_provider(executor, monkeypatch)
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version,
         toolchain_hash=binding.toolchain_lock_hash,
@@ -686,8 +702,8 @@ def test_scheduled_repair_resolves_native_private_verification(
     binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -832,8 +848,8 @@ def test_scheduled_repair_rejects_public_only_verification_summary(
     monkeypatch.setattr(executor.service, "verify", fake_verify)
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -857,8 +873,8 @@ def test_mode_e_rejects_forged_model_config_binding(
     executor.service._binding = forged
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=forged.repository.commit,
         prompt_version=forged.prompt_version,
         toolchain_hash=forged.toolchain_lock_hash,
@@ -882,8 +898,8 @@ def test_mode_e_requires_pricing_attestation_before_provider_call(
     executor.service._pricing_attestation = None
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -928,8 +944,8 @@ def test_mode_e_rejects_unattested_response_policy(
     )
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -951,14 +967,18 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
     from gpu_agent.benchmark.executor import EvaluationExecutor
     from gpu_agent.benchmark.holdout import HoldoutController
     from gpu_agent.benchmark.metrics import EvaluationLabels, Score
-    from gpu_agent.store import RunStore
 
     executor = native_evaluation_executor
     binding = executor.service.binding
     assert binding is not None
-    evaluator = RunStore(tmp_path / "private-evaluator", visibility="evaluator")
-    controller = HoldoutController(executor.service.store, evaluator, binding=binding)
-    batch = controller.prepare([("case_0100", "vector-add")])
+    evaluator = executor.corpus
+    controller = HoldoutController(
+        executor.service.store,
+        evaluator,
+        binding=binding,
+        _schedule_verifier=executor._schedule_verifier,
+    )
+    batch = controller.prepare()
     alias = batch.aliases[0]
     holdout_executor = EvaluationExecutor(
         executor.service,
@@ -967,11 +987,12 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
         holdout_controller=controller,
         holdout_batch=batch,
         _corpus_family=executor._corpus_family,
+        _schedule_verifier=executor._schedule_verifier,
     )
     manifest = EvaluationRunner(
         executor.service.store,
-        {alias: alias},
         holdout_executor,
+        schedule_client=schedule_client_for_test(holdout_executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -1029,6 +1050,7 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
         "public_store": executor.service.store,
         "evaluator_store": evaluator,
         "run_binding": binding,
+        "schedule_verifier": executor._schedule_verifier,
     }
     summary = aggregate([result], **metric_kwargs)
     assert summary.record_count == summary.case_count == summary.template_count == 1
@@ -1164,8 +1186,8 @@ def test_deterministic_mode_rejects_unexpected_verification_child(
     monkeypatch.setattr(executor, "execute_scheduled", injected)
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -1193,8 +1215,8 @@ def test_mode_d_replay_rejects_future_evidence_and_forged_budget(
     assert binding is not None
     result = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -1250,6 +1272,71 @@ def test_mode_d_replay_rejects_future_evidence_and_forged_budget(
             executor.validate_scheduled_record(result.records[0], schedule.items[0], attempt)
         monkeypatch.setattr(RunStore, "read", original_read)
 
+    initial_ref = next(
+        ref for ref in diagnosis.artifact_refs if ref.name == "agent/initial-budget.json"
+    )
+    initial = json.loads(executor.service.store.read(initial_ref))
+
+    def forged_initial(self, ref):
+        if ref.id == initial_ref.id:
+            return json.dumps({**initial, "agent_steps": 1}).encode()
+        return original_read(self, ref)
+
+    monkeypatch.setattr(RunStore, "read", forged_initial)
+    with pytest.raises(ValueError, match="budget audit"):
+        executor.validate_scheduled_record(result.records[0], schedule.items[0], attempt)
+    monkeypatch.setattr(RunStore, "read", original_read)
+
+
+@pytest.mark.parametrize("failure", ["sanitizer", "docs"])
+def test_mode_d_failed_acquisition_is_terminal_inconclusive(
+    native_evaluation_executor, monkeypatch, failure
+):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+    from gpu_agent.execution.process import ProcessCapture
+
+    executor = native_evaluation_executor
+    binding = executor.service.binding
+    assert binding is not None
+    if failure == "docs":
+        executor.service.knowledge = None
+        expected = "KNOWLEDGE_UNAVAILABLE"
+    else:
+        backend = executor.service._backend_factory
+        original_container = backend._container
+
+        def fail_sanitizer(self, path, operation, timeout, *, stdin=b"", cancel=None):
+            if operation in {"memcheck", "racecheck", "initcheck", "synccheck"}:
+                return (
+                    ProcessCapture(None, b"", b"", False, tool_error="CONTAINER_ERROR"),
+                    b"",
+                    b"",
+                )
+            return original_container(self, path, operation, timeout, stdin=stdin, cancel=cancel)
+
+        monkeypatch.setattr(backend, "_container", fail_sanitizer)
+        expected = "SANITIZER_EVIDENCE_UNAVAILABLE"
+    result = EvaluationRunner(
+        executor.service.store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=0,
+        max_unit_cost_usd=0,
+        random_seed=7,
+    ).run("D", "development", 3)
+    assert result.stopped_reason is None and len(result.records) == 3
+    assert all(record.status == "INCONCLUSIVE" for record in result.records)
+    assert all(expected in record.diagnosis["limitations"] for record in result.records)
+    for record in result.records:
+        run = executor.service.store.load(record.record_id)
+        audit_ref = next(ref for ref in run.artifact_refs if ref.name == "agent/budget-audit.json")
+        assert json.loads(executor.service.store.read(audit_ref))[-1]["state"] == "FAILED"
+
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
 def test_private_case_cannot_enter_public_schedule_without_holdout_alias(
@@ -1262,8 +1349,8 @@ def test_private_case_cannot_enter_public_schedule_without_holdout_alias(
     assert binding is not None
     runner = EvaluationRunner(
         executor.service.store,
-        {"case_0100": "vector-add"},
         executor,
+        schedule_client=schedule_client_for_test(executor),
         commit=binding.repository.commit,
         prompt_version=binding.prompt_version or "",
         toolchain_hash=binding.toolchain_lock_hash or "",
@@ -1276,20 +1363,25 @@ def test_private_case_cannot_enter_public_schedule_without_holdout_alias(
         runner.run("D", "holdout", 3)
 
 
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
 def test_holdout_rejects_missing_private_labels_and_forged_public_record(
     oob_service, tmp_path, native_evaluation_executor
 ):
     from gpu_agent.benchmark.holdout import HoldoutController
     from gpu_agent.benchmark.metrics import EvaluationLabels, Score
     from gpu_agent.contracts import ArtifactRef
-    from gpu_agent.store import RunStore
 
     executor = native_evaluation_executor
     binding = executor.service.binding
     assert binding is not None
-    evaluator = RunStore(tmp_path / "private-evaluator", visibility="evaluator")
-    controller = HoldoutController(executor.service.store, evaluator, binding=binding)
-    batch = controller.prepare([("private-case", "private-template")])
+    evaluator = executor.corpus
+    controller = HoldoutController(
+        executor.service.store,
+        evaluator,
+        binding=binding,
+        _schedule_verifier=executor._schedule_verifier,
+    )
+    batch = controller.prepare()
     forged = ArtifactRef(
         id="a" * 32,
         run_id="b" * 32,

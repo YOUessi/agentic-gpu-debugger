@@ -82,7 +82,14 @@ def benchmark_evaluate(
             or runner.bindings.max_unit_cost_usd != max_unit_cost_usd
         ):
             raise ValueError("injected runner caps differ from requested caps")
-        cases = runner.case_ids
+        if runner.schedule_client is None:
+            raise typer.BadParameter(
+                "SCHEDULE_ATTESTATION_REQUIRED: external schedule authority is unavailable."
+            )
+        schedule = EvaluationRunner._schedule(
+            runner, cast(EvaluationSelection, mode), cast(EvaluationSplit, split), repeats
+        )
+        cases = {item.case_id for item in schedule.items}
         mode_count = 5 if mode == "all" else 1
         typer.echo(
             f"{len(cases)} case × {mode_count} mode × {repeats} repeats = "

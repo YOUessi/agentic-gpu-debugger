@@ -148,7 +148,21 @@ def oob_service(store, tmp_path):
 
 
 @pytest.fixture
-def native_evaluation_executor(oob_service, tmp_path, monkeypatch, request):
+def test_schedule_commit_client(tmp_path):
+    from schedule_authority_support import (
+        TestScheduleCommitClient,
+        register_test_schedule_client,
+    )
+
+    client = TestScheduleCommitClient.create(tmp_path / "test-schedule-authority")
+    register_test_schedule_client(client)
+    return client
+
+
+@pytest.fixture
+def native_evaluation_executor(
+    oob_service, tmp_path, monkeypatch, request, test_schedule_commit_client
+):
     """Fast native evaluation producer backed by the real store/orchestrator schemas."""
     import hashlib
 
@@ -215,11 +229,12 @@ def native_evaluation_executor(oob_service, tmp_path, monkeypatch, request):
         )
     visibility = "public" if split == "public" else "evaluator"
     corpus = RunStore(tmp_path / "corpus", visibility=visibility)
-    family = CorpusFamily.provision(
+    family = CorpusFamily._provision_for_test(
         tmp_path / "corpus-controller",
         public_store=corpus.root if visibility == "public" else tmp_path / "public-corpus",
         evaluator_store=corpus.root if visibility == "evaluator" else tmp_path / "evaluator-corpus",
         repository=tmp_path / "repository",
+        schedule_public_key=test_schedule_commit_client.public_key,
     )
     monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
     assert service.binding is not None
@@ -343,11 +358,14 @@ def native_evaluation_executor(oob_service, tmp_path, monkeypatch, request):
     clean_id, mutant_id = execute_case("clean"), execute_case("mutant")
     builder = BenchmarkBuilder(corpus)
     builder.register(builder.validate(clean_id, mutant_id))
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
     return EvaluationExecutor(
         service,
         corpus,
         {"case_0100": source},
         _corpus_family=family,
+        _schedule_verifier=EvaluationScheduleVerifier._for_test(family, service.store),
     )
 
 

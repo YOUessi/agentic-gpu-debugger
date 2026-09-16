@@ -7,11 +7,10 @@ import os
 import random
 import re
 import stat
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from gpu_agent.agent.models import (
     ACTION_ADAPTER,
@@ -74,6 +73,7 @@ from gpu_agent.verification.policy import decide_verdict, finding_signature, pla
 if TYPE_CHECKING:
     from gpu_agent.benchmark.holdout import HoldoutBatch, HoldoutController
     from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
 
 _TRUTH_CASE = (
@@ -83,22 +83,6 @@ _TRUTH_CASE = (
 
 class CostBoundUnavailable(ValueError):
     """A production monetary bound must be attested before any provider work is allowed."""
-
-
-_LocatorMethod = Callable[[Any, str, int], EvaluationRecord]
-
-
-def _serialized_locator(method: _LocatorMethod) -> _LocatorMethod:
-    """Make every entry to the implementation pass through the locator transaction."""
-
-    @wraps(method)
-    def guarded(self: Any, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
-        if not re.fullmatch(r"[a-f0-9]{32}", evaluation_run_id) or ordinal < 0:
-            raise ValueError("evaluation run locator is invalid")
-        with self._unit_transaction(evaluation_run_id, ordinal):
-            return method(self, evaluation_run_id, ordinal)
-
-    return guarded
 
 
 def _one_ref(run: RunManifest, name: str) -> ArtifactRef:
@@ -202,6 +186,9 @@ def _validate_verification_audit(
     build_clean: list[bool] = []
     runtime_clean: list[bool] = []
     sanitizer_clean: dict[str, list[bool]] = {}
+    build_states: list[str] = []
+    runtime_states: list[str] = []
+    sanitizer_states: dict[str, list[str]] = {}
     native_public_passed = 0
     native_private_passed = 0
     native_new_findings: list[Finding] = []
@@ -318,22 +305,32 @@ def _validate_verification_audit(
             if tool_name == "build":
                 model = ToolResult[BuildPayload].model_validate_json(raw)
                 build_model = model
-                build_clean.append(
+                build_infra = bool(
+                    model.tool_error or model.timed_out or model.cancelled or model.truncated
+                )
+                build_ok = bool(
                     model.exit_code == 0
                     and model.typed_payload.binary_ref is not None
-                    and not (
-                        model.tool_error or model.timed_out or model.cancelled or model.truncated
-                    )
+                    and not build_infra
+                )
+                build_clean.append(build_ok)
+                build_states.append(
+                    "TOOL_ERROR" if build_infra else "CLEAN" if build_ok else "FAILED"
                 )
             elif tool_name == "run":
                 model = ToolResult[ExecutionPayload].model_validate_json(raw)
                 run_model = model
-                runtime_clean.append(
+                runtime_infra = bool(
+                    model.tool_error or model.timed_out or model.cancelled or model.truncated
+                )
+                runtime_ok = bool(
                     model.typed_payload.runtime_status == "SUCCESS"
                     and model.typed_payload.output_ref == model.stdout_artifact
-                    and not (
-                        model.tool_error or model.timed_out or model.cancelled or model.truncated
-                    )
+                    and not runtime_infra
+                )
+                runtime_clean.append(runtime_ok)
+                runtime_states.append(
+                    "TOOL_ERROR" if runtime_infra else "CLEAN" if runtime_ok else "FAILED"
                 )
             else:
                 model = ToolResult[SanitizerPayload].model_validate_json(raw)
@@ -367,13 +364,22 @@ def _validate_verification_audit(
                     )
                 ):
                     raise ValueError("evaluation verification sanitizer result is not reproducible")
-                sanitizer_clean.setdefault(model.typed_payload.tool, []).append(
+                sanitizer_infra = bool(
+                    model.tool_error
+                    or model.timed_out
+                    or model.cancelled
+                    or model.truncated
+                    or not model.typed_payload.completed
+                )
+                sanitizer_ok = bool(
                     model.typed_payload.completed
                     and model.typed_payload.check_outcome == "CLEAN"
                     and model.typed_payload.program_output_ref == model.stdout_artifact
-                    and not (
-                        model.tool_error or model.timed_out or model.cancelled or model.truncated
-                    )
+                    and not sanitizer_infra
+                )
+                sanitizer_clean.setdefault(model.typed_payload.tool, []).append(sanitizer_ok)
+                sanitizer_states.setdefault(model.typed_payload.tool, []).append(
+                    "TOOL_ERROR" if sanitizer_infra else "CLEAN" if sanitizer_ok else "FINDING"
                 )
             for nested in (model.stdout_artifact, model.stderr_artifact):
                 if nested.run_id != child.id or nested.visibility != "evaluator":
@@ -568,26 +574,31 @@ def _validate_verification_audit(
         or native_new_findings != audit_result.observation.new_blocking_findings
     ):
         raise ValueError("verification findings differ from native sanitizer results")
+
+    def aggregate_state(states: list[str], *, absent: str) -> str:
+        if not states:
+            return absent
+        if "TOOL_ERROR" in states:
+            return "TOOL_ERROR"
+        return "CLEAN" if all(state == "CLEAN" for state in states) else "FAILED"
+
     derived_checks: dict[str, str] = {
-        "build": "CLEAN" if build_clean and all(build_clean) else "FAILED",
-        "runtime": "CLEAN" if runtime_clean and all(runtime_clean) else "FAILED",
+        "build": aggregate_state(build_states, absent="NOT_RUN"),
+        "runtime": aggregate_state(runtime_states, absent="NOT_RUN"),
         "public_oracle": (
             "CLEAN" if public_oracle is True else "FAILED" if public_oracle is False else "NOT_RUN"
         ),
-        "private_oracle": (
-            "CLEAN"
-            if len(private_oracles) == len(holdouts) and all(private_oracles)
-            else "FAILED"
-            if private_oracles and not all(private_oracles)
-            else "INCOMPLETE"
-            if private_oracles
-            else "NOT_RUN"
-        ),
     }
     for tool in ("memcheck", "racecheck", "initcheck", "synccheck"):
-        values = sanitizer_clean.get(tool, [])
-        if values:
-            derived_checks[tool] = "CLEAN" if all(values) else "FINDING"
+        states = sanitizer_states.get(tool, [])
+        if states:
+            derived_checks[tool] = (
+                "TOOL_ERROR"
+                if "TOOL_ERROR" in states
+                else "CLEAN"
+                if all(state == "CLEAN" for state in states)
+                else "FINDING"
+            )
         elif tool == "memcheck" or full_check_plan:
             derived_checks[tool] = "NOT_RUN"
     derived_outcomes = {
@@ -596,8 +607,12 @@ def _validate_verification_audit(
     }
     derived_observation = audit_result.observation.model_copy(
         update={
-            "build_ok": all(build_clean) if build_clean else False,
-            "runtime_ok": all(runtime_clean) if runtime_clean else None,
+            "build_ok": (
+                None if "TOOL_ERROR" in build_states else all(build_clean) if build_clean else None
+            ),
+            "runtime_ok": (
+                None if "TOOL_ERROR" in runtime_states or not runtime_clean else all(runtime_clean)
+            ),
             "original_finding_present": derived_original,
             "public_oracle_passed": public_oracle,
             "private_holdout_passed": derived_private_oracle,
@@ -607,17 +622,49 @@ def _validate_verification_audit(
             "check_outcomes": derived_outcomes,
         }
     )
+    if "TOOL_ERROR" in build_states:
+        derived_reason = "BUILD_TOOL_ERROR"
+    elif build_states and build_states[0] == "FAILED":
+        derived_reason = "CANDIDATE_BUILD_FAILED"
+    elif infrastructure_missing:
+        derived_reason = "REQUIRED_EVIDENCE_MISSING"
+    elif derived_original is True:
+        derived_reason = "ORIGINAL_FINDING_PRESENT"
+    elif derived_original is None:
+        derived_reason = "ORIGINAL_FINDING_UNKNOWN"
+    elif native_new_findings:
+        derived_reason = "NEW_BLOCKING_FINDING"
+    elif runtime_states and runtime_states[0] == "FAILED":
+        derived_reason = "RUNTIME_FAILED"
+    elif public_oracle is False:
+        derived_reason = "ORACLE_FAILED"
+    elif public_oracle is None:
+        derived_reason = "ORACLE_NOT_RUN"
+    else:
+        derived_reason = "ALL_REQUIRED_CHECKS_PASSED"
+    derived_not_run = {
+        requirement.tool: "UPSTREAM_CHECK_DID_NOT_PASS"
+        for requirement in result.check_requirements
+        if requirement.required and derived_outcomes[requirement.tool] == "NOT_RUN"
+    }
     if (
         result.required_checks != derived_checks
         or result.check_outcomes != derived_outcomes
         or audit_result.observation != derived_observation
         or result.binary_hashes != sorted(set(observed_binary_hashes))
         or decide_verdict(derived_observation) != result.verdict
+        or result.reason_code != derived_reason
+        or result.failure_stage
+        != (None if derived_reason == "ALL_REQUIRED_CHECKS_PASSED" else "verification")
+        or result.not_run_reasons != derived_not_run
+        or result.public_passed_count != native_public_passed
+        or result.limitations != ["Containers share the host kernel and GPU driver."]
     ):
         raise ValueError("verification checks differ from native tool results")
     if (
         audit_result.public_passed_count != native_public_passed
         or audit_result.private_passed_count != native_private_passed
+        or audit_result.not_run_count != 1 + len(holdouts) - len(children)
     ):
         raise ValueError("verification pass counts differ from native results")
     return audit_result
@@ -851,8 +898,8 @@ def validate_evaluation_record(
     ):
         raise ValueError("fixed controller evidence differs from scheduled mode")
     if item.mode == "D" and (
-        sum(action in sanitizer_actions for action in decision_types) != acquisition.sanitizer_calls
-        or decision_types.count("retrieve_official_docs") != acquisition.retrieval_calls
+        sum(action in sanitizer_actions for action in decision_types) < acquisition.sanitizer_calls
+        or decision_types.count("retrieve_official_docs") < acquisition.retrieval_calls
         or observed_sanitizers != acquisition.sanitizer_calls
         or bool(observed_retrievals) != bool(acquisition.retrieval_calls)
         or any(
@@ -868,7 +915,7 @@ def validate_evaluation_record(
             store.read(_one_ref(run, "agent/initial-budget.json"))
         )
         budget_audit = json.loads(store.read(_one_ref(run, "agent/budget-audit.json")))
-        if not isinstance(budget_audit, list):
+        if not isinstance(budget_audit, list) or initial_budget != AgentBudget():
             raise ValueError("rule controller budget audit is invalid")
         step_refs = sorted(
             (
@@ -883,6 +930,8 @@ def validate_evaluation_record(
         seen: set[str] = set()
         expected_budget = initial_budget
         expected_audit: list[dict[str, object]] = []
+        expected_sanitizer_physical = 0
+        expected_retrieval_physical = 0
         expected_evidence_index: int | None = None
         evidence_by_id = {ref.id: index for index, ref in enumerate(evidence_refs)}
         acquisition_actions = sanitizer_actions | {
@@ -959,20 +1008,44 @@ def validate_evaluation_record(
             }
             if action.action_type in acquisition_actions:
                 reservation_id = len(expected_audit) // 3 + 1
-                expected_audit.extend(
-                    [
-                        {"id": reservation_id, "action": action.action_type, "state": "ATTEMPTED"},
-                        {"id": reservation_id, "action": action.action_type, "state": "STARTED"},
-                        {"id": reservation_id, "action": action.action_type, "state": "COMPLETED"},
-                    ]
-                )
+                audit_slice: list[object] = budget_audit[
+                    len(expected_audit) : len(expected_audit) + 3
+                ]
+                prefix: list[dict[str, object]] = [
+                    {"id": reservation_id, "action": action.action_type, "state": "ATTEMPTED"},
+                    {"id": reservation_id, "action": action.action_type, "state": "STARTED"},
+                ]
+                if len(audit_slice) != 3 or audit_slice[:2] != prefix:
+                    raise ValueError("rule controller acquisition audit is invalid")
+                terminal = audit_slice[2] if len(audit_slice) == 3 else None
+                if terminal not in (
+                    {"id": reservation_id, "action": action.action_type, "state": "COMPLETED"},
+                    {"id": reservation_id, "action": action.action_type, "state": "FAILED"},
+                ):
+                    raise ValueError("rule controller acquisition audit is invalid")
+                assert isinstance(terminal, dict)
+                expected_audit.extend([*prefix, terminal])
                 if action.action_type in sanitizer_actions:
                     updates["sanitizer_calls"] = expected_step_budget.sanitizer_calls + 1
+                    expected_sanitizer_physical += 1
                 elif action.action_type == "retrieve_official_docs":
                     updates["rag_calls"] = expected_step_budget.rag_calls + 1
+                    if (
+                        terminal["state"] == "COMPLETED"
+                        or "KNOWLEDGE_UNAVAILABLE" not in diagnosis.limitations
+                    ):
+                        expected_retrieval_physical += 1
                 elif action.action_type == "inspect_source":
                     updates["source_reads"] = expected_step_budget.source_reads + 1
-                expected_evidence_index += 1
+                if (
+                    terminal["state"] == "COMPLETED"
+                    or expected_evidence_index < len(evidence_refs) - 1
+                ):
+                    expected_evidence_index += 1
+                if terminal["state"] == "FAILED" and (
+                    index != len(step_refs) - 1 or diagnosis.diagnostic_outcome != "INCONCLUSIVE"
+                ):
+                    raise ValueError("failed acquisition did not terminate inconclusively")
             expected_budget = expected_step_budget.model_copy(update=updates)
         final_budget = budget
         expected_final = expected_budget.model_copy(
@@ -984,6 +1057,8 @@ def validate_evaluation_record(
             or budget_audit != expected_audit
             or expected_evidence_index is None
             or expected_evidence_index != len(evidence_refs) - 1
+            or acquisition.sanitizer_calls != expected_sanitizer_physical
+            or acquisition.retrieval_calls != expected_retrieval_physical
         ):
             raise ValueError("rule controller final budget or audit is invalid")
     if item.mode in {"A", "B", "C", "D"}:
@@ -1234,7 +1309,13 @@ def validate_evaluation_record(
         finished = verifications[0].events[-1].at
         if verification.verdict != VerificationVerdict.INCONCLUSIVE:
             expected_status = "COMPLETED"
-    elif reason and reason not in {"INVALID_DIAGNOSIS_EVIDENCE", "MODEL_DECLARED_INCONCLUSIVE"}:
+    elif reason and reason not in {
+        "INVALID_DIAGNOSIS_EVIDENCE",
+        "MODEL_DECLARED_INCONCLUSIVE",
+        "SANITIZER_EVIDENCE_UNAVAILABLE",
+        "KNOWLEDGE_UNAVAILABLE",
+        "NO_INFORMATION_GAIN",
+    }:
         expected_status = "TIMEOUT" if "TIMEOUT" in reason else "FAILED"
     if reason is not None and not re.fullmatch(r"[A-Z0-9_]{1,80}", reason):
         reason = "EVALUATION_FAILED"
@@ -1280,14 +1361,18 @@ def registered_cases(
     family = family or CorpusFamily.configured(corpus)
     builder = BenchmarkBuilder(corpus)
     cases: dict[str, CaseManifest] = {}
-    for path in sorted(corpus.root.iterdir()):
-        if not re.fullmatch(r"[a-f0-9]{32}", path.name) or not path.is_dir():
-            continue
-        run = corpus.load(path.name)
-        if run.kind != "benchmark_case":
-            continue
+    target_hash = family.ledger.target_store_hash(corpus)
+    transactions = [
+        transaction
+        for transaction in family.ledger.committed_through()
+        if transaction.visibility == corpus.visibility
+        and transaction.target_store_hash == target_hash
+    ]
+    for authoritative_transaction in transactions:
+        run = corpus.load(authoritative_transaction.run_id)
         if (
-            run.status != RunStatus.COMPLETED
+            run.kind != "benchmark_case"
+            or run.status != RunStatus.COMPLETED
             or run.binding is None
             or run.binding.purpose != "corpus_validation"
             or run.binding.toolchain_lock_hash is None
@@ -1296,13 +1381,13 @@ def registered_cases(
         ):
             raise ValueError("case registration is not terminal")
         refs = [ref for ref in run.artifact_refs if ref.name == "case-manifest.json"]
-        transactions = [
+        ledger_refs = [
             ref for ref in run.artifact_refs if ref.name == "validation/ledger-transaction.json"
         ]
-        if len(refs) != 1 or len(transactions) != 1:
+        if len(refs) != 1 or len(ledger_refs) != 1:
             raise ValueError("case registration is ambiguous")
         case = CaseManifest.model_validate_json(corpus.read(refs[0]))
-        transaction = json.loads(corpus.read(transactions[0]))
+        transaction = json.loads(corpus.read(ledger_refs[0]))
         try:
             committed = family.ledger.committed(str(transaction.get("transaction_id", "")))
         except ValueError:
@@ -1337,7 +1422,7 @@ def registered_cases(
             or committed.template_hash != transaction["template_identity_hash"]
             or committed.source_pair_hash != transaction["source_pair_hash"]
             or committed.target_store_hash != transaction["target_store_hash"]
-            or committed.target_store_hash != family.ledger.target_store_hash(corpus)
+            or committed.target_store_hash != target_hash
             or committed.visibility != corpus.visibility
             or committed.manifest_hash != refs[0].sha256
             or case.toolchain_hash != run.binding.toolchain_lock_hash
@@ -1347,6 +1432,7 @@ def registered_cases(
             or len(set(case.validation_run_ids)) != 2
             or not all(re.fullmatch(r"[a-f0-9]{32}", item) for item in case.validation_run_ids)
             or (case.split == "public") != (corpus.visibility == "public")
+            or committed != authoritative_transaction
         ):
             raise ValueError("case registration provenance is invalid")
         try:
@@ -1389,6 +1475,7 @@ class EvaluationExecutor:
         holdout_controller: "HoldoutController | None" = None,
         holdout_batch: "HoldoutBatch | None" = None,
         _corpus_family: "CorpusFamily | None" = None,
+        _schedule_verifier: "EvaluationScheduleVerifier | None" = None,
     ) -> None:
         if service.store.visibility != "public":
             raise ValueError("evaluation requires a public service store")
@@ -1403,6 +1490,13 @@ class EvaluationExecutor:
             _corpus_family = CorpusFamily.configured(corpus)
         _corpus_family.require_store(corpus)
         self._corpus_family = _corpus_family
+        if _schedule_verifier is None:
+            from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+            _schedule_verifier = EvaluationScheduleVerifier.for_family(
+                _corpus_family, service.store
+            )
+        self._schedule_verifier = _schedule_verifier
 
     def _ref(self, run: RunManifest, name: str) -> ArtifactRef:
         refs = [ref for ref in run.artifact_refs if ref.name == name]
@@ -1438,7 +1532,7 @@ class EvaluationExecutor:
         )
 
     @contextmanager
-    def _unit_transaction(self, evaluation_run_id: str, ordinal: int) -> Iterator[None]:
+    def _unit_transaction(self, evaluation_run_id: str, ordinal: int) -> Iterator[tuple[int, Path]]:
         del ordinal
         path = self.service.store.root / f".evaluation-execution-{evaluation_run_id}.lock"
         reject_symlinks(path)
@@ -1447,17 +1541,32 @@ class EvaluationExecutor:
             if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_mode & 0o077:
                 raise ValueError("evaluation transaction lock is unsafe")
             fcntl.flock(fd, fcntl.LOCK_EX)
-            yield
+            yield fd, path
         finally:
             os.close(fd)
 
     def execute_scheduled(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
-        return self._execute(evaluation_run_id, ordinal)
+        return EvaluationExecutor._execute(self, evaluation_run_id, ordinal)
 
-    @_serialized_locator
     def _execute(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
-        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+        if not re.fullmatch(r"[a-f0-9]{32}", evaluation_run_id) or ordinal < 0:
+            raise ValueError("evaluation run locator is invalid")
+        with self._unit_transaction(evaluation_run_id, ordinal) as (fd, path):
+            return EvaluationExecutor.__execute_locked(self, fd, path, evaluation_run_id, ordinal)
 
+    def __execute_locked(
+        self,
+        fd: int,
+        path: Path,
+        evaluation_run_id: str,
+        ordinal: int,
+    ) -> EvaluationRecord:
+        expected = self.service.store.root / f".evaluation-execution-{evaluation_run_id}.lock"
+        if path != expected or not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ValueError("evaluation transaction lease is invalid")
+        # Re-acquiring on the same open file description is non-blocking.  A direct
+        # helper call therefore cannot execute without first owning the real flock.
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         parent = self.service.store.load(evaluation_run_id)
         if (
             parent.kind != "evaluation"
@@ -1466,9 +1575,9 @@ class EvaluationExecutor:
             or parent.binding != self.service.binding
         ):
             raise ValueError("evaluation run is not active and bound")
-        EvaluationScheduleVerifier.for_family(self._corpus_family, self.service.store).verify(
-            evaluation_run_id
-        )
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        EvaluationScheduleVerifier.verify(self._schedule_verifier, evaluation_run_id)
         schedule_ref = self._ref(parent, "evaluation/schedule.json")
         schedule = EvaluationSchedule.model_validate_json(self.service.store.read(schedule_ref))
         if ordinal >= len(schedule.items) or schedule.bindings.max_unit_cost_usd is None:
@@ -1747,7 +1856,13 @@ class EvaluationExecutor:
             reason = verification.reason_code
             if verification.verdict != VerificationVerdict.INCONCLUSIVE:
                 status = "COMPLETED"
-        elif reason and reason not in {"INVALID_DIAGNOSIS_EVIDENCE", "MODEL_DECLARED_INCONCLUSIVE"}:
+        elif reason and reason not in {
+            "INVALID_DIAGNOSIS_EVIDENCE",
+            "MODEL_DECLARED_INCONCLUSIVE",
+            "SANITIZER_EVIDENCE_UNAVAILABLE",
+            "KNOWLEDGE_UNAVAILABLE",
+            "NO_INFORMATION_GAIN",
+        }:
             status = "TIMEOUT" if "TIMEOUT" in reason else "FAILED"
         # Only bounded reason codes leave this adapter, never an exception message.
         if reason is not None and not re.fullmatch(r"[A-Z0-9_]{1,80}", reason):

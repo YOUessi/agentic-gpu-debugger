@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 
 import pytest
+from schedule_authority_support import schedule_client_for_test
 
 from gpu_agent.benchmark.evaluation import (
     EvaluationAttempt,
@@ -19,8 +20,8 @@ def _runner(executor, execute_owner=None, **overrides) -> EvaluationRunner:
     del execute_owner
     options = {
         "store": executor.service.store,
-        "case_ids": {"case_0100": "vector-add"},
         "executor": executor,
+        "schedule_client": schedule_client_for_test(executor),
         "commit": binding.repository.commit,
         "prompt_version": binding.prompt_version,
         "toolchain_hash": binding.toolchain_lock_hash,
@@ -194,6 +195,7 @@ def test_successful_resume_continues_after_completed_ordinal(
         executor.corpus,
         executor.sources,
         _corpus_family=executor._corpus_family,
+        _schedule_verifier=executor._schedule_verifier,
     )
     result = _runner(restarted).resume(run_id, "D", "development", 3)
     assert [record.repeat for record in result.records] == [2, 0, 1]
@@ -248,10 +250,17 @@ def test_resume_recomputes_exact_attempt_set(native_evaluation_executor, fault):
     run = store.create_run("evaluation", binding=executor.service.binding)
     store.transition(run.id, RunStatus.RUNNING, "EXECUTING")
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
-    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleAuthority
+    from gpu_agent.benchmark.schedule_authority import seal_schedule
 
-    authority = EvaluationScheduleAuthority.for_family(executor._corpus_family, store)
-    authority.seal(store, run.id, schedule, executor.service.binding)
+    seal_schedule(
+        executor._corpus_family,
+        store,
+        run.id,
+        schedule,
+        executor.service.binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
+    )
     attempt = runner._attempt(run.id, schedule, schedule.items[0])
     if fault == "reservation":
         attempt = attempt.model_copy(update={"reserved_cost_usd": 1})
@@ -271,7 +280,15 @@ def test_resume_recomputes_exact_attempt_set(native_evaluation_executor, fault):
             "evaluation/schedule.json",
             schedule.model_dump_json().encode(),
         )
-        authority.seal(store, source_run.id, schedule, executor.service.binding)
+        seal_schedule(
+            executor._corpus_family,
+            store,
+            source_run.id,
+            schedule,
+            executor.service.binding,
+            schedule_client_for_test(executor),
+            executor._schedule_verifier,
+        )
         source_attempt = runner._attempt(source_run.id, schedule, schedule.items[0])
         runner._put(
             source_run.id,
@@ -293,7 +310,6 @@ def test_runner_rejects_non_public_store(tmp_path, native_evaluation_executor):
     with pytest.raises(ValueError):
         EvaluationRunner(
             RunStore(tmp_path / "evaluator", visibility="evaluator"),
-            {"case_0100": "vector-add"},
             executor,
             commit=binding.repository.commit,
             prompt_version=binding.prompt_version or "",
@@ -317,7 +333,6 @@ def test_runner_rejects_duck_typed_executor(native_evaluation_executor):
     with pytest.raises(ValueError, match="native executor implementation"):
         EvaluationRunner(
             executor.service.store,
-            {"case_0100": "vector-add"},
             ForgedExecutor(),  # type: ignore[arg-type]
             commit=binding.repository.commit,
             prompt_version=binding.prompt_version or "",
@@ -333,7 +348,7 @@ def test_concurrent_resume_claims_one_physical_evaluation_unit(
     native_evaluation_executor, monkeypatch
 ):
     from gpu_agent.benchmark.executor import EvaluationExecutor
-    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleAuthority
+    from gpu_agent.benchmark.schedule_authority import seal_schedule
 
     executor = native_evaluation_executor
 
@@ -368,8 +383,14 @@ def test_concurrent_resume_claims_one_physical_evaluation_unit(
     run = store.create_run("evaluation", binding=executor.service.binding)
     store.transition(run.id, RunStatus.RUNNING, "EXECUTING")
     first_runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
-    EvaluationScheduleAuthority.for_family(executor._corpus_family, store).seal(
-        store, run.id, schedule, executor.service.binding
+    seal_schedule(
+        executor._corpus_family,
+        store,
+        run.id,
+        schedule,
+        executor.service.binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
     )
     second_runner = _runner(executor)
     with ThreadPoolExecutor(max_workers=2) as pool:

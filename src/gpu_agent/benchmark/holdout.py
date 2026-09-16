@@ -1,5 +1,7 @@
 """Evaluator-owned holdout aliases and private score bindings."""
 
+from __future__ import annotations
+
 import fcntl
 import hashlib
 import hmac
@@ -11,6 +13,7 @@ import stat
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from typing import TYPE_CHECKING
 
 from pydantic import Field
 
@@ -29,6 +32,9 @@ from gpu_agent.store import RunStore, reject_symlinks
 
 _SCORE_GUARD = threading.Lock()
 _SCORE_LOCKS: dict[str, threading.Lock] = {}
+
+if TYPE_CHECKING:
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
 
 class HoldoutBatch(ExecutionModel):
@@ -77,7 +83,14 @@ class _PrivateScore(ExecutionModel):
 class HoldoutController:
     """Keep private identities and judgments in an evaluator-only RunStore."""
 
-    def __init__(self, public: RunStore, evaluator: RunStore, *, binding: RunBinding) -> None:
+    def __init__(
+        self,
+        public: RunStore,
+        evaluator: RunStore,
+        *,
+        binding: RunBinding,
+        _schedule_verifier: EvaluationScheduleVerifier | None = None,
+    ) -> None:
         if (
             public.visibility != "public"
             or evaluator.visibility != "evaluator"
@@ -93,8 +106,19 @@ class HoldoutController:
         if family_root is None:
             raise ValueError("trusted corpus family configuration is required")
         self._schedule_family = CorpusFamily.open(Path(family_root))
+        if _schedule_verifier is None:
+            from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
-    def prepare(self, private_identities: list[tuple[str, str]]) -> HoldoutBatch:
+            _schedule_verifier = EvaluationScheduleVerifier.for_family(
+                self._schedule_family, public
+            )
+        self._schedule_verifier = _schedule_verifier
+
+    def prepare(self) -> HoldoutBatch:
+        from gpu_agent.benchmark.executor import registered_cases
+
+        cases = registered_cases(self.evaluator, self.binding, self._schedule_family)
+        private_identities = sorted((case.id, case.template_id) for case in cases.values())
         if not private_identities or len(set(private_identities)) != len(private_identities):
             raise ValueError("holdout preparation input is invalid")
         public_run = self.public.create_run("holdout_aliases", binding=self.binding)
@@ -188,7 +212,18 @@ class HoldoutController:
             ).hexdigest()
             for item in mapping.identities
         ]
-        if recomputed != batch.aliases or [item.alias for item in mapping.identities] != recomputed:
+        from gpu_agent.benchmark.executor import registered_cases
+
+        cases = registered_cases(self.evaluator, self.binding, self._schedule_family)
+        expected_private = sorted((case.id, case.template_id) for case in cases.values())
+        observed_private = [
+            (item.private_case_id, item.private_template_id) for item in mapping.identities
+        ]
+        if (
+            recomputed != batch.aliases
+            or [item.alias for item in mapping.identities] != recomputed
+            or observed_private != expected_private
+        ):
             raise ValueError("holdout binding is invalid")
         return HoldoutScheduleProof(public_run_id=batch.public_run_id, aliases_hash=refs[0].sha256)
 
@@ -338,7 +373,7 @@ class HoldoutController:
             raise ValueError("public evaluation record is invalid")
         from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
-        EvaluationScheduleVerifier.for_family(self._schedule_family, self.public).verify(run.id)
+        EvaluationScheduleVerifier.verify(self._schedule_verifier, run.id)
         ordinal = int(ref.name.split("/")[-1].removesuffix(".json"))
         schedule_refs = [r for r in run.artifact_refs if r.name == "evaluation/schedule.json"]
         manifest_refs = [r for r in run.artifact_refs if r.name == "evaluation/manifest.json"]

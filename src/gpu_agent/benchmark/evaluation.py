@@ -23,6 +23,7 @@ from gpu_agent.store import RunStore, reject_symlinks
 if TYPE_CHECKING:
     from gpu_agent.benchmark.executor import EvaluationExecutor
     from gpu_agent.benchmark.holdout import HoldoutBatch, HoldoutController
+    from gpu_agent.benchmark.schedule_authority import ScheduleCommitClient
 
 _CLAIM_GUARD = threading.Lock()
 _CLAIM_LOCKS: dict[str, threading.Lock] = {}
@@ -290,7 +291,6 @@ class EvaluationRunner:
     def __init__(
         self,
         store: RunStore,
-        case_ids: dict[str, str],
         executor: "EvaluationExecutor",
         *,
         commit: str,
@@ -303,6 +303,7 @@ class EvaluationRunner:
         random_seed: int = 20260915,
         holdout_controller: "HoldoutController | None" = None,
         holdout_batch: "HoldoutBatch | None" = None,
+        schedule_client: "ScheduleCommitClient | None" = None,
     ) -> None:
         if store.visibility != "public":
             raise ValueError("evaluation requires a public RunStore")
@@ -320,8 +321,8 @@ class EvaluationRunner:
             raise ValueError("evaluation schedule differs from its immutable run binding")
         self.store = store
         self.binding = binding
-        self.case_ids = dict(case_ids)
         self.executor = executor
+        self.schedule_client = schedule_client
         self.bindings = EvaluationBindings(
             commit=commit,
             prompt_version=prompt_version,
@@ -338,38 +339,43 @@ class EvaluationRunner:
     def run(
         self, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
-        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleAuthority
+        from gpu_agent.benchmark.schedule_authority import seal_schedule
 
-        schedule = self._schedule(mode, split, repeats)
+        if self.schedule_client is None:
+            raise ValueError("external schedule authority is required")
+        schedule = EvaluationRunner._schedule(self, mode, split, repeats)
         run = self.store.create_run("evaluation", binding=self.binding)
-        authority = EvaluationScheduleAuthority.for_family(self.executor._corpus_family, self.store)
-        prepared = authority.prepare(run.id, schedule, self.binding)
         self._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
-        committed = authority.commit(prepared)
-        authority.persist_receipt(self.store, committed)
+        seal_schedule(
+            self.executor._corpus_family,
+            self.store,
+            run.id,
+            schedule,
+            self.binding,
+            self.schedule_client,
+            self.executor._schedule_verifier,
+        )
         self.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
-        return self._execute(run.id, schedule, [], {})
+        return EvaluationRunner._execute(self, run.id, schedule, [], {})
 
     def resume(
         self, run_id: str, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
-        with self._claim(run_id):
-            return self._resume_claimed(run_id, mode, split, repeats)
+        with EvaluationRunner._claim(self, run_id):
+            return EvaluationRunner._resume_claimed(self, run_id, mode, split, repeats)
 
     def _resume_claimed(
         self, run_id: str, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
-        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
-
         run = self.store.load(run_id)
         if run.kind != "evaluation" or run.status != RunStatus.RUNNING:
             raise ValueError("only a running evaluation run may be resumed")
         if run.binding != self.binding:
             raise ValueError("evaluation run binding does not match controller")
-        expected = self._schedule(mode, split, repeats)
-        EvaluationScheduleVerifier.for_family(self.executor._corpus_family, self.store).verify(
-            run_id
-        )
+        expected = EvaluationRunner._schedule(self, mode, split, repeats)
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        EvaluationScheduleVerifier.verify(self.executor._schedule_verifier, run_id)
         persisted = EvaluationSchedule.model_validate_json(
             self.store.read(self._one_artifact(run_id, "evaluation/schedule.json"))
         )
@@ -377,7 +383,7 @@ class EvaluationRunner:
             raise ValueError("evaluation schedule or bindings do not match")
         attempts = self._attempts(run_id, persisted)
         records = self._records(run_id, persisted, attempts)
-        return self._execute(run_id, persisted, records, attempts)
+        return EvaluationRunner._execute(self, run_id, persisted, records, attempts)
 
     @contextmanager
     def _claim(self, run_id: str) -> Iterator[None]:
@@ -405,19 +411,24 @@ class EvaluationRunner:
             if self.holdout_controller is None or self.holdout_batch is None:
                 raise ValueError("holdout alias proof is required")
             holdout_proof = self.holdout_controller.validate_batch(self.holdout_batch)
-            if set(self.case_ids) != set(self.holdout_batch.aliases) or any(
-                case_id != template_id for case_id, template_id in self.case_ids.items()
-            ):
-                raise ValueError("holdout alias proof does not match scheduled identities")
+            case_ids = {alias: alias for alias in self.holdout_batch.aliases}
         else:
             if self.holdout_controller is not None:
                 raise ValueError("holdout alias proof cannot bind a development schedule")
             holdout_proof = None
+            from gpu_agent.benchmark.executor import registered_cases
+
+            cases = registered_cases(
+                self.executor.corpus, self.binding, self.executor._corpus_family
+            )
+            case_ids = {case.id: case.template_id for case in cases.values()}
+            if not case_ids:
+                raise ValueError("committed corpus transaction universe is empty")
         modes: list[EvaluationMode] = ["A", "B", "C", "D", "E"] if mode == "all" else [mode]
         units = [
             (case_id, template_id, item_mode, repeat)
             for repeat in range(repeats)
-            for case_id, template_id in self.case_ids.items()
+            for case_id, template_id in case_ids.items()
             for item_mode in modes
         ]
         random.Random(self.random_seed).shuffle(units)

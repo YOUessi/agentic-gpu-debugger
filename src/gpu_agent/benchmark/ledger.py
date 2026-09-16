@@ -19,9 +19,11 @@ from gpu_agent.store import RunStore, read_regular, reject_symlinks, sync_direct
 
 class _FamilyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     public_store: str
     evaluator_store: str
+    schedule_authority_profile: Literal["UNCONFIGURED", "PRODUCTION", "TEST_ONLY"] = "UNCONFIGURED"
+    schedule_public_key_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 class CorpusTransaction(BaseModel):
@@ -36,6 +38,7 @@ class CorpusTransaction(BaseModel):
     target_store_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     visibility: Visibility
     manifest_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    commit_sequence: int | None = Field(default=None, ge=1)
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -78,7 +81,12 @@ class CorpusFamily:
 
     def _marker_bytes(self) -> bytes:
         return json.dumps(
-            {"schema_version": 1, "ledger_namespace_hash": self.namespace_hash},
+            {
+                "schema_version": 2,
+                "ledger_namespace_hash": self.namespace_hash,
+                "schedule_authority_profile": self._config.schedule_authority_profile,
+                "schedule_public_key_hash": self._config.schedule_public_key_hash,
+            },
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
@@ -110,6 +118,43 @@ class CorpusFamily:
         evaluator_store: Path,
         repository: Path,
     ) -> "CorpusFamily":
+        return cls._provision(
+            root,
+            public_store=public_store,
+            evaluator_store=evaluator_store,
+            repository=repository,
+            test_schedule_public_key=None,
+        )
+
+    @classmethod
+    def _provision_for_test(
+        cls,
+        root: Path,
+        *,
+        public_store: Path,
+        evaluator_store: Path,
+        repository: Path,
+        schedule_public_key: bytes,
+    ) -> "CorpusFamily":
+        """Provision a family whose schedule authority is explicitly non-production."""
+        return cls._provision(
+            root,
+            public_store=public_store,
+            evaluator_store=evaluator_store,
+            repository=repository,
+            test_schedule_public_key=schedule_public_key,
+        )
+
+    @classmethod
+    def _provision(
+        cls,
+        root: Path,
+        *,
+        public_store: Path,
+        evaluator_store: Path,
+        repository: Path,
+        test_schedule_public_key: bytes | None,
+    ) -> "CorpusFamily":
         controller_root = root.absolute()
         public = public_store.absolute()
         evaluator = evaluator_store.absolute()
@@ -122,13 +167,31 @@ class CorpusFamily:
         reject_symlinks(controller_root)
         controller_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(controller_root, 0o700)
-        config = _FamilyConfig(public_store=str(public), evaluator_store=str(evaluator))
+        key_hash = (
+            hashlib.sha256(test_schedule_public_key).hexdigest()
+            if test_schedule_public_key is not None
+            else None
+        )
+        config = _FamilyConfig(
+            public_store=str(public),
+            evaluator_store=str(evaluator),
+            schedule_authority_profile=(
+                "TEST_ONLY" if test_schedule_public_key is not None else "UNCONFIGURED"
+            ),
+            schedule_public_key_hash=key_hash,
+        )
         config_path = controller_root / "family.json"
         _atomic_create(config_path, config.model_dump_json().encode(), 0o600)
         observed = _FamilyConfig.model_validate_json(read_regular(config_path, 64 * 1024))
         if observed != config:
             raise ValueError("corpus family is already configured for different stores")
+        if test_schedule_public_key is not None:
+            key_path = controller_root / "schedule-authority.pub"
+            _atomic_create(key_path, test_schedule_public_key, 0o400)
+            if read_regular(key_path, 64 * 1024) != test_schedule_public_key:
+                raise ValueError("test schedule public key differs from family configuration")
         family = cls(controller_root, observed, CorpusLedger(controller_root / "ledger"))
+        family._verify_schedule_key()
         family._pin_store(public)
         family._pin_store(evaluator)
         return family
@@ -149,6 +212,7 @@ class CorpusFamily:
         ):
             raise ValueError("corpus family store boundaries are unsafe")
         family = cls(controller_root, config, CorpusLedger(controller_root / "ledger"))
+        family._verify_schedule_key()
         family._verify_store_pins()
         return family
 
@@ -169,6 +233,30 @@ class CorpusFamily:
         )
         if store.root != expected:
             raise ValueError("store does not belong to the configured corpus family")
+
+    def _verify_schedule_key(self) -> None:
+        if self._config.schedule_authority_profile == "UNCONFIGURED":
+            if self._config.schedule_public_key_hash is not None:
+                raise ValueError("unconfigured schedule authority has a public key")
+            return
+        content = read_regular(self.root / "schedule-authority.pub", 64 * 1024)
+        if hashlib.sha256(content).hexdigest() != self._config.schedule_public_key_hash:
+            raise ValueError("schedule authority public key is unavailable or changed")
+
+    @property
+    def schedule_authority_profile(self) -> Literal["UNCONFIGURED", "PRODUCTION", "TEST_ONLY"]:
+        return self._config.schedule_authority_profile
+
+    @property
+    def schedule_public_key_hash(self) -> str | None:
+        return self._config.schedule_public_key_hash
+
+    @property
+    def schedule_public_key_path(self) -> Path:
+        self._verify_schedule_key()
+        if self._config.schedule_authority_profile == "UNCONFIGURED":
+            raise ValueError("external schedule authority is not configured")
+        return self.root / "schedule-authority.pub"
 
     def corpus_store(self, visibility: Visibility) -> RunStore:
         """Open one store fixed by the controller-private family configuration."""
@@ -233,8 +321,8 @@ class CorpusLedger:
             if state_path.exists():
                 state = json.loads(read_regular(state_path, 16 * 1024 * 1024))
             else:
-                state = {"schema_version": 2, "transactions": []}
-            if state.get("schema_version") != 2 or not isinstance(state.get("transactions"), list):
+                state = {"schema_version": 3, "transactions": []}
+            if state.get("schema_version") != 3 or not isinstance(state.get("transactions"), list):
                 raise ValueError("corpus ledger is malformed")
         except BaseException:
             os.close(fd)
@@ -282,6 +370,27 @@ class CorpusLedger:
             raise ValueError("corpus transaction is not committed")
         return transaction
 
+    def committed_through(self, cutoff: int | None = None) -> list[CorpusTransaction]:
+        """Return the ordered, immutable COMMITTED corpus universe at ``cutoff``."""
+        fd, state = self._locked_state()
+        try:
+            raw_transactions = state["transactions"]
+            assert isinstance(raw_transactions, list)
+            transactions = [self._transaction(item) for item in raw_transactions]
+        finally:
+            os.close(fd)
+        committed = [item for item in transactions if item.state == "COMMITTED"]
+        if any(item.commit_sequence is None for item in committed):
+            raise ValueError("committed corpus transaction has no sequence")
+        ordered = sorted(committed, key=lambda item: item.commit_sequence or 0)
+        if [item.commit_sequence for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise ValueError("corpus commit sequence is not contiguous")
+        if cutoff is None:
+            return ordered
+        if cutoff < 0 or cutoff > len(ordered):
+            raise ValueError("corpus universe cutoff is invalid")
+        return ordered[:cutoff]
+
     @contextmanager
     def registration_lock(self, transaction: CorpusTransaction) -> Iterator[CorpusTransaction]:
         """Serialize one transaction's RunStore completion and ledger commit.
@@ -303,7 +412,8 @@ class CorpusLedger:
             committed_while_waiting = (
                 transaction.state == "PREPARED"
                 and observed.state == "COMMITTED"
-                and observed.model_copy(update={"state": "PREPARED"}) == transaction
+                and observed.model_copy(update={"state": "PREPARED", "commit_sequence": None})
+                == transaction
             )
             if not exact and not committed_while_waiting:
                 raise ValueError("corpus transaction changed before recovery")
@@ -358,6 +468,7 @@ class CorpusLedger:
                 target_store_hash=target_hash,
                 visibility=store.visibility,
                 manifest_hash=manifest_hash,
+                commit_sequence=None,
             )
             transactions.append(transaction.model_dump(mode="json"))
             self._save(state)
@@ -376,7 +487,14 @@ class CorpusLedger:
                     continue
                 if observed != transaction:
                     raise ValueError("corpus transaction changed before commit")
-                committed = observed.model_copy(update={"state": "COMMITTED"})
+                if observed.commit_sequence is not None:
+                    raise ValueError("prepared corpus transaction already has a commit sequence")
+                next_sequence = 1 + sum(
+                    1 for item in transactions if self._transaction(item).state == "COMMITTED"
+                )
+                committed = observed.model_copy(
+                    update={"state": "COMMITTED", "commit_sequence": next_sequence}
+                )
                 transactions[index] = committed.model_dump(mode="json")
                 self._save(state)
                 return committed
