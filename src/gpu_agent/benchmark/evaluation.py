@@ -16,7 +16,7 @@ from pydantic import Field, ValidationError
 
 from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.benchmark.metrics import EvaluationLabels, Score
-from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunBinding, RunStatus
+from gpu_agent.contracts import ArtifactRef, RunBinding, RunStatus
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.store import RunStore, reject_symlinks
 
@@ -339,7 +339,7 @@ class EvaluationRunner:
     def run(
         self, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
-        from gpu_agent.benchmark.schedule_authority import seal_schedule
+        from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
 
         if self.schedule_client is None:
             raise ValueError("external schedule authority is required")
@@ -355,7 +355,7 @@ class EvaluationRunner:
             self.schedule_client,
             self.executor._schedule_verifier,
         )
-        self.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
+        activate_schedule(self.store, self.executor._schedule_verifier, run.id)
         return EvaluationRunner._execute(self, run.id, schedule, [], {})
 
     def resume(
@@ -368,19 +368,45 @@ class EvaluationRunner:
         self, run_id: str, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
         run = self.store.load(run_id)
-        if run.kind != "evaluation" or run.status != RunStatus.RUNNING:
-            raise ValueError("only a running evaluation run may be resumed")
+        if run.kind != "evaluation" or run.status not in {
+            RunStatus.QUEUED,
+            RunStatus.RUNNING,
+        }:
+            raise ValueError("only an activatable evaluation run may be resumed")
         if run.binding != self.binding:
             raise ValueError("evaluation run binding does not match controller")
         expected = EvaluationRunner._schedule(self, mode, split, repeats)
-        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
-
-        EvaluationScheduleVerifier.verify(self.executor._schedule_verifier, run_id)
         persisted = EvaluationSchedule.model_validate_json(
             self.store.read(self._one_artifact(run_id, "evaluation/schedule.json"))
         )
         if self._schedule_hash(persisted) != self._schedule_hash(expected) or persisted != expected:
             raise ValueError("evaluation schedule or bindings do not match")
+        from gpu_agent.benchmark.schedule_authority import (
+            EvaluationScheduleVerifier,
+            activate_schedule,
+            seal_schedule,
+        )
+
+        if run.status == RunStatus.QUEUED:
+            receipts = [
+                ref for ref in run.artifact_refs if ref.name == "evaluation/schedule-receipt.json"
+            ]
+            if not receipts:
+                seal_schedule(
+                    self.executor._corpus_family,
+                    self.store,
+                    run_id,
+                    persisted,
+                    self.binding,
+                    self.schedule_client,
+                    self.executor._schedule_verifier,
+                )
+            elif len(receipts) == 1:
+                EvaluationScheduleVerifier.verify(self.executor._schedule_verifier, run_id)
+            else:
+                raise ValueError("evaluation schedule receipt is ambiguous")
+            activate_schedule(self.store, self.executor._schedule_verifier, run_id)
+        EvaluationScheduleVerifier.verify(self.executor._schedule_verifier, run_id)
         attempts = self._attempts(run_id, persisted)
         records = self._records(run_id, persisted, attempts)
         return EvaluationRunner._execute(self, run_id, persisted, records, attempts)

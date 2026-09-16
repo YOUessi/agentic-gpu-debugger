@@ -6,7 +6,7 @@ import os
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 from urllib.parse import urlsplit
 
 from gpu_agent.agent.models import AcquisitionUsage, AgentBudget, DiagnosisResult
@@ -57,6 +57,9 @@ from gpu_agent.verification.models import VerificationResult, VerificationVerdic
 BackendFactory = Callable[[RunStore, Path, Path], ExecutionBackend]
 BENCHMARK_ROOT = Path(__file__).resolve().parents[2] / "benchmarks"
 
+if TYPE_CHECKING:
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
 
 class _ControllerOnlyProvider:
     """Local gate carrier for deterministic A-D evaluation; inference is forbidden."""
@@ -91,12 +94,22 @@ class ApplicationService:
         knowledge: KnowledgeIndex | None = None,
         knowledge_version: str = "",
         _binding: RunBinding | None = None,
+        _evaluation_schedule_verifier: "EvaluationScheduleVerifier | None" = None,
     ) -> None:
         self.store, self.evaluator_root = store, evaluator_root
         self._provider, self._backend_factory = provider, backend_factory
         self.knowledge, self.knowledge_version = knowledge, knowledge_version
         self._binding = _binding
+        self._evaluation_schedule_verifier = _evaluation_schedule_verifier
         self._pricing_attestation: PricingAttestation | None = None
+
+    def _bind_evaluation_schedule_verifier(self, verifier: "EvaluationScheduleVerifier") -> None:
+        if (
+            self._evaluation_schedule_verifier is not None
+            and self._evaluation_schedule_verifier is not verifier
+        ):
+            raise ValueError("evaluation service authority is already bound")
+        self._evaluation_schedule_verifier = verifier
 
     @property
     def binding(self) -> RunBinding | None:
@@ -231,6 +244,14 @@ class ApplicationService:
             or evaluation_unit.mode != mode
         ):
             raise ValueError("evaluation unit requires an evaluation-bound service")
+        if evaluation_unit is not None:
+            if self._evaluation_schedule_verifier is None:
+                raise ValueError("evaluation unit requires signed schedule authority")
+            from gpu_agent.benchmark.schedule_authority import validate_evaluation_unit
+
+            validate_evaluation_unit(
+                self.store, self._evaluation_schedule_verifier, evaluation_unit
+            )
         run = self.store.create_run(
             "diagnosis",
             parent_run_id=(evaluation_unit.evaluation_run_id if evaluation_unit else None),

@@ -250,7 +250,6 @@ def _execute_claimed_test_unit(
     persistence and terminalization are covered by EvaluationRunner tests.
     """
     from gpu_agent.benchmark.evaluation import EvaluationRunner
-    from gpu_agent.contracts import CurrentPhase, RunStatus
 
     binding = executor.service.binding
     assert binding is not None
@@ -288,9 +287,8 @@ def _execute_claimed_test_unit(
     )
     item = schedule.items[0]
     run = runner.store.create_run("evaluation", binding=binding)
-    runner.store.transition(run.id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
-    from gpu_agent.benchmark.schedule_authority import seal_schedule
+    from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
 
     seal_schedule(
         executor._corpus_family,
@@ -301,6 +299,7 @@ def _execute_claimed_test_unit(
         schedule_client_for_test(executor),
         executor._schedule_verifier,
     )
+    activate_schedule(runner.store, executor._schedule_verifier, run.id)
     attempt = runner._attempt(run.id, schedule, item)
     runner._put(
         run.id,
@@ -1073,10 +1072,15 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
     assert rescored.inconclusive_correct is True
     assert rescored.location_correct is True
     copied_run = executor.service.store.create_run("evaluation", binding=binding)
-    executor.service.store.transition(copied_run.id, "RUNNING", "EXECUTING")
     original_refs = {ref.name: ref for ref in evaluation_run.artifact_refs}
+    for name in ("evaluation/schedule.json", "evaluation/schedule-receipt.json"):
+        executor.service.store.put(
+            copied_run.id,
+            name,
+            executor.service.store.read(original_refs[name]),
+            "public",
+        )
     for name in (
-        "evaluation/schedule.json",
         "evaluation/attempts/0.json",
         "evaluation/records/0.json",
     ):
@@ -1086,8 +1090,6 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
             executor.service.store.read(original_refs[name]),
             "public",
         )
-    executor.service.store.transition(copied_run.id, "RUNNING", "FINALIZING")
-    executor.service.store.transition(copied_run.id, "COMPLETED", None)
     copied_ref = next(
         ref
         for ref in executor.service.store.load(copied_run.id).artifact_refs

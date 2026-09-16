@@ -1497,6 +1497,8 @@ class EvaluationExecutor:
                 _corpus_family, service.store
             )
         self._schedule_verifier = _schedule_verifier
+        service.store.bind_evaluation_verifier(_schedule_verifier)
+        service._bind_evaluation_schedule_verifier(_schedule_verifier)
 
     def _ref(self, run: RunManifest, name: str) -> ArtifactRef:
         refs = [ref for ref in run.artifact_refs if ref.name == name]

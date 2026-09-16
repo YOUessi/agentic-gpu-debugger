@@ -11,15 +11,22 @@ import json
 import subprocess
 import tempfile
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from gpu_agent.benchmark.evaluation import EvaluationSchedule, HoldoutScheduleProof
+from gpu_agent.benchmark.evaluation import (
+    EvaluationAttempt,
+    EvaluationExecutionClaim,
+    EvaluationSchedule,
+    EvaluationUnitBinding,
+    HoldoutScheduleProof,
+)
 from gpu_agent.benchmark.ledger import CorpusFamily, CorpusTransaction
 from gpu_agent.benchmark.models import CaseManifest
-from gpu_agent.contracts import RunBinding, RunStatus
+from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunBinding, RunManifest, RunStatus
 from gpu_agent.store import RunStore, reject_symlinks
 
 _OPENSSL = Path("/usr/bin/openssl")
@@ -38,7 +45,7 @@ class CorpusUniverseEntry(BaseModel):
 
 class EvaluationScheduleSigningRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     transaction_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     target_store_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -61,6 +68,13 @@ class EvaluationScheduleSigningRequest(BaseModel):
     corpus_universe_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     authority_profile: Literal["PRODUCTION", "TEST_ONLY"]
     authority_key_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    queued_manifest_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    event_prefix_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    event_prefix_count: int = Field(ge=1)
+    artifact_prefix_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    artifact_prefix_count: int = Field(ge=1)
+    child_inventory_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    child_count: Literal[0] = 0
 
     def signed_bytes(self) -> bytes:
         return _SIGNING_DOMAIN + _canonical(self)
@@ -87,6 +101,26 @@ def _canonical(value: BaseModel) -> bytes:
 
 def _schedule_hash(schedule: EvaluationSchedule) -> str:
     return hashlib.sha256(_canonical(schedule)).hexdigest()
+
+
+def _sequence_hash(domain: bytes, values: Sequence[BaseModel]) -> str:
+    content = json.dumps(
+        [value.model_dump(mode="json") for value in values],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(domain + content).hexdigest()
+
+
+def _queued_manifest_hash(run: RunManifest) -> str:
+    return hashlib.sha256(
+        b"gpu-agent-evaluation-queued-manifest-v1\0" + _canonical(run)
+    ).hexdigest()
+
+
+_EMPTY_CHILD_INVENTORY_HASH = hashlib.sha256(
+    b"gpu-agent-evaluation-child-inventory-v1\0[]"
+).hexdigest()
 
 
 def _store_hash(namespace_hash: str, store: RunStore) -> str:
@@ -231,27 +265,27 @@ def _universe_hash(entries: list[CorpusUniverseEntry]) -> str:
     return hashlib.sha256(b"gpu-agent-corpus-universe-v1\0" + content).hexdigest()
 
 
-def build_signing_request(
+def _assemble_signing_request(
     family: CorpusFamily,
     store: RunStore,
     run_id: str,
     schedule: EvaluationSchedule,
     binding: RunBinding,
     *,
-    corpus_cutoff: int | None = None,
+    corpus_cutoff: int,
+    queued_manifest_hash: str,
+    event_prefix_hash: str,
+    event_prefix_count: int,
+    artifact_prefix_hash: str,
+    artifact_prefix_count: int,
 ) -> EvaluationScheduleSigningRequest:
     profile = family.schedule_authority_profile
     key_hash = family.schedule_public_key_hash
     if profile == "UNCONFIGURED" or key_hash is None:
         raise ValueError("external schedule authority is not configured")
-    run = store.load(run_id)
     pairs = _validate_coverage(schedule)
     if (
-        run.kind != "evaluation"
-        or run.status
-        not in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.COMPLETED, RunStatus.FAILED}
-        or run.binding != binding
-        or binding.purpose != "evaluation"
+        binding.purpose != "evaluation"
         or binding.corpus_ledger_namespace_hash != family.namespace_hash
         or schedule.bindings.commit != binding.repository.commit
         or schedule.bindings.prompt_version != binding.prompt_version
@@ -262,9 +296,7 @@ def build_signing_request(
     visibility: Literal["public", "evaluator"] = (
         "public" if schedule.split == "development" else "evaluator"
     )
-    committed = family.ledger.committed_through()
-    effective_cutoff = len(committed) if corpus_cutoff is None else corpus_cutoff
-    entries, cases = _universe(family, binding, visibility, effective_cutoff)
+    entries, cases = _universe(family, binding, visibility, corpus_cutoff)
     aliases = _validated_holdout_aliases(schedule, store, binding)
     expected_pairs = (
         {case.id: case.template_id for case in cases.values()}
@@ -276,7 +308,7 @@ def build_signing_request(
     digest = _schedule_hash(schedule)
     target = _store_hash(family.namespace_hash, store)
     transaction_id = hashlib.sha256(
-        f"evaluation-schedule-v2:{run_id}:{target}:{digest}".encode()
+        f"evaluation-schedule-v3:{run_id}:{target}:{digest}:{queued_manifest_hash}".encode()
     ).hexdigest()[:32]
     return EvaluationScheduleSigningRequest(
         transaction_id=transaction_id,
@@ -296,11 +328,63 @@ def build_signing_request(
         holdout_aliases=aliases,
         corpus_namespace_hash=family.namespace_hash,
         corpus_visibility=visibility,
-        corpus_cutoff=effective_cutoff,
+        corpus_cutoff=corpus_cutoff,
         corpus_universe=entries,
         corpus_universe_hash=_universe_hash(entries),
         authority_profile=profile,
         authority_key_hash=key_hash,
+        queued_manifest_hash=queued_manifest_hash,
+        event_prefix_hash=event_prefix_hash,
+        event_prefix_count=event_prefix_count,
+        artifact_prefix_hash=artifact_prefix_hash,
+        artifact_prefix_count=artifact_prefix_count,
+        child_inventory_hash=_EMPTY_CHILD_INVENTORY_HASH,
+    )
+
+
+def build_signing_request(
+    family: CorpusFamily,
+    store: RunStore,
+    run_id: str,
+    schedule: EvaluationSchedule,
+    binding: RunBinding,
+    *,
+    corpus_cutoff: int | None = None,
+) -> EvaluationScheduleSigningRequest:
+    """Build the one signable snapshot before any evaluation child can exist."""
+    run = store.load(run_id)
+    schedule_refs = [ref for ref in run.artifact_refs if ref.name == "evaluation/schedule.json"]
+    if (
+        run.kind != "evaluation"
+        or run.status != RunStatus.QUEUED
+        or run.current_phase is not None
+        or run.last_completed_phase is not None
+        or run.binding != binding
+        or len(run.events) != 1
+        or run.events[0].status != RunStatus.QUEUED
+        or run.events[0].phase is not None
+        or len(run.artifact_refs) != 1
+        or len(schedule_refs) != 1
+        or EvaluationSchedule.model_validate_json(store.read(schedule_refs[0])) != schedule
+    ):
+        raise ValueError("signing requires the exact QUEUED evaluation pre-state")
+    if store.children(run_id):
+        raise ValueError("signing requires a zero-child evaluation pre-state")
+    cutoff = len(family.ledger.committed_through()) if corpus_cutoff is None else corpus_cutoff
+    return _assemble_signing_request(
+        family,
+        store,
+        run_id,
+        schedule,
+        binding,
+        corpus_cutoff=cutoff,
+        queued_manifest_hash=_queued_manifest_hash(run),
+        event_prefix_hash=_sequence_hash(b"gpu-agent-evaluation-event-prefix-v1\0", run.events),
+        event_prefix_count=len(run.events),
+        artifact_prefix_hash=_sequence_hash(
+            b"gpu-agent-evaluation-artifact-prefix-v1\0", run.artifact_refs
+        ),
+        artifact_prefix_count=len(run.artifact_refs),
     )
 
 
@@ -337,6 +421,58 @@ def _verify_signature(public_key: Path, receipt: EvaluationScheduleReceipt) -> N
         )
     if result.returncode != 0 or len(result.stdout) > 4096 or len(result.stderr) > 4096:
         raise ValueError("schedule receipt signature is invalid")
+
+
+def _validate_signed_prestate(
+    store: RunStore,
+    run: RunManifest,
+    receipt: EvaluationScheduleReceipt,
+) -> None:
+    request = receipt.request
+    if (
+        run.kind != "evaluation"
+        or run.binding != request.binding
+        or request.child_count != 0
+        or request.child_inventory_hash != _EMPTY_CHILD_INVENTORY_HASH
+        or request.event_prefix_count > len(run.events)
+        or request.artifact_prefix_count >= len(run.artifact_refs)
+    ):
+        raise ValueError("schedule receipt does not bind the evaluation pre-state")
+    events = run.events[: request.event_prefix_count]
+    artifacts = run.artifact_refs[: request.artifact_prefix_count]
+    receipt_ref = run.artifact_refs[request.artifact_prefix_count]
+    queued = run.model_copy(
+        update={
+            "status": RunStatus.QUEUED,
+            "current_phase": None,
+            "last_completed_phase": None,
+            "events": events,
+            "artifact_refs": artifacts,
+        }
+    )
+    if (
+        request.event_prefix_count != 1
+        or events[0].status != RunStatus.QUEUED
+        or events[0].phase is not None
+        or request.event_prefix_hash
+        != _sequence_hash(b"gpu-agent-evaluation-event-prefix-v1\0", events)
+        or request.artifact_prefix_hash
+        != _sequence_hash(b"gpu-agent-evaluation-artifact-prefix-v1\0", artifacts)
+        or request.queued_manifest_hash != _queued_manifest_hash(queued)
+        or receipt_ref.name != "evaluation/schedule-receipt.json"
+    ):
+        raise ValueError("evaluation prefix differs from the signed QUEUED pre-state")
+    if run.status == RunStatus.QUEUED:
+        if (
+            len(run.events) != request.event_prefix_count
+            or len(run.artifact_refs) != request.artifact_prefix_count + 1
+            or store.children(run.id)
+        ):
+            raise ValueError("QUEUED evaluation changed after schedule signing")
+    else:
+        first_active = run.events[request.event_prefix_count]
+        if first_active.status != RunStatus.RUNNING or first_active.phase != CurrentPhase.EXECUTING:
+            raise ValueError("evaluation did not activate from the signed pre-state")
 
 
 class EvaluationScheduleVerifier:
@@ -377,17 +513,134 @@ class EvaluationScheduleVerifier:
         ):
             raise ValueError("schedule receipt uses another authority")
         _verify_signature(self.__public_key, receipt)
-        expected = build_signing_request(
+        _validate_signed_prestate(self.__store, run, receipt)
+        expected = _assemble_signing_request(
             family,
             self.__store,
             run_id,
             schedule,
             run.binding,
             corpus_cutoff=receipt.request.corpus_cutoff,
+            queued_manifest_hash=receipt.request.queued_manifest_hash,
+            event_prefix_hash=receipt.request.event_prefix_hash,
+            event_prefix_count=receipt.request.event_prefix_count,
+            artifact_prefix_hash=receipt.request.artifact_prefix_hash,
+            artifact_prefix_count=receipt.request.artifact_prefix_count,
         )
         if receipt.request != expected:
             raise ValueError("schedule receipt differs from native authority inputs")
         return receipt
+
+
+def _one_ref(run: RunManifest, name: str) -> ArtifactRef:
+    refs = [ref for ref in run.artifact_refs if ref.name == name]
+    if len(refs) != 1:
+        raise ValueError(f"evaluation artifact {name} is missing or ambiguous")
+    return refs[0]
+
+
+def _ordinal_inventory(run: RunManifest, prefix: str) -> list[int]:
+    result: list[int] = []
+    for ref in run.artifact_refs:
+        if not ref.name.startswith(prefix):
+            continue
+        suffix = ref.name.removeprefix(prefix)
+        if not suffix.endswith(".json") or not suffix[:-5].isdigit():
+            raise ValueError("evaluation ordinal artifact name is invalid")
+        result.append(int(suffix[:-5]))
+    if len(result) != len(set(result)):
+        raise ValueError("evaluation ordinal artifact is duplicated")
+    return sorted(result)
+
+
+def validate_evaluation_unit(
+    store: RunStore,
+    verifier: EvaluationScheduleVerifier,
+    unit: EvaluationUnitBinding,
+) -> None:
+    """Revalidate one claimed unit immediately before creating physical work."""
+    EvaluationScheduleVerifier.verify(verifier, unit.evaluation_run_id)
+    parent = store.load(unit.evaluation_run_id)
+    if parent.status != RunStatus.RUNNING or parent.current_phase != CurrentPhase.EXECUTING:
+        raise ValueError("evaluation parent is not RUNNING")
+    schedule = EvaluationSchedule.model_validate_json(
+        store.read(_one_ref(parent, "evaluation/schedule.json"))
+    )
+    if unit.ordinal >= len(schedule.items):
+        raise ValueError("evaluation unit ordinal is outside the signed schedule")
+    schedule_hash = _schedule_hash(schedule)
+    item = schedule.items[unit.ordinal]
+    if schedule.bindings.max_unit_cost_usd is None:
+        raise ValueError("evaluation unit has no frozen reservation")
+    attempt = EvaluationAttempt.model_validate_json(
+        store.read(_one_ref(parent, f"evaluation/attempts/{unit.ordinal}.json"))
+    )
+    expected_attempt = EvaluationAttempt(
+        run_id=parent.id,
+        ordinal=unit.ordinal,
+        schedule_hash=schedule_hash,
+        idempotency_key=hashlib.sha256(
+            f"{parent.id}:{schedule_hash}:{unit.ordinal}".encode()
+        ).hexdigest(),
+        reserved_cost_usd=schedule.bindings.max_unit_cost_usd,
+    )
+    expected_unit = EvaluationUnitBinding(
+        evaluation_run_id=parent.id,
+        ordinal=item.ordinal,
+        schedule_hash=schedule_hash,
+        idempotency_key=expected_attempt.idempotency_key,
+        reserved_cost_usd=expected_attempt.reserved_cost_usd,
+        case_id=item.case_id,
+        template_id=item.template_id,
+        mode=item.mode,
+        repeat=item.repeat,
+        split=item.split,
+        holdout_proof=item.holdout_proof,
+    )
+    attempt_content = expected_attempt.model_dump_json().encode()
+    expected_claim = EvaluationExecutionClaim(
+        run_id=parent.id,
+        ordinal=item.ordinal,
+        schedule_hash=schedule_hash,
+        attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
+    )
+    claim = EvaluationExecutionClaim.model_validate_json(
+        store.read(_one_ref(parent, f"evaluation/claims/{unit.ordinal}.json"))
+    )
+    if unit != expected_unit or attempt != expected_attempt or claim != expected_claim:
+        raise ValueError("evaluation unit is not the claimed signed ordinal")
+    expected_previous = list(range(unit.ordinal))
+    if (
+        _ordinal_inventory(parent, "evaluation/attempts/") != list(range(unit.ordinal + 1))
+        or _ordinal_inventory(parent, "evaluation/claims/") != list(range(unit.ordinal + 1))
+        or _ordinal_inventory(parent, "evaluation/records/") != expected_previous
+    ):
+        raise ValueError("evaluation unit is not the canonical claimed ordinal")
+    children = store.children(parent.id)
+    child_ordinals: list[int] = []
+    for child in children:
+        if child.kind != "diagnosis" or child.status != RunStatus.COMPLETED:
+            raise ValueError("evaluation parent has an unexpected child")
+        child_unit = EvaluationUnitBinding.model_validate_json(
+            store.read(_one_ref(child, "evaluation/unit.json"))
+        )
+        child_ordinals.append(child_unit.ordinal)
+    if sorted(child_ordinals) != expected_previous:
+        raise ValueError("evaluation parent has extra or missing diagnosis children")
+
+
+def activate_schedule(
+    store: RunStore,
+    verifier: EvaluationScheduleVerifier,
+    run_id: str,
+) -> EvaluationScheduleReceipt:
+    """Verify the committed receipt, atomically activate, then verify the active prefix."""
+    receipt = EvaluationScheduleVerifier.verify(verifier, run_id)
+    store.transition(run_id, RunStatus.RUNNING, CurrentPhase.EXECUTING)
+    active = EvaluationScheduleVerifier.verify(verifier, run_id)
+    if active != receipt:
+        raise ValueError("evaluation receipt changed during activation")
+    return active
 
 
 def seal_schedule(

@@ -14,6 +14,7 @@ import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from gpu_agent.contracts import (
     ArtifactRef,
@@ -26,6 +27,9 @@ from gpu_agent.contracts import (
     Visibility,
     new_id,
 )
+
+if TYPE_CHECKING:
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
 
 def reject_symlinks(path: Path) -> None:
@@ -71,6 +75,16 @@ class RunStore:
         for created in reversed(missing):
             sync_directory(created.parent)
         self.visibility = visibility
+        self._evaluation_verifier: EvaluationScheduleVerifier | None = None
+
+    def bind_evaluation_verifier(self, verifier: "EvaluationScheduleVerifier") -> None:
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        if type(verifier) is not EvaluationScheduleVerifier:
+            raise ValueError("evaluation store requires the native schedule verifier")
+        if self._evaluation_verifier is not None and self._evaluation_verifier is not verifier:
+            raise ValueError("evaluation store authority is already bound")
+        self._evaluation_verifier = verifier
 
     def _run_dir(self, run_id: str) -> Path:
         if not re.fullmatch(r"[a-f0-9]{32}", run_id):
@@ -140,6 +154,13 @@ class RunStore:
             raise ValueError("external origin visibility must name a different store")
         if parent_run_id is not None:
             parent = self.load(parent_run_id)
+            if (
+                parent.kind == "evaluation"
+                and parent.binding is not None
+                and parent.binding.purpose == "evaluation"
+                and parent.status == RunStatus.QUEUED
+            ):
+                raise ValueError("children cannot be created under a QUEUED evaluation")
             if parent.binding is None and binding is not None:
                 raise ValueError("a child cannot add a missing parent release binding")
             if parent.binding is not None:
@@ -190,6 +211,17 @@ class RunStore:
                     runs.append(run)
         return runs
 
+    def children(self, parent_run_id: str) -> list[RunManifest]:
+        """Return the exact direct-child inventory for a controller run."""
+        self.load(parent_run_id)
+        children: list[RunManifest] = []
+        for path in sorted(self.root.iterdir()):
+            if path.is_dir() and re.fullmatch(r"[a-f0-9]{32}", path.name):
+                run = self.load(path.name)
+                if run.parent_run_id == parent_run_id:
+                    children.append(run)
+        return children
+
     def fail_interrupted(
         self, run_id: str, reason_code: str = "CONTROLLER_RESTARTED"
     ) -> RunManifest:
@@ -221,6 +253,21 @@ class RunStore:
                 run.status == RunStatus.QUEUED and target == RunStatus.COMPLETED
             ):
                 raise ValueError("invalid transition")
+            if (
+                run.status == RunStatus.QUEUED
+                and target == RunStatus.RUNNING
+                and run.kind == "evaluation"
+                and run.binding is not None
+                and run.binding.purpose == "evaluation"
+            ):
+                if self._evaluation_verifier is None:
+                    raise ValueError("evaluation RUNNING requires signed schedule activation")
+                from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+                try:
+                    EvaluationScheduleVerifier.verify(self._evaluation_verifier, run_id)
+                except (OSError, ValueError):
+                    raise ValueError("evaluation signed schedule activation failed") from None
             if run.status == RunStatus.RUNNING and (
                 target == RunStatus.COMPLETED
                 or (target == RunStatus.RUNNING and active != run.current_phase)
