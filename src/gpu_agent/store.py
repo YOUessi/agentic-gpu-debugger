@@ -105,7 +105,7 @@ class RunStore:
 
         if type(verifier) is not EvaluationScheduleVerifier:
             raise ValueError("evaluation store requires the native schedule verifier")
-        verifier.require_store(self)
+        EvaluationScheduleVerifier.require_store(verifier, self)
         if self._evaluation_verifier is not None and self._evaluation_verifier is not verifier:
             raise ValueError("evaluation store authority is already bound")
         self._evaluation_verifier = verifier
@@ -301,7 +301,7 @@ class RunStore:
 
         if type(verifier) is not EvaluationScheduleVerifier:
             raise ValueError("evaluation activation requires the native verifier")
-        verifier.require_store(self)
+        EvaluationScheduleVerifier.require_store(verifier, self)
         if self._evaluation_verifier is not verifier:
             raise ValueError("evaluation activation verifier is not store-bound")
         with self._lock(run_id):
@@ -338,7 +338,7 @@ class RunStore:
             or type(unit) is not EvaluationUnitBinding
         ):
             raise ValueError("evaluation child requires native authority models")
-        verifier.require_store(self)
+        EvaluationScheduleVerifier.require_store(verifier, self)
         if self._evaluation_verifier is not verifier:
             raise ValueError("evaluation child verifier is not store-bound")
         with self._lock(unit.evaluation_run_id):

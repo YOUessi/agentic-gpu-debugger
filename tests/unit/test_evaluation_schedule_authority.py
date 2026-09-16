@@ -3,6 +3,7 @@ import json
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 import pytest
 from schedule_authority_support import TestScheduleCommitClient, schedule_client_for_test
@@ -92,14 +93,17 @@ def _activate_claimed_first_unit(executor):
     return runner, schedule, run, item, unit
 
 
-def test_verifier_is_pinned_to_exact_store_identity(native_evaluation_executor, tmp_path):
+def test_verifier_is_pinned_to_exact_store_identity(
+    native_evaluation_executor, tmp_path, monkeypatch
+):
     executor = native_evaluation_executor
     verifier = executor._schedule_verifier
-    verifier.require_store(executor.service.store)
+    EvaluationScheduleVerifier.require_store(verifier, executor.service.store)
     _runner_value, binding, _schedule, source_run = _queued_schedule(executor)
 
     other = RunStore(tmp_path / "other-public")
     other.create_run("evaluation", binding=binding, _run_id=source_run.id)
+    monkeypatch.setattr(verifier, "require_store", lambda _store: None)
     with pytest.raises(ValueError, match="store identity"):
         other.bind_evaluation_verifier(verifier)
     with pytest.raises(ValueError, match="store identity"):
@@ -109,11 +113,11 @@ def test_verifier_is_pinned_to_exact_store_identity(native_evaluation_executor, 
     shutil.copytree(executor.service.store.root, copied_root)
     copied = RunStore(copied_root)
     with pytest.raises(ValueError, match="store identity"):
-        verifier.require_store(copied)
+        EvaluationScheduleVerifier.require_store(verifier, copied)
 
     wrong_visibility = RunStore(executor.service.store.root, visibility="evaluator")
     with pytest.raises(ValueError, match="store identity"):
-        verifier.require_store(wrong_visibility)
+        EvaluationScheduleVerifier.require_store(verifier, wrong_visibility)
 
     symlink = tmp_path / "store-link"
     symlink.symlink_to(executor.service.store.root, target_is_directory=True)
@@ -130,16 +134,17 @@ def test_concurrent_direct_service_calls_reserve_one_evaluation_child(
     calls = 0
     guard = threading.Lock()
     start = threading.Barrier(2)
-    validation_barrier = threading.Barrier(2)
-    from gpu_agent.benchmark import schedule_authority
+    lock_barrier = threading.Barrier(2)
+    native_lock = runner.store._lock
 
-    native_validate = schedule_authority.validate_evaluation_unit
+    @contextmanager
+    def synchronized_parent_lock(run_id):
+        if run_id == run.id:
+            lock_barrier.wait()
+        with native_lock(run_id):
+            yield
 
-    def synchronized_validate(*args, **kwargs):
-        native_validate(*args, **kwargs)
-        validation_barrier.wait()
-
-    monkeypatch.setattr(schedule_authority, "validate_evaluation_unit", synchronized_validate)
+    monkeypatch.setattr(runner.store, "_lock", synchronized_parent_lock)
 
     def counted_factory(*args, **kwargs):
         nonlocal calls

@@ -506,7 +506,7 @@ class EvaluationScheduleVerifier:
             raise ValueError("evaluation verifier store identity differs")
 
     def verify(self, run_id: str) -> EvaluationScheduleReceipt:
-        self.require_store(self.__store)
+        EvaluationScheduleVerifier.require_store(self, self.__store)
         family = CorpusFamily.open(self.__family_root)
         run = self.__store.load(run_id)
         schedule_refs = [ref for ref in run.artifact_refs if ref.name == "evaluation/schedule.json"]
@@ -572,7 +572,7 @@ def _validate_evaluation_unit(
     unit: EvaluationUnitBinding,
 ) -> None:
     """Revalidate one claimed unit immediately before creating physical work."""
-    verifier.require_store(store)
+    EvaluationScheduleVerifier.require_store(verifier, store)
     EvaluationScheduleVerifier.verify(verifier, unit.evaluation_run_id)
     parent = store.load(unit.evaluation_run_id)
     if parent.status != RunStatus.RUNNING or parent.current_phase != CurrentPhase.EXECUTING:
@@ -643,22 +643,13 @@ def _validate_evaluation_unit(
         raise ValueError("evaluation parent has extra or missing diagnosis children")
 
 
-def validate_evaluation_unit(
-    store: RunStore,
-    verifier: EvaluationScheduleVerifier,
-    unit: EvaluationUnitBinding,
-) -> None:
-    """Compatibility entry that still dispatches through the concrete verifier."""
-    EvaluationScheduleVerifier.validate_unit(verifier, store, unit)
-
-
 def activate_schedule(
     store: RunStore,
     verifier: EvaluationScheduleVerifier,
     run_id: str,
 ) -> EvaluationScheduleReceipt:
     """Verify the committed receipt, atomically activate, then verify the active prefix."""
-    verifier.require_store(store)
+    EvaluationScheduleVerifier.require_store(verifier, store)
     receipt = EvaluationScheduleVerifier.verify(verifier, run_id)
     store.activate_evaluation(verifier, run_id)
     active = EvaluationScheduleVerifier.verify(verifier, run_id)
@@ -678,7 +669,7 @@ def seal_schedule(
 ) -> EvaluationScheduleReceipt:
     if client is None:
         raise ValueError("external schedule authority is required")
-    verifier.require_store(store)
+    EvaluationScheduleVerifier.require_store(verifier, store)
     request = build_signing_request(family, store, run_id, schedule, binding)
     receipt = client.commit(request)
     if receipt.request != request or receipt.state != "COMMITTED":

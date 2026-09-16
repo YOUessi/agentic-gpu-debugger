@@ -104,7 +104,9 @@ class ApplicationService:
         self._pricing_attestation: PricingAttestation | None = None
 
     def _bind_evaluation_schedule_verifier(self, verifier: "EvaluationScheduleVerifier") -> None:
-        verifier.require_store(self.store)
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        EvaluationScheduleVerifier.require_store(verifier, self.store)
         if (
             self._evaluation_schedule_verifier is not None
             and self._evaluation_schedule_verifier is not verifier
