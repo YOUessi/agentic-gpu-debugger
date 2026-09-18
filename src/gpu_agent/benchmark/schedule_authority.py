@@ -234,6 +234,15 @@ def _bind_reserved_schedule_leased(
     schedule: EvaluationSchedule,
     binding: RunBinding,
 ) -> EvaluationCutoffReservation:
+    run = lease.load()
+    if (
+        run.kind != "evaluation"
+        or run.binding != binding
+        or run.status != RunStatus.QUEUED
+        or run.current_phase is not None
+        or run.last_completed_phase is not None
+    ):
+        raise ValueError("schedule binding requires the exact QUEUED evaluation state")
     reservation = family.ledger.evaluation_cutoff_reservation(lease, binding)
     _validate_reservation(
         family,
@@ -787,6 +796,19 @@ class EvaluationScheduleVerifier:
         with self.__store.evaluation_run_lease(run_id) as lease:
             return EvaluationScheduleVerifier._verify_leased(self, lease)
 
+    def verify_queued(self, run_id: str) -> EvaluationScheduleReceipt:
+        """Verify status and receipt atomically for a still-QUEUED evaluation."""
+        EvaluationScheduleVerifier.require_store(self, self.__store)
+        with self.__store.evaluation_run_lease(run_id) as lease:
+            run = lease.load()
+            if (
+                run.status != RunStatus.QUEUED
+                or run.current_phase is not None
+                or run.last_completed_phase is not None
+            ):
+                raise ValueError("schedule recovery requires the exact QUEUED state")
+            return EvaluationScheduleVerifier._verify_leased(self, lease)
+
     def _verify_leased(self, lease: EvaluationRunLease) -> EvaluationScheduleReceipt:
         EvaluationScheduleVerifier.require_store(self, lease.store)
         family = CorpusFamily.open(self.__family_root)
@@ -952,6 +974,37 @@ def activate_schedule(
     return active
 
 
+def verify_existing_schedule_binding(
+    family: CorpusFamily,
+    store: RunStore,
+    run_id: str,
+    schedule: EvaluationSchedule,
+    binding: RunBinding,
+    verifier: EvaluationScheduleVerifier,
+) -> EvaluationScheduleReceipt:
+    """Read-only validation for resuming an already active evaluation."""
+    EvaluationScheduleVerifier.require_store(verifier, store)
+    with store.evaluation_run_lease(run_id) as lease:
+        run = lease.load()
+        if (
+            run.kind != "evaluation"
+            or run.binding != binding
+            or run.status != RunStatus.RUNNING
+            or run.current_phase != CurrentPhase.EXECUTING
+        ):
+            raise ValueError("existing schedule validation requires a RUNNING evaluation")
+        schedule_refs = [ref for ref in run.artifact_refs if ref.name == "evaluation/schedule.json"]
+        if (
+            len(schedule_refs) != 1
+            or EvaluationSchedule.model_validate_json(lease.read(schedule_refs[0])) != schedule
+        ):
+            raise ValueError("active evaluation schedule differs from recovery input")
+        receipt = EvaluationScheduleVerifier._verify_leased(verifier, lease)
+        reservation = family.ledger.evaluation_cutoff_reservation(lease, binding)
+        _validate_reservation(family, lease, schedule, binding, reservation)
+        return receipt
+
+
 def seal_schedule(
     family: CorpusFamily,
     store: RunStore,
@@ -971,15 +1024,8 @@ def seal_schedule(
         # A concurrent exact seal may have installed the receipt after binding but
         # before this signing snapshot acquired the run lease. Only a fully verified
         # receipt for this exact caller input makes that race idempotent.
-        current = store.load(run_id)
-        if (
-            current.status != RunStatus.QUEUED
-            or current.current_phase is not None
-            or current.last_completed_phase is not None
-        ):
-            raise build_error
         try:
-            committed = EvaluationScheduleVerifier.verify(verifier, run_id)
+            committed = EvaluationScheduleVerifier.verify_queued(verifier, run_id)
         except ValueError:
             raise build_error from None
         if (
@@ -998,4 +1044,4 @@ def seal_schedule(
         receipt.model_dump_json().encode(),
         "public",
     )
-    return EvaluationScheduleVerifier.verify(verifier, run_id)
+    return EvaluationScheduleVerifier.verify_queued(verifier, run_id)

@@ -481,18 +481,22 @@ class EvaluationRunner:
             or persisted != expected
         ):
             raise ValueError("evaluation schedule or bindings do not match")
-        from gpu_agent.benchmark.schedule_authority import bind_reserved_schedule
-
-        bind_reserved_schedule(
-            self.executor._corpus_family, self.store, run_id, persisted, self.binding
-        )
         from gpu_agent.benchmark.schedule_authority import (
             EvaluationScheduleVerifier,
             activate_schedule,
+            bind_reserved_schedule,
             seal_schedule,
+            verify_existing_schedule_binding,
         )
 
         if run.status == RunStatus.QUEUED:
+            bind_reserved_schedule(
+                self.executor._corpus_family,
+                self.store,
+                run_id,
+                persisted,
+                self.binding,
+            )
             receipts = [
                 ref for ref in run.artifact_refs if ref.name == "evaluation/schedule-receipt.json"
             ]
@@ -511,6 +515,15 @@ class EvaluationRunner:
             else:
                 raise ValueError("evaluation schedule receipt is ambiguous")
             activate_schedule(self.store, self.executor._schedule_verifier, run_id)
+        else:
+            verify_existing_schedule_binding(
+                self.executor._corpus_family,
+                self.store,
+                run_id,
+                persisted,
+                self.binding,
+                self.executor._schedule_verifier,
+            )
         EvaluationScheduleVerifier.verify(self.executor._schedule_verifier, run_id)
         attempts = EvaluationRunner._attempts(self, run_id, persisted)
         records = EvaluationRunner._records(self, run_id, persisted, attempts)

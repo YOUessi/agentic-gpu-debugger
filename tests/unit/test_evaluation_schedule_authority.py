@@ -256,6 +256,46 @@ def test_concurrent_activation_is_exactly_once_and_wrong_phases_fail(
         activate_schedule(runner.store, executor._schedule_verifier, run.id)
 
 
+def test_running_parent_rejects_exact_schedule_rebind(native_evaluation_executor):
+    executor = native_evaluation_executor
+    runner, binding, schedule, run = _queued_schedule(executor)
+    seal_schedule(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        schedule,
+        binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
+    )
+    activate_schedule(runner.store, executor._schedule_verifier, run.id)
+
+    with pytest.raises(ValueError, match="QUEUED"):
+        bind_reserved_schedule(
+            executor._corpus_family,
+            runner.store,
+            run.id,
+            schedule,
+            binding,
+        )
+
+
+def test_queued_exact_schedule_rebind_is_idempotent(native_evaluation_executor):
+    executor = native_evaluation_executor
+    runner, binding, schedule, run = _queued_schedule(executor)
+
+    rebound = bind_reserved_schedule(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        schedule,
+        binding,
+    )
+
+    assert rebound.schedule_hash == runner._schedule_hash(schedule)
+    assert runner.store.load(run.id).status == RunStatus.QUEUED
+
+
 def test_signing_request_requires_queued_parent(native_evaluation_executor):
     executor = native_evaluation_executor
     runner, binding, schedule, run = _queued_schedule(executor)
@@ -459,6 +499,37 @@ def test_resume_recovers_receipt_before_running_and_running_before_work(
         assert runner.store.load(run.id).status == RunStatus.COMPLETED
 
 
+def test_running_resume_uses_read_only_existing_binding(native_evaluation_executor, monkeypatch):
+    import gpu_agent.benchmark.schedule_authority as schedule_authority
+    from gpu_agent.benchmark.ledger import CorpusLedger
+
+    executor = native_evaluation_executor
+    runner, binding, schedule, run = _queued_schedule(executor)
+    seal_schedule(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        schedule,
+        binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
+    )
+    activate_schedule(runner.store, executor._schedule_verifier, run.id)
+
+    def reject_bind(*args, **kwargs):
+        raise AssertionError("RUNNING resume must not call the schedule bind API")
+
+    def reject_ledger_write(*args, **kwargs):
+        raise AssertionError("RUNNING resume must not write the corpus ledger")
+
+    monkeypatch.setattr(schedule_authority, "bind_reserved_schedule", reject_bind)
+    monkeypatch.setattr(CorpusLedger, "_save", reject_ledger_write)
+    result = runner.resume(run.id, "A", "development", 3)
+
+    assert result.executed_units == len(schedule.items)
+    assert runner.store.load(run.id).status == RunStatus.COMPLETED
+
+
 def test_generic_child_entry_rejects_active_evaluation(native_evaluation_executor):
     executor = native_evaluation_executor
     runner, binding, schedule, run = _queued_schedule(executor)
@@ -636,6 +707,41 @@ def test_concurrent_exact_seal_and_crash_retry_are_idempotent(
         receipts = list(pool.map(lambda _: seal_schedule(*arguments), range(2)))
     assert receipts[0] == receipts[1]
     assert executor._schedule_verifier.verify(run.id) == receipts[0]
+
+
+def test_seal_recovery_rejects_activation_before_queued_receipt_check(
+    native_evaluation_executor, monkeypatch
+):
+    executor = native_evaluation_executor
+    runner, binding, schedule, run = _queued_schedule(executor)
+    arguments = (
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        schedule,
+        binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
+    )
+    seal_schedule(*arguments)
+    native_verify_queued = EvaluationScheduleVerifier.verify_queued
+    raced = False
+
+    def activate_before_queued_check(self, run_id):
+        nonlocal raced
+        if not raced:
+            raced = True
+            activate_schedule(runner.store, executor._schedule_verifier, run_id)
+        return native_verify_queued(self, run_id)
+
+    monkeypatch.setattr(
+        EvaluationScheduleVerifier,
+        "verify_queued",
+        activate_before_queued_check,
+    )
+    with pytest.raises(ValueError, match="QUEUED"):
+        seal_schedule(*arguments)
+    assert runner.store.load(run.id).status == RunStatus.RUNNING
 
 
 def test_family_pinned_key_rejects_self_signed_receipt(native_evaluation_executor, tmp_path):

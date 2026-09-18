@@ -847,6 +847,15 @@ class CorpusLedger:
         fd, state = CorpusLedger._locked_state(self)
         finalized = False
         try:
+            run = lease.load()
+            if (
+                run.kind != "evaluation"
+                or run.binding != binding
+                or run.status != RunStatus.QUEUED
+                or run.current_phase is not None
+                or run.last_completed_phase is not None
+            ):
+                raise ValueError("schedule binding requires the exact QUEUED evaluation state")
             raw_reservations = state["evaluation_reservations"]
             assert isinstance(raw_reservations, list)
             match: tuple[int, EvaluationCutoffReservation] | None = None
