@@ -501,9 +501,8 @@ def test_swap_after_lock_acquisition_cannot_create_a_reservation(
         _reservation(executor, run.id)
 
 
-@pytest.mark.parametrize("swap_after_save", [1, 2])
-def test_save_then_directory_swap_leaves_only_prepared_reservation(
-    native_evaluation_executor, tmp_path, monkeypatch, swap_after_save
+def test_prepared_save_then_directory_swap_leaves_unusable_reservation(
+    native_evaluation_executor, tmp_path, monkeypatch
 ):
     import json
 
@@ -524,7 +523,7 @@ def test_save_then_directory_swap_leaves_only_prepared_reservation(
         nonlocal save_count
         native_save(state)
         save_count += 1
-        if save_count == swap_after_save:
+        if save_count == 1:
             canonical.rename(displaced)
             shutil.copytree(displaced, canonical)
 
@@ -552,6 +551,99 @@ def test_save_then_directory_swap_leaves_only_prepared_reservation(
     displaced.rename(canonical)
     with pytest.raises(ValueError, match="unavailable"):
         _reservation(executor, run.id)
+
+
+def test_committed_save_is_the_final_reservation_linearization_point(
+    native_evaluation_executor, tmp_path, monkeypatch
+):
+    """A post-replace path swap cannot turn success into failed-but-usable state."""
+    from gpu_agent.benchmark.schedule_authority import (
+        rebuild_reserved_schedule,
+        reserve_evaluation_cutoff,
+    )
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    ledger = executor._corpus_family.ledger
+    native_save = ledger._save
+    canonical = runner.store.root / run.id
+    displaced = tmp_path / "committed-original-run"
+    save_count = 0
+
+    def save_swap_then_reject_rollback(state):
+        nonlocal save_count
+        save_count += 1
+        if save_count == 3:
+            raise OSError("rollback must never be needed")
+        native_save(state)
+        if save_count == 2:
+            canonical.rename(displaced)
+            shutil.copytree(displaced, canonical)
+
+    monkeypatch.setattr(ledger, "_save", save_swap_then_reject_rollback)
+    reservation = reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    assert reservation.state == "COMMITTED"
+    assert save_count == 2
+    with pytest.raises(ValueError, match="prestate"):
+        rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)
+
+    shutil.rmtree(canonical)
+    displaced.rename(canonical)
+    assert _reservation(executor, run.id) == reservation
+
+
+def test_uncertain_committed_save_exact_readback_returns_success(
+    native_evaluation_executor, monkeypatch
+):
+    from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    ledger = executor._corpus_family.ledger
+    native_save = ledger._save
+    save_count = 0
+
+    def durable_save_then_fsync_error(state):
+        nonlocal save_count
+        save_count += 1
+        native_save(state)
+        if save_count == 2:
+            raise OSError("simulated post-replace fsync error")
+
+    monkeypatch.setattr(ledger, "_save", durable_save_then_fsync_error)
+    reservation = reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    assert reservation.state == "COMMITTED"
+    assert _reservation(executor, run.id) == reservation
 
 
 @pytest.mark.parametrize("unsafe_target", ["root", "run"])

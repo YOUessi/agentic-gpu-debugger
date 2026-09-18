@@ -442,6 +442,23 @@ class CorpusLedger:
         finally:
             Path(temporary).unlink(missing_ok=True)
 
+    def _exact_reservation_is_durable(self, expected: EvaluationCutoffReservation) -> bool:
+        """Resolve an uncertain atomic-save outcome without reacquiring the ledger lock."""
+        try:
+            state = json.loads(read_regular(self.root / "transactions.json", 16 * 1024 * 1024))
+            raw_reservations = state.get("evaluation_reservations")
+            if state.get("schema_version") != 3 or not isinstance(raw_reservations, list):
+                return False
+            matches = [
+                self._reservation(raw)
+                for raw in raw_reservations
+                if isinstance(raw, dict)
+                and raw.get("evaluation_run_id") == expected.evaluation_run_id
+            ]
+            return matches == [expected]
+        except (OSError, ValueError, TypeError):
+            return False
+
     @staticmethod
     def _transaction(value: object) -> CorpusTransaction:
         try:
@@ -614,6 +631,7 @@ class CorpusLedger:
         """Two-phase reservation under the global lease -> ledger lock order."""
         lease.validate()
         fd, state = self._locked_state()
+        finalized = False
         try:
             prestate = self._reservation_prestate(lease, binding, require_pristine=True)
             raw_reservations = state["evaluation_reservations"]
@@ -681,23 +699,29 @@ class CorpusLedger:
                 if observed.state == "COMMITTED":
                     return observed
             committed = prepared.model_copy(update={"state": "COMMITTED"})
+            # This is the last fallible validation before the authority write.
+            # A successful exact COMMITTED replace is the sole linearization point.
             lease.validate()
             raw_reservations[index] = committed.model_dump(mode="json")
             try:
                 self._save(state)
-                lease.validate()
             except BaseException:
-                raw_reservations[index] = prepared.model_dump(mode="json")
-                try:
-                    self._save(state)
-                except BaseException:
-                    # Preserve the original error. A COMMITTED value is still unusable
-                    # unless a reader can revalidate this exact leased prestate.
-                    pass
-                raise
+                # os.replace may have installed the exact state before directory fsync
+                # reported an error. Under the held ledger flock, exact read-back turns
+                # that uncertain outcome into success instead of a failed-but-usable
+                # authority record.
+                if not self._exact_reservation_is_durable(committed):
+                    raise
+            finalized = True
             return committed
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                if not finalized:
+                    raise
+            if finalized:
+                lease._finalize_authority()
 
     def evaluation_cutoff_reservation(
         self, lease: EvaluationRunLease, binding: RunBinding

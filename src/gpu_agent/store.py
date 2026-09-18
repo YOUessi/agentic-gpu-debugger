@@ -119,6 +119,11 @@ class EvaluationRunLease:
         self._lock_fd = lock_fd
         self.identity = identity
         self._active = True
+        self._authority_finalized = False
+
+    def _finalize_authority(self) -> None:
+        """Mark a caller's durable authority write as the final linearization point."""
+        self._authority_finalized = True
 
     @staticmethod
     def _same(left: os.stat_result, right: os.stat_result) -> bool:
@@ -349,17 +354,21 @@ class RunStore:
             lease = EvaluationRunLease(self, run_id, root_fd, run_fd, lock_fd, identity)
             lease.validate()
             yield lease
-            lease.validate()
+            if not lease._authority_finalized:
+                lease.validate()
         except OSError as exc:
             raise ValueError("evaluation run lease is unavailable or unsafe") from exc
         finally:
             if lease is not None:
                 lease._active = False
-            if lock_fd >= 0:
-                os.close(lock_fd)
-            if run_fd >= 0:
-                os.close(run_fd)
-            os.close(root_fd)
+            for descriptor in (lock_fd, run_fd, root_fd):
+                if descriptor < 0:
+                    continue
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    if lease is None or not lease._authority_finalized:
+                        raise
 
     def _save(self, manifest: RunManifest) -> None:
         directory = self._run_dir(manifest.id)
