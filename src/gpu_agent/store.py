@@ -42,6 +42,15 @@ class RunStoreIdentity:
     visibility: Visibility
 
 
+@dataclass(frozen=True)
+class RunDirectoryIdentity:
+    resolved_path: str
+    device: int
+    inode: int
+    lock_device: int
+    lock_inode: int
+
+
 def reject_symlinks(path: Path) -> None:
     for part in [*reversed(path.parents), path]:
         if part.is_symlink():
@@ -127,6 +136,105 @@ class RunStore:
                 raise ValueError("lock must be a regular file")
             fcntl.flock(fd, fcntl.LOCK_EX)
             yield
+        finally:
+            os.close(fd)
+
+    def evaluation_run_identity(
+        self,
+        run_id: str,
+        *,
+        locked: RunDirectoryIdentity | None = None,
+        lock_fd: int | None = None,
+    ) -> RunDirectoryIdentity:
+        """Resolve one canonical run directory and lock inode without following links."""
+        path = self._run_dir(run_id)
+        root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        run_fd = -1
+        observed_lock_fd = -1
+        try:
+            root_info = os.fstat(root_fd)
+            store_identity = self.identity
+            if (root_info.st_dev, root_info.st_ino) != (
+                store_identity.device,
+                store_identity.inode,
+            ):
+                raise ValueError("run store root changed during identity validation")
+            run_fd = os.open(
+                run_id,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+            run_info = os.fstat(run_fd)
+            canonical_run = os.stat(run_id, dir_fd=root_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(run_info.st_mode)
+                or not stat.S_ISDIR(canonical_run.st_mode)
+                or (run_info.st_dev, run_info.st_ino)
+                != (canonical_run.st_dev, canonical_run.st_ino)
+            ):
+                raise ValueError("canonical evaluation run directory changed")
+            observed_lock_fd = os.open(
+                ".lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=run_fd
+            )
+            observed_lock = os.fstat(observed_lock_fd)
+            relative_lock = os.stat(".lock", dir_fd=run_fd, follow_symlinks=False)
+            canonical_lock = os.stat(f"{run_id}/.lock", dir_fd=root_fd, follow_symlinks=False)
+            if (
+                not stat.S_ISREG(observed_lock.st_mode)
+                or observed_lock.st_mode & 0o077
+                or (observed_lock.st_dev, observed_lock.st_ino)
+                != (relative_lock.st_dev, relative_lock.st_ino)
+                or (observed_lock.st_dev, observed_lock.st_ino)
+                != (canonical_lock.st_dev, canonical_lock.st_ino)
+            ):
+                raise ValueError("canonical evaluation run lock changed")
+            if lock_fd is not None:
+                held_lock = os.fstat(lock_fd)
+                if (held_lock.st_dev, held_lock.st_ino) != (
+                    observed_lock.st_dev,
+                    observed_lock.st_ino,
+                ):
+                    raise ValueError("held evaluation run lock is no longer canonical")
+            identity = RunDirectoryIdentity(
+                resolved_path=str(path.resolve(strict=True)),
+                device=run_info.st_dev,
+                inode=run_info.st_ino,
+                lock_device=observed_lock.st_dev,
+                lock_inode=observed_lock.st_ino,
+            )
+            final_run = os.stat(run_id, dir_fd=root_fd, follow_symlinks=False)
+            final_lock = os.stat(f"{run_id}/.lock", dir_fd=root_fd, follow_symlinks=False)
+            if (
+                (final_run.st_dev, final_run.st_ino) != (identity.device, identity.inode)
+                or (final_lock.st_dev, final_lock.st_ino)
+                != (identity.lock_device, identity.lock_inode)
+                or (locked is not None and identity != locked)
+            ):
+                raise ValueError("evaluation run identity changed")
+            return identity
+        except OSError as exc:
+            raise ValueError("evaluation run identity is unavailable or unsafe") from exc
+        finally:
+            if observed_lock_fd >= 0:
+                os.close(observed_lock_fd)
+            if run_fd >= 0:
+                os.close(run_fd)
+            os.close(root_fd)
+
+    @contextmanager
+    def evaluation_run_lock(self, run_id: str) -> Iterator[RunDirectoryIdentity]:
+        """Hold and continuously pin the canonical in-run lock and directory inodes."""
+        lock_path = self._run_dir(run_id) / ".lock"
+        reject_symlinks(lock_path)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
+                raise ValueError("evaluation run lock is unsafe")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            identity = self.evaluation_run_identity(run_id, lock_fd=fd)
+            yield identity
+            self.evaluation_run_identity(run_id, locked=identity, lock_fd=fd)
         finally:
             os.close(fd)
 

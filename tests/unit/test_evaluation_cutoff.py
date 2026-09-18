@@ -1,5 +1,7 @@
 """Adversarial recovery checks for the immutable corpus cutoff."""
 
+import shutil
+
 import pytest
 from schedule_authority_support import schedule_client_for_test
 
@@ -364,7 +366,7 @@ def test_reservation_rejects_rebuilt_run_in_another_store(native_evaluation_exec
     schedule = rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)
     copied = RunStore(tmp_path / "copied-evaluation-store")
     copied.create_run("evaluation", binding=binding, _run_id=run.id)
-    with pytest.raises(ValueError, match="prestate"):
+    with pytest.raises(ValueError, match="identity|prestate"):
         bind_reserved_schedule(executor._corpus_family, copied, run.id, schedule, binding)
 
 
@@ -412,3 +414,83 @@ def test_wrong_schedule_cannot_win_or_poison_first_hash_cas(native_evaluation_ex
     assert future.id == "case_0101"
     bound = bind_reserved_schedule(executor._corpus_family, runner.store, run.id, correct, binding)
     assert bound.schedule_hash == runner._schedule_hash(correct)
+
+
+def test_copytree_replacement_cannot_reuse_a_reserved_run_inode(
+    native_evaluation_executor, tmp_path
+):
+    from gpu_agent.benchmark.schedule_authority import (
+        rebuild_reserved_schedule,
+        reserve_evaluation_cutoff,
+    )
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    reservation = reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    original = runner.store.root / run.id
+    displaced = tmp_path / "displaced-original-run"
+    original.rename(displaced)
+    shutil.copytree(displaced, original)
+
+    with pytest.raises(ValueError, match="prestate"):
+        rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)
+    observed = executor._corpus_family.ledger.evaluation_cutoff_reservation(run.id)
+    assert observed == reservation and observed.schedule_hash is None
+
+
+def test_swap_after_lock_acquisition_cannot_create_a_reservation(
+    native_evaluation_executor, tmp_path, monkeypatch
+):
+    from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    ledger = executor._corpus_family.ledger
+    original_locked_state = ledger._locked_state
+    swapped = False
+
+    def swap_run_then_lock_ledger():
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            canonical = runner.store.root / run.id
+            displaced = tmp_path / "locked-original-run"
+            canonical.rename(displaced)
+            shutil.copytree(displaced, canonical)
+        return original_locked_state()
+
+    monkeypatch.setattr(ledger, "_locked_state", swap_run_then_lock_ledger)
+    with pytest.raises(ValueError, match="identity|canonical"):
+        reserve_evaluation_cutoff(
+            executor._corpus_family,
+            runner.store,
+            run.id,
+            binding,
+            selection="D",
+            modes=["D"],
+            split="development",
+            repeats=3,
+            random_seed=runner.random_seed,
+            max_cost_usd=runner.bindings.max_cost_usd,
+            max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+        )
+    with pytest.raises(ValueError, match="unavailable"):
+        ledger.evaluation_cutoff_reservation(run.id)

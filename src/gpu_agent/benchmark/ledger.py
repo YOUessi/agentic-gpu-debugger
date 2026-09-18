@@ -14,7 +14,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.contracts import RunBinding, RunManifest, RunStatus, StateEvent, Visibility, new_id
-from gpu_agent.store import RunStore, read_regular, reject_symlinks, sync_directory
+from gpu_agent.store import (
+    RunDirectoryIdentity,
+    RunStore,
+    read_regular,
+    reject_symlinks,
+    sync_directory,
+)
 
 
 class _FamilyConfig(BaseModel):
@@ -51,6 +57,11 @@ class _EvaluationReservationPrestate(BaseModel):
     target_store_device: int = Field(ge=0)
     target_store_inode: int = Field(ge=1)
     target_visibility: Visibility
+    target_run_path: str
+    target_run_device: int = Field(ge=0)
+    target_run_inode: int = Field(ge=1)
+    target_run_lock_device: int = Field(ge=0)
+    target_run_lock_inode: int = Field(ge=1)
     queued_manifest_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     event_prefix_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     event_prefix_count: Literal[1] = 1
@@ -64,13 +75,18 @@ class EvaluationCutoffReservation(BaseModel):
     """Controller-owned snapshot of the corpus head for one evaluation run."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     target_store_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     target_store_root: str
     target_store_device: int = Field(ge=0)
     target_store_inode: int = Field(ge=1)
     target_visibility: Visibility
+    target_run_path: str
+    target_run_device: int = Field(ge=0)
+    target_run_inode: int = Field(ge=1)
+    target_run_lock_device: int = Field(ge=0)
+    target_run_lock_inode: int = Field(ge=1)
     binding: RunBinding
     selection: EvaluationSelectionName
     modes: list[EvaluationModeName]
@@ -500,6 +516,7 @@ class CorpusLedger:
         binding: RunBinding,
         *,
         require_pristine: bool,
+        locked_run: RunDirectoryIdentity | None = None,
     ) -> _EvaluationReservationPrestate:
         """Reconstruct the exact zero-artifact QUEUED state captured at reservation.
 
@@ -510,6 +527,7 @@ class CorpusLedger:
         validates immutable prefixes and never mutates the reservation.
         """
         identity = store.identity
+        run_identity = store.evaluation_run_identity(run_id, locked=locked_run)
         run = RunStore.load(store, run_id)
         if (
             run.kind != "evaluation"
@@ -540,6 +558,11 @@ class CorpusLedger:
             target_store_device=identity.device,
             target_store_inode=identity.inode,
             target_visibility=identity.visibility,
+            target_run_path=run_identity.resolved_path,
+            target_run_device=run_identity.device,
+            target_run_inode=run_identity.inode,
+            target_run_lock_device=run_identity.lock_device,
+            target_run_lock_inode=run_identity.lock_inode,
             queued_manifest_hash=_reservation_manifest_hash(initial),
             event_prefix_hash=_reservation_sequence_hash(_RESERVATION_EVENT_DOMAIN, initial_events),
             artifact_prefix_hash=_reservation_sequence_hash(_RESERVATION_ARTIFACT_DOMAIN, []),
@@ -554,15 +577,25 @@ class CorpusLedger:
         binding: RunBinding,
         *,
         require_pristine: bool = False,
+        locked_run: RunDirectoryIdentity | None = None,
     ) -> None:
         observed = CorpusLedger._reservation_prestate(
-            store, run_id, binding, require_pristine=require_pristine
+            store,
+            run_id,
+            binding,
+            require_pristine=require_pristine,
+            locked_run=locked_run,
         )
         expected = _EvaluationReservationPrestate(
             target_store_root=reservation.target_store_root,
             target_store_device=reservation.target_store_device,
             target_store_inode=reservation.target_store_inode,
             target_visibility=reservation.target_visibility,
+            target_run_path=reservation.target_run_path,
+            target_run_device=reservation.target_run_device,
+            target_run_inode=reservation.target_run_inode,
+            target_run_lock_device=reservation.target_run_lock_device,
+            target_run_lock_inode=reservation.target_run_lock_inode,
             queued_manifest_hash=reservation.queued_manifest_hash,
             event_prefix_hash=reservation.event_prefix_hash,
             artifact_prefix_hash=reservation.artifact_prefix_hash,
@@ -592,11 +625,15 @@ class CorpusLedger:
         """Bind an existing pristine run to the current head under one ledger flock."""
         # Global order: target RunStore run flock, then CorpusLedger flock.  No
         # ledger-held path acquires a RunStore flock.
-        with store._lock(evaluation_run_id):
+        with store.evaluation_run_lock(evaluation_run_id) as locked_run:
             fd, state = self._locked_state()
             try:
                 prestate = self._reservation_prestate(
-                    store, evaluation_run_id, binding, require_pristine=True
+                    store,
+                    evaluation_run_id,
+                    binding,
+                    require_pristine=True,
+                    locked_run=locked_run,
                 )
                 raw_reservations = state["evaluation_reservations"]
                 assert isinstance(raw_reservations, list)
@@ -621,6 +658,11 @@ class CorpusLedger:
                         target_store_device=prestate.target_store_device,
                         target_store_inode=prestate.target_store_inode,
                         target_visibility=prestate.target_visibility,
+                        target_run_path=prestate.target_run_path,
+                        target_run_device=prestate.target_run_device,
+                        target_run_inode=prestate.target_run_inode,
+                        target_run_lock_device=prestate.target_run_lock_device,
+                        target_run_lock_inode=prestate.target_run_lock_inode,
                         queued_manifest_hash=prestate.queued_manifest_hash,
                         event_prefix_hash=prestate.event_prefix_hash,
                         artifact_prefix_hash=prestate.artifact_prefix_hash,
@@ -667,7 +709,7 @@ class CorpusLedger:
         schedule_hash: str,
     ) -> EvaluationCutoffReservation:
         """CAS the authority-derived schedule hash without accepting caller prestate."""
-        with store._lock(run_id):
+        with store.evaluation_run_lock(run_id) as locked_run:
             fd, state = self._locked_state()
             try:
                 raw_reservations = state["evaluation_reservations"]
@@ -688,6 +730,7 @@ class CorpusLedger:
                     run_id,
                     binding,
                     require_pristine=observed.schedule_hash is None,
+                    locked_run=locked_run,
                 )
                 if observed.schedule_hash not in {None, schedule_hash}:
                     raise ValueError("evaluation schedule differs from cutoff reservation")
