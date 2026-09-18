@@ -4,7 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 
 import pytest
-from schedule_authority_support import schedule_client_for_test
+from schedule_authority_support import reserve_schedule_for_test, schedule_client_for_test
 
 from gpu_agent.benchmark.evaluation import (
     EvaluationAttempt,
@@ -250,6 +250,7 @@ def test_resume_recomputes_exact_attempt_set(native_evaluation_executor, fault):
     schedule = runner._schedule("D", "development", 3)
     store = executor.service.store
     run = store.create_run("evaluation", binding=executor.service.binding)
+    reserve_schedule_for_test(executor, runner, run.id, schedule)
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
     from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
 
@@ -276,6 +277,7 @@ def test_resume_recomputes_exact_attempt_set(native_evaluation_executor, fault):
         )
     else:
         source_run = store.create_run("evaluation", binding=executor.service.binding)
+        reserve_schedule_for_test(executor, runner, source_run.id, schedule)
         runner._put(
             source_run.id,
             "evaluation/schedule.json",
@@ -383,6 +385,7 @@ def test_concurrent_resume_claims_one_physical_evaluation_unit(
     schedule = first_runner._schedule("D", "development", 3)
     store = executor.service.store
     run = store.create_run("evaluation", binding=executor.service.binding)
+    reserve_schedule_for_test(executor, first_runner, run.id, schedule)
     first_runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
     seal_schedule(
         executor._corpus_family,
@@ -455,6 +458,7 @@ def test_execution_lease_rejects_wrong_inode(native_evaluation_executor, monkeyp
     schedule = runner._schedule("D", "development", 3)
     store = executor.service.store
     run = store.create_run("evaluation", binding=executor.service.binding)
+    reserve_schedule_for_test(executor, runner, run.id, schedule)
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
     from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
 
@@ -499,6 +503,7 @@ def test_execution_lease_rejects_canonical_path_substitution(
     schedule = runner._schedule("D", "development", 3)
     store = executor.service.store
     run = store.create_run("evaluation", binding=executor.service.binding)
+    reserve_schedule_for_test(executor, runner, run.id, schedule)
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
     from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
 
@@ -592,6 +597,7 @@ def test_concurrent_direct_execution_dispatches_one_physical_diagnosis(
     schedule = runner._schedule("D", "development", 3)
     store = executor.service.store
     run = store.create_run("evaluation", binding=executor.service.binding)
+    reserve_schedule_for_test(executor, runner, run.id, schedule)
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
     seal_schedule(
         executor._corpus_family,

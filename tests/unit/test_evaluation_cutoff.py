@@ -1,7 +1,5 @@
 """Adversarial recovery checks for the immutable corpus cutoff."""
 
-import hashlib
-
 import pytest
 from schedule_authority_support import schedule_client_for_test
 
@@ -12,7 +10,6 @@ from gpu_agent.benchmark.evaluation import (
     PublicEvaluationRecord,
 )
 from gpu_agent.benchmark.holdout import HoldoutController
-from gpu_agent.benchmark.ledger import CorpusFamily
 
 
 def _runner(executor, **overrides) -> EvaluationRunner:
@@ -33,22 +30,6 @@ def _runner(executor, **overrides) -> EvaluationRunner:
     }
     options.update(overrides)
     return EvaluationRunner(**options)
-
-
-def _append_opposite_visibility_commit(family: CorpusFamily, visibility: str) -> int:
-    """Advance the global ledger without changing the selected split's native store."""
-    store = family.corpus_store(visibility)  # type: ignore[arg-type]
-    marker = str(len(family.ledger.committed_through()) + 1).encode()
-    transaction = family.ledger.prepare(
-        b"future-case-" + marker,
-        b"future-template-" + marker,
-        b"future-source-pair-" + marker,
-        store=store,
-        manifest_hash=hashlib.sha256(b"future-manifest-" + marker).hexdigest(),
-    )
-    committed = family.ledger.commit(transaction)
-    assert committed.commit_sequence is not None
-    return committed.commit_sequence
 
 
 def _artifact(store, run_id: str, name: str) -> bytes:
@@ -81,7 +62,9 @@ def test_development_resume_uses_signed_cutoff_after_later_commit(
     )
     assert schedule.corpus_cutoff == 1
 
-    _append_opposite_visibility_commit(executor._corpus_family, "evaluator")
+    future = executor._register_future_case_for_test()
+    assert future.id == "case_0101"
+    assert len(executor._corpus_family.ledger.committed_through()) == 2
     monkeypatch.setattr(RunStore, "put", native_put)
     restarted = EvaluationExecutor(
         executor.service,
@@ -130,7 +113,9 @@ def test_holdout_score_uses_alias_cutoff_after_later_commit(native_evaluation_ex
     run = executor.service.store.load(manifest.run_id)
     record_ref = next(ref for ref in run.artifact_refs if ref.name == "evaluation/records/0.json")
 
-    _append_opposite_visibility_commit(executor._corpus_family, "public")
+    future = executor._register_future_case_for_test()
+    assert future.id == "case_0101"
+    assert len(executor._corpus_family.ledger.committed_through()) == 2
     persisted = controller.bind_score(
         batch,
         batch.aliases[0],
@@ -154,6 +139,47 @@ def test_holdout_score_uses_alias_cutoff_after_later_commit(native_evaluation_ex
         schedule_verifier=executor._schedule_verifier,
     )
     assert summary.record_count == 1
+    second_ref = next(ref for ref in run.artifact_refs if ref.name == "evaluation/records/1.json")
+    second = controller.bind_score(
+        batch,
+        batch.aliases[0],
+        second_ref,
+        labels=EvaluationLabels(),
+        score=Score(
+            family_correct=True,
+            root_cause_correct=True,
+            location_correct=True,
+            inconclusive_correct=True,
+        ),
+        should_be_inconclusive=False,
+        private_holdout_passed=True,
+    )
+    combined = aggregate(
+        [persisted, second],
+        public_store=executor.service.store,
+        evaluator_store=executor.corpus,
+        run_binding=binding,
+        schedule_verifier=executor._schedule_verifier,
+    )
+    assert combined.record_count == 2
+    assert combined.corpus_cutoff == batch.corpus_cutoff
+    assert combined.evaluation_authority_id == manifest.run_id
+    with pytest.raises(ValueError, match="one corpus cutoff"):
+        aggregate(
+            [persisted, second.model_copy(update={"corpus_cutoff": 2})],
+            public_store=executor.service.store,
+            evaluator_store=executor.corpus,
+            run_binding=binding,
+            schedule_verifier=executor._schedule_verifier,
+        )
+    with pytest.raises(ValueError, match="signed evaluation authority"):
+        aggregate(
+            [persisted, second.model_copy(update={"public_evaluation_run_id": "f" * 32})],
+            public_store=executor.service.store,
+            evaluator_store=executor.corpus,
+            run_binding=binding,
+            schedule_verifier=executor._schedule_verifier,
+        )
     with pytest.raises(ValueError, match="score transaction"):
         controller._load_metric_record(
             persisted.model_copy(update={"corpus_cutoff": persisted.corpus_cutoff + 1})
@@ -227,3 +253,58 @@ def test_mixed_attempt_record_and_receipt_cutoffs_fail_closed(native_evaluation_
             schedule.items[0],
             attempt,
         )
+
+
+def test_unreserved_new_run_cannot_sign_a_stale_cutoff(native_evaluation_executor):
+    from gpu_agent.benchmark.schedule_authority import seal_schedule
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    stale = runner._schedule("D", "development", 3)
+    future = executor._register_future_case_for_test()
+    assert future.id == "case_0101"
+    run = runner.store.create_run("evaluation", binding=binding)
+    runner._put(run.id, "evaluation/schedule.json", stale.model_dump_json().encode())
+    with pytest.raises(ValueError, match="cutoff reservation"):
+        seal_schedule(
+            executor._corpus_family,
+            runner.store,
+            run.id,
+            stale,
+            binding,
+            schedule_client_for_test(executor),
+            executor._schedule_verifier,
+        )
+
+
+def test_reserved_pre_schedule_crash_recovers_at_old_cutoff(
+    native_evaluation_executor, monkeypatch
+):
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    native_put = EvaluationRunner._put
+
+    def crash_before_schedule(self, run_id, name, content):
+        if name == "evaluation/schedule.json":
+            raise KeyboardInterrupt
+        return native_put(self, run_id, name, content)
+
+    monkeypatch.setattr(EvaluationRunner, "_put", crash_before_schedule)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run("D", "development", 3)
+    run_id = next(
+        path.name
+        for path in runner.store.root.iterdir()
+        if path.is_dir() and runner.store.load(path.name).kind == "evaluation"
+    )
+    reservation = executor._corpus_family.ledger.evaluation_cutoff_reservation(run_id)
+    assert reservation.corpus_cutoff == 1 and reservation.schedule_hash is not None
+
+    future = executor._register_future_case_for_test()
+    assert future.id == "case_0101"
+    monkeypatch.setattr(EvaluationRunner, "_put", native_put)
+    manifest = runner.resume(run_id, "D", "development", 3)
+    assert manifest.corpus_cutoff == 1
+    assert manifest.executed_units == 3

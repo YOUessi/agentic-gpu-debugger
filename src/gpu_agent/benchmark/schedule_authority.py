@@ -24,13 +24,17 @@ from gpu_agent.benchmark.evaluation import (
     EvaluationUnitBinding,
     HoldoutScheduleProof,
 )
-from gpu_agent.benchmark.ledger import CorpusFamily, CorpusTransaction
+from gpu_agent.benchmark.ledger import (
+    CorpusFamily,
+    CorpusTransaction,
+    EvaluationCutoffReservation,
+)
 from gpu_agent.benchmark.models import CaseManifest
 from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunBinding, RunManifest, RunStatus
 from gpu_agent.store import RunStore, RunStoreIdentity, reject_symlinks
 
 _OPENSSL = Path("/usr/bin/openssl")
-_SIGNING_DOMAIN = b"gpu-agent-evaluation-schedule-v2\0"
+_SIGNING_DOMAIN = b"gpu-agent-evaluation-schedule-v3\0"
 
 
 class CorpusUniverseEntry(BaseModel):
@@ -45,7 +49,7 @@ class CorpusUniverseEntry(BaseModel):
 
 class EvaluationScheduleSigningRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
     transaction_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     target_store_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -64,6 +68,7 @@ class EvaluationScheduleSigningRequest(BaseModel):
     corpus_namespace_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     corpus_visibility: Literal["public", "evaluator"]
     corpus_cutoff: int = Field(ge=1)
+    cutoff_reservation_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     corpus_universe: list[CorpusUniverseEntry]
     corpus_universe_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     authority_profile: Literal["PRODUCTION", "TEST_ONLY"]
@@ -126,6 +131,81 @@ _EMPTY_CHILD_INVENTORY_HASH = hashlib.sha256(
 def _store_hash(namespace_hash: str, store: RunStore) -> str:
     content = b"gpu-agent-evaluation-store-v2\0" + bytes.fromhex(namespace_hash)
     return hashlib.sha256(content + b"\0" + str(store.root).encode()).hexdigest()
+
+
+def _reservation_hash(reservation: EvaluationCutoffReservation) -> str:
+    return hashlib.sha256(
+        b"gpu-agent-evaluation-cutoff-reservation-v1\0" + _canonical(reservation)
+    ).hexdigest()
+
+
+def reserve_evaluation_cutoff(
+    family: CorpusFamily,
+    store: RunStore,
+    run_id: str,
+    binding: RunBinding,
+    *,
+    selection: str,
+    modes: Sequence[str],
+    split: Literal["development", "holdout"],
+    repeats: int,
+    random_seed: int,
+    max_cost_usd: float | None,
+    max_unit_cost_usd: float | None,
+) -> EvaluationCutoffReservation:
+    if store.visibility != "public":
+        raise ValueError("evaluation cutoff reservation requires the public evaluation store")
+    return family.ledger.reserve_evaluation_cutoff(
+        evaluation_run_id=run_id,
+        target_store_hash=_store_hash(family.namespace_hash, store),
+        target_visibility=store.visibility,
+        binding=binding,
+        selection=selection,
+        modes=list(modes),
+        split=split,
+        repeats=repeats,
+        random_seed=random_seed,
+        max_cost_usd=max_cost_usd,
+        max_unit_cost_usd=max_unit_cost_usd,
+    )
+
+
+def _validate_reservation(
+    family: CorpusFamily,
+    store: RunStore,
+    run_id: str,
+    schedule: EvaluationSchedule,
+    binding: RunBinding,
+    reservation: EvaluationCutoffReservation,
+) -> None:
+    if (
+        reservation.evaluation_run_id != run_id
+        or reservation.target_store_hash != _store_hash(family.namespace_hash, store)
+        or reservation.target_visibility != store.visibility
+        or reservation.binding != binding
+        or reservation.selection != schedule.selection
+        or reservation.modes != schedule.modes
+        or reservation.split != schedule.split
+        or reservation.repeats != schedule.repeats
+        or reservation.random_seed != schedule.random_seed
+        or reservation.max_cost_usd != schedule.bindings.max_cost_usd
+        or reservation.max_unit_cost_usd != schedule.bindings.max_unit_cost_usd
+        or reservation.corpus_cutoff != schedule.corpus_cutoff
+        or reservation.schedule_hash != _schedule_hash(schedule)
+    ):
+        raise ValueError("evaluation schedule differs from cutoff reservation")
+
+
+def bind_reserved_schedule(
+    family: CorpusFamily,
+    store: RunStore,
+    run_id: str,
+    schedule: EvaluationSchedule,
+    binding: RunBinding,
+) -> EvaluationCutoffReservation:
+    reservation = family.ledger.bind_evaluation_schedule(run_id, _schedule_hash(schedule))
+    _validate_reservation(family, store, run_id, schedule, binding, reservation)
+    return reservation
 
 
 def _case_templates(schedule: EvaluationSchedule) -> dict[str, str]:
@@ -285,6 +365,7 @@ def _assemble_signing_request(
     event_prefix_count: int,
     artifact_prefix_hash: str,
     artifact_prefix_count: int,
+    reservation: EvaluationCutoffReservation,
 ) -> EvaluationScheduleSigningRequest:
     profile = family.schedule_authority_profile
     key_hash = family.schedule_public_key_hash
@@ -316,7 +397,7 @@ def _assemble_signing_request(
     digest = _schedule_hash(schedule)
     target = _store_hash(family.namespace_hash, store)
     transaction_id = hashlib.sha256(
-        f"evaluation-schedule-v3:{run_id}:{target}:{digest}:{queued_manifest_hash}".encode()
+        f"evaluation-schedule-v4:{run_id}:{target}:{digest}:{queued_manifest_hash}".encode()
     ).hexdigest()[:32]
     return EvaluationScheduleSigningRequest(
         transaction_id=transaction_id,
@@ -337,6 +418,7 @@ def _assemble_signing_request(
         corpus_namespace_hash=family.namespace_hash,
         corpus_visibility=visibility,
         corpus_cutoff=corpus_cutoff,
+        cutoff_reservation_hash=_reservation_hash(reservation),
         corpus_universe=entries,
         corpus_universe_hash=_universe_hash(entries),
         authority_profile=profile,
@@ -378,7 +460,11 @@ def build_signing_request(
         raise ValueError("signing requires the exact QUEUED evaluation pre-state")
     if store.children(run_id):
         raise ValueError("signing requires a zero-child evaluation pre-state")
-    cutoff = schedule.corpus_cutoff if corpus_cutoff is None else corpus_cutoff
+    reservation = family.ledger.evaluation_cutoff_reservation(run_id)
+    _validate_reservation(family, store, run_id, schedule, binding, reservation)
+    cutoff = reservation.corpus_cutoff if corpus_cutoff is None else corpus_cutoff
+    if cutoff != reservation.corpus_cutoff:
+        raise ValueError("requested corpus cutoff differs from controller reservation")
     family.ledger.committed_through(cutoff)
     return _assemble_signing_request(
         family,
@@ -394,6 +480,7 @@ def build_signing_request(
             b"gpu-agent-evaluation-artifact-prefix-v1\0", run.artifact_refs
         ),
         artifact_prefix_count=len(run.artifact_refs),
+        reservation=reservation,
     )
 
 
@@ -533,6 +620,8 @@ class EvaluationScheduleVerifier:
             raise ValueError("schedule receipt uses another authority")
         _verify_signature(self.__public_key, receipt)
         _validate_signed_prestate(self.__store, run, receipt)
+        reservation = family.ledger.evaluation_cutoff_reservation(run_id)
+        _validate_reservation(family, self.__store, run_id, schedule, run.binding, reservation)
         expected = _assemble_signing_request(
             family,
             self.__store,
@@ -545,6 +634,7 @@ class EvaluationScheduleVerifier:
             event_prefix_count=receipt.request.event_prefix_count,
             artifact_prefix_hash=receipt.request.artifact_prefix_hash,
             artifact_prefix_count=receipt.request.artifact_prefix_count,
+            reservation=reservation,
         )
         if receipt.request != expected:
             raise ValueError("schedule receipt differs from native authority inputs")
@@ -682,6 +772,7 @@ def seal_schedule(
     if client is None:
         raise ValueError("external schedule authority is required")
     EvaluationScheduleVerifier.require_store(verifier, store)
+    bind_reserved_schedule(family, store, run_id, schedule, binding)
     request = build_signing_request(family, store, run_id, schedule, binding)
     receipt = client.commit(request)
     if receipt.request != request or receipt.state != "COMMITTED":

@@ -70,6 +70,8 @@ class Metric(ExecutionModel):
 
 
 class MetricSummary(ExecutionModel):
+    corpus_cutoff: int = Field(ge=1)
+    evaluation_authority_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     case_count: int
     template_count: int
     record_count: int
@@ -127,6 +129,12 @@ def _load_records(
         or any(not isinstance(record, EvaluatorRecordBinding) for record in records)
     ):
         raise ValueError("metrics require persisted evaluator record bindings")
+    if not records:
+        raise ValueError("metrics require at least one persisted evaluator record binding")
+    cutoffs = {record.corpus_cutoff for record in records}
+    authorities = {record.public_evaluation_run_id for record in records}
+    if len(cutoffs) != 1 or len(authorities) != 1:
+        raise ValueError("metrics require one corpus cutoff and signed evaluation authority")
     controller = HoldoutController(
         public_store,
         evaluator_store,
@@ -185,6 +193,8 @@ def aggregate(
     retrieval_k: int = 5,
 ) -> MetricSummary:
     loaded = _load_records(records, public_store, evaluator_store, run_binding, schedule_verifier)
+    corpus_cutoff = records[0].corpus_cutoff
+    evaluation_authority_id = records[0].public_evaluation_run_id
     if retrieval_k < 1:
         raise ValueError("retrieval_k must be positive")
 
@@ -262,6 +272,8 @@ def aggregate(
     truth_inc = [record for record in loaded if record.should_be_inconclusive is not None]
     known_costs = [record.cost_usd for record in loaded if record.cost_usd is not None]
     return MetricSummary(
+        corpus_cutoff=corpus_cutoff,
+        evaluation_authority_id=evaluation_authority_id,
         case_count=len({record.case_id for record in loaded}),
         template_count=len({record.template_id for record in loaded}),
         record_count=len(loaded),

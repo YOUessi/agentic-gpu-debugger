@@ -347,12 +347,36 @@ class EvaluationRunner:
     def run(
         self, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
-        from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
+        from gpu_agent.benchmark.schedule_authority import (
+            activate_schedule,
+            bind_reserved_schedule,
+            reserve_evaluation_cutoff,
+            seal_schedule,
+        )
 
         if self.schedule_client is None:
             raise ValueError("external schedule authority is required")
-        schedule = EvaluationRunner._schedule(self, mode, split, repeats)
         run = RunStore.create_run(self.store, "evaluation", binding=self.binding)
+        modes: list[EvaluationMode] = ["A", "B", "C", "D", "E"] if mode == "all" else [mode]
+        reservation = reserve_evaluation_cutoff(
+            self.executor._corpus_family,
+            self.store,
+            run.id,
+            self.binding,
+            selection=mode,
+            modes=modes,
+            split=split,
+            repeats=repeats,
+            random_seed=self.random_seed,
+            max_cost_usd=self.bindings.max_cost_usd,
+            max_unit_cost_usd=self.bindings.max_unit_cost_usd,
+        )
+        schedule = EvaluationRunner._schedule(
+            self, mode, split, repeats, corpus_cutoff=reservation.corpus_cutoff
+        )
+        bind_reserved_schedule(
+            self.executor._corpus_family, self.store, run.id, schedule, self.binding
+        )
         EvaluationRunner._put(
             self, run.id, "evaluation/schedule.json", schedule.model_dump_json().encode()
         )
@@ -385,12 +409,36 @@ class EvaluationRunner:
             raise ValueError("only an activatable evaluation run may be resumed")
         if run.binding != self.binding:
             raise ValueError("evaluation run binding does not match controller")
-        persisted = EvaluationSchedule.model_validate_json(
-            RunStore.read(
-                self.store,
-                EvaluationRunner._one_artifact(self, run_id, "evaluation/schedule.json"),
+        reservation = self.executor._corpus_family.ledger.evaluation_cutoff_reservation(run_id)
+        schedule_refs = [ref for ref in run.artifact_refs if ref.name == "evaluation/schedule.json"]
+        if len(schedule_refs) > 1:
+            raise ValueError("evaluation schedule is ambiguous")
+        if schedule_refs:
+            persisted = EvaluationSchedule.model_validate_json(
+                RunStore.read(self.store, schedule_refs[0])
             )
-        )
+        elif run.status == RunStatus.QUEUED:
+            persisted = EvaluationRunner._schedule(
+                self, mode, split, repeats, corpus_cutoff=reservation.corpus_cutoff
+            )
+            from gpu_agent.benchmark.schedule_authority import bind_reserved_schedule
+
+            bind_reserved_schedule(
+                self.executor._corpus_family,
+                self.store,
+                run.id,
+                persisted,
+                self.binding,
+            )
+            EvaluationRunner._put(
+                self,
+                run_id,
+                "evaluation/schedule.json",
+                persisted.model_dump_json().encode(),
+            )
+            run = RunStore.load(self.store, run_id)
+        else:
+            raise ValueError("active evaluation schedule is unavailable")
         expected = EvaluationRunner._schedule(
             self, mode, split, repeats, corpus_cutoff=persisted.corpus_cutoff
         )
@@ -399,6 +447,11 @@ class EvaluationRunner:
             or persisted != expected
         ):
             raise ValueError("evaluation schedule or bindings do not match")
+        from gpu_agent.benchmark.schedule_authority import bind_reserved_schedule
+
+        bind_reserved_schedule(
+            self.executor._corpus_family, self.store, run_id, persisted, self.binding
+        )
         from gpu_agent.benchmark.schedule_authority import (
             EvaluationScheduleVerifier,
             activate_schedule,

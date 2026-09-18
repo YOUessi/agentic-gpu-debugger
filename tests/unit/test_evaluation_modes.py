@@ -5,7 +5,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
-from schedule_authority_support import schedule_client_for_test
+from schedule_authority_support import reserve_schedule_for_test, schedule_client_for_test
 
 
 def rule_retrieval_corpus(service):
@@ -287,6 +287,7 @@ def _execute_claimed_test_unit(
     )
     item = schedule.items[0]
     run = runner.store.create_run("evaluation", binding=binding)
+    reserve_schedule_for_test(executor, runner, run.id, schedule)
     runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
     from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
 

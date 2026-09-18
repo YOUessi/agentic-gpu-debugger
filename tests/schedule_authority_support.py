@@ -99,3 +99,31 @@ def schedule_client_for_test(executor) -> TestScheduleCommitClient:
     if key_hash not in _CLIENTS:
         raise ValueError("test schedule authority is not registered")
     return _CLIENTS[key_hash]
+
+
+def reserve_schedule_for_test(executor, runner, run_id, schedule) -> None:
+    """Mirror the controller reservation step for low-level schedule tests."""
+    from gpu_agent.benchmark.schedule_authority import (
+        bind_reserved_schedule,
+        reserve_evaluation_cutoff,
+    )
+
+    binding = executor.service.binding
+    if binding is None:
+        raise ValueError("test evaluation binding is unavailable")
+    reservation = reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run_id,
+        binding,
+        selection=schedule.selection,
+        modes=schedule.modes,
+        split=schedule.split,
+        repeats=schedule.repeats,
+        random_seed=schedule.random_seed,
+        max_cost_usd=schedule.bindings.max_cost_usd,
+        max_unit_cost_usd=schedule.bindings.max_unit_cost_usd,
+    )
+    if reservation.corpus_cutoff != schedule.corpus_cutoff:
+        raise ValueError("test schedule cutoff differs from reservation")
+    bind_reserved_schedule(executor._corpus_family, runner.store, run_id, schedule, binding)

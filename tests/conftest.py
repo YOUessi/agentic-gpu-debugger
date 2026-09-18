@@ -284,7 +284,35 @@ def native_evaluation_executor(
         sanitizer_repetitions=1,
         mutation_provenance_hash="9" * 64,
     )
-    registry_bytes = AuthoritativeCaseRegistry(cases=[spec]).model_dump_json().encode()
+    future_source_root = tmp_path / "future-corpus-sources"
+    future_clean_root = future_source_root / "clean"
+    future_mutant_root = future_source_root / "mutant"
+    future_clean_root.mkdir(parents=True)
+    future_mutant_root.mkdir(parents=True)
+    future_clean_bytes = clean_bytes + b"\n// later committed corpus case\n"
+    future_mutant_bytes = mutant_bytes + b"\n// later committed corpus case\n"
+    (future_clean_root / "kernel.cu").write_bytes(future_clean_bytes)
+    (future_mutant_root / "kernel.cu").write_bytes(future_mutant_bytes)
+    future_harness_root = future_source_root / "harness"
+    future_harness_root.mkdir()
+    for name in ("vector_io.cpp", "vector_api.h", "json.hpp"):
+        (future_harness_root / name).write_bytes((harness_root / name).read_bytes())
+    future_spec = AuthoritativeCaseSpec(
+        case_id="case_0101",
+        template_id="vector-add-future",
+        mutation_id="delete-guard-future",
+        split=split,
+        clean_source_hash=hashlib.sha256(future_clean_bytes).hexdigest(),
+        mutant_source_hash=hashlib.sha256(future_mutant_bytes).hexdigest(),
+        harness_hash=harness_hash,
+        input_set_hash=hashlib.sha256(input_bytes).hexdigest(),
+        oracle_id="vector-add-cpu-v1",
+        target_tool="memcheck",
+        expected_finding="Invalid __global__ write",
+        sanitizer_repetitions=1,
+        mutation_provenance_hash="8" * 64,
+    )
+    registry_bytes = AuthoritativeCaseRegistry(cases=[spec, future_spec]).model_dump_json().encode()
     registry_hash = hashlib.sha256(registry_bytes).hexdigest()
     corpus_binding = RunBinding(
         repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
@@ -329,44 +357,60 @@ def native_evaluation_executor(
     backend = CorpusBackend(corpus, source_root, tmp_path / "corpus-tasks")
     controller = CaseValidationController._for_test(corpus, backend, corpus_binding, registry_bytes)
 
-    def execute_case(role):
+    def execute_case(controller, case_spec, case_source_root, role):
         names = [
             f"{role}/kernel.cu",
             *[f"harness/{name}" for name in ("vector_io.cpp", "vector_api.h", "json.hpp")],
         ]
         return controller.execute(
             CaseExecutionPlan(
-                case_id="case_0100",
-                template_id="vector-add",
-                mutation_id="clean" if role == "clean" else "delete-guard",
+                case_id=case_spec.case_id,
+                template_id=case_spec.template_id,
+                mutation_id="clean" if role == "clean" else case_spec.mutation_id,
                 role=role,
                 split=split,
                 source_manifest={
-                    name: hashlib.sha256((source_root / name).read_bytes()).hexdigest()
+                    name: hashlib.sha256((case_source_root / name).read_bytes()).hexdigest()
                     for name in names
                 },
                 target_tool="memcheck",
                 expected_finding="Invalid __global__ write",
                 sanitizer_repetitions=1,
                 case_registry_hash=registry_hash,
-                case_spec_hash=controller.spec_hash(spec),
-                mutation_provenance_hash=spec.mutation_provenance_hash,
+                case_spec_hash=controller.spec_hash(case_spec),
+                mutation_provenance_hash=case_spec.mutation_provenance_hash,
             ),
             input_bytes,
         )
 
-    clean_id, mutant_id = execute_case("clean"), execute_case("mutant")
+    clean_id = execute_case(controller, spec, source_root, "clean")
+    mutant_id = execute_case(controller, spec, source_root, "mutant")
     builder = BenchmarkBuilder(corpus)
     builder.register(builder.validate(clean_id, mutant_id))
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
-    return EvaluationExecutor(
+    executor = EvaluationExecutor(
         service,
         corpus,
         {"case_0100": source},
         _corpus_family=family,
         _schedule_verifier=EvaluationScheduleVerifier._for_test(family, service.store),
     )
+
+    def register_future_case_for_test():
+        future_backend = CorpusBackend(corpus, future_source_root, tmp_path / "future-corpus-tasks")
+        future_controller = CaseValidationController._for_test(
+            corpus, future_backend, corpus_binding, registry_bytes
+        )
+        future_clean_id = execute_case(future_controller, future_spec, future_source_root, "clean")
+        future_mutant_id = execute_case(
+            future_controller, future_spec, future_source_root, "mutant"
+        )
+        future_builder = BenchmarkBuilder(corpus)
+        return future_builder.register(future_builder.validate(future_clean_id, future_mutant_id))
+
+    executor._register_future_case_for_test = register_future_case_for_test  # type: ignore[attr-defined]
+    return executor
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

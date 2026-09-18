@@ -17,7 +17,9 @@ from gpu_agent.benchmark.schedule_authority import (
     EvaluationScheduleReceipt,
     EvaluationScheduleVerifier,
     activate_schedule,
+    bind_reserved_schedule,
     build_signing_request,
+    reserve_evaluation_cutoff,
     seal_schedule,
 )
 from gpu_agent.contracts import CurrentPhase, RunStatus
@@ -42,12 +44,31 @@ def _runner(executor, *, client=True):
     )
 
 
+def _reserve_existing(executor, runner, run, schedule, binding):
+    reservation = reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection=schedule.selection,
+        modes=schedule.modes,
+        split=schedule.split,
+        repeats=schedule.repeats,
+        random_seed=schedule.random_seed,
+        max_cost_usd=schedule.bindings.max_cost_usd,
+        max_unit_cost_usd=schedule.bindings.max_unit_cost_usd,
+    )
+    assert reservation.corpus_cutoff == schedule.corpus_cutoff
+    bind_reserved_schedule(executor._corpus_family, runner.store, run.id, schedule, binding)
+
+
 def _queued_schedule(executor):
     runner = _runner(executor)
     binding = executor.service.binding
     assert binding is not None
-    schedule = runner._schedule("A", "development", 3)
     run = runner.store.create_run("evaluation", binding=binding)
+    schedule = runner._schedule("A", "development", 3)
+    _reserve_existing(executor, runner, run, schedule, binding)
     runner.store.put(
         run.id, "evaluation/schedule.json", schedule.model_dump_json().encode(), "public"
     )
@@ -508,6 +529,7 @@ def test_signature_and_subset_schedule_are_rejected(native_evaluation_executor):
     assert binding is not None
     schedule = runner._schedule("A", "development", 3)
     run = runner.store.create_run("evaluation", binding=binding)
+    _reserve_existing(executor, runner, run, schedule, binding)
     runner.store.put(
         run.id, "evaluation/schedule.json", schedule.model_dump_json().encode(), "public"
     )
@@ -574,6 +596,7 @@ def test_concurrent_exact_seal_and_crash_retry_are_idempotent(
     assert binding is not None
     schedule = runner._schedule("A", "development", 3)
     run = runner.store.create_run("evaluation", binding=binding)
+    _reserve_existing(executor, runner, run, schedule, binding)
     runner.store.put(
         run.id, "evaluation/schedule.json", schedule.model_dump_json().encode(), "public"
     )
@@ -613,6 +636,7 @@ def test_family_pinned_key_rejects_self_signed_receipt(native_evaluation_executo
     assert binding is not None
     schedule = runner._schedule("A", "development", 3)
     run = runner.store.create_run("evaluation", binding=binding)
+    _reserve_existing(executor, runner, run, schedule, binding)
     runner.store.put(
         run.id, "evaluation/schedule.json", schedule.model_dump_json().encode(), "public"
     )

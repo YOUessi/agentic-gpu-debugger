@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from gpu_agent.contracts import Visibility, new_id
+from gpu_agent.contracts import RunBinding, Visibility, new_id
 from gpu_agent.store import RunStore, read_regular, reject_symlinks, sync_directory
 
 
@@ -39,6 +39,26 @@ class CorpusTransaction(BaseModel):
     visibility: Visibility
     manifest_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     commit_sequence: int | None = Field(default=None, ge=1)
+
+
+class EvaluationCutoffReservation(BaseModel):
+    """Controller-owned snapshot of the corpus head for one evaluation run."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    schema_version: Literal[1] = 1
+    evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    target_store_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    target_visibility: Visibility
+    binding: RunBinding
+    selection: str
+    modes: list[str]
+    split: Literal["development", "holdout"]
+    repeats: int = Field(ge=3)
+    random_seed: int
+    max_cost_usd: float | None = Field(default=None, ge=0)
+    max_unit_cost_usd: float | None = Field(default=None, ge=0)
+    corpus_cutoff: int = Field(ge=1)
+    schedule_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
 
 def _is_within(path: Path, parent: Path) -> bool:
@@ -321,9 +341,12 @@ class CorpusLedger:
             if state_path.exists():
                 state = json.loads(read_regular(state_path, 16 * 1024 * 1024))
             else:
-                state = {"schema_version": 3, "transactions": []}
+                state = {"schema_version": 3, "transactions": [], "evaluation_reservations": []}
             if state.get("schema_version") != 3 or not isinstance(state.get("transactions"), list):
                 raise ValueError("corpus ledger is malformed")
+            state.setdefault("evaluation_reservations", [])
+            if not isinstance(state["evaluation_reservations"], list):
+                raise ValueError("corpus ledger evaluation reservations are malformed")
         except BaseException:
             os.close(fd)
             raise
@@ -390,6 +413,122 @@ class CorpusLedger:
         if cutoff < 0 or cutoff > len(ordered):
             raise ValueError("corpus universe cutoff is invalid")
         return ordered[:cutoff]
+
+    @staticmethod
+    def _committed_in_state(state: dict[str, object]) -> list[CorpusTransaction]:
+        raw_transactions = state["transactions"]
+        assert isinstance(raw_transactions, list)
+        transactions = [CorpusLedger._transaction(item) for item in raw_transactions]
+        committed = [item for item in transactions if item.state == "COMMITTED"]
+        if any(item.commit_sequence is None for item in committed):
+            raise ValueError("committed corpus transaction has no sequence")
+        ordered = sorted(committed, key=lambda item: item.commit_sequence or 0)
+        if [item.commit_sequence for item in ordered] != list(range(1, len(ordered) + 1)):
+            raise ValueError("corpus commit sequence is not contiguous")
+        return ordered
+
+    @staticmethod
+    def _reservation(value: object) -> EvaluationCutoffReservation:
+        try:
+            return EvaluationCutoffReservation.model_validate(value)
+        except ValueError as exc:
+            raise ValueError("evaluation cutoff reservation is malformed") from exc
+
+    def reserve_evaluation_cutoff(
+        self,
+        *,
+        evaluation_run_id: str,
+        target_store_hash: str,
+        target_visibility: Visibility,
+        binding: RunBinding,
+        selection: str,
+        modes: list[str],
+        split: Literal["development", "holdout"],
+        repeats: int,
+        random_seed: int,
+        max_cost_usd: float | None,
+        max_unit_cost_usd: float | None,
+    ) -> EvaluationCutoffReservation:
+        """Atomically bind a new run to the current committed ledger head."""
+        fd, state = self._locked_state()
+        try:
+            raw_reservations = state["evaluation_reservations"]
+            assert isinstance(raw_reservations, list)
+
+            def candidate(cutoff: int) -> EvaluationCutoffReservation:
+                return EvaluationCutoffReservation(
+                    evaluation_run_id=evaluation_run_id,
+                    target_store_hash=target_store_hash,
+                    target_visibility=target_visibility,
+                    binding=binding,
+                    selection=selection,
+                    modes=modes,
+                    split=split,
+                    repeats=repeats,
+                    random_seed=random_seed,
+                    max_cost_usd=max_cost_usd,
+                    max_unit_cost_usd=max_unit_cost_usd,
+                    corpus_cutoff=cutoff,
+                )
+
+            for raw in raw_reservations:
+                observed = self._reservation(raw)
+                if observed.evaluation_run_id != evaluation_run_id:
+                    continue
+                expected = observed.model_copy(update={"schedule_hash": None})
+                requested = candidate(observed.corpus_cutoff)
+                if expected != requested:
+                    raise ValueError("evaluation cutoff reservation differs from run authority")
+                return observed
+            cutoff = len(self._committed_in_state(state))
+            if cutoff < 1:
+                raise ValueError("evaluation cutoff reservation requires a committed corpus")
+            reservation = candidate(cutoff)
+            raw_reservations.append(reservation.model_dump(mode="json"))
+            self._save(state)
+            return reservation
+        finally:
+            os.close(fd)
+
+    def evaluation_cutoff_reservation(self, run_id: str) -> EvaluationCutoffReservation:
+        fd, state = self._locked_state()
+        try:
+            raw_reservations = state["evaluation_reservations"]
+            assert isinstance(raw_reservations, list)
+            observed = [self._reservation(raw) for raw in raw_reservations]
+            matches = [item for item in observed if item.evaluation_run_id == run_id]
+            if len(matches) != 1:
+                raise ValueError("evaluation cutoff reservation is unavailable or ambiguous")
+            return matches[0]
+        finally:
+            os.close(fd)
+
+    def bind_evaluation_schedule(
+        self, run_id: str, schedule_hash: str
+    ) -> EvaluationCutoffReservation:
+        fd, state = self._locked_state()
+        try:
+            raw_reservations = state["evaluation_reservations"]
+            assert isinstance(raw_reservations, list)
+            match: tuple[int, EvaluationCutoffReservation] | None = None
+            for index, raw in enumerate(raw_reservations):
+                observed = self._reservation(raw)
+                if observed.evaluation_run_id == run_id:
+                    if match is not None:
+                        raise ValueError("evaluation cutoff reservation is ambiguous")
+                    match = index, observed
+            if match is None:
+                raise ValueError("evaluation cutoff reservation is unavailable")
+            index, observed = match
+            if observed.schedule_hash not in {None, schedule_hash}:
+                raise ValueError("evaluation schedule differs from cutoff reservation")
+            bound = observed.model_copy(update={"schedule_hash": schedule_hash})
+            if observed != bound:
+                raw_reservations[index] = bound.model_dump(mode="json")
+                self._save(state)
+            return bound
+        finally:
+            os.close(fd)
 
     @contextmanager
     def registration_lock(self, transaction: CorpusTransaction) -> Iterator[CorpusTransaction]:
