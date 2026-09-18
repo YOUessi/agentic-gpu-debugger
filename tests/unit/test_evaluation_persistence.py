@@ -430,6 +430,7 @@ def test_low_level_executor_rejects_caller_constructed_schedule_unit(
         run_id="a" * 32,
         ordinal=0,
         schedule_hash="b" * 64,
+        corpus_cutoff=1,
         idempotency_key="c" * 64,
         reserved_cost_usd=0,
     )

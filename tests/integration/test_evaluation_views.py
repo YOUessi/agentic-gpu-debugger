@@ -5,6 +5,7 @@ def _lineage():
     from gpu_agent.benchmark.evaluation import EvaluationLineage
 
     return EvaluationLineage(
+        corpus_cutoff=1,
         diagnosis_run_id="a" * 32,
         diagnosis_hash="b" * 64,
         evidence_hash="c" * 64,
@@ -17,6 +18,7 @@ def test_blind_view_excludes_mode_model_usage_and_trace():
 
     record = EvaluationRecord(
         record_id="blind-1",
+        corpus_cutoff=1,
         lineage=_lineage(),
         case_id="case_0001",
         template_id="index",
@@ -117,6 +119,7 @@ def test_blind_rejects_untyped_diagnosis_metadata():
 
     record = EvaluationRecord(
         record_id="x",
+        corpus_cutoff=1,
         lineage=_lineage(),
         case_id="c",
         template_id="t",
@@ -137,6 +140,7 @@ def test_blind_view_does_not_reveal_record_mapping_or_private_observations():
 
     record = EvaluationRecord(
         record_id="MODE_E_MODEL_CANARY",
+        corpus_cutoff=1,
         lineage=_lineage(),
         case_id="case_1",
         template_id="t",

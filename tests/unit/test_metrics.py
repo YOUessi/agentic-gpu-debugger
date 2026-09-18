@@ -32,7 +32,9 @@ def test_public_metric_entry_points_reject_raw_records():
 
     record = EvaluationRecord(
         record_id="raw",
+        corpus_cutoff=1,
         lineage={
+            "corpus_cutoff": 1,
             "diagnosis_run_id": "a" * 32,
             "diagnosis_hash": "b" * 64,
             "evidence_hash": "c" * 64,

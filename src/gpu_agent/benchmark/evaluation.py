@@ -43,6 +43,7 @@ StoppedReason = Literal[
 
 
 class EvaluationLineage(ExecutionModel):
+    corpus_cutoff: int = Field(ge=1)
     diagnosis_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     diagnosis_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     evidence_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -125,6 +126,7 @@ class PublicEvaluationRecord(ExecutionModel):
     """The public projection of an evaluation result; it contains no hidden truth."""
 
     record_id: str
+    corpus_cutoff: int = Field(ge=1)
     lineage: EvaluationLineage
     case_id: str
     template_id: str
@@ -202,6 +204,7 @@ class EvaluationBindings(ExecutionModel):
 class HoldoutScheduleProof(ExecutionModel):
     public_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     aliases_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    corpus_cutoff: int = Field(ge=1)
 
 
 class EvaluationScheduleItem(ExecutionModel):
@@ -221,6 +224,7 @@ class EvaluationSchedule(ExecutionModel):
     split: EvaluationSplit
     repeats: int = Field(ge=3)
     random_seed: int
+    corpus_cutoff: int = Field(ge=1)
     bindings: EvaluationBindings
     items: list[EvaluationScheduleItem]
     holdout_proof: HoldoutScheduleProof | None = None
@@ -233,6 +237,7 @@ class EvaluationAttempt(ExecutionModel):
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     ordinal: int = Field(ge=0)
     schedule_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    corpus_cutoff: int = Field(ge=1)
     idempotency_key: str = Field(pattern=r"^[a-f0-9]{64}$")
     reserved_cost_usd: float = Field(ge=0)
 
@@ -244,6 +249,7 @@ class EvaluationExecutionClaim(ExecutionModel):
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     ordinal: int = Field(ge=0)
     schedule_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    corpus_cutoff: int = Field(ge=1)
     attempt_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
 
 
@@ -254,6 +260,7 @@ class EvaluationUnitBinding(ExecutionModel):
     evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     ordinal: int = Field(ge=0)
     schedule_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    corpus_cutoff: int = Field(ge=1)
     idempotency_key: str = Field(pattern=r"^[a-f0-9]{64}$")
     reserved_cost_usd: float = Field(ge=0)
     case_id: str = Field(min_length=1)
@@ -272,6 +279,7 @@ class EvaluationManifest(ExecutionModel):
     toolchain_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     model_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     schedule_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    corpus_cutoff: int = Field(ge=1)
     expected_units: int = Field(ge=0)
     executed_units: int = Field(ge=0)
     modes: list[EvaluationMode]
@@ -377,12 +385,14 @@ class EvaluationRunner:
             raise ValueError("only an activatable evaluation run may be resumed")
         if run.binding != self.binding:
             raise ValueError("evaluation run binding does not match controller")
-        expected = EvaluationRunner._schedule(self, mode, split, repeats)
         persisted = EvaluationSchedule.model_validate_json(
             RunStore.read(
                 self.store,
                 EvaluationRunner._one_artifact(self, run_id, "evaluation/schedule.json"),
             )
+        )
+        expected = EvaluationRunner._schedule(
+            self, mode, split, repeats, corpus_cutoff=persisted.corpus_cutoff
         )
         if (
             EvaluationRunner._schedule_hash(persisted) != EvaluationRunner._schedule_hash(expected)
@@ -437,14 +447,24 @@ class EvaluationRunner:
                 os.close(fd)
 
     def _schedule(
-        self, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
+        self,
+        mode: EvaluationSelection,
+        split: EvaluationSplit,
+        repeats: int,
+        *,
+        corpus_cutoff: int | None = None,
     ) -> EvaluationSchedule:
         if repeats < 3:
             raise ValueError("evaluation requires at least three repeats")
+        current_cutoff = len(self.executor._corpus_family.ledger.committed_through())
+        cutoff = current_cutoff if corpus_cutoff is None else corpus_cutoff
+        self.executor._corpus_family.ledger.committed_through(cutoff)
         if split == "holdout":
             if self.holdout_controller is None or self.holdout_batch is None:
                 raise ValueError("holdout alias proof is required")
             holdout_proof = self.holdout_controller.validate_batch(self.holdout_batch)
+            if self.holdout_batch.corpus_cutoff != cutoff or holdout_proof.corpus_cutoff != cutoff:
+                raise ValueError("holdout alias cutoff differs from evaluation schedule")
             case_ids = {alias: alias for alias in self.holdout_batch.aliases}
         else:
             if self.holdout_controller is not None:
@@ -453,7 +473,10 @@ class EvaluationRunner:
             from gpu_agent.benchmark.executor import registered_cases
 
             cases = registered_cases(
-                self.executor.corpus, self.binding, self.executor._corpus_family
+                self.executor.corpus,
+                self.binding,
+                self.executor._corpus_family,
+                cutoff=cutoff,
             )
             case_ids = {case.id: case.template_id for case in cases.values()}
             if not case_ids:
@@ -472,6 +495,7 @@ class EvaluationRunner:
             split=split,
             repeats=repeats,
             random_seed=self.random_seed,
+            corpus_cutoff=cutoff,
             bindings=self.bindings,
             items=[
                 EvaluationScheduleItem(
@@ -506,6 +530,7 @@ class EvaluationRunner:
             run_id=run_id,
             ordinal=item.ordinal,
             schedule_hash=schedule_hash,
+            corpus_cutoff=schedule.corpus_cutoff,
             idempotency_key=key,
             reserved_cost_usd=schedule.bindings.max_unit_cost_usd,
         )
@@ -613,6 +638,7 @@ class EvaluationRunner:
             toolchain_hash=schedule.bindings.toolchain_hash,
             model_config_hash=schedule.bindings.model_config_hash,
             schedule_hash=EvaluationRunner._schedule_hash(schedule),
+            corpus_cutoff=schedule.corpus_cutoff,
             expected_units=len(schedule.items),
             executed_units=len(persisted_records),
             modes=schedule.modes,
@@ -702,6 +728,11 @@ class EvaluationRunner:
             item.repeat,
         ):
             raise ValueError("evaluation record does not match scheduled unit")
+        if (
+            record.corpus_cutoff != attempt.corpus_cutoff
+            or record.lineage.corpus_cutoff != attempt.corpus_cutoff
+        ):
+            raise ValueError("evaluation record corpus cutoff differs from scheduled unit")
         from gpu_agent.benchmark.executor import EvaluationExecutor
 
         EvaluationExecutor.validate_scheduled_record(self.executor, record, item, attempt)

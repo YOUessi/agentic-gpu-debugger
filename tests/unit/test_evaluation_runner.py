@@ -7,6 +7,7 @@ def test_public_evaluation_record_requires_native_lineage():
 
     with pytest.raises(ValidationError, match="lineage"):
         PublicEvaluationRecord(
+            corpus_cutoff=1,
             record_id="f" * 32,
             case_id="case_0001",
             template_id="index",

@@ -74,6 +74,7 @@ def _activate_claimed_first_unit(executor):
         run_id=run.id,
         ordinal=0,
         schedule_hash=attempt.schedule_hash,
+        corpus_cutoff=attempt.corpus_cutoff,
         attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
     )
     runner._put(run.id, "evaluation/claims/0.json", claim.model_dump_json().encode())
@@ -81,6 +82,7 @@ def _activate_claimed_first_unit(executor):
         evaluation_run_id=run.id,
         ordinal=0,
         schedule_hash=attempt.schedule_hash,
+        corpus_cutoff=attempt.corpus_cutoff,
         idempotency_key=attempt.idempotency_key,
         reserved_cost_usd=attempt.reserved_cost_usd,
         case_id=item.case_id,
@@ -322,6 +324,7 @@ def test_application_service_rejects_unclaimed_evaluation_unit(native_evaluation
         evaluation_run_id=run.id,
         ordinal=item.ordinal,
         schedule_hash=attempt.schedule_hash,
+        corpus_cutoff=attempt.corpus_cutoff,
         idempotency_key=attempt.idempotency_key,
         reserved_cost_usd=attempt.reserved_cost_usd,
         case_id=item.case_id,
@@ -351,6 +354,7 @@ def test_application_service_rejects_queued_parent_without_receipt(
         evaluation_run_id=run.id,
         ordinal=item.ordinal,
         schedule_hash=attempt.schedule_hash,
+        corpus_cutoff=attempt.corpus_cutoff,
         idempotency_key=attempt.idempotency_key,
         reserved_cost_usd=attempt.reserved_cost_usd,
         case_id=item.case_id,

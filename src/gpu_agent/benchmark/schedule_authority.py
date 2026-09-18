@@ -162,6 +162,7 @@ def _validate_coverage(schedule: EvaluationSchedule) -> dict[str, str]:
         aliases = set(pairs)
         if (
             schedule.holdout_proof is None
+            or schedule.holdout_proof.corpus_cutoff != schedule.corpus_cutoff
             or any(case_id != template_id for case_id, template_id in pairs.items())
             or any(item.holdout_proof != schedule.holdout_proof for item in schedule.items)
             or aliases != {item.case_id for item in schedule.items}
@@ -193,9 +194,15 @@ def _validated_holdout_aliases(
     ):
         raise ValueError("holdout schedule aliases are not authoritative")
     payload = json.loads(store.read(refs[0]))
-    aliases = payload.get("aliases") if set(payload) == {"schema_version", "aliases"} else None
+    aliases = (
+        payload.get("aliases")
+        if set(payload) == {"schema_version", "corpus_cutoff", "aliases"}
+        else None
+    )
     if (
-        payload.get("schema_version") != 1
+        payload.get("schema_version") != 2
+        or payload.get("corpus_cutoff") != schedule.corpus_cutoff
+        or proof.corpus_cutoff != schedule.corpus_cutoff
         or not isinstance(aliases, list)
         or not aliases
         or len(aliases) != len(set(aliases))
@@ -228,7 +235,7 @@ def _universe(
     from gpu_agent.benchmark.executor import registered_cases
 
     store = family.corpus_store(visibility)
-    cases = registered_cases(store, binding, family)
+    cases = registered_cases(store, binding, family, cutoff=cutoff)
     selected = [
         transaction
         for transaction in family.ledger.committed_through(cutoff)
@@ -248,7 +255,7 @@ def _universe(
         ):
             raise ValueError("committed corpus universe differs from native registrations")
         selected_cases[case.id] = case
-    if cutoff is None and set(selected_cases) != set(cases):
+    if set(selected_cases) != set(cases):
         raise ValueError("native corpus registration is absent from committed universe")
     entries = [_entry(transaction) for transaction in selected]
     if not entries:
@@ -291,6 +298,7 @@ def _assemble_signing_request(
         or schedule.bindings.prompt_version != binding.prompt_version
         or schedule.bindings.toolchain_hash != binding.toolchain_lock_hash
         or schedule.bindings.model_config_hash != binding.model_config_hash
+        or schedule.corpus_cutoff != corpus_cutoff
     ):
         raise ValueError("evaluation schedule differs from its immutable binding")
     visibility: Literal["public", "evaluator"] = (
@@ -370,7 +378,8 @@ def build_signing_request(
         raise ValueError("signing requires the exact QUEUED evaluation pre-state")
     if store.children(run_id):
         raise ValueError("signing requires a zero-child evaluation pre-state")
-    cutoff = len(family.ledger.committed_through()) if corpus_cutoff is None else corpus_cutoff
+    cutoff = schedule.corpus_cutoff if corpus_cutoff is None else corpus_cutoff
+    family.ledger.committed_through(cutoff)
     return _assemble_signing_request(
         family,
         store,
@@ -593,6 +602,7 @@ def _validate_evaluation_unit(
         run_id=parent.id,
         ordinal=unit.ordinal,
         schedule_hash=schedule_hash,
+        corpus_cutoff=schedule.corpus_cutoff,
         idempotency_key=hashlib.sha256(
             f"{parent.id}:{schedule_hash}:{unit.ordinal}".encode()
         ).hexdigest(),
@@ -602,6 +612,7 @@ def _validate_evaluation_unit(
         evaluation_run_id=parent.id,
         ordinal=item.ordinal,
         schedule_hash=schedule_hash,
+        corpus_cutoff=schedule.corpus_cutoff,
         idempotency_key=expected_attempt.idempotency_key,
         reserved_cost_usd=expected_attempt.reserved_cost_usd,
         case_id=item.case_id,
@@ -616,6 +627,7 @@ def _validate_evaluation_unit(
         run_id=parent.id,
         ordinal=item.ordinal,
         schedule_hash=schedule_hash,
+        corpus_cutoff=schedule.corpus_cutoff,
         attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
     )
     claim = EvaluationExecutionClaim.model_validate_json(

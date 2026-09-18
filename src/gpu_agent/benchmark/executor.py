@@ -683,6 +683,11 @@ def validate_evaluation_record(
     """Resolve one public record back to immutable native execution artifacts."""
     public = record.public() if isinstance(record, EvaluationRecord) else record
     lineage = public.lineage
+    if (
+        public.corpus_cutoff != attempt.corpus_cutoff
+        or lineage.corpus_cutoff != attempt.corpus_cutoff
+    ):
+        raise ValueError("evaluation record corpus cutoff differs from its attempt")
     run = store.load(lineage.diagnosis_run_id)
     if (
         store.visibility != "public"
@@ -700,6 +705,7 @@ def validate_evaluation_record(
         evaluation_run_id=attempt.run_id,
         ordinal=item.ordinal,
         schedule_hash=attempt.schedule_hash,
+        corpus_cutoff=attempt.corpus_cutoff,
         idempotency_key=attempt.idempotency_key,
         reserved_cost_usd=attempt.reserved_cost_usd,
         case_id=item.case_id,
@@ -869,9 +875,9 @@ def validate_evaluation_record(
         raise ValueError("fixed controller evidence differs from scheduled mode")
     if corpus is None or corpus_family is None:
         raise ValueError("native corpus authority is required for evaluation validation")
-    trusted_case = registered_cases(corpus, binding, corpus_family).get(
-        registered_case_id or item.case_id
-    )
+    trusted_case = registered_cases(
+        corpus, binding, corpus_family, cutoff=attempt.corpus_cutoff
+    ).get(registered_case_id or item.case_id)
     if trusted_case is None:
         raise ValueError("scheduled case is absent from the trusted corpus")
     if acquisition_policy["required_tools"] != [trusted_case.target_tool]:
@@ -1350,6 +1356,8 @@ def registered_cases(
     corpus: RunStore,
     evaluation_binding: RunBinding,
     family: "CorpusFamily | None" = None,
+    *,
+    cutoff: int | None = None,
 ) -> dict[str, CaseManifest]:
     """Load only completed, hash-checked registrations from the controller corpus."""
     from gpu_agent.benchmark.builder import BenchmarkBuilder
@@ -1363,7 +1371,7 @@ def registered_cases(
     target_hash = family.ledger.target_store_hash(corpus)
     transactions = [
         transaction
-        for transaction in family.ledger.committed_through()
+        for transaction in family.ledger.committed_through(cutoff)
         if transaction.visibility == corpus.visibility
         and transaction.target_store_hash == target_hash
     ]
@@ -1581,6 +1589,7 @@ class EvaluationExecutor:
                 run_id=evaluation_run_id,
                 ordinal=ordinal,
                 schedule_hash=schedule_hash,
+                corpus_cutoff=schedule.corpus_cutoff,
                 idempotency_key=hashlib.sha256(
                     f"{evaluation_run_id}:{schedule_hash}:{ordinal}".encode()
                 ).hexdigest(),
@@ -1635,6 +1644,7 @@ class EvaluationExecutor:
                 evaluation_run_id=attempt.run_id,
                 ordinal=item.ordinal,
                 schedule_hash=attempt.schedule_hash,
+                corpus_cutoff=attempt.corpus_cutoff,
                 idempotency_key=attempt.idempotency_key,
                 reserved_cost_usd=attempt.reserved_cost_usd,
                 case_id=item.case_id,
@@ -1649,6 +1659,7 @@ class EvaluationExecutor:
                 run_id=evaluation_run_id,
                 ordinal=ordinal,
                 schedule_hash=schedule_hash,
+                corpus_cutoff=schedule.corpus_cutoff,
                 attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
             )
             self.service.store.put_if_absent_exact(
@@ -1672,9 +1683,12 @@ class EvaluationExecutor:
                 )
             if self.service.binding is None:
                 raise ValueError("evaluation service is unbound")
-            case = registered_cases(self.corpus, self.service.binding, self._corpus_family).get(
-                registered_case_id
-            )
+            case = registered_cases(
+                self.corpus,
+                self.service.binding,
+                self._corpus_family,
+                cutoff=schedule.corpus_cutoff,
+            ).get(registered_case_id)
             if (
                 case is None
                 or case.template_id != registered_template_id
@@ -1871,6 +1885,7 @@ class EvaluationExecutor:
                 raise ValueError("evaluation evidence is unavailable")
             store.read(evidence_refs[-1])
             lineage = EvaluationLineage(
+                corpus_cutoff=unit.corpus_cutoff,
                 diagnosis_run_id=run.id,
                 diagnosis_hash=diagnosis_ref.sha256,
                 evidence_hash=evidence_refs[-1].sha256,
@@ -1882,6 +1897,7 @@ class EvaluationExecutor:
             return EvaluationRecord.model_validate(
                 {
                     "record_id": run.id,
+                    "corpus_cutoff": unit.corpus_cutoff,
                     "lineage": lineage,
                     "case_id": case_id,
                     "template_id": template_id,

@@ -42,6 +42,7 @@ class HoldoutBatch(ExecutionModel):
     evaluator_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     aliases: list[str]
     public_alias_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    corpus_cutoff: int = Field(ge=1)
 
 
 class EvaluatorRecordBinding(ExecutionModel):
@@ -52,6 +53,7 @@ class EvaluatorRecordBinding(ExecutionModel):
     private_case_id: str = Field(min_length=1)
     private_template_id: str = Field(min_length=1)
     private_score_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    corpus_cutoff: int = Field(ge=1)
 
 
 class _PrivateIdentity(ExecutionModel):
@@ -61,13 +63,15 @@ class _PrivateIdentity(ExecutionModel):
 
 
 class _PrivateAliasMap(ExecutionModel):
-    schema_version: int = 1
+    schema_version: int = 2
+    corpus_cutoff: int = Field(ge=1)
     nonce_hex: str = Field(pattern=r"^[a-f0-9]{64}$")
     identities: list[_PrivateIdentity]
 
 
 class _PrivateScore(ExecutionModel):
-    schema_version: int = 1
+    schema_version: int = 2
+    corpus_cutoff: int = Field(ge=1)
     public_record_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     labels: EvaluationLabels
     score: Score
@@ -117,7 +121,8 @@ class HoldoutController:
     def prepare(self) -> HoldoutBatch:
         from gpu_agent.benchmark.executor import registered_cases
 
-        cases = registered_cases(self.evaluator, self.binding, self._schedule_family)
+        cutoff = len(self._schedule_family.ledger.committed_through())
+        cases = registered_cases(self.evaluator, self.binding, self._schedule_family, cutoff=cutoff)
         private_identities = sorted((case.id, case.template_id) for case in cases.values())
         if not private_identities or len(set(private_identities)) != len(private_identities):
             raise ValueError("holdout preparation input is invalid")
@@ -145,14 +150,20 @@ class HoldoutController:
         if len({item.alias for item in identities}) != len(identities):
             raise ValueError("holdout preparation input is invalid")
         public_content = json.dumps(
-            {"schema_version": 1, "aliases": [item.alias for item in identities]},
+            {
+                "schema_version": 2,
+                "corpus_cutoff": cutoff,
+                "aliases": [item.alias for item in identities],
+            },
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
         public_ref = self.public.put(
             public_run.id, "holdout/aliases.json", public_content, "public"
         )
-        mapping = _PrivateAliasMap(nonce_hex=nonce.hex(), identities=identities)
+        mapping = _PrivateAliasMap(
+            corpus_cutoff=cutoff, nonce_hex=nonce.hex(), identities=identities
+        )
         self.evaluator.put(
             evaluator_run.id,
             "holdout/private-alias-map.json",
@@ -168,6 +179,7 @@ class HoldoutController:
             evaluator_run_id=evaluator_run.id,
             aliases=[item.alias for item in identities],
             public_alias_hash=public_ref.sha256,
+            corpus_cutoff=cutoff,
         )
 
     def validate_batch(self, batch: HoldoutBatch) -> HoldoutScheduleProof:
@@ -185,7 +197,11 @@ class HoldoutController:
         ):
             raise ValueError("holdout binding is invalid")
         public_payload = json.loads(self.public.read(refs[0]))
-        if public_payload != {"schema_version": 1, "aliases": batch.aliases}:
+        if public_payload != {
+            "schema_version": 2,
+            "corpus_cutoff": batch.corpus_cutoff,
+            "aliases": batch.aliases,
+        }:
             raise ValueError("holdout binding is invalid")
         mapping_run = self.evaluator.load(batch.evaluator_run_id)
         mapping_refs = [
@@ -201,6 +217,8 @@ class HoldoutController:
         ):
             raise ValueError("holdout binding is invalid")
         mapping = _PrivateAliasMap.model_validate_json(self.evaluator.read(mapping_refs[0]))
+        if mapping.corpus_cutoff != batch.corpus_cutoff:
+            raise ValueError("holdout binding cutoff is invalid")
         nonce = bytes.fromhex(mapping.nonce_hex)
         recomputed = [
             hmac.new(
@@ -214,7 +232,12 @@ class HoldoutController:
         ]
         from gpu_agent.benchmark.executor import registered_cases
 
-        cases = registered_cases(self.evaluator, self.binding, self._schedule_family)
+        cases = registered_cases(
+            self.evaluator,
+            self.binding,
+            self._schedule_family,
+            cutoff=batch.corpus_cutoff,
+        )
         expected_private = sorted((case.id, case.template_id) for case in cases.values())
         observed_private = [
             (item.private_case_id, item.private_template_id) for item in mapping.identities
@@ -225,7 +248,11 @@ class HoldoutController:
             or observed_private != expected_private
         ):
             raise ValueError("holdout binding is invalid")
-        return HoldoutScheduleProof(public_run_id=batch.public_run_id, aliases_hash=refs[0].sha256)
+        return HoldoutScheduleProof(
+            public_run_id=batch.public_run_id,
+            aliases_hash=refs[0].sha256,
+            corpus_cutoff=batch.corpus_cutoff,
+        )
 
     def bind_score(
         self,
@@ -245,6 +272,7 @@ class HoldoutController:
         if record.case_id != alias or record.template_id != alias:
             raise ValueError("public evaluation record is invalid")
         private_score = _PrivateScore(
+            corpus_cutoff=batch.corpus_cutoff,
             public_record_hash=public_record_ref.sha256,
             labels=labels,
             score=score,
@@ -260,6 +288,7 @@ class HoldoutController:
             private_case_id=identity.private_case_id,
             private_template_id=identity.private_template_id,
             private_score_hash=hashlib.sha256(private_score.content()).hexdigest(),
+            corpus_cutoff=batch.corpus_cutoff,
         )
         with self._score_claim(score_run_id):
             try:
@@ -345,6 +374,7 @@ class HoldoutController:
                 item = schedule.items[ordinal]
                 if (
                     schedule.split != "holdout"
+                    or schedule.corpus_cutoff != batch.corpus_cutoff
                     or schedule.holdout_proof != proof
                     or item.split != "holdout"
                     or item.holdout_proof != proof
@@ -419,6 +449,7 @@ class HoldoutController:
                 observed_attempt.run_id != run.id
                 or observed_attempt.ordinal != attempt_ordinal
                 or observed_attempt.schedule_hash != schedule_hash
+                or observed_attempt.corpus_cutoff != schedule.corpus_cutoff
                 or observed_attempt.idempotency_key != expected_attempt_key
                 or observed_attempt.reserved_cost_usd != schedule.bindings.max_unit_cost_usd
             ):
@@ -432,6 +463,7 @@ class HoldoutController:
             attempt.run_id != run.id
             or attempt.ordinal != ordinal
             or attempt.schedule_hash != schedule_hash
+            or attempt.corpus_cutoff != schedule.corpus_cutoff
             or attempt.idempotency_key != expected_key
             or attempt.reserved_cost_usd != schedule.bindings.max_unit_cost_usd
         ):
@@ -455,6 +487,7 @@ class HoldoutController:
             sorted(records) != list(range(len(records)))
             or manifest.run_id != run.id
             or manifest.schedule_hash != schedule_hash
+            or manifest.corpus_cutoff != schedule.corpus_cutoff
             or manifest.expected_units != len(schedule.items)
             or manifest.executed_units != len(records)
             or manifest.records != ordered_records
@@ -541,6 +574,7 @@ class HoldoutController:
         if (
             score_refs[0].sha256 != binding.private_score_hash
             or private_score.public_record_hash != binding.public_record_hash
+            or private_score.corpus_cutoff != binding.corpus_cutoff
         ):
             raise ValueError("holdout score transaction is invalid")
         evaluation_run = self.public.load(binding.public_evaluation_run_id)
@@ -562,6 +596,12 @@ class HoldoutController:
         ):
             raise ValueError("holdout score transaction is invalid")
         public_alias_run = self.public.load(mapping_run.external_origin.run_id)
+        mapping_refs = [
+            ref for ref in mapping_run.artifact_refs if ref.name == "holdout/private-alias-map.json"
+        ]
+        if len(mapping_refs) != 1:
+            raise ValueError("holdout score transaction is invalid")
+        mapping = _PrivateAliasMap.model_validate_json(self.evaluator.read(mapping_refs[0]))
         alias_refs = [
             ref for ref in public_alias_run.artifact_refs if ref.name == "holdout/aliases.json"
         ]
@@ -573,6 +613,7 @@ class HoldoutController:
             evaluator_run_id=mapping_run.id,
             aliases=alias_payload.get("aliases", []),
             public_alias_hash=alias_refs[0].sha256,
+            corpus_cutoff=mapping.corpus_cutoff,
         )
         public = self._validated_public_record(refs[0], batch)
         identity = self._identity(batch, public.case_id)
@@ -583,6 +624,9 @@ class HoldoutController:
             or public.record_id != binding.public_record_id
             or identity.private_case_id != binding.private_case_id
             or identity.private_template_id != binding.private_template_id
+            or public.corpus_cutoff != binding.corpus_cutoff
+            or public.lineage.corpus_cutoff != binding.corpus_cutoff
+            or batch.corpus_cutoff != binding.corpus_cutoff
         ):
             raise ValueError("holdout score transaction is invalid")
         return private_score, public
