@@ -33,6 +33,7 @@ from gpu_agent.contracts import (
 
 if TYPE_CHECKING:
     from gpu_agent.benchmark.evaluation import EvaluationUnitBinding
+    from gpu_agent.benchmark.ledger import CorpusLedger, EvaluationCutoffReservation
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
 
@@ -119,11 +120,34 @@ class EvaluationRunLease:
         self._lock_fd = lock_fd
         self.identity = identity
         self._active = True
-        self._authority_finalized = False
+        self.__authority_finalized = False
 
-    def _finalize_authority(self) -> None:
-        """Mark a caller's durable authority write as the final linearization point."""
-        self._authority_finalized = True
+    @property
+    def _authority_commit_finalized(self) -> bool:
+        return self.__authority_finalized
+
+    def _commit_cutoff_reservation(
+        self,
+        ledger: CorpusLedger,
+        ledger_lock_fd: int,
+        state: dict[str, object],
+        committed: EvaluationCutoffReservation,
+    ) -> None:
+        """Atomically bind finalization to one concrete exact ledger commit."""
+        from gpu_agent.benchmark.ledger import CorpusLedger, EvaluationCutoffReservation
+
+        if type(ledger) is not CorpusLedger or type(committed) is not EvaluationCutoffReservation:
+            raise ValueError("cutoff authority commit requires native controller types")
+        CorpusLedger._commit_exact_reservation(
+            ledger,
+            self,
+            ledger_lock_fd,
+            state,
+            committed,
+        )
+        # The concrete primitive returned only after the exact COMMITTED state became
+        # authoritative. This assignment is intentionally unreachable independently.
+        self.__authority_finalized = True
 
     @staticmethod
     def _same(left: os.stat_result, right: os.stat_result) -> bool:
@@ -354,7 +378,7 @@ class RunStore:
             lease = EvaluationRunLease(self, run_id, root_fd, run_fd, lock_fd, identity)
             lease.validate()
             yield lease
-            if not lease._authority_finalized:
+            if not lease._authority_commit_finalized:
                 lease.validate()
         except OSError as exc:
             raise ValueError("evaluation run lease is unavailable or unsafe") from exc
@@ -367,7 +391,7 @@ class RunStore:
                 try:
                     os.close(descriptor)
                 except OSError:
-                    if lease is None or not lease._authority_finalized:
+                    if lease is None or not lease._authority_commit_finalized:
                         raise
 
     def _save(self, manifest: RunManifest) -> None:

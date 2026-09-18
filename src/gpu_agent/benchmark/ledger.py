@@ -5,6 +5,7 @@ import hashlib
 import hmac
 import json
 import os
+import stat
 import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -459,6 +460,45 @@ class CorpusLedger:
         except (OSError, ValueError, TypeError):
             return False
 
+    def _commit_exact_reservation(
+        self,
+        lease: EvaluationRunLease,
+        ledger_lock_fd: int,
+        state: dict[str, object],
+        expected: EvaluationCutoffReservation,
+    ) -> None:
+        """Concrete final authority write; callers cannot separate commit from finalization."""
+        if (
+            type(self) is not CorpusLedger
+            or type(lease) is not EvaluationRunLease
+            or type(expected) is not EvaluationCutoffReservation
+        ):
+            raise ValueError("cutoff authority commit requires native controller types")
+        lock_info = os.fstat(ledger_lock_fd)
+        canonical_lock = os.stat(self.root / ".lock", follow_symlinks=False)
+        if not stat.S_ISREG(lock_info.st_mode) or (lock_info.st_dev, lock_info.st_ino) != (
+            canonical_lock.st_dev,
+            canonical_lock.st_ino,
+        ):
+            raise ValueError("corpus ledger lock is no longer canonical")
+        fcntl.flock(ledger_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        raw_reservations = state.get("evaluation_reservations")
+        if not isinstance(raw_reservations, list):
+            raise ValueError("corpus ledger evaluation reservations are malformed")
+        matches = [
+            CorpusLedger._reservation(raw)
+            for raw in raw_reservations
+            if isinstance(raw, dict) and raw.get("evaluation_run_id") == expected.evaluation_run_id
+        ]
+        if matches != [expected] or expected.state != "COMMITTED":
+            raise ValueError("exact committed reservation is absent")
+        EvaluationRunLease.validate(lease)
+        try:
+            CorpusLedger._save(self, state)
+        except BaseException:
+            if not CorpusLedger._exact_reservation_is_durable(self, expected):
+                raise
+
     @staticmethod
     def _transaction(value: object) -> CorpusTransaction:
         try:
@@ -699,19 +739,8 @@ class CorpusLedger:
                 if observed.state == "COMMITTED":
                     return observed
             committed = prepared.model_copy(update={"state": "COMMITTED"})
-            # This is the last fallible validation before the authority write.
-            # A successful exact COMMITTED replace is the sole linearization point.
-            lease.validate()
             raw_reservations[index] = committed.model_dump(mode="json")
-            try:
-                self._save(state)
-            except BaseException:
-                # os.replace may have installed the exact state before directory fsync
-                # reported an error. Under the held ledger flock, exact read-back turns
-                # that uncertain outcome into success instead of a failed-but-usable
-                # authority record.
-                if not self._exact_reservation_is_durable(committed):
-                    raise
+            EvaluationRunLease._commit_cutoff_reservation(lease, self, fd, state, committed)
             finalized = True
             return committed
         finally:
@@ -720,8 +749,6 @@ class CorpusLedger:
             except OSError:
                 if not finalized:
                     raise
-            if finalized:
-                lease._finalize_authority()
 
     def evaluation_cutoff_reservation(
         self, lease: EvaluationRunLease, binding: RunBinding

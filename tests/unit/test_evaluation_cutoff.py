@@ -506,6 +506,7 @@ def test_prepared_save_then_directory_swap_leaves_unusable_reservation(
 ):
     import json
 
+    from gpu_agent.benchmark.ledger import CorpusLedger
     from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
 
     executor = native_evaluation_executor
@@ -514,20 +515,20 @@ def test_prepared_save_then_directory_swap_leaves_unusable_reservation(
     assert binding is not None
     run = runner.store.create_run("evaluation", binding=binding)
     ledger = executor._corpus_family.ledger
-    native_save = ledger._save
+    native_save = CorpusLedger._save
     canonical = runner.store.root / run.id
     displaced = tmp_path / "save-original-run"
     save_count = 0
 
-    def save_then_swap(state):
+    def save_then_swap(self, state):
         nonlocal save_count
-        native_save(state)
+        native_save(self, state)
         save_count += 1
         if save_count == 1:
             canonical.rename(displaced)
             shutil.copytree(displaced, canonical)
 
-    monkeypatch.setattr(ledger, "_save", save_then_swap)
+    monkeypatch.setattr(CorpusLedger, "_save", save_then_swap)
     with pytest.raises(ValueError, match="canonical"):
         reserve_evaluation_cutoff(
             executor._corpus_family,
@@ -557,6 +558,7 @@ def test_committed_save_is_the_final_reservation_linearization_point(
     native_evaluation_executor, tmp_path, monkeypatch
 ):
     """A post-replace path swap cannot turn success into failed-but-usable state."""
+    from gpu_agent.benchmark.ledger import CorpusLedger
     from gpu_agent.benchmark.schedule_authority import (
         rebuild_reserved_schedule,
         reserve_evaluation_cutoff,
@@ -567,23 +569,22 @@ def test_committed_save_is_the_final_reservation_linearization_point(
     binding = executor.service.binding
     assert binding is not None
     run = runner.store.create_run("evaluation", binding=binding)
-    ledger = executor._corpus_family.ledger
-    native_save = ledger._save
+    native_save = CorpusLedger._save
     canonical = runner.store.root / run.id
     displaced = tmp_path / "committed-original-run"
     save_count = 0
 
-    def save_swap_then_reject_rollback(state):
+    def save_swap_then_reject_rollback(self, state):
         nonlocal save_count
         save_count += 1
         if save_count == 3:
             raise OSError("rollback must never be needed")
-        native_save(state)
+        native_save(self, state)
         if save_count == 2:
             canonical.rename(displaced)
             shutil.copytree(displaced, canonical)
 
-    monkeypatch.setattr(ledger, "_save", save_swap_then_reject_rollback)
+    monkeypatch.setattr(CorpusLedger, "_save", save_swap_then_reject_rollback)
     reservation = reserve_evaluation_cutoff(
         executor._corpus_family,
         runner.store,
@@ -610,6 +611,7 @@ def test_committed_save_is_the_final_reservation_linearization_point(
 def test_uncertain_committed_save_exact_readback_returns_success(
     native_evaluation_executor, monkeypatch
 ):
+    from gpu_agent.benchmark.ledger import CorpusLedger
     from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
 
     executor = native_evaluation_executor
@@ -617,18 +619,17 @@ def test_uncertain_committed_save_exact_readback_returns_success(
     binding = executor.service.binding
     assert binding is not None
     run = runner.store.create_run("evaluation", binding=binding)
-    ledger = executor._corpus_family.ledger
-    native_save = ledger._save
+    native_save = CorpusLedger._save
     save_count = 0
 
-    def durable_save_then_fsync_error(state):
+    def durable_save_then_fsync_error(self, state):
         nonlocal save_count
         save_count += 1
-        native_save(state)
+        native_save(self, state)
         if save_count == 2:
             raise OSError("simulated post-replace fsync error")
 
-    monkeypatch.setattr(ledger, "_save", durable_save_then_fsync_error)
+    monkeypatch.setattr(CorpusLedger, "_save", durable_save_then_fsync_error)
     reservation = reserve_evaluation_cutoff(
         executor._corpus_family,
         runner.store,
@@ -644,6 +645,21 @@ def test_uncertain_committed_save_exact_readback_returns_success(
     )
     assert reservation.state == "COMMITTED"
     assert _reservation(executor, run.id) == reservation
+
+
+def test_evaluation_lease_has_no_free_finalization_marker(native_evaluation_executor):
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    run_path = runner.store.root / run.id
+
+    with pytest.raises(ValueError, match="canonical or safe"):
+        with runner.store.evaluation_run_lease(run.id) as lease:
+            with pytest.raises(AttributeError):
+                lease._finalize_authority()
+            run_path.chmod(0o777)
 
 
 @pytest.mark.parametrize("unsafe_target", ["root", "run"])
