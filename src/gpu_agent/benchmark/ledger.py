@@ -5,7 +5,7 @@ import hashlib
 import hmac
 import json
 import os
-import stat
+import re
 import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -76,8 +76,10 @@ class EvaluationCutoffReservation(BaseModel):
     """Controller-owned snapshot of the corpus head for one evaluation run."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal[4] = 4
+    schema_version: Literal[5] = 5
     state: Literal["PREPARED", "COMMITTED"]
+    preparation_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    preparation_mac: str = Field(pattern=r"^[a-f0-9]{64}$")
     evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     target_store_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     target_store_root: str
@@ -115,6 +117,7 @@ _RESERVATION_MANIFEST_DOMAIN = b"gpu-agent-evaluation-reservation-manifest-v1\0"
 _RESERVATION_EVENT_DOMAIN = b"gpu-agent-evaluation-reservation-event-prefix-v1\0"
 _RESERVATION_ARTIFACT_DOMAIN = b"gpu-agent-evaluation-reservation-artifact-prefix-v1\0"
 _RESERVATION_CHILD_DOMAIN = b"gpu-agent-evaluation-reservation-child-inventory-v1\0"
+_RESERVATION_PREPARATION_DOMAIN = b"gpu-agent-evaluation-reservation-preparation-v1\0"
 
 
 def _canonical_model(value: BaseModel) -> bytes:
@@ -460,44 +463,65 @@ class CorpusLedger:
         except (OSError, ValueError, TypeError):
             return False
 
-    def _commit_exact_reservation(
+    def _commit_prepared_reservation(
         self,
         lease: EvaluationRunLease,
-        ledger_lock_fd: int,
-        state: dict[str, object],
-        expected: EvaluationCutoffReservation,
-    ) -> None:
-        """Concrete final authority write; callers cannot separate commit from finalization."""
-        if (
-            type(self) is not CorpusLedger
-            or type(lease) is not EvaluationRunLease
-            or type(expected) is not EvaluationCutoffReservation
-        ):
+        preparation_id: str,
+    ) -> EvaluationCutoffReservation:
+        """Reload and commit one authenticated PREPARED record under a fresh ledger lock."""
+        if type(self) is not CorpusLedger or type(lease) is not EvaluationRunLease:
             raise ValueError("cutoff authority commit requires native controller types")
-        lock_info = os.fstat(ledger_lock_fd)
-        canonical_lock = os.stat(self.root / ".lock", follow_symlinks=False)
-        if not stat.S_ISREG(lock_info.st_mode) or (lock_info.st_dev, lock_info.st_ino) != (
-            canonical_lock.st_dev,
-            canonical_lock.st_ino,
-        ):
-            raise ValueError("corpus ledger lock is no longer canonical")
-        fcntl.flock(ledger_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        raw_reservations = state.get("evaluation_reservations")
-        if not isinstance(raw_reservations, list):
-            raise ValueError("corpus ledger evaluation reservations are malformed")
-        matches = [
-            CorpusLedger._reservation(raw)
-            for raw in raw_reservations
-            if isinstance(raw, dict) and raw.get("evaluation_run_id") == expected.evaluation_run_id
-        ]
-        if matches != [expected] or expected.state != "COMMITTED":
-            raise ValueError("exact committed reservation is absent")
-        EvaluationRunLease.validate(lease)
+        if not re.fullmatch(r"[a-f0-9]{32}", preparation_id):
+            raise ValueError("evaluation preparation ID is invalid")
+        fd, state = CorpusLedger._locked_state(self)
+        finalized = False
         try:
-            CorpusLedger._save(self, state)
-        except BaseException:
-            if not CorpusLedger._exact_reservation_is_durable(self, expected):
-                raise
+            raw_reservations = state["evaluation_reservations"]
+            assert isinstance(raw_reservations, list)
+            matches: list[tuple[int, EvaluationCutoffReservation]] = []
+            for index, raw in enumerate(raw_reservations):
+                observed = CorpusLedger._reservation(self, raw)
+                if (
+                    observed.preparation_id == preparation_id
+                    or observed.evaluation_run_id == lease.run_id
+                ):
+                    matches.append((index, observed))
+            if len(matches) != 1:
+                raise ValueError("evaluation cutoff preparation is unavailable or ambiguous")
+            index, prepared = matches[0]
+            if (
+                prepared.preparation_id != preparation_id
+                or prepared.evaluation_run_id != lease.run_id
+                or prepared.state not in {"PREPARED", "COMMITTED"}
+                or prepared.corpus_cutoff > len(CorpusLedger._committed_in_state(state))
+            ):
+                raise ValueError("evaluation cutoff preparation is invalid")
+            CorpusLedger.validate_evaluation_reservation_prestate(
+                prepared,
+                lease,
+                prepared.binding,
+                require_pristine=prepared.schedule_hash is None,
+            )
+            if prepared.state == "COMMITTED":
+                return prepared
+            committed = prepared.model_copy(update={"state": "COMMITTED"})
+            raw_reservations[index] = committed.model_dump(mode="json")
+            # Last fallible authority check. Exact COMMITTED persistence is the
+            # linearization point; an uncertain save is resolved by locked read-back.
+            EvaluationRunLease.validate(lease)
+            try:
+                CorpusLedger._save(self, state)
+            except BaseException:
+                if not CorpusLedger._exact_reservation_is_durable(self, committed):
+                    raise
+            finalized = True
+            return committed
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                if not finalized:
+                    raise
 
     @staticmethod
     def _transaction(value: object) -> CorpusTransaction:
@@ -560,12 +584,31 @@ class CorpusLedger:
             raise ValueError("corpus commit sequence is not contiguous")
         return ordered
 
-    @staticmethod
-    def _reservation(value: object) -> EvaluationCutoffReservation:
+    def __reservation_preparation_mac(self, reservation: EvaluationCutoffReservation) -> str:
+        normalized = reservation.model_copy(
+            update={
+                "state": "PREPARED",
+                "schedule_hash": None,
+                "preparation_mac": "0" * 64,
+            }
+        )
+        return hmac.new(
+            self.__key,
+            _RESERVATION_PREPARATION_DOMAIN + _canonical_model(normalized),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _reservation(self, value: object) -> EvaluationCutoffReservation:
         try:
-            return EvaluationCutoffReservation.model_validate(value)
+            reservation = EvaluationCutoffReservation.model_validate(value)
         except ValueError as exc:
             raise ValueError("evaluation cutoff reservation is malformed") from exc
+        if not hmac.compare_digest(
+            reservation.preparation_mac,
+            self.__reservation_preparation_mac(reservation),
+        ):
+            raise ValueError("evaluation cutoff reservation preparation is unauthenticated")
+        return reservation
 
     @staticmethod
     def _reservation_prestate(
@@ -678,10 +721,14 @@ class CorpusLedger:
             assert isinstance(raw_reservations, list)
 
             def candidate(
-                cutoff: int, status: Literal["PREPARED", "COMMITTED"]
+                cutoff: int,
+                preparation_id: str,
+                preparation_mac: str,
             ) -> EvaluationCutoffReservation:
                 return EvaluationCutoffReservation(
-                    state=status,
+                    state="PREPARED",
+                    preparation_id=preparation_id,
+                    preparation_mac=preparation_mac,
                     evaluation_run_id=lease.run_id,
                     target_store_hash=target_store_hash,
                     binding=binding,
@@ -722,15 +769,21 @@ class CorpusLedger:
                 cutoff = len(self._committed_in_state(state))
                 if cutoff < 1:
                     raise ValueError("evaluation cutoff reservation requires a committed corpus")
-                prepared = candidate(cutoff, "PREPARED")
+                prepared = candidate(cutoff, new_id(), "0" * 64)
+                prepared = prepared.model_copy(
+                    update={"preparation_mac": self.__reservation_preparation_mac(prepared)}
+                )
                 raw_reservations.append(prepared.model_dump(mode="json"))
-                index = len(raw_reservations) - 1
                 lease.validate()
                 self._save(state)
                 lease.validate()
             else:
-                index, observed = match
-                prepared = candidate(observed.corpus_cutoff, "PREPARED")
+                _, observed = match
+                prepared = candidate(
+                    observed.corpus_cutoff,
+                    observed.preparation_id,
+                    observed.preparation_mac,
+                )
                 if (
                     observed.model_copy(update={"state": "PREPARED", "schedule_hash": None})
                     != prepared
@@ -738,17 +791,20 @@ class CorpusLedger:
                     raise ValueError("evaluation cutoff reservation differs from run authority")
                 if observed.state == "COMMITTED":
                     return observed
-            committed = prepared.model_copy(update={"state": "COMMITTED"})
-            raw_reservations[index] = committed.model_dump(mode="json")
-            EvaluationRunLease._commit_cutoff_reservation(lease, self, fd, state, committed)
+            os.close(fd)
+            fd = -1
+            committed = EvaluationRunLease._commit_cutoff_reservation(
+                lease, self, prepared.preparation_id
+            )
             finalized = True
             return committed
         finally:
-            try:
-                os.close(fd)
-            except OSError:
-                if not finalized:
-                    raise
+            if fd >= 0:
+                try:
+                    os.close(fd)
+                except OSError:
+                    if not finalized:
+                        raise
 
     def evaluation_cutoff_reservation(
         self, lease: EvaluationRunLease, binding: RunBinding

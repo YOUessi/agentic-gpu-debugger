@@ -662,6 +662,77 @@ def test_evaluation_lease_has_no_free_finalization_marker(native_evaluation_exec
             run_path.chmod(0o777)
 
 
+def test_forged_old_cutoff_cannot_enter_authenticated_commit(native_evaluation_executor):
+    import os
+
+    from gpu_agent.benchmark.ledger import CorpusLedger
+    from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
+    from gpu_agent.contracts import new_id
+    from gpu_agent.store import EvaluationRunLease
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    future = executor._register_future_case_for_test()
+    assert future.id == "case_0101"
+    assert len(executor._corpus_family.ledger.committed_through()) == 2
+
+    legitimate_run = runner.store.create_run("evaluation", binding=binding)
+    legitimate = reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        legitimate_run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    assert legitimate.corpus_cutoff == 2
+
+    forged_run = runner.store.create_run("evaluation", binding=binding)
+    ledger = executor._corpus_family.ledger
+    with runner.store.evaluation_run_lease(forged_run.id) as lease:
+        prestate = CorpusLedger._reservation_prestate(lease, binding, require_pristine=True)
+        forged = legitimate.model_copy(
+            update={
+                "state": "COMMITTED",
+                "preparation_id": new_id(),
+                "evaluation_run_id": forged_run.id,
+                "corpus_cutoff": 1,
+                "target_store_root": prestate.target_store_root,
+                "target_store_device": prestate.target_store_device,
+                "target_store_inode": prestate.target_store_inode,
+                "target_run_path": prestate.target_run_path,
+                "target_run_device": prestate.target_run_device,
+                "target_run_inode": prestate.target_run_inode,
+                "target_run_lock_device": prestate.target_run_lock_device,
+                "target_run_lock_inode": prestate.target_run_lock_inode,
+                "queued_manifest_hash": prestate.queued_manifest_hash,
+                "event_prefix_hash": prestate.event_prefix_hash,
+                "artifact_prefix_hash": prestate.artifact_prefix_hash,
+                "child_inventory_hash": prestate.child_inventory_hash,
+            }
+        )
+        fd, state = CorpusLedger._locked_state(ledger)
+        try:
+            reservations = state["evaluation_reservations"]
+            assert isinstance(reservations, list)
+            reservations.append(forged.model_dump(mode="json"))
+            CorpusLedger._save(ledger, state)
+        finally:
+            os.close(fd)
+        with pytest.raises(ValueError, match="unauthenticated"):
+            EvaluationRunLease._commit_cutoff_reservation(lease, ledger, forged.preparation_id)
+
+    with pytest.raises(ValueError, match="unauthenticated"):
+        _reservation(executor, forged_run.id)
+
+
 @pytest.mark.parametrize("unsafe_target", ["root", "run"])
 def test_reservation_rejects_world_accessible_authority_directories(
     native_evaluation_executor, unsafe_target

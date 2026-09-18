@@ -129,25 +129,22 @@ class EvaluationRunLease:
     def _commit_cutoff_reservation(
         self,
         ledger: CorpusLedger,
-        ledger_lock_fd: int,
-        state: dict[str, object],
-        committed: EvaluationCutoffReservation,
-    ) -> None:
-        """Atomically bind finalization to one concrete exact ledger commit."""
-        from gpu_agent.benchmark.ledger import CorpusLedger, EvaluationCutoffReservation
+        preparation_id: str,
+    ) -> EvaluationCutoffReservation:
+        """Finalize only a ledger-reloaded authenticated PREPARED reservation."""
+        from gpu_agent.benchmark.ledger import CorpusLedger
 
-        if type(ledger) is not CorpusLedger or type(committed) is not EvaluationCutoffReservation:
+        if type(ledger) is not CorpusLedger:
             raise ValueError("cutoff authority commit requires native controller types")
-        CorpusLedger._commit_exact_reservation(
+        committed = CorpusLedger._commit_prepared_reservation(
             ledger,
             self,
-            ledger_lock_fd,
-            state,
-            committed,
+            preparation_id,
         )
         # The concrete primitive returned only after the exact COMMITTED state became
         # authoritative. This assignment is intentionally unreachable independently.
         self.__authority_finalized = True
+        return committed
 
     @staticmethod
     def _same(left: os.stat_result, right: os.stat_result) -> bool:
