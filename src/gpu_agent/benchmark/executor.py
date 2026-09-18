@@ -7,8 +7,7 @@ import os
 import random
 import re
 import stat
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -1533,389 +1532,393 @@ class EvaluationExecutor:
             registered_case_id,
         )
 
-    @contextmanager
-    def _unit_transaction(self, evaluation_run_id: str, ordinal: int) -> Iterator[tuple[int, Path]]:
-        del ordinal
-        path = self.service.store.root / f".evaluation-execution-{evaluation_run_id}.lock"
-        reject_symlinks(path)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    def execute_scheduled(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
+        if not re.fullmatch(r"[a-f0-9]{32}", evaluation_run_id) or ordinal < 0:
+            raise ValueError("evaluation run locator is invalid")
+        expected = (
+            self.service.store.root / f".evaluation-execution-{evaluation_run_id}-{ordinal}.lock"
+        )
+        reject_symlinks(expected)
+        fd = os.open(expected, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode) or os.fstat(fd).st_mode & 0o077:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or opened.st_mode & 0o077:
                 raise ValueError("evaluation transaction lock is unsafe")
             fcntl.flock(fd, fcntl.LOCK_EX)
-            yield fd, path
+            reject_symlinks(expected)
+            located = os.stat(expected, follow_symlinks=False)
+            if not stat.S_ISREG(located.st_mode) or (opened.st_dev, opened.st_ino) != (
+                located.st_dev,
+                located.st_ino,
+            ):
+                raise ValueError("evaluation transaction lease path changed")
+            parent = self.service.store.load(evaluation_run_id)
+            if (
+                parent.kind != "evaluation"
+                or parent.status != RunStatus.RUNNING
+                or self.service.binding is None
+                or parent.binding != self.service.binding
+            ):
+                raise ValueError("evaluation run is not active and bound")
+            from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+            EvaluationScheduleVerifier.verify(self._schedule_verifier, evaluation_run_id)
+            schedule_ref = EvaluationExecutor._ref(self, parent, "evaluation/schedule.json")
+            schedule = EvaluationSchedule.model_validate_json(self.service.store.read(schedule_ref))
+            if ordinal >= len(schedule.items) or schedule.bindings.max_unit_cost_usd is None:
+                raise ValueError("evaluation ordinal is outside the frozen schedule")
+            schedule_hash = hashlib.sha256(
+                json.dumps(
+                    schedule.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+            attempt_ref = EvaluationExecutor._ref(
+                self, parent, f"evaluation/attempts/{ordinal}.json"
+            )
+            attempt = EvaluationAttempt.model_validate_json(self.service.store.read(attempt_ref))
+            item = schedule.items[ordinal]
+            expected_attempt = EvaluationAttempt(
+                run_id=evaluation_run_id,
+                ordinal=ordinal,
+                schedule_hash=schedule_hash,
+                idempotency_key=hashlib.sha256(
+                    f"{evaluation_run_id}:{schedule_hash}:{ordinal}".encode()
+                ).hexdigest(),
+                reserved_cost_usd=schedule.bindings.max_unit_cost_usd,
+            )
+            expected_ordinals = list(range(len(schedule.items)))
+            if [scheduled.ordinal for scheduled in schedule.items] != expected_ordinals:
+                raise ValueError("evaluation schedule ordinals are not canonical")
+            attempt_ordinals: list[int] = []
+            record_ordinals: list[int] = []
+            claim_ordinals: list[int] = []
+            for ref in parent.artifact_refs:
+                for prefix, destination in (
+                    ("evaluation/attempts/", attempt_ordinals),
+                    ("evaluation/records/", record_ordinals),
+                    ("evaluation/claims/", claim_ordinals),
+                ):
+                    if ref.name.startswith(prefix):
+                        match = re.fullmatch(re.escape(prefix) + r"([0-9]+)\.json", ref.name)
+                        if match is None:
+                            raise ValueError("evaluation artifact namespace is invalid")
+                        destination.append(int(match.group(1)))
+            if (
+                sorted(attempt_ordinals) != list(range(ordinal + 1))
+                or sorted(record_ordinals) != list(range(ordinal))
+                or sorted(claim_ordinals) != list(range(ordinal))
+                or len(attempt_ordinals) != len(set(attempt_ordinals))
+                or len(record_ordinals) != len(set(record_ordinals))
+                or len(claim_ordinals) != len(set(claim_ordinals))
+            ):
+                raise ValueError("evaluation execution state is not canonical")
+            if (
+                item.ordinal != ordinal
+                or attempt != expected_attempt
+                or any(
+                    ref.name == f"evaluation/records/{ordinal}.json" for ref in parent.artifact_refs
+                )
+                or schedule.bindings.commit != self.service.binding.repository.commit
+                or schedule.bindings.prompt_version != self.service.binding.prompt_version
+                or schedule.bindings.toolchain_hash != self.service.binding.toolchain_lock_hash
+                or schedule.bindings.model_config_hash != self.service.binding.model_config_hash
+            ):
+                raise ValueError("evaluation schedule locator is invalid")
+            if item.split == "holdout":
+                if self.holdout_controller is None or self.holdout_batch is None:
+                    raise ValueError("private evaluation requires validated holdout authority")
+                if self.holdout_controller.validate_batch(self.holdout_batch) != item.holdout_proof:
+                    raise ValueError("holdout authority differs from scheduled proof")
+            elif item.holdout_proof is not None:
+                raise ValueError("development evaluation cannot carry holdout authority")
+            unit = EvaluationUnitBinding(
+                evaluation_run_id=attempt.run_id,
+                ordinal=item.ordinal,
+                schedule_hash=attempt.schedule_hash,
+                idempotency_key=attempt.idempotency_key,
+                reserved_cost_usd=attempt.reserved_cost_usd,
+                case_id=item.case_id,
+                template_id=item.template_id,
+                mode=item.mode,
+                repeat=item.repeat,
+                split=item.split,
+                holdout_proof=item.holdout_proof,
+            )
+            attempt_content = attempt.model_dump_json().encode()
+            claim = EvaluationExecutionClaim(
+                run_id=evaluation_run_id,
+                ordinal=ordinal,
+                schedule_hash=schedule_hash,
+                attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
+            )
+            self.service.store.put_if_absent_exact(
+                evaluation_run_id,
+                f"evaluation/claims/{ordinal}.json",
+                claim.model_dump_json().encode(),
+                "public",
+            )
+            case_id, template_id, mode, repeat = (
+                item.case_id,
+                item.template_id,
+                item.mode,
+                item.repeat,
+            )
+            registered_case_id, registered_template_id = case_id, template_id
+            if self.holdout_controller is not None and self.holdout_batch is not None:
+                if case_id != template_id:
+                    raise ValueError("holdout evaluation alias is invalid")
+                registered_case_id, registered_template_id = (
+                    self.holdout_controller.resolve_private(self.holdout_batch, case_id)
+                )
+            if self.service.binding is None:
+                raise ValueError("evaluation service is unbound")
+            case = registered_cases(self.corpus, self.service.binding, self._corpus_family).get(
+                registered_case_id
+            )
+            if (
+                case is None
+                or case.template_id != registered_template_id
+                or registered_case_id not in self.sources
+            ):
+                raise ValueError("case or template is not registered")
+            if (case.split == "private") != (
+                unit.split == "holdout" and unit.holdout_proof is not None
+            ):
+                raise ValueError("case visibility does not match evaluation split")
+            if repeat < 0 or mode not in {"A", "B", "C", "D", "E"}:
+                raise ValueError("invalid evaluation unit")
+            source = self.sources[registered_case_id]
+            selected = source / "kernel.cu" if source.is_dir() else source
+            if (
+                hashlib.sha256(read_regular(selected, 4 * 1024 * 1024)).hexdigest()
+                != case.source_hash
+            ):
+                raise ValueError("registered source hash mismatch")
+            run = self.service.diagnose(
+                source,
+                mode=mode,
+                required_tools=(case.target_tool,),
+                expected_source_hash=case.source_hash,
+                evaluation_unit=unit,
+            )
+            run = self.service.store.load(run.id)
+            if run.status != RunStatus.COMPLETED:
+                raise ValueError("diagnosis artifacts are not terminal")
+            store = self.service.store
+            result = self.service.diagnosis(run.id)
+            # Reading the required ref prevents diagnosis()'s missing-result convenience fallback.
+            diagnosis_ref = EvaluationExecutor._ref(self, run, "diagnosis.json")
+            store.read(diagnosis_ref)
+            bundle = EvidenceRepository(store).public_view(run.id)
+            source_refs = [ref for ref in bundle.source_snapshot if ref.name.endswith("/kernel.cu")]
+            if len(source_refs) != 1 or source_refs[0].sha256 != case.source_hash:
+                raise ValueError("diagnosis input differs from registered case")
+            budget = AgentBudget.model_validate_json(
+                store.read(EvaluationExecutor._ref(self, run, "agent/final-budget.json"))
+            )
+            summary = json.loads(
+                store.read(EvaluationExecutor._ref(self, run, "agent/usage-summary.json"))
+            )
+            if summary["physical_calls"] != budget.llm_calls:
+                raise ValueError("provider usage artifacts disagree")
+            acquisition = AcquisitionUsage.model_validate_json(
+                store.read(EvaluationExecutor._ref(self, run, "agent/acquisition-usage.json"))
+            )
+            if (
+                acquisition.sanitizer_calls > budget.sanitizer_calls
+                or acquisition.retrieval_calls > budget.rag_calls
+            ):
+                raise ValueError("physical acquisition exceeds reserved attempts")
+            usage: dict[str, int | None] = {
+                "physical_calls": budget.llm_calls,
+                "sanitizer_calls": acquisition.sanitizer_calls,
+                "retrieval_calls": acquisition.retrieval_calls,
+                "sanitizer_attempts": budget.sanitizer_calls,
+                "retrieval_attempts": budget.rag_calls,
+                "build_calls": int(bundle.build_result is not None),
+                "runtime_calls": int(bundle.execution_result is not None),
+            }
+            diagnostic_tool_calls = (
+                acquisition.sanitizer_calls
+                + acquisition.retrieval_calls
+                + int(bundle.build_result is not None)
+                + int(bundle.execution_result is not None)
+            )
+            usage["diagnostic_tool_calls"] = diagnostic_tool_calls
+            usage["tool_calls"] = diagnostic_tool_calls
+            usage["total_sanitizer_calls"] = acquisition.sanitizer_calls
+            invocations: dict[str, Invocation] = {}
+            terminal_invocation_hashes: list[str] = []
+            for ref in run.artifact_refs:
+                if ref.name.startswith("provider/") and ref.name.endswith(".json"):
+                    invocation = Invocation.model_validate_json(store.read(ref))
+                    invocations[invocation.invocation_id] = invocation
+                    if invocation.state != "STARTED":
+                        terminal_invocation_hashes.append(ref.sha256)
+            for field in ("input_tokens", "output_tokens", "total_tokens"):
+                values = [
+                    getattr(item.usage, field) if item.usage else None
+                    for item in invocations.values()
+                ]
+                usage[field] = (
+                    sum(value for value in values if value is not None)
+                    if values and len(values) == budget.llm_calls and None not in values
+                    else None
+                )
+            cost_usd: float | None = 0.0
+            if mode == "E":
+                pricing_refs = [
+                    ref for ref in run.artifact_refs if ref.name == "agent/pricing-attestation.json"
+                ]
+                cost_usd = None
+                if len(pricing_refs) == 1:
+                    pricing = PricingAttestation.model_validate_json(store.read(pricing_refs[0]))
+                    input_tokens = usage.get("input_tokens")
+                    output_tokens = usage.get("output_tokens")
+                    cost_usd = (
+                        pricing.cost(input_tokens, output_tokens)
+                        if isinstance(input_tokens, int) and isinstance(output_tokens, int)
+                        else None
+                    )
+            checks: dict[str, str] = {
+                item.tool_result.typed_payload.tool: item.check_outcome
+                for item in bundle.sanitizer_results
+                if item.tool_result is not None
+            }
+            candidate_hash: str | None = None
+            candidate_run_id: str | None = None
+            verification_run_id: str | None = None
+            public_verification_hash: str | None = None
+            verification: VerificationResult | None = None
+            verification_audit: VerificationAuditResult | None = None
+            finished = run.events[-1].at
+            candidates = self.service.candidates(run.id)
+            if len(candidates) > 1:
+                raise ValueError("evaluation candidate is ambiguous")
+            if candidates:
+                candidate_run_id = candidates[0]
+                candidate_run = store.load(candidates[0])
+                if candidate_run.status != RunStatus.COMPLETED:
+                    raise ValueError("candidate artifacts are not terminal")
+                candidate = PatchCandidate.model_validate_json(
+                    store.read(EvaluationExecutor._ref(self, candidate_run, "candidate.json"))
+                )
+                if candidate.generated_by != "agent" or candidate.parent_run_id != run.id:
+                    raise ValueError("evaluation candidate is not agent generated")
+                candidate_hash = candidate.patched_source_hash
+                self.service.verify(run.id, candidates[0])
+                verification_runs = [
+                    store.load(path.name)
+                    for path in store.root.iterdir()
+                    if path.is_dir() and re.fullmatch(r"[a-f0-9]{32}", path.name)
+                ]
+                matches = [
+                    item
+                    for item in verification_runs
+                    if item.kind == "verification" and item.parent_run_id == run.id
+                ]
+                if len(matches) != 1 or matches[0].status != RunStatus.COMPLETED:
+                    raise ValueError("verification artifacts are missing or ambiguous")
+                verification = VerificationResult.model_validate_json(
+                    store.read(
+                        EvaluationExecutor._ref(self, matches[0], "verification/result.json")
+                    )
+                )
+                verification_ref = EvaluationExecutor._ref(
+                    self, matches[0], "verification/result.json"
+                )
+                verification_run_id = matches[0].id
+                public_verification_hash = verification_ref.sha256
+                if verification.candidate_hash != candidate_hash:
+                    raise ValueError("verification candidate hash mismatch")
+                verification_audit = _validate_verification_audit(
+                    self.service.store,
+                    RunStore(self.service.evaluator_root / "runs", visibility="evaluator"),
+                    run.id,
+                    verification,
+                    self.service.binding,
+                )
+                checks.update(
+                    {
+                        f"verification/{key}": value
+                        for key, value in verification.required_checks.items()
+                    }
+                )
+                finished = matches[0].events[-1].at
+                # The verification result has outcomes, not physical invocation
+                # counts. Preserve diagnostic components and report totals unknown.
+                usage["tool_calls"] = None
+                usage["total_sanitizer_calls"] = None
+            reason = result.limitations[0] if result.limitations else None
+            status: str = "INCONCLUSIVE"
+            if verification is not None:
+                reason = verification.reason_code
+                if verification.verdict != VerificationVerdict.INCONCLUSIVE:
+                    status = "COMPLETED"
+            elif reason and reason not in {
+                "INVALID_DIAGNOSIS_EVIDENCE",
+                "MODEL_DECLARED_INCONCLUSIVE",
+                "SANITIZER_EVIDENCE_UNAVAILABLE",
+                "KNOWLEDGE_UNAVAILABLE",
+                "NO_INFORMATION_GAIN",
+            }:
+                status = "TIMEOUT" if "TIMEOUT" in reason else "FAILED"
+            # Only bounded reason codes leave this adapter, never an exception message.
+            if reason is not None and not re.fullmatch(r"[A-Z0-9_]{1,80}", reason):
+                reason = "EVALUATION_FAILED"
+            evidence_refs = [ref for ref in run.artifact_refs if ref.name == "evidence/bundle.json"]
+            if not evidence_refs:
+                raise ValueError("evaluation evidence is unavailable")
+            store.read(evidence_refs[-1])
+            lineage = EvaluationLineage(
+                diagnosis_run_id=run.id,
+                diagnosis_hash=diagnosis_ref.sha256,
+                evidence_hash=evidence_refs[-1].sha256,
+                provider_invocation_hashes=terminal_invocation_hashes,
+                candidate_run_id=candidate_run_id,
+                verification_run_id=verification_run_id,
+                public_verification_hash=public_verification_hash,
+            )
+            return EvaluationRecord.model_validate(
+                {
+                    "record_id": run.id,
+                    "lineage": lineage,
+                    "case_id": case_id,
+                    "template_id": template_id,
+                    "mode": mode,
+                    "repeat": repeat,
+                    "input_hash": case.source_hash,
+                    "evidence_hash": evidence_refs[-1].sha256,
+                    "executed_checks": checks,
+                    "status": status,
+                    "diagnosis": result.model_dump(mode="json"),
+                    "patch_hash": candidate_hash,
+                    "oracle_passed": verification.public_oracle_passed if verification else None,
+                    "private_holdout_passed": (
+                        verification_audit.observation.private_holdout_passed
+                        if verification_audit
+                        else None
+                    ),
+                    "patch_compile_passed": (
+                        {"CLEAN": True, "FAILED": False}.get(
+                            verification.required_checks.get("build", "")
+                        )
+                        if verification
+                        else None
+                    ),
+                    "verdict": verification.verdict.value if verification else None,
+                    "regression_detected": bool(
+                        verification
+                        and verification.verdict == VerificationVerdict.REGRESSION_DETECTED
+                    ),
+                    "usage": usage,
+                    "latency_ms": (finished - run.events[0].at).total_seconds() * 1000,
+                    "cost_usd": cost_usd,
+                    "failure_reason": reason,
+                }
+            )
         finally:
             os.close(fd)
 
-    def execute_scheduled(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
-        return EvaluationExecutor._execute(self, evaluation_run_id, ordinal)
-
     def _execute(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
-        if not re.fullmatch(r"[a-f0-9]{32}", evaluation_run_id) or ordinal < 0:
-            raise ValueError("evaluation run locator is invalid")
-        with self._unit_transaction(evaluation_run_id, ordinal) as (fd, path):
-            return EvaluationExecutor.__execute_locked(self, fd, path, evaluation_run_id, ordinal)
-
-    def __execute_locked(
-        self,
-        fd: int,
-        path: Path,
-        evaluation_run_id: str,
-        ordinal: int,
-    ) -> EvaluationRecord:
-        expected = self.service.store.root / f".evaluation-execution-{evaluation_run_id}.lock"
-        if path != expected or not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ValueError("evaluation transaction lease is invalid")
-        # Re-acquiring on the same open file description is non-blocking.  A direct
-        # helper call therefore cannot execute without first owning the real flock.
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        parent = self.service.store.load(evaluation_run_id)
-        if (
-            parent.kind != "evaluation"
-            or parent.status != RunStatus.RUNNING
-            or self.service.binding is None
-            or parent.binding != self.service.binding
-        ):
-            raise ValueError("evaluation run is not active and bound")
-        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
-
-        EvaluationScheduleVerifier.verify(self._schedule_verifier, evaluation_run_id)
-        schedule_ref = self._ref(parent, "evaluation/schedule.json")
-        schedule = EvaluationSchedule.model_validate_json(self.service.store.read(schedule_ref))
-        if ordinal >= len(schedule.items) or schedule.bindings.max_unit_cost_usd is None:
-            raise ValueError("evaluation ordinal is outside the frozen schedule")
-        schedule_hash = hashlib.sha256(
-            json.dumps(
-                schedule.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-            ).encode()
-        ).hexdigest()
-        attempt_ref = self._ref(parent, f"evaluation/attempts/{ordinal}.json")
-        attempt = EvaluationAttempt.model_validate_json(self.service.store.read(attempt_ref))
-        item = schedule.items[ordinal]
-        expected_attempt = EvaluationAttempt(
-            run_id=evaluation_run_id,
-            ordinal=ordinal,
-            schedule_hash=schedule_hash,
-            idempotency_key=hashlib.sha256(
-                f"{evaluation_run_id}:{schedule_hash}:{ordinal}".encode()
-            ).hexdigest(),
-            reserved_cost_usd=schedule.bindings.max_unit_cost_usd,
-        )
-        expected_ordinals = list(range(len(schedule.items)))
-        if [scheduled.ordinal for scheduled in schedule.items] != expected_ordinals:
-            raise ValueError("evaluation schedule ordinals are not canonical")
-        attempt_ordinals: list[int] = []
-        record_ordinals: list[int] = []
-        claim_ordinals: list[int] = []
-        for ref in parent.artifact_refs:
-            for prefix, destination in (
-                ("evaluation/attempts/", attempt_ordinals),
-                ("evaluation/records/", record_ordinals),
-                ("evaluation/claims/", claim_ordinals),
-            ):
-                if ref.name.startswith(prefix):
-                    match = re.fullmatch(re.escape(prefix) + r"([0-9]+)\.json", ref.name)
-                    if match is None:
-                        raise ValueError("evaluation artifact namespace is invalid")
-                    destination.append(int(match.group(1)))
-        if (
-            sorted(attempt_ordinals) != list(range(ordinal + 1))
-            or sorted(record_ordinals) != list(range(ordinal))
-            or sorted(claim_ordinals) != list(range(ordinal))
-            or len(attempt_ordinals) != len(set(attempt_ordinals))
-            or len(record_ordinals) != len(set(record_ordinals))
-            or len(claim_ordinals) != len(set(claim_ordinals))
-        ):
-            raise ValueError("evaluation execution state is not canonical")
-        if (
-            item.ordinal != ordinal
-            or attempt != expected_attempt
-            or any(ref.name == f"evaluation/records/{ordinal}.json" for ref in parent.artifact_refs)
-            or schedule.bindings.commit != self.service.binding.repository.commit
-            or schedule.bindings.prompt_version != self.service.binding.prompt_version
-            or schedule.bindings.toolchain_hash != self.service.binding.toolchain_lock_hash
-            or schedule.bindings.model_config_hash != self.service.binding.model_config_hash
-        ):
-            raise ValueError("evaluation schedule locator is invalid")
-        if item.split == "holdout":
-            if self.holdout_controller is None or self.holdout_batch is None:
-                raise ValueError("private evaluation requires validated holdout authority")
-            if self.holdout_controller.validate_batch(self.holdout_batch) != item.holdout_proof:
-                raise ValueError("holdout authority differs from scheduled proof")
-        elif item.holdout_proof is not None:
-            raise ValueError("development evaluation cannot carry holdout authority")
-        unit = EvaluationUnitBinding(
-            evaluation_run_id=attempt.run_id,
-            ordinal=item.ordinal,
-            schedule_hash=attempt.schedule_hash,
-            idempotency_key=attempt.idempotency_key,
-            reserved_cost_usd=attempt.reserved_cost_usd,
-            case_id=item.case_id,
-            template_id=item.template_id,
-            mode=item.mode,
-            repeat=item.repeat,
-            split=item.split,
-            holdout_proof=item.holdout_proof,
-        )
-        attempt_content = attempt.model_dump_json().encode()
-        claim = EvaluationExecutionClaim(
-            run_id=evaluation_run_id,
-            ordinal=ordinal,
-            schedule_hash=schedule_hash,
-            attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
-        )
-        self.service.store.put_if_absent_exact(
-            evaluation_run_id,
-            f"evaluation/claims/{ordinal}.json",
-            claim.model_dump_json().encode(),
-            "public",
-        )
-        case_id, template_id, mode, repeat = (
-            item.case_id,
-            item.template_id,
-            item.mode,
-            item.repeat,
-        )
-        registered_case_id, registered_template_id = case_id, template_id
-        if self.holdout_controller is not None and self.holdout_batch is not None:
-            if case_id != template_id:
-                raise ValueError("holdout evaluation alias is invalid")
-            registered_case_id, registered_template_id = self.holdout_controller.resolve_private(
-                self.holdout_batch, case_id
-            )
-        if self.service.binding is None:
-            raise ValueError("evaluation service is unbound")
-        case = registered_cases(self.corpus, self.service.binding, self._corpus_family).get(
-            registered_case_id
-        )
-        if (
-            case is None
-            or case.template_id != registered_template_id
-            or registered_case_id not in self.sources
-        ):
-            raise ValueError("case or template is not registered")
-        if (case.split == "private") != (
-            unit.split == "holdout" and unit.holdout_proof is not None
-        ):
-            raise ValueError("case visibility does not match evaluation split")
-        if repeat < 0 or mode not in {"A", "B", "C", "D", "E"}:
-            raise ValueError("invalid evaluation unit")
-        source = self.sources[registered_case_id]
-        selected = source / "kernel.cu" if source.is_dir() else source
-        if hashlib.sha256(read_regular(selected, 4 * 1024 * 1024)).hexdigest() != case.source_hash:
-            raise ValueError("registered source hash mismatch")
-        run = self.service.diagnose(
-            source,
-            mode=mode,
-            required_tools=(case.target_tool,),
-            expected_source_hash=case.source_hash,
-            evaluation_unit=unit,
-        )
-        run = self.service.store.load(run.id)
-        if run.status != RunStatus.COMPLETED:
-            raise ValueError("diagnosis artifacts are not terminal")
-        store = self.service.store
-        result = self.service.diagnosis(run.id)
-        # Reading the required ref prevents diagnosis()'s missing-result convenience fallback.
-        diagnosis_ref = self._ref(run, "diagnosis.json")
-        store.read(diagnosis_ref)
-        bundle = EvidenceRepository(store).public_view(run.id)
-        source_refs = [ref for ref in bundle.source_snapshot if ref.name.endswith("/kernel.cu")]
-        if len(source_refs) != 1 or source_refs[0].sha256 != case.source_hash:
-            raise ValueError("diagnosis input differs from registered case")
-        budget = AgentBudget.model_validate_json(
-            store.read(self._ref(run, "agent/final-budget.json"))
-        )
-        summary = json.loads(store.read(self._ref(run, "agent/usage-summary.json")))
-        if summary["physical_calls"] != budget.llm_calls:
-            raise ValueError("provider usage artifacts disagree")
-        acquisition = AcquisitionUsage.model_validate_json(
-            store.read(self._ref(run, "agent/acquisition-usage.json"))
-        )
-        if (
-            acquisition.sanitizer_calls > budget.sanitizer_calls
-            or acquisition.retrieval_calls > budget.rag_calls
-        ):
-            raise ValueError("physical acquisition exceeds reserved attempts")
-        usage: dict[str, int | None] = {
-            "physical_calls": budget.llm_calls,
-            "sanitizer_calls": acquisition.sanitizer_calls,
-            "retrieval_calls": acquisition.retrieval_calls,
-            "sanitizer_attempts": budget.sanitizer_calls,
-            "retrieval_attempts": budget.rag_calls,
-            "build_calls": int(bundle.build_result is not None),
-            "runtime_calls": int(bundle.execution_result is not None),
-        }
-        diagnostic_tool_calls = (
-            acquisition.sanitizer_calls
-            + acquisition.retrieval_calls
-            + int(bundle.build_result is not None)
-            + int(bundle.execution_result is not None)
-        )
-        usage["diagnostic_tool_calls"] = diagnostic_tool_calls
-        usage["tool_calls"] = diagnostic_tool_calls
-        usage["total_sanitizer_calls"] = acquisition.sanitizer_calls
-        invocations: dict[str, Invocation] = {}
-        terminal_invocation_hashes: list[str] = []
-        for ref in run.artifact_refs:
-            if ref.name.startswith("provider/") and ref.name.endswith(".json"):
-                invocation = Invocation.model_validate_json(store.read(ref))
-                invocations[invocation.invocation_id] = invocation
-                if invocation.state != "STARTED":
-                    terminal_invocation_hashes.append(ref.sha256)
-        for field in ("input_tokens", "output_tokens", "total_tokens"):
-            values = [
-                getattr(item.usage, field) if item.usage else None for item in invocations.values()
-            ]
-            usage[field] = (
-                sum(value for value in values if value is not None)
-                if values and len(values) == budget.llm_calls and None not in values
-                else None
-            )
-        cost_usd: float | None = 0.0
-        if mode == "E":
-            pricing_refs = [
-                ref for ref in run.artifact_refs if ref.name == "agent/pricing-attestation.json"
-            ]
-            cost_usd = None
-            if len(pricing_refs) == 1:
-                pricing = PricingAttestation.model_validate_json(store.read(pricing_refs[0]))
-                input_tokens = usage.get("input_tokens")
-                output_tokens = usage.get("output_tokens")
-                cost_usd = (
-                    pricing.cost(input_tokens, output_tokens)
-                    if isinstance(input_tokens, int) and isinstance(output_tokens, int)
-                    else None
-                )
-        checks: dict[str, str] = {
-            item.tool_result.typed_payload.tool: item.check_outcome
-            for item in bundle.sanitizer_results
-            if item.tool_result is not None
-        }
-        candidate_hash: str | None = None
-        candidate_run_id: str | None = None
-        verification_run_id: str | None = None
-        public_verification_hash: str | None = None
-        verification: VerificationResult | None = None
-        verification_audit: VerificationAuditResult | None = None
-        finished = run.events[-1].at
-        candidates = self.service.candidates(run.id)
-        if len(candidates) > 1:
-            raise ValueError("evaluation candidate is ambiguous")
-        if candidates:
-            candidate_run_id = candidates[0]
-            candidate_run = store.load(candidates[0])
-            if candidate_run.status != RunStatus.COMPLETED:
-                raise ValueError("candidate artifacts are not terminal")
-            candidate = PatchCandidate.model_validate_json(
-                store.read(self._ref(candidate_run, "candidate.json"))
-            )
-            if candidate.generated_by != "agent" or candidate.parent_run_id != run.id:
-                raise ValueError("evaluation candidate is not agent generated")
-            candidate_hash = candidate.patched_source_hash
-            self.service.verify(run.id, candidates[0])
-            verification_runs = [
-                store.load(path.name)
-                for path in store.root.iterdir()
-                if path.is_dir() and re.fullmatch(r"[a-f0-9]{32}", path.name)
-            ]
-            matches = [
-                item
-                for item in verification_runs
-                if item.kind == "verification" and item.parent_run_id == run.id
-            ]
-            if len(matches) != 1 or matches[0].status != RunStatus.COMPLETED:
-                raise ValueError("verification artifacts are missing or ambiguous")
-            verification = VerificationResult.model_validate_json(
-                store.read(self._ref(matches[0], "verification/result.json"))
-            )
-            verification_ref = self._ref(matches[0], "verification/result.json")
-            verification_run_id = matches[0].id
-            public_verification_hash = verification_ref.sha256
-            if verification.candidate_hash != candidate_hash:
-                raise ValueError("verification candidate hash mismatch")
-            verification_audit = _validate_verification_audit(
-                self.service.store,
-                RunStore(self.service.evaluator_root / "runs", visibility="evaluator"),
-                run.id,
-                verification,
-                self.service.binding,
-            )
-            checks.update(
-                {
-                    f"verification/{key}": value
-                    for key, value in verification.required_checks.items()
-                }
-            )
-            finished = matches[0].events[-1].at
-            # The verification result has outcomes, not physical invocation
-            # counts. Preserve diagnostic components and report totals unknown.
-            usage["tool_calls"] = None
-            usage["total_sanitizer_calls"] = None
-        reason = result.limitations[0] if result.limitations else None
-        status: str = "INCONCLUSIVE"
-        if verification is not None:
-            reason = verification.reason_code
-            if verification.verdict != VerificationVerdict.INCONCLUSIVE:
-                status = "COMPLETED"
-        elif reason and reason not in {
-            "INVALID_DIAGNOSIS_EVIDENCE",
-            "MODEL_DECLARED_INCONCLUSIVE",
-            "SANITIZER_EVIDENCE_UNAVAILABLE",
-            "KNOWLEDGE_UNAVAILABLE",
-            "NO_INFORMATION_GAIN",
-        }:
-            status = "TIMEOUT" if "TIMEOUT" in reason else "FAILED"
-        # Only bounded reason codes leave this adapter, never an exception message.
-        if reason is not None and not re.fullmatch(r"[A-Z0-9_]{1,80}", reason):
-            reason = "EVALUATION_FAILED"
-        evidence_refs = [ref for ref in run.artifact_refs if ref.name == "evidence/bundle.json"]
-        if not evidence_refs:
-            raise ValueError("evaluation evidence is unavailable")
-        store.read(evidence_refs[-1])
-        lineage = EvaluationLineage(
-            diagnosis_run_id=run.id,
-            diagnosis_hash=diagnosis_ref.sha256,
-            evidence_hash=evidence_refs[-1].sha256,
-            provider_invocation_hashes=terminal_invocation_hashes,
-            candidate_run_id=candidate_run_id,
-            verification_run_id=verification_run_id,
-            public_verification_hash=public_verification_hash,
-        )
-        return EvaluationRecord.model_validate(
-            {
-                "record_id": run.id,
-                "lineage": lineage,
-                "case_id": case_id,
-                "template_id": template_id,
-                "mode": mode,
-                "repeat": repeat,
-                "input_hash": case.source_hash,
-                "evidence_hash": evidence_refs[-1].sha256,
-                "executed_checks": checks,
-                "status": status,
-                "diagnosis": result.model_dump(mode="json"),
-                "patch_hash": candidate_hash,
-                "oracle_passed": verification.public_oracle_passed if verification else None,
-                "private_holdout_passed": (
-                    verification_audit.observation.private_holdout_passed
-                    if verification_audit
-                    else None
-                ),
-                "patch_compile_passed": (
-                    {"CLEAN": True, "FAILED": False}.get(
-                        verification.required_checks.get("build", "")
-                    )
-                    if verification
-                    else None
-                ),
-                "verdict": verification.verdict.value if verification else None,
-                "regression_detected": bool(
-                    verification and verification.verdict == VerificationVerdict.REGRESSION_DETECTED
-                ),
-                "usage": usage,
-                "latency_ms": (finished - run.events[0].at).total_seconds() * 1000,
-                "cost_usd": cost_usd,
-                "failure_reason": reason,
-            }
-        )
+        return EvaluationExecutor.execute_scheduled(self, evaluation_run_id, ordinal)

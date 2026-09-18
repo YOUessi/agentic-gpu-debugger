@@ -344,8 +344,10 @@ class EvaluationRunner:
         if self.schedule_client is None:
             raise ValueError("external schedule authority is required")
         schedule = EvaluationRunner._schedule(self, mode, split, repeats)
-        run = self.store.create_run("evaluation", binding=self.binding)
-        self._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+        run = RunStore.create_run(self.store, "evaluation", binding=self.binding)
+        EvaluationRunner._put(
+            self, run.id, "evaluation/schedule.json", schedule.model_dump_json().encode()
+        )
         seal_schedule(
             self.executor._corpus_family,
             self.store,
@@ -367,7 +369,7 @@ class EvaluationRunner:
     def _resume_claimed(
         self, run_id: str, mode: EvaluationSelection, split: EvaluationSplit, repeats: int
     ) -> EvaluationManifest:
-        run = self.store.load(run_id)
+        run = RunStore.load(self.store, run_id)
         if run.kind != "evaluation" or run.status not in {
             RunStatus.QUEUED,
             RunStatus.RUNNING,
@@ -377,9 +379,15 @@ class EvaluationRunner:
             raise ValueError("evaluation run binding does not match controller")
         expected = EvaluationRunner._schedule(self, mode, split, repeats)
         persisted = EvaluationSchedule.model_validate_json(
-            self.store.read(self._one_artifact(run_id, "evaluation/schedule.json"))
+            RunStore.read(
+                self.store,
+                EvaluationRunner._one_artifact(self, run_id, "evaluation/schedule.json"),
+            )
         )
-        if self._schedule_hash(persisted) != self._schedule_hash(expected) or persisted != expected:
+        if (
+            EvaluationRunner._schedule_hash(persisted) != EvaluationRunner._schedule_hash(expected)
+            or persisted != expected
+        ):
             raise ValueError("evaluation schedule or bindings do not match")
         from gpu_agent.benchmark.schedule_authority import (
             EvaluationScheduleVerifier,
@@ -407,8 +415,8 @@ class EvaluationRunner:
                 raise ValueError("evaluation schedule receipt is ambiguous")
             activate_schedule(self.store, self.executor._schedule_verifier, run_id)
         EvaluationScheduleVerifier.verify(self.executor._schedule_verifier, run_id)
-        attempts = self._attempts(run_id, persisted)
-        records = self._records(run_id, persisted, attempts)
+        attempts = EvaluationRunner._attempts(self, run_id, persisted)
+        records = EvaluationRunner._records(self, run_id, persisted, attempts)
         return EvaluationRunner._execute(self, run_id, persisted, records, attempts)
 
     @contextmanager
@@ -492,7 +500,7 @@ class EvaluationRunner:
     ) -> EvaluationAttempt:
         if schedule.bindings.max_unit_cost_usd is None:
             raise ValueError("evaluation attempt requires a unit cost reservation")
-        schedule_hash = self._schedule_hash(schedule)
+        schedule_hash = EvaluationRunner._schedule_hash(schedule)
         key = hashlib.sha256(f"{run_id}:{schedule_hash}:{item.ordinal}".encode()).hexdigest()
         return EvaluationAttempt(
             run_id=run_id,
@@ -510,19 +518,19 @@ class EvaluationRunner:
         attempts: dict[int, EvaluationAttempt],
     ) -> EvaluationManifest:
         if schedule.bindings.max_cost_usd is None or schedule.bindings.max_unit_cost_usd is None:
-            return self._terminal(
-                run_id, schedule, records, "COST_CAP_REQUIRED", RunStatus.COMPLETED
+            return EvaluationRunner._terminal(
+                self, run_id, schedule, records, "COST_CAP_REQUIRED", RunStatus.COMPLETED
             )
 
         spent = 0.0
         for record in records:
             if record.cost_usd is None:
-                return self._terminal(
-                    run_id, schedule, records, "COST_UNKNOWN", RunStatus.COMPLETED
+                return EvaluationRunner._terminal(
+                    self, run_id, schedule, records, "COST_UNKNOWN", RunStatus.COMPLETED
                 )
             if record.cost_usd > schedule.bindings.max_unit_cost_usd:
-                return self._terminal(
-                    run_id, schedule, records, "UNIT_COST_CEILING_EXCEEDED", RunStatus.FAILED
+                return EvaluationRunner._terminal(
+                    self, run_id, schedule, records, "UNIT_COST_CEILING_EXCEEDED", RunStatus.FAILED
                 )
             spent += record.cost_usd
 
@@ -531,21 +539,23 @@ class EvaluationRunner:
         ]
         if incomplete_attempts:
             spent += sum(attempt.reserved_cost_usd for attempt in incomplete_attempts)
-            return self._terminal(
-                run_id, schedule, records, "AMBIGUOUS_STARTED_ATTEMPT", RunStatus.FAILED
+            return EvaluationRunner._terminal(
+                self, run_id, schedule, records, "AMBIGUOUS_STARTED_ATTEMPT", RunStatus.FAILED
             )
 
         for item in schedule.items[len(records) :]:
             if spent + schedule.bindings.max_unit_cost_usd > schedule.bindings.max_cost_usd:
-                return self._terminal(
+                return EvaluationRunner._terminal(
+                    self,
                     run_id,
                     schedule,
                     records,
                     "COST_CAP_RESERVATION_REQUIRED",
                     RunStatus.COMPLETED,
                 )
-            attempt = self._attempt(run_id, schedule, item)
-            self._put(
+            attempt = EvaluationRunner._attempt(self, run_id, schedule, item)
+            EvaluationRunner._put(
+                self,
                 run_id,
                 f"evaluation/attempts/{item.ordinal}.json",
                 attempt.model_dump_json().encode(),
@@ -555,32 +565,36 @@ class EvaluationRunner:
                 from gpu_agent.benchmark.executor import EvaluationExecutor
 
                 record = EvaluationExecutor.execute_scheduled(self.executor, run_id, item.ordinal)
-                self._validate_record(record, item, attempt)
+                EvaluationRunner._validate_record(self, record, item, attempt)
             except Exception:
-                return self._terminal(
-                    run_id, schedule, records, "EXECUTION_ERROR", RunStatus.FAILED
+                return EvaluationRunner._terminal(
+                    self, run_id, schedule, records, "EXECUTION_ERROR", RunStatus.FAILED
                 )
             try:
-                self._put(
+                EvaluationRunner._put(
+                    self,
                     run_id,
                     f"evaluation/records/{item.ordinal}.json",
                     record.public().model_dump_json().encode(),
                 )
             except Exception:
-                return self._terminal(
-                    run_id, schedule, records, "RECORD_PERSISTENCE_ERROR", RunStatus.FAILED
+                return EvaluationRunner._terminal(
+                    self, run_id, schedule, records, "RECORD_PERSISTENCE_ERROR", RunStatus.FAILED
                 )
-            records.append(record)
+            attempts = EvaluationRunner._attempts(self, run_id, schedule)
+            records = EvaluationRunner._records(self, run_id, schedule, attempts)
             if record.cost_usd is None:
-                return self._terminal(
-                    run_id, schedule, records, "COST_UNKNOWN", RunStatus.COMPLETED
+                return EvaluationRunner._terminal(
+                    self, run_id, schedule, records, "COST_UNKNOWN", RunStatus.COMPLETED
                 )
             if record.cost_usd > schedule.bindings.max_unit_cost_usd:
-                return self._terminal(
-                    run_id, schedule, records, "UNIT_COST_CEILING_EXCEEDED", RunStatus.FAILED
+                return EvaluationRunner._terminal(
+                    self, run_id, schedule, records, "UNIT_COST_CEILING_EXCEEDED", RunStatus.FAILED
                 )
             spent += record.cost_usd
-        return self._terminal(run_id, schedule, records, None, RunStatus.COMPLETED)
+        return EvaluationRunner._terminal(
+            self, run_id, schedule, records, None, RunStatus.COMPLETED
+        )
 
     def _terminal(
         self,
@@ -590,25 +604,37 @@ class EvaluationRunner:
         stopped_reason: StoppedReason | None,
         status: RunStatus,
     ) -> EvaluationManifest:
+        attempts = EvaluationRunner._attempts(self, run_id, schedule)
+        persisted_records = EvaluationRunner._records(self, run_id, schedule, attempts)
         manifest = EvaluationManifest(
             run_id=run_id,
             commit=schedule.bindings.commit,
             prompt_version=schedule.bindings.prompt_version,
             toolchain_hash=schedule.bindings.toolchain_hash,
             model_config_hash=schedule.bindings.model_config_hash,
-            schedule_hash=self._schedule_hash(schedule),
+            schedule_hash=EvaluationRunner._schedule_hash(schedule),
             expected_units=len(schedule.items),
-            executed_units=len(records),
+            executed_units=len(persisted_records),
             modes=schedule.modes,
             split=schedule.split,
             repeats=schedule.repeats,
             random_seed=schedule.random_seed,
-            records=[self._public(record) for record in records],
+            records=[EvaluationRunner._public(record) for record in persisted_records],
             stopped_reason=stopped_reason,
         )
-        self._put(run_id, "evaluation/manifest.json", manifest.model_dump_json().encode())
-        self.store.transition(run_id, status, None)
-        return manifest
+        EvaluationRunner._put(
+            self, run_id, "evaluation/manifest.json", manifest.model_dump_json().encode()
+        )
+        RunStore.transition(self.store, run_id, status, None)
+        persisted = EvaluationManifest.model_validate_json(
+            RunStore.read(
+                self.store,
+                EvaluationRunner._one_artifact(self, run_id, "evaluation/manifest.json"),
+            )
+        )
+        if persisted != manifest:
+            raise ValueError("persisted evaluation manifest differs from native records")
+        return persisted
 
     @staticmethod
     def _public(record: PersistedOrReturnedRecord) -> PublicEvaluationRecord:
@@ -621,7 +647,7 @@ class EvaluationRunner:
         attempts: dict[int, EvaluationAttempt],
     ) -> list[PublicEvaluationRecord]:
         records: dict[int, PublicEvaluationRecord] = {}
-        for ref in self.store.load(run_id).artifact_refs:
+        for ref in RunStore.load(self.store, run_id).artifact_refs:
             if not ref.name.startswith("evaluation/records/"):
                 continue
             match = re.fullmatch(r"evaluation/records/([0-9]+)\.json", ref.name)
@@ -634,8 +660,10 @@ class EvaluationRunner:
                 raise ValueError("evaluation record ordinal is out of range")
             if ordinal not in attempts:
                 raise ValueError("completed evaluation record has no durable attempt")
-            record = PublicEvaluationRecord.model_validate_json(self.store.read(ref))
-            self._validate_record(record, schedule.items[ordinal], attempts[ordinal])
+            record = PublicEvaluationRecord.model_validate_json(RunStore.read(self.store, ref))
+            EvaluationRunner._validate_record(
+                self, record, schedule.items[ordinal], attempts[ordinal]
+            )
             records[ordinal] = record
         if set(records) != set(range(len(records))):
             raise ValueError("evaluation record ordinals have a gap")
@@ -643,7 +671,7 @@ class EvaluationRunner:
 
     def _attempts(self, run_id: str, schedule: EvaluationSchedule) -> dict[int, EvaluationAttempt]:
         attempts: dict[int, EvaluationAttempt] = {}
-        for ref in self.store.load(run_id).artifact_refs:
+        for ref in RunStore.load(self.store, run_id).artifact_refs:
             if not ref.name.startswith("evaluation/attempts/"):
                 continue
             match = re.fullmatch(r"evaluation/attempts/([0-9]+)\.json", ref.name)
@@ -654,8 +682,8 @@ class EvaluationRunner:
                 raise ValueError("duplicate evaluation attempt ordinal")
             if ordinal >= len(schedule.items):
                 raise ValueError("evaluation attempt ordinal is out of range")
-            attempt = EvaluationAttempt.model_validate_json(self.store.read(ref))
-            expected = self._attempt(run_id, schedule, schedule.items[ordinal])
+            attempt = EvaluationAttempt.model_validate_json(RunStore.read(self.store, ref))
+            expected = EvaluationRunner._attempt(self, run_id, schedule, schedule.items[ordinal])
             if attempt != expected:
                 raise ValueError("evaluation attempt does not match scheduled unit")
             attempts[ordinal] = attempt
@@ -679,10 +707,10 @@ class EvaluationRunner:
         EvaluationExecutor.validate_scheduled_record(self.executor, record, item, attempt)
 
     def _one_artifact(self, run_id: str, name: str) -> ArtifactRef:
-        refs = [ref for ref in self.store.load(run_id).artifact_refs if ref.name == name]
+        refs = [ref for ref in RunStore.load(self.store, run_id).artifact_refs if ref.name == name]
         if len(refs) != 1:
             raise ValueError(f"expected exactly one {name} artifact")
         return refs[0]
 
     def _put(self, run_id: str, name: str, content: bytes) -> None:
-        self.store.put(run_id, name, content, self.store.visibility)
+        RunStore.put(self.store, run_id, name, content, self.store.visibility)

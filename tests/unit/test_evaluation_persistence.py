@@ -1,4 +1,5 @@
 import json
+import os
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 
@@ -173,23 +174,24 @@ def test_successful_resume_continues_after_completed_ordinal(
     native_evaluation_executor, monkeypatch
 ):
     from gpu_agent.benchmark.executor import EvaluationExecutor
+    from gpu_agent.store import RunStore
 
     executor = native_evaluation_executor
     runner = _runner(executor)
     store = executor.service.store
-    put = store.put
+    put = RunStore.put
 
-    def interrupt_after_first_record(run_id, name, content, visibility):
-        result = put(run_id, name, content, visibility)
+    def interrupt_after_first_record(self, run_id, name, content, visibility):
+        result = put(self, run_id, name, content, visibility)
         if name == "evaluation/records/0.json":
             raise KeyboardInterrupt
         return result
 
-    monkeypatch.setattr(store, "put", interrupt_after_first_record)
+    monkeypatch.setattr(RunStore, "put", interrupt_after_first_record)
     with pytest.raises(KeyboardInterrupt):
         runner.run("D", "development", 3)
     run_id = store.recoverable_runs()[0].id
-    monkeypatch.setattr(store, "put", put)
+    monkeypatch.setattr(RunStore, "put", put)
     restarted = EvaluationExecutor(
         executor.service,
         executor.corpus,
@@ -207,14 +209,14 @@ def test_record_serialization_failure_persists_failed_terminal_manifest(
 ):
     executor = native_evaluation_executor
     runner = _runner(executor)
-    put = runner._put
+    put = EvaluationRunner._put
 
-    def fail_record(run_id, name, content):
+    def fail_record(self, run_id, name, content):
         if name == "evaluation/records/0.json":
             raise TypeError("serialization failed")
-        return put(run_id, name, content)
+        return put(self, run_id, name, content)
 
-    monkeypatch.setattr(runner, "_put", fail_record)
+    monkeypatch.setattr(EvaluationRunner, "_put", fail_record)
     result = runner.run("D", "development", 3)
     assert result.stopped_reason == "RECORD_PERSISTENCE_ERROR"
     assert result.records == [] and result.executed_units == 0
@@ -437,4 +439,226 @@ def test_low_level_executor_rejects_caller_constructed_schedule_unit(
         executor.execute_scheduled(attempt.run_id, attempt.ordinal)
     with pytest.raises(ValueError):
         executor._execute(attempt.run_id, attempt.ordinal)
-    assert (executor.service.store.root / f".evaluation-execution-{attempt.run_id}.lock").is_file()
+    assert (
+        executor.service.store.root
+        / f".evaluation-execution-{attempt.run_id}-{attempt.ordinal}.lock"
+    ).is_file()
+
+
+def test_execution_lease_rejects_wrong_inode(native_evaluation_executor, monkeypatch):
+    """The locked descriptor must still name the canonical per-unit lock path."""
+    import gpu_agent.benchmark.executor as executor_module
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    schedule = runner._schedule("D", "development", 3)
+    store = executor.service.store
+    run = store.create_run("evaluation", binding=executor.service.binding)
+    runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+    from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
+
+    seal_schedule(
+        executor._corpus_family,
+        store,
+        run.id,
+        schedule,
+        executor.service.binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
+    )
+    activate_schedule(store, executor._schedule_verifier, run.id)
+    attempt = runner._attempt(run.id, schedule, schedule.items[0])
+    runner._put(run.id, "evaluation/attempts/0.json", attempt.model_dump_json().encode())
+
+    native_stat = executor_module.os.stat
+    lock_path = store.root / f".evaluation-execution-{run.id}-0.lock"
+
+    def wrong_inode(path, *args, **kwargs):
+        result = native_stat(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(lock_path):
+            values = list(result)
+            values[1] += 1
+            return os.stat_result(values)
+        return result
+
+    monkeypatch.setattr(executor_module.os, "stat", wrong_inode)
+    with pytest.raises(ValueError, match="lease path"):
+        executor.execute_scheduled(run.id, 0)
+    assert not store.children(run.id)
+
+
+@pytest.mark.parametrize("replacement", ["regular", "symlink"])
+def test_execution_lease_rejects_canonical_path_substitution(
+    native_evaluation_executor, monkeypatch, tmp_path, replacement
+):
+    import gpu_agent.benchmark.executor as executor_module
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    schedule = runner._schedule("D", "development", 3)
+    store = executor.service.store
+    run = store.create_run("evaluation", binding=executor.service.binding)
+    runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+    from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
+
+    seal_schedule(
+        executor._corpus_family,
+        store,
+        run.id,
+        schedule,
+        executor.service.binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
+    )
+    activate_schedule(store, executor._schedule_verifier, run.id)
+    attempt = runner._attempt(run.id, schedule, schedule.items[0])
+    runner._put(run.id, "evaluation/attempts/0.json", attempt.model_dump_json().encode())
+
+    lock_path = store.root / f".evaluation-execution-{run.id}-0.lock"
+    replacement_path = tmp_path / "replacement.lock"
+    replacement_path.write_bytes(b"")
+    replacement_path.chmod(0o600)
+    native_flock = executor_module.fcntl.flock
+    replaced = False
+
+    def replace_after_flock(fd, operation):
+        nonlocal replaced
+        result = native_flock(fd, operation)
+        if not replaced and operation == executor_module.fcntl.LOCK_EX:
+            replaced = True
+            lock_path.unlink()
+            if replacement == "symlink":
+                lock_path.symlink_to(replacement_path)
+            else:
+                os.replace(replacement_path, lock_path)
+        return result
+
+    monkeypatch.setattr(executor_module.fcntl, "flock", replace_after_flock)
+    with pytest.raises(ValueError, match="symlink|lease path"):
+        executor.execute_scheduled(run.id, 0)
+    assert not store.children(run.id)
+
+
+def test_runner_ignores_instance_replaced_trust_boundary_methods(
+    native_evaluation_executor, monkeypatch
+):
+    """Instance callbacks cannot replace execution, validation, or persistence authority."""
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("instance replacement reached a trust boundary")
+
+    for name in (
+        "execute_scheduled",
+        "validate_scheduled_record",
+        "_ref",
+    ):
+        monkeypatch.setattr(executor, name, forbidden)
+    for name in (
+        "_schedule",
+        "_attempt",
+        "_validate_record",
+        "_records",
+        "_attempts",
+        "_terminal",
+        "_put",
+        "_one_artifact",
+    ):
+        monkeypatch.setattr(runner, name, forbidden)
+
+    result = runner.run("D", "development", 3)
+    assert result.executed_units == 3 and result.stopped_reason is None
+
+
+def test_executor_exposes_no_unleased_helper_or_wrapped_path(native_evaluation_executor):
+    executor = native_evaluation_executor
+    assert not hasattr(executor, "_unit_transaction")
+    assert not hasattr(executor, "_EvaluationExecutor__execute_locked")
+    assert not hasattr(executor, "_execute_leased")
+    assert not hasattr(type(executor).execute_scheduled, "__wrapped__")
+    assert not hasattr(type(executor)._execute, "__wrapped__")
+
+
+def test_concurrent_direct_execution_dispatches_one_physical_diagnosis(
+    native_evaluation_executor, monkeypatch
+):
+    from gpu_agent.benchmark.schedule_authority import activate_schedule, seal_schedule
+    from gpu_agent.service import ApplicationService
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    schedule = runner._schedule("D", "development", 3)
+    store = executor.service.store
+    run = store.create_run("evaluation", binding=executor.service.binding)
+    runner._put(run.id, "evaluation/schedule.json", schedule.model_dump_json().encode())
+    seal_schedule(
+        executor._corpus_family,
+        store,
+        run.id,
+        schedule,
+        executor.service.binding,
+        schedule_client_for_test(executor),
+        executor._schedule_verifier,
+    )
+    activate_schedule(store, executor._schedule_verifier, run.id)
+    attempt = runner._attempt(run.id, schedule, schedule.items[0])
+    runner._put(run.id, "evaluation/attempts/0.json", attempt.model_dump_json().encode())
+
+    native_diagnose = ApplicationService.diagnose
+    guard = Lock()
+    started = Event()
+    release = Event()
+    calls = 0
+
+    def blocking_diagnose(self, *args, **kwargs):
+        nonlocal calls
+        with guard:
+            calls += 1
+        started.set()
+        release.wait(2)
+        return native_diagnose(self, *args, **kwargs)
+
+    monkeypatch.setattr(ApplicationService, "diagnose", blocking_diagnose)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(type(executor).execute_scheduled, executor, run.id, 0)
+        assert started.wait(1)
+        second = pool.submit(type(executor)._execute, executor, run.id, 0)
+        release.set()
+        record = first.result()
+        with pytest.raises(ValueError, match="execution state"):
+            second.result()
+    assert record.lineage.diagnosis_run_id
+    assert calls == 1
+
+
+def test_crash_after_physical_diagnosis_never_redispatches_ordinal(
+    native_evaluation_executor, monkeypatch
+):
+    from gpu_agent.service import ApplicationService
+
+    executor = native_evaluation_executor
+    native_diagnose = ApplicationService.diagnose
+    native_diagnosis = ApplicationService.diagnosis
+    calls = 0
+
+    def count_diagnose(self, *args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return native_diagnose(self, *args, **kwargs)
+
+    def crash_after_diagnosis(self, run_id):
+        native_diagnosis(self, run_id)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ApplicationService, "diagnose", count_diagnose)
+    monkeypatch.setattr(ApplicationService, "diagnosis", crash_after_diagnosis)
+    runner = _runner(executor)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run("D", "development", 3)
+    run_id = executor.service.store.recoverable_runs()[0].id
+    monkeypatch.setattr(ApplicationService, "diagnosis", native_diagnosis)
+    result = _runner(executor).resume(run_id, "D", "development", 3)
+    assert result.stopped_reason == "AMBIGUOUS_STARTED_ATTEMPT"
+    assert result.executed_units == 0
+    assert calls == 1
