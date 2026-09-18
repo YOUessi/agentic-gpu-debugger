@@ -733,6 +733,133 @@ def test_forged_old_cutoff_cannot_enter_authenticated_commit(native_evaluation_e
         _reservation(executor, forged_run.id)
 
 
+def test_crash_prepared_reservation_cannot_be_directly_promoted(
+    native_evaluation_executor, monkeypatch
+):
+    import os
+
+    from gpu_agent.benchmark.ledger import CorpusLedger
+    from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    ledger = executor._corpus_family.ledger
+    native_save = CorpusLedger._save
+    save_count = 0
+
+    def crash_after_prepared(self, state):
+        nonlocal save_count
+        save_count += 1
+        native_save(self, state)
+        if save_count == 1:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(CorpusLedger, "_save", crash_after_prepared)
+    with pytest.raises(KeyboardInterrupt):
+        reserve_evaluation_cutoff(
+            executor._corpus_family,
+            runner.store,
+            run.id,
+            binding,
+            selection="D",
+            modes=["D"],
+            split="development",
+            repeats=3,
+            random_seed=runner.random_seed,
+            max_cost_usd=runner.bindings.max_cost_usd,
+            max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+        )
+    monkeypatch.setattr(CorpusLedger, "_save", native_save)
+    fd, state = CorpusLedger._locked_state(ledger)
+    try:
+        reservations = state["evaluation_reservations"]
+        assert isinstance(reservations, list) and len(reservations) == 1
+        assert reservations[0]["state"] == "PREPARED"
+        reservations[0]["state"] = "COMMITTED"
+        CorpusLedger._save(ledger, state)
+    finally:
+        os.close(fd)
+    with pytest.raises(ValueError, match="unauthenticated"):
+        _reservation(executor, run.id)
+
+
+def test_direct_schedule_hash_mutation_invalidates_reservation_mac(native_evaluation_executor):
+    import os
+
+    from gpu_agent.benchmark.ledger import CorpusLedger
+    from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    ledger = executor._corpus_family.ledger
+    fd, state = CorpusLedger._locked_state(ledger)
+    try:
+        reservations = state["evaluation_reservations"]
+        assert isinstance(reservations, list) and len(reservations) == 1
+        reservations[0]["schedule_hash"] = "f" * 64
+        CorpusLedger._save(ledger, state)
+    finally:
+        os.close(fd)
+    with pytest.raises(ValueError, match="unauthenticated"):
+        _reservation(executor, run.id)
+
+
+def test_legacy_v4_reservation_is_explicitly_unsupported(native_evaluation_executor):
+    import os
+
+    from gpu_agent.benchmark.ledger import CorpusLedger
+    from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    ledger = executor._corpus_family.ledger
+    fd, state = CorpusLedger._locked_state(ledger)
+    try:
+        reservations = state["evaluation_reservations"]
+        assert isinstance(reservations, list) and len(reservations) == 1
+        reservations[0]["schema_version"] = 4
+        CorpusLedger._save(ledger, state)
+    finally:
+        os.close(fd)
+    with pytest.raises(ValueError, match="unsupported legacy.*migration is forbidden"):
+        _reservation(executor, run.id)
+
+
 @pytest.mark.parametrize("unsafe_target", ["root", "run"])
 def test_reservation_rejects_world_accessible_authority_directories(
     native_evaluation_executor, unsafe_target

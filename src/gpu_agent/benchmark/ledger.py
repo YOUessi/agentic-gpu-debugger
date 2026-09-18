@@ -504,7 +504,12 @@ class CorpusLedger:
             )
             if prepared.state == "COMMITTED":
                 return prepared
-            committed = prepared.model_copy(update={"state": "COMMITTED"})
+            committed = prepared.model_copy(
+                update={"state": "COMMITTED", "preparation_mac": "0" * 64}
+            )
+            committed = committed.model_copy(
+                update={"preparation_mac": self.__reservation_mac(committed)}
+            )
             raw_reservations[index] = committed.model_dump(mode="json")
             # Last fallible authority check. Exact COMMITTED persistence is the
             # linearization point; an uncertain save is resolved by locked read-back.
@@ -584,14 +589,8 @@ class CorpusLedger:
             raise ValueError("corpus commit sequence is not contiguous")
         return ordered
 
-    def __reservation_preparation_mac(self, reservation: EvaluationCutoffReservation) -> str:
-        normalized = reservation.model_copy(
-            update={
-                "state": "PREPARED",
-                "schedule_hash": None,
-                "preparation_mac": "0" * 64,
-            }
-        )
+    def __reservation_mac(self, reservation: EvaluationCutoffReservation) -> str:
+        normalized = reservation.model_copy(update={"preparation_mac": "0" * 64})
         return hmac.new(
             self.__key,
             _RESERVATION_PREPARATION_DOMAIN + _canonical_model(normalized),
@@ -599,13 +598,18 @@ class CorpusLedger:
         ).hexdigest()
 
     def _reservation(self, value: object) -> EvaluationCutoffReservation:
+        if isinstance(value, dict) and value.get("schema_version") == 4:
+            raise ValueError(
+                "unsupported legacy evaluation cutoff reservation schema; "
+                "automatic authority migration is forbidden"
+            )
         try:
             reservation = EvaluationCutoffReservation.model_validate(value)
         except ValueError as exc:
             raise ValueError("evaluation cutoff reservation is malformed") from exc
         if not hmac.compare_digest(
             reservation.preparation_mac,
-            self.__reservation_preparation_mac(reservation),
+            self.__reservation_mac(reservation),
         ):
             raise ValueError("evaluation cutoff reservation preparation is unauthenticated")
         return reservation
@@ -771,7 +775,7 @@ class CorpusLedger:
                     raise ValueError("evaluation cutoff reservation requires a committed corpus")
                 prepared = candidate(cutoff, new_id(), "0" * 64)
                 prepared = prepared.model_copy(
-                    update={"preparation_mac": self.__reservation_preparation_mac(prepared)}
+                    update={"preparation_mac": self.__reservation_mac(prepared)}
                 )
                 raw_reservations.append(prepared.model_dump(mode="json"))
                 lease.validate()
@@ -855,16 +859,27 @@ class CorpusLedger:
             )
             if observed.schedule_hash not in {None, schedule_hash}:
                 raise ValueError("evaluation schedule differs from cutoff reservation")
-            bound = observed.model_copy(update={"schedule_hash": schedule_hash})
+            bound = observed.model_copy(
+                update={"schedule_hash": schedule_hash, "preparation_mac": "0" * 64}
+            )
+            bound = bound.model_copy(update={"preparation_mac": self.__reservation_mac(bound)})
             if observed != bound:
                 lease.validate()
                 raw_reservations[index] = bound.model_dump(mode="json")
-                self._save(state)
+                try:
+                    self._save(state)
+                except BaseException:
+                    if not self._exact_reservation_is_durable(bound):
+                        raise
                 try:
                     lease.validate()
                 except BaseException:
                     raw_reservations[index] = observed.model_dump(mode="json")
-                    self._save(state)
+                    try:
+                        self._save(state)
+                    except BaseException:
+                        if not self._exact_reservation_is_durable(observed):
+                            raise
                     raise
             return bound
         finally:
