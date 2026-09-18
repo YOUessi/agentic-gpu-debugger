@@ -350,6 +350,7 @@ class EvaluationRunner:
         from gpu_agent.benchmark.schedule_authority import (
             activate_schedule,
             bind_reserved_schedule,
+            rebuild_reserved_schedule,
             reserve_evaluation_cutoff,
             seal_schedule,
         )
@@ -358,6 +359,13 @@ class EvaluationRunner:
             raise ValueError("external schedule authority is required")
         run = RunStore.create_run(self.store, "evaluation", binding=self.binding)
         modes: list[EvaluationMode] = ["A", "B", "C", "D", "E"] if mode == "all" else [mode]
+        holdout_proof = None
+        holdout_aliases: list[str] = []
+        if split == "holdout":
+            if self.holdout_controller is None or self.holdout_batch is None:
+                raise ValueError("holdout alias proof is required")
+            holdout_proof = self.holdout_controller.validate_batch(self.holdout_batch)
+            holdout_aliases = self.holdout_batch.aliases
         reservation = reserve_evaluation_cutoff(
             self.executor._corpus_family,
             self.store,
@@ -370,9 +378,13 @@ class EvaluationRunner:
             random_seed=self.random_seed,
             max_cost_usd=self.bindings.max_cost_usd,
             max_unit_cost_usd=self.bindings.max_unit_cost_usd,
+            holdout_proof=holdout_proof,
+            holdout_aliases=holdout_aliases,
         )
-        schedule = EvaluationRunner._schedule(
-            self, mode, split, repeats, corpus_cutoff=reservation.corpus_cutoff
+        if reservation.corpus_cutoff < 1:
+            raise ValueError("evaluation cutoff reservation is invalid")
+        schedule = rebuild_reserved_schedule(
+            self.executor._corpus_family, self.store, run.id, self.binding
         )
         bind_reserved_schedule(
             self.executor._corpus_family, self.store, run.id, schedule, self.binding
@@ -410,6 +422,19 @@ class EvaluationRunner:
         if run.binding != self.binding:
             raise ValueError("evaluation run binding does not match controller")
         reservation = self.executor._corpus_family.ledger.evaluation_cutoff_reservation(run_id)
+        requested_modes: list[EvaluationMode] = (
+            ["A", "B", "C", "D", "E"] if mode == "all" else [mode]
+        )
+        if (
+            reservation.selection != mode
+            or reservation.modes != requested_modes
+            or reservation.split != split
+            or reservation.repeats != repeats
+            or reservation.random_seed != self.random_seed
+            or reservation.max_cost_usd != self.bindings.max_cost_usd
+            or reservation.max_unit_cost_usd != self.bindings.max_unit_cost_usd
+        ):
+            raise ValueError("evaluation recovery request differs from cutoff reservation")
         schedule_refs = [ref for ref in run.artifact_refs if ref.name == "evaluation/schedule.json"]
         if len(schedule_refs) > 1:
             raise ValueError("evaluation schedule is ambiguous")
@@ -418,10 +443,14 @@ class EvaluationRunner:
                 RunStore.read(self.store, schedule_refs[0])
             )
         elif run.status == RunStatus.QUEUED:
-            persisted = EvaluationRunner._schedule(
-                self, mode, split, repeats, corpus_cutoff=reservation.corpus_cutoff
+            from gpu_agent.benchmark.schedule_authority import (
+                bind_reserved_schedule,
+                rebuild_reserved_schedule,
             )
-            from gpu_agent.benchmark.schedule_authority import bind_reserved_schedule
+
+            persisted = rebuild_reserved_schedule(
+                self.executor._corpus_family, self.store, run.id, self.binding
+            )
 
             bind_reserved_schedule(
                 self.executor._corpus_family,
@@ -439,8 +468,10 @@ class EvaluationRunner:
             run = RunStore.load(self.store, run_id)
         else:
             raise ValueError("active evaluation schedule is unavailable")
-        expected = EvaluationRunner._schedule(
-            self, mode, split, repeats, corpus_cutoff=persisted.corpus_cutoff
+        from gpu_agent.benchmark.schedule_authority import rebuild_reserved_schedule
+
+        expected = rebuild_reserved_schedule(
+            self.executor._corpus_family, self.store, run.id, self.binding
         )
         if (
             EvaluationRunner._schedule_hash(persisted) != EvaluationRunner._schedule_hash(expected)

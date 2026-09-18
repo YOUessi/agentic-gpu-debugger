@@ -241,9 +241,7 @@ def registered_executor(oob_service, tmp_path):
     return EvaluationExecutor(service, corpus, {"case_0100": source}), source
 
 
-def _execute_claimed_test_unit(
-    executor, mode, *, case_id="case_0100", template_id="vector-add", repeat=0
-):
+def _execute_claimed_test_unit(executor, mode, *, case_id="case_0100", template_id="vector-add"):
     """Exercise the production schedule/attempt claim path for one unit.
 
     Component tests intentionally stop after the native executor returns; batch
@@ -276,15 +274,6 @@ def _execute_claimed_test_unit(
                 ]
             }
         )
-    item = next(value for value in schedule.items if value.repeat == repeat)
-    ordered = [item, *(value for value in schedule.items if value is not item)]
-    schedule = schedule.model_copy(
-        update={
-            "items": [
-                value.model_copy(update={"ordinal": index}) for index, value in enumerate(ordered)
-            ]
-        }
-    )
     item = schedule.items[0]
     run = runner.store.create_run("evaluation", binding=binding)
     reserve_schedule_for_test(executor, runner, run.id, schedule)

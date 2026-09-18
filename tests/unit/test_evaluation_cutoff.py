@@ -308,3 +308,107 @@ def test_reserved_pre_schedule_crash_recovers_at_old_cutoff(
     manifest = runner.resume(run_id, "D", "development", 3)
     assert manifest.corpus_cutoff == 1
     assert manifest.executed_units == 3
+
+
+def test_reservation_rejects_a_future_evaluation_run_id(native_evaluation_executor):
+    from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    with pytest.raises(ValueError):
+        reserve_evaluation_cutoff(
+            executor._corpus_family,
+            runner.store,
+            "f" * 32,
+            binding,
+            selection="D",
+            modes=["D"],
+            split="development",
+            repeats=3,
+            random_seed=runner.random_seed,
+            max_cost_usd=runner.bindings.max_cost_usd,
+            max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+        )
+    with pytest.raises(ValueError, match="unavailable"):
+        executor._corpus_family.ledger.evaluation_cutoff_reservation("f" * 32)
+
+
+def test_reservation_rejects_rebuilt_run_in_another_store(native_evaluation_executor, tmp_path):
+    from gpu_agent.benchmark.schedule_authority import (
+        bind_reserved_schedule,
+        rebuild_reserved_schedule,
+        reserve_evaluation_cutoff,
+    )
+    from gpu_agent.store import RunStore
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    schedule = rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)
+    copied = RunStore(tmp_path / "copied-evaluation-store")
+    copied.create_run("evaluation", binding=binding, _run_id=run.id)
+    with pytest.raises(ValueError, match="prestate"):
+        bind_reserved_schedule(executor._corpus_family, copied, run.id, schedule, binding)
+
+
+def test_wrong_schedule_cannot_win_or_poison_first_hash_cas(native_evaluation_executor):
+    from gpu_agent.benchmark.schedule_authority import (
+        bind_reserved_schedule,
+        rebuild_reserved_schedule,
+        reserve_evaluation_cutoff,
+    )
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    correct = rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)
+    reordered = list(reversed(correct.items))
+    wrong = correct.model_copy(
+        update={
+            "items": [
+                item.model_copy(update={"ordinal": ordinal})
+                for ordinal, item in enumerate(reordered)
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="schedule differs"):
+        bind_reserved_schedule(executor._corpus_family, runner.store, run.id, wrong, binding)
+    unbound = executor._corpus_family.ledger.evaluation_cutoff_reservation(run.id)
+    assert unbound.schedule_hash is None
+
+    future = executor._register_future_case_for_test()
+    assert future.id == "case_0101"
+    bound = bind_reserved_schedule(executor._corpus_family, runner.store, run.id, correct, binding)
+    assert bound.schedule_hash == runner._schedule_hash(correct)

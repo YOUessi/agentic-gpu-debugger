@@ -45,6 +45,13 @@ def _runner(executor, *, client=True):
 
 
 def _reserve_existing(executor, runner, run, schedule, binding):
+    holdout_aliases = []
+    if schedule.holdout_proof is not None:
+        alias_run = runner.store.load(schedule.holdout_proof.public_run_id)
+        alias_ref = next(
+            ref for ref in alias_run.artifact_refs if ref.name == "holdout/aliases.json"
+        )
+        holdout_aliases = json.loads(runner.store.read(alias_ref))["aliases"]
     reservation = reserve_evaluation_cutoff(
         executor._corpus_family,
         runner.store,
@@ -57,6 +64,8 @@ def _reserve_existing(executor, runner, run, schedule, binding):
         random_seed=schedule.random_seed,
         max_cost_usd=schedule.bindings.max_cost_usd,
         max_unit_cost_usd=schedule.bindings.max_unit_cost_usd,
+        holdout_proof=schedule.holdout_proof,
+        holdout_aliases=holdout_aliases,
     )
     assert reservation.corpus_cutoff == schedule.corpus_cutoff
     bind_reserved_schedule(executor._corpus_family, runner.store, run.id, schedule, binding)

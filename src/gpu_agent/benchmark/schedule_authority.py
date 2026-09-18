@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import random
 import subprocess
 import tempfile
 from collections import Counter
@@ -19,8 +20,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.benchmark.evaluation import (
     EvaluationAttempt,
+    EvaluationBindings,
     EvaluationExecutionClaim,
     EvaluationSchedule,
+    EvaluationScheduleItem,
     EvaluationUnitBinding,
     HoldoutScheduleProof,
 )
@@ -28,6 +31,8 @@ from gpu_agent.benchmark.ledger import (
     CorpusFamily,
     CorpusTransaction,
     EvaluationCutoffReservation,
+    EvaluationModeName,
+    EvaluationSelectionName,
 )
 from gpu_agent.benchmark.models import CaseManifest
 from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunBinding, RunManifest, RunStatus
@@ -145,20 +150,25 @@ def reserve_evaluation_cutoff(
     run_id: str,
     binding: RunBinding,
     *,
-    selection: str,
-    modes: Sequence[str],
+    selection: EvaluationSelectionName,
+    modes: Sequence[EvaluationModeName],
     split: Literal["development", "holdout"],
     repeats: int,
     random_seed: int,
     max_cost_usd: float | None,
     max_unit_cost_usd: float | None,
+    holdout_proof: HoldoutScheduleProof | None = None,
+    holdout_aliases: Sequence[str] = (),
 ) -> EvaluationCutoffReservation:
     if store.visibility != "public":
         raise ValueError("evaluation cutoff reservation requires the public evaluation store")
+    # Give nonexistent IDs a stable fail-closed error before the ledger enters the
+    # store-run/ledger lock transaction that performs the authoritative recheck.
+    RunStore.load(store, run_id)
     return family.ledger.reserve_evaluation_cutoff(
+        store=store,
         evaluation_run_id=run_id,
         target_store_hash=_store_hash(family.namespace_hash, store),
-        target_visibility=store.visibility,
         binding=binding,
         selection=selection,
         modes=list(modes),
@@ -167,6 +177,9 @@ def reserve_evaluation_cutoff(
         random_seed=random_seed,
         max_cost_usd=max_cost_usd,
         max_unit_cost_usd=max_unit_cost_usd,
+        holdout_public_run_id=(holdout_proof.public_run_id if holdout_proof else None),
+        holdout_aliases_hash=(holdout_proof.aliases_hash if holdout_proof else None),
+        holdout_aliases=list(holdout_aliases),
     )
 
 
@@ -177,7 +190,11 @@ def _validate_reservation(
     schedule: EvaluationSchedule,
     binding: RunBinding,
     reservation: EvaluationCutoffReservation,
+    *,
+    allow_unbound_schedule: bool = False,
 ) -> None:
+    family.ledger.validate_evaluation_reservation_prestate(reservation, store, run_id, binding)
+    expected = _authority_schedule(family, store, reservation, binding)
     if (
         reservation.evaluation_run_id != run_id
         or reservation.target_store_hash != _store_hash(family.namespace_hash, store)
@@ -191,7 +208,14 @@ def _validate_reservation(
         or reservation.max_cost_usd != schedule.bindings.max_cost_usd
         or reservation.max_unit_cost_usd != schedule.bindings.max_unit_cost_usd
         or reservation.corpus_cutoff != schedule.corpus_cutoff
-        or reservation.schedule_hash != _schedule_hash(schedule)
+        or reservation.schedule_hash
+        not in (
+            {None, _schedule_hash(schedule)}
+            if allow_unbound_schedule
+            else {_schedule_hash(schedule)}
+        )
+        or schedule != expected
+        or _canonical(schedule) != _canonical(expected)
     ):
         raise ValueError("evaluation schedule differs from cutoff reservation")
 
@@ -203,7 +227,26 @@ def bind_reserved_schedule(
     schedule: EvaluationSchedule,
     binding: RunBinding,
 ) -> EvaluationCutoffReservation:
-    reservation = family.ledger.bind_evaluation_schedule(run_id, _schedule_hash(schedule))
+    reservation = family.ledger.evaluation_cutoff_reservation(run_id)
+    _validate_reservation(
+        family,
+        store,
+        run_id,
+        schedule,
+        binding,
+        reservation,
+        allow_unbound_schedule=True,
+    )
+    family.ledger.validate_evaluation_reservation_prestate(
+        reservation,
+        store,
+        run_id,
+        binding,
+        require_pristine=reservation.schedule_hash is None,
+    )
+    reservation = family.ledger.bind_evaluation_schedule(
+        store, run_id, binding, _schedule_hash(schedule)
+    )
     _validate_reservation(family, store, run_id, schedule, binding, reservation)
     return reservation
 
@@ -350,6 +393,111 @@ def _universe_hash(entries: list[CorpusUniverseEntry]) -> str:
         separators=(",", ":"),
     ).encode()
     return hashlib.sha256(b"gpu-agent-corpus-universe-v1\0" + content).hexdigest()
+
+
+def _authority_schedule(
+    family: CorpusFamily,
+    store: RunStore,
+    reservation: EvaluationCutoffReservation,
+    binding: RunBinding,
+) -> EvaluationSchedule:
+    """Deterministically derive the only schedule eligible for the hash CAS."""
+    if (
+        reservation.binding != binding
+        or binding.purpose != "evaluation"
+        or binding.corpus_ledger_namespace_hash != family.namespace_hash
+        or binding.prompt_version is None
+        or binding.toolchain_lock_hash is None
+        or binding.model_config_hash is None
+    ):
+        raise ValueError("evaluation reservation binding is incomplete")
+    modes: list[EvaluationModeName] = (
+        ["A", "B", "C", "D", "E"] if reservation.selection == "all" else [reservation.selection]
+    )
+    if reservation.modes != modes:
+        raise ValueError("evaluation reservation modes are invalid")
+    visibility: Literal["public", "evaluator"] = (
+        "public" if reservation.split == "development" else "evaluator"
+    )
+    _, cases = _universe(family, binding, visibility, reservation.corpus_cutoff)
+    holdout_proof: HoldoutScheduleProof | None = None
+    if reservation.split == "development":
+        if (
+            reservation.holdout_public_run_id is not None
+            or reservation.holdout_aliases_hash is not None
+            or reservation.holdout_aliases
+        ):
+            raise ValueError("development reservation carries holdout authority")
+        case_pairs = sorted((case.id, case.template_id) for case in cases.values())
+    else:
+        if (
+            reservation.holdout_public_run_id is None
+            or reservation.holdout_aliases_hash is None
+            or not reservation.holdout_aliases
+            or len(reservation.holdout_aliases) != len(set(reservation.holdout_aliases))
+            or len(reservation.holdout_aliases) != len(cases)
+        ):
+            raise ValueError("holdout reservation authority is incomplete")
+        holdout_proof = HoldoutScheduleProof(
+            public_run_id=reservation.holdout_public_run_id,
+            aliases_hash=reservation.holdout_aliases_hash,
+            corpus_cutoff=reservation.corpus_cutoff,
+        )
+        case_pairs = [(alias, alias) for alias in sorted(reservation.holdout_aliases)]
+    units = [
+        (case_id, template_id, mode, repeat)
+        for repeat in range(reservation.repeats)
+        for case_id, template_id in case_pairs
+        for mode in modes
+    ]
+    random.Random(reservation.random_seed).shuffle(units)
+    schedule = EvaluationSchedule(
+        selection=reservation.selection,
+        modes=modes,
+        split=reservation.split,
+        repeats=reservation.repeats,
+        random_seed=reservation.random_seed,
+        corpus_cutoff=reservation.corpus_cutoff,
+        bindings=EvaluationBindings(
+            commit=binding.repository.commit,
+            prompt_version=binding.prompt_version,
+            toolchain_hash=binding.toolchain_lock_hash,
+            model_config_hash=binding.model_config_hash,
+            max_cost_usd=reservation.max_cost_usd,
+            max_unit_cost_usd=reservation.max_unit_cost_usd,
+        ),
+        items=[
+            EvaluationScheduleItem(
+                ordinal=ordinal,
+                case_id=case_id,
+                template_id=template_id,
+                mode=mode,
+                repeat=repeat,
+                split=reservation.split,
+                holdout_proof=holdout_proof,
+            )
+            for ordinal, (case_id, template_id, mode, repeat) in enumerate(units)
+        ],
+        holdout_proof=holdout_proof,
+    )
+    _validate_coverage(schedule)
+    if reservation.split == "holdout":
+        aliases = _validated_holdout_aliases(schedule, store, binding)
+        if aliases != reservation.holdout_aliases:
+            raise ValueError("holdout alias order differs from cutoff reservation")
+    return schedule
+
+
+def rebuild_reserved_schedule(
+    family: CorpusFamily,
+    store: RunStore,
+    run_id: str,
+    binding: RunBinding,
+) -> EvaluationSchedule:
+    """Rebuild the canonical schedule without accepting caller-selected order."""
+    reservation = family.ledger.evaluation_cutoff_reservation(run_id)
+    family.ledger.validate_evaluation_reservation_prestate(reservation, store, run_id, binding)
+    return _authority_schedule(family, store, reservation, binding)
 
 
 def _assemble_signing_request(

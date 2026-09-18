@@ -4,6 +4,7 @@ The production package deliberately has no signing-key API or implementation.
 """
 
 import hashlib
+import json
 import subprocess
 import threading
 from pathlib import Path
@@ -111,6 +112,13 @@ def reserve_schedule_for_test(executor, runner, run_id, schedule) -> None:
     binding = executor.service.binding
     if binding is None:
         raise ValueError("test evaluation binding is unavailable")
+    holdout_aliases = []
+    if schedule.holdout_proof is not None:
+        alias_run = runner.store.load(schedule.holdout_proof.public_run_id)
+        alias_ref = next(
+            ref for ref in alias_run.artifact_refs if ref.name == "holdout/aliases.json"
+        )
+        holdout_aliases = json.loads(runner.store.read(alias_ref))["aliases"]
     reservation = reserve_evaluation_cutoff(
         executor._corpus_family,
         runner.store,
@@ -123,6 +131,8 @@ def reserve_schedule_for_test(executor, runner, run_id, schedule) -> None:
         random_seed=schedule.random_seed,
         max_cost_usd=schedule.bindings.max_cost_usd,
         max_unit_cost_usd=schedule.bindings.max_unit_cost_usd,
+        holdout_proof=schedule.holdout_proof,
+        holdout_aliases=holdout_aliases,
     )
     if reservation.corpus_cutoff != schedule.corpus_cutoff:
         raise ValueError("test schedule cutoff differs from reservation")
