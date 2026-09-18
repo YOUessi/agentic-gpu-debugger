@@ -421,6 +421,143 @@ def test_wrong_schedule_cannot_win_or_poison_first_hash_cas(native_evaluation_ex
     assert bound.schedule_hash == runner._schedule_hash(correct)
 
 
+def test_bound_schedule_save_is_the_final_linearization_point(
+    native_evaluation_executor, tmp_path, monkeypatch
+):
+    from gpu_agent.benchmark.ledger import CorpusLedger
+    from gpu_agent.benchmark.schedule_authority import (
+        bind_reserved_schedule,
+        rebuild_reserved_schedule,
+        reserve_evaluation_cutoff,
+    )
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    schedule = rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)
+    native_save = CorpusLedger._save
+    canonical = runner.store.root / run.id
+    displaced = tmp_path / "schedule-bound-original-run"
+    save_count = 0
+
+    def save_bound_swap_then_reject_rollback(self, state):
+        nonlocal save_count
+        save_count += 1
+        if save_count == 2:
+            raise OSError("rollback must not be attempted")
+        native_save(self, state)
+        canonical.rename(displaced)
+        shutil.copytree(displaced, canonical)
+
+    monkeypatch.setattr(CorpusLedger, "_save", save_bound_swap_then_reject_rollback)
+    bound = bind_reserved_schedule(executor._corpus_family, runner.store, run.id, schedule, binding)
+    assert save_count == 1
+    assert bound.schedule_hash == runner._schedule_hash(schedule)
+    with pytest.raises(ValueError, match="prestate"):
+        _reservation(executor, run.id)
+
+    shutil.rmtree(canonical)
+    displaced.rename(canonical)
+    assert _reservation(executor, run.id) == bound
+
+
+def test_schedule_bind_save_failure_preserves_usable_unbound_reservation(
+    native_evaluation_executor, monkeypatch
+):
+    from gpu_agent.benchmark.ledger import CorpusLedger
+    from gpu_agent.benchmark.schedule_authority import (
+        bind_reserved_schedule,
+        rebuild_reserved_schedule,
+        reserve_evaluation_cutoff,
+    )
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    schedule = rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)
+
+    def reject_before_save(self, state):
+        raise OSError("schedule binding was not installed")
+
+    monkeypatch.setattr(CorpusLedger, "_save", reject_before_save)
+    with pytest.raises((OSError, ValueError)):
+        bind_reserved_schedule(executor._corpus_family, runner.store, run.id, schedule, binding)
+
+    unbound = _reservation(executor, run.id)
+    assert unbound.schedule_hash is None
+
+
+def test_uncertain_schedule_bind_save_uses_exact_durable_readback(
+    native_evaluation_executor, monkeypatch
+):
+    from gpu_agent.benchmark.ledger import CorpusLedger
+    from gpu_agent.benchmark.schedule_authority import (
+        bind_reserved_schedule,
+        rebuild_reserved_schedule,
+        reserve_evaluation_cutoff,
+    )
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    schedule = rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)
+    native_save = CorpusLedger._save
+
+    def durable_save_then_error(self, state):
+        native_save(self, state)
+        raise OSError("simulated post-replace fsync error")
+
+    monkeypatch.setattr(CorpusLedger, "_save", durable_save_then_error)
+    bound = bind_reserved_schedule(executor._corpus_family, runner.store, run.id, schedule, binding)
+    assert bound.schedule_hash == runner._schedule_hash(schedule)
+    assert _reservation(executor, run.id) == bound
+
+
 def test_copytree_replacement_cannot_reuse_a_reserved_run_inode(
     native_evaluation_executor, tmp_path
 ):

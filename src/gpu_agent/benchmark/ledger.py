@@ -829,29 +829,46 @@ class CorpusLedger:
         finally:
             os.close(fd)
 
-    def bind_evaluation_schedule(
+    def _commit_schedule_binding(
         self,
         lease: EvaluationRunLease,
         binding: RunBinding,
+        preparation_id: str,
         schedule_hash: str,
     ) -> EvaluationCutoffReservation:
-        """CAS the authority-derived schedule hash without accepting caller prestate."""
+        """Reload, validate, sign, and durably bind one schedule as one primitive."""
+        if type(self) is not CorpusLedger or type(lease) is not EvaluationRunLease:
+            raise ValueError("schedule authority commit requires native controller types")
+        if not re.fullmatch(r"[a-f0-9]{32}", preparation_id):
+            raise ValueError("evaluation preparation ID is invalid")
+        if not re.fullmatch(r"[a-f0-9]{64}", schedule_hash):
+            raise ValueError("evaluation schedule hash is invalid")
         lease.validate()
-        fd, state = self._locked_state()
+        fd, state = CorpusLedger._locked_state(self)
+        finalized = False
         try:
             raw_reservations = state["evaluation_reservations"]
             assert isinstance(raw_reservations, list)
             match: tuple[int, EvaluationCutoffReservation] | None = None
             for index, raw in enumerate(raw_reservations):
-                observed = self._reservation(raw)
-                if observed.evaluation_run_id == lease.run_id:
+                observed = CorpusLedger._reservation(self, raw)
+                if (
+                    observed.preparation_id == preparation_id
+                    or observed.evaluation_run_id == lease.run_id
+                ):
                     if match is not None:
                         raise ValueError("evaluation cutoff reservation is ambiguous")
                     match = index, observed
-            if match is None or match[1].state != "COMMITTED":
+            if (
+                match is None
+                or match[1].preparation_id != preparation_id
+                or match[1].evaluation_run_id != lease.run_id
+                or match[1].state != "COMMITTED"
+                or match[1].binding != binding
+            ):
                 raise ValueError("evaluation cutoff reservation is unavailable")
             index, observed = match
-            self.validate_evaluation_reservation_prestate(
+            CorpusLedger.validate_evaluation_reservation_prestate(
                 observed,
                 lease,
                 binding,
@@ -862,28 +879,42 @@ class CorpusLedger:
             bound = observed.model_copy(
                 update={"schedule_hash": schedule_hash, "preparation_mac": "0" * 64}
             )
-            bound = bound.model_copy(update={"preparation_mac": self.__reservation_mac(bound)})
-            if observed != bound:
-                lease.validate()
-                raw_reservations[index] = bound.model_dump(mode="json")
-                try:
-                    self._save(state)
-                except BaseException:
-                    if not self._exact_reservation_is_durable(bound):
-                        raise
-                try:
-                    lease.validate()
-                except BaseException:
-                    raw_reservations[index] = observed.model_dump(mode="json")
-                    try:
-                        self._save(state)
-                    except BaseException:
-                        if not self._exact_reservation_is_durable(observed):
-                            raise
+            bound = bound.model_copy(
+                update={"preparation_mac": CorpusLedger.__reservation_mac(self, bound)}
+            )
+            raw_reservations[index] = bound.model_dump(mode="json")
+            # Every successful invocation installs the exact signed record. All
+            # fallible lease and authority checks precede this linearization point.
+            EvaluationRunLease.validate(lease)
+            try:
+                CorpusLedger._save(self, state)
+            except BaseException:
+                if not CorpusLedger._exact_reservation_is_durable(self, bound):
                     raise
+            finalized = True
             return bound
         finally:
-            os.close(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                if not finalized:
+                    raise
+
+    def bind_evaluation_schedule(
+        self,
+        lease: EvaluationRunLease,
+        binding: RunBinding,
+        preparation_id: str,
+        schedule_hash: str,
+    ) -> EvaluationCutoffReservation:
+        """Linearize the authority-derived schedule hash from stable identifiers."""
+        return EvaluationRunLease._bind_cutoff_schedule(
+            lease,
+            self,
+            binding,
+            preparation_id,
+            schedule_hash,
+        )
 
     @contextmanager
     def registration_lock(self, transaction: CorpusTransaction) -> Iterator[CorpusTransaction]:

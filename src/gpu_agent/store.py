@@ -146,6 +146,30 @@ class EvaluationRunLease:
         self.__authority_finalized = True
         return committed
 
+    def _bind_cutoff_schedule(
+        self,
+        ledger: CorpusLedger,
+        binding: RunBinding,
+        preparation_id: str,
+        schedule_hash: str,
+    ) -> EvaluationCutoffReservation:
+        """Linearize one authenticated schedule binding with no free finalizer."""
+        from gpu_agent.benchmark.ledger import CorpusLedger
+
+        if type(ledger) is not CorpusLedger:
+            raise ValueError("schedule authority commit requires native controller types")
+        bound = CorpusLedger._commit_schedule_binding(
+            ledger,
+            self,
+            binding,
+            preparation_id,
+            schedule_hash,
+        )
+        # The concrete primitive returned only after the exact signed binding became
+        # durable. No caller-controlled proof or independent finalizer is accepted.
+        self.__authority_finalized = True
+        return bound
+
     @staticmethod
     def _same(left: os.stat_result, right: os.stat_result) -> bool:
         return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)

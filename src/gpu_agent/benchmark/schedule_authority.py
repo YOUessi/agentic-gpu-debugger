@@ -29,6 +29,7 @@ from gpu_agent.benchmark.evaluation import (
 )
 from gpu_agent.benchmark.ledger import (
     CorpusFamily,
+    CorpusLedger,
     CorpusTransaction,
     EvaluationCutoffReservation,
     EvaluationModeName,
@@ -248,9 +249,17 @@ def _bind_reserved_schedule_leased(
         binding,
         require_pristine=reservation.schedule_hash is None,
     )
-    reservation = family.ledger.bind_evaluation_schedule(lease, binding, _schedule_hash(schedule))
-    _validate_reservation(family, lease, schedule, binding, reservation)
-    return reservation
+    if reservation.schedule_hash is not None:
+        return reservation
+    # All schedule semantics were checked above. The exact signed save is the final
+    # authority action; after it linearizes this call chain must only return.
+    return CorpusLedger.bind_evaluation_schedule(
+        family.ledger,
+        lease,
+        binding,
+        reservation.preparation_id,
+        _schedule_hash(schedule),
+    )
 
 
 def _case_templates(schedule: EvaluationSchedule) -> dict[str, str]:
@@ -956,7 +965,29 @@ def seal_schedule(
         raise ValueError("external schedule authority is required")
     EvaluationScheduleVerifier.require_store(verifier, store)
     bind_reserved_schedule(family, store, run_id, schedule, binding)
-    request = build_signing_request(family, store, run_id, schedule, binding)
+    try:
+        request = build_signing_request(family, store, run_id, schedule, binding)
+    except ValueError as build_error:
+        # A concurrent exact seal may have installed the receipt after binding but
+        # before this signing snapshot acquired the run lease. Only a fully verified
+        # receipt for this exact caller input makes that race idempotent.
+        current = store.load(run_id)
+        if (
+            current.status != RunStatus.QUEUED
+            or current.current_phase is not None
+            or current.last_completed_phase is not None
+        ):
+            raise build_error
+        try:
+            committed = EvaluationScheduleVerifier.verify(verifier, run_id)
+        except ValueError:
+            raise build_error from None
+        if (
+            committed.request.schedule_hash != _schedule_hash(schedule)
+            or committed.request.binding != binding
+        ):
+            raise build_error
+        return committed
     receipt = client.commit(request)
     if receipt.request != request or receipt.state != "COMMITTED":
         raise ValueError("external schedule authority returned another transaction")
