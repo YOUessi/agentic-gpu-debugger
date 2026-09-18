@@ -421,7 +421,10 @@ class EvaluationRunner:
             raise ValueError("only an activatable evaluation run may be resumed")
         if run.binding != self.binding:
             raise ValueError("evaluation run binding does not match controller")
-        reservation = self.executor._corpus_family.ledger.evaluation_cutoff_reservation(run_id)
+        with self.store.evaluation_run_lease(run_id) as lease:
+            reservation = self.executor._corpus_family.ledger.evaluation_cutoff_reservation(
+                lease, self.binding
+            )
         requested_modes: list[EvaluationMode] = (
             ["A", "B", "C", "D", "E"] if mode == "all" else [mode]
         )

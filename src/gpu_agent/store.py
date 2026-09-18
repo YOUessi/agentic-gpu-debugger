@@ -4,6 +4,8 @@ State audit events are committed inside the manifest to avoid a two-file transac
 No candidate may write this root. This is not a sandbox against the owning OS user.
 """
 
+from __future__ import annotations
+
 import fcntl
 import hashlib
 import os
@@ -43,8 +45,10 @@ class RunStoreIdentity:
 
 
 @dataclass(frozen=True)
-class RunDirectoryIdentity:
+class EvaluationRunIdentity:
     resolved_path: str
+    root_device: int
+    root_inode: int
     device: int
     inode: int
     lock_device: int
@@ -81,6 +85,166 @@ def read_regular(path: Path, limit: int) -> bytes:
         return data
 
 
+def _read_regular_at(directory_fd: int, name: str, limit: int) -> bytes:
+    try:
+        fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+    except OSError as exc:
+        raise ValueError("file is unavailable or unsafe") from exc
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > limit:
+            raise ValueError("not a bounded regular file")
+        data = stream.read(limit + 1)
+        if len(data) > limit:
+            raise ValueError("file grew beyond limit")
+        return data
+
+
+class EvaluationRunLease:
+    """Fd-scoped authority view of one canonical evaluation run."""
+
+    def __init__(
+        self,
+        store: RunStore,
+        run_id: str,
+        root_fd: int,
+        run_fd: int,
+        lock_fd: int,
+        identity: EvaluationRunIdentity,
+    ) -> None:
+        self.store = store
+        self.run_id = run_id
+        self._root_fd = root_fd
+        self._run_fd = run_fd
+        self._lock_fd = lock_fd
+        self.identity = identity
+        self._active = True
+
+    @staticmethod
+    def _same(left: os.stat_result, right: os.stat_result) -> bool:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+    def validate(self) -> None:
+        if not self._active:
+            raise ValueError("evaluation run lease is closed")
+        root_fd_info = os.fstat(self._root_fd)
+        run_fd_info = os.fstat(self._run_fd)
+        lock_fd_info = os.fstat(self._lock_fd)
+        root_path_info = os.stat(self.store.root, follow_symlinks=False)
+        run_path_info = os.stat(self.run_id, dir_fd=self._root_fd, follow_symlinks=False)
+        lock_relative_info = os.stat(".lock", dir_fd=self._run_fd, follow_symlinks=False)
+        lock_path_info = os.stat(
+            f"{self.run_id}/.lock", dir_fd=self._root_fd, follow_symlinks=False
+        )
+        if (
+            not stat.S_ISDIR(root_fd_info.st_mode)
+            or not stat.S_ISDIR(root_path_info.st_mode)
+            or not self._same(root_fd_info, root_path_info)
+            or root_fd_info.st_mode & 0o077
+            or not stat.S_ISDIR(run_fd_info.st_mode)
+            or not stat.S_ISDIR(run_path_info.st_mode)
+            or not self._same(run_fd_info, run_path_info)
+            or run_fd_info.st_mode & 0o077
+            or not stat.S_ISREG(lock_fd_info.st_mode)
+            or stat.S_IMODE(lock_fd_info.st_mode) != 0o600
+            or lock_fd_info.st_nlink != 1
+            or not self._same(lock_fd_info, lock_relative_info)
+            or not self._same(lock_fd_info, lock_path_info)
+            or self.identity.root_device != root_fd_info.st_dev
+            or self.identity.root_inode != root_fd_info.st_ino
+            or self.identity.device != run_fd_info.st_dev
+            or self.identity.inode != run_fd_info.st_ino
+            or self.identity.lock_device != lock_fd_info.st_dev
+            or self.identity.lock_inode != lock_fd_info.st_ino
+        ):
+            raise ValueError("evaluation run lease is no longer canonical or safe")
+        resolved = str((self.store.root / self.run_id).resolve(strict=True))
+        if resolved != self.identity.resolved_path:
+            raise ValueError("evaluation run resolved path changed")
+
+    def load(self) -> RunManifest:
+        self.validate()
+        manifest = RunManifest.model_validate_json(
+            _read_regular_at(self._run_fd, "manifest.json", 8 * 1024 * 1024)
+        )
+        if manifest.id != self.run_id:
+            raise ValueError("manifest ID mismatch")
+        self.validate()
+        return manifest
+
+    def save(self, manifest: RunManifest) -> None:
+        if manifest.id != self.run_id:
+            raise ValueError("leased manifest ID mismatch")
+        self.validate()
+        fd, temporary = tempfile.mkstemp(prefix=".manifest-", dir=f"/proc/self/fd/{self._run_fd}")
+        name = Path(temporary).name
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(manifest.model_dump_json(indent=2).encode())
+                stream.flush()
+                os.fsync(stream.fileno())
+            self.validate()
+            os.replace(
+                name,
+                "manifest.json",
+                src_dir_fd=self._run_fd,
+                dst_dir_fd=self._run_fd,
+            )
+            os.fsync(self._run_fd)
+            self.validate()
+        finally:
+            try:
+                os.unlink(name, dir_fd=self._run_fd)
+            except FileNotFoundError:
+                pass
+
+    def children(self) -> list[RunManifest]:
+        self.validate()
+        children: list[RunManifest] = []
+        for name in sorted(os.listdir(self._root_fd)):
+            if not re.fullmatch(r"[a-f0-9]{32}", name):
+                continue
+            child_fd = -1
+            try:
+                child_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=self._root_fd,
+                )
+                child = RunManifest.model_validate_json(
+                    _read_regular_at(child_fd, "manifest.json", 8 * 1024 * 1024)
+                )
+            except (OSError, ValueError) as exc:
+                raise ValueError("evaluation child inventory is unsafe") from exc
+            finally:
+                if child_fd >= 0:
+                    os.close(child_fd)
+            if child.id != name:
+                raise ValueError("child manifest ID mismatch")
+            if child.parent_run_id == self.run_id:
+                children.append(child)
+        self.validate()
+        return children
+
+    def read(self, ref: ArtifactRef) -> bytes:
+        run = self.load()
+        if ref.visibility != self.store.visibility or ref not in run.artifact_refs:
+            raise ValueError("unregistered artifact or wrong visibility")
+        if ref.relative_path != f"{self.run_id}/artifacts/{ref.id}":
+            raise ValueError("artifact path mismatch")
+        artifacts_fd = os.open(
+            "artifacts", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=self._run_fd
+        )
+        try:
+            data = _read_regular_at(artifacts_fd, ref.id, min(ref.byte_count, 64 * 1024 * 1024))
+        finally:
+            os.close(artifacts_fd)
+        if len(data) != ref.byte_count or hashlib.sha256(data).hexdigest() != ref.sha256:
+            raise ValueError("artifact hash mismatch")
+        self.validate()
+        return data
+
+
 class RunStore:
     def __init__(self, root: Path, *, visibility: Visibility = "public") -> None:
         self.root = root.absolute()
@@ -109,7 +273,7 @@ class RunStore:
             visibility=self.visibility,
         )
 
-    def bind_evaluation_verifier(self, verifier: "EvaluationScheduleVerifier") -> None:
+    def bind_evaluation_verifier(self, verifier: EvaluationScheduleVerifier) -> None:
         from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
         if type(verifier) is not EvaluationScheduleVerifier:
@@ -139,104 +303,63 @@ class RunStore:
         finally:
             os.close(fd)
 
-    def evaluation_run_identity(
-        self,
-        run_id: str,
-        *,
-        locked: RunDirectoryIdentity | None = None,
-        lock_fd: int | None = None,
-    ) -> RunDirectoryIdentity:
-        """Resolve one canonical run directory and lock inode without following links."""
-        path = self._run_dir(run_id)
+    @contextmanager
+    def evaluation_run_lease(self, run_id: str) -> Iterator[EvaluationRunLease]:
+        """Hold canonical root/run/lock fds for one complete authority operation."""
+        self._run_dir(run_id)
         root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         run_fd = -1
-        observed_lock_fd = -1
+        lock_fd = -1
+        lease: EvaluationRunLease | None = None
         try:
             root_info = os.fstat(root_fd)
-            store_identity = self.identity
-            if (root_info.st_dev, root_info.st_ino) != (
-                store_identity.device,
-                store_identity.inode,
-            ):
-                raise ValueError("run store root changed during identity validation")
+            if not stat.S_ISDIR(root_info.st_mode) or root_info.st_mode & 0o077:
+                raise ValueError("evaluation store root is not a private real directory")
             run_fd = os.open(
                 run_id,
                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                 dir_fd=root_fd,
             )
             run_info = os.fstat(run_fd)
-            canonical_run = os.stat(run_id, dir_fd=root_fd, follow_symlinks=False)
-            if (
-                not stat.S_ISDIR(run_info.st_mode)
-                or not stat.S_ISDIR(canonical_run.st_mode)
-                or (run_info.st_dev, run_info.st_ino)
-                != (canonical_run.st_dev, canonical_run.st_ino)
-            ):
-                raise ValueError("canonical evaluation run directory changed")
-            observed_lock_fd = os.open(
-                ".lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=run_fd
+            if not stat.S_ISDIR(run_info.st_mode) or run_info.st_mode & 0o077:
+                raise ValueError("evaluation run is not a private real directory")
+            lock_fd = os.open(
+                ".lock",
+                os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=run_fd,
             )
-            observed_lock = os.fstat(observed_lock_fd)
-            relative_lock = os.stat(".lock", dir_fd=run_fd, follow_symlinks=False)
-            canonical_lock = os.stat(f"{run_id}/.lock", dir_fd=root_fd, follow_symlinks=False)
+            lock_info = os.fstat(lock_fd)
             if (
-                not stat.S_ISREG(observed_lock.st_mode)
-                or observed_lock.st_mode & 0o077
-                or (observed_lock.st_dev, observed_lock.st_ino)
-                != (relative_lock.st_dev, relative_lock.st_ino)
-                or (observed_lock.st_dev, observed_lock.st_ino)
-                != (canonical_lock.st_dev, canonical_lock.st_ino)
+                not stat.S_ISREG(lock_info.st_mode)
+                or stat.S_IMODE(lock_info.st_mode) != 0o600
+                or lock_info.st_nlink != 1
             ):
-                raise ValueError("canonical evaluation run lock changed")
-            if lock_fd is not None:
-                held_lock = os.fstat(lock_fd)
-                if (held_lock.st_dev, held_lock.st_ino) != (
-                    observed_lock.st_dev,
-                    observed_lock.st_ino,
-                ):
-                    raise ValueError("held evaluation run lock is no longer canonical")
-            identity = RunDirectoryIdentity(
-                resolved_path=str(path.resolve(strict=True)),
+                raise ValueError("evaluation run lock is unsafe")
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            identity = EvaluationRunIdentity(
+                resolved_path=str((self.root / run_id).resolve(strict=True)),
+                root_device=root_info.st_dev,
+                root_inode=root_info.st_ino,
                 device=run_info.st_dev,
                 inode=run_info.st_ino,
-                lock_device=observed_lock.st_dev,
-                lock_inode=observed_lock.st_ino,
+                lock_device=lock_info.st_dev,
+                lock_inode=lock_info.st_ino,
             )
-            final_run = os.stat(run_id, dir_fd=root_fd, follow_symlinks=False)
-            final_lock = os.stat(f"{run_id}/.lock", dir_fd=root_fd, follow_symlinks=False)
-            if (
-                (final_run.st_dev, final_run.st_ino) != (identity.device, identity.inode)
-                or (final_lock.st_dev, final_lock.st_ino)
-                != (identity.lock_device, identity.lock_inode)
-                or (locked is not None and identity != locked)
-            ):
-                raise ValueError("evaluation run identity changed")
-            return identity
+            lease = EvaluationRunLease(self, run_id, root_fd, run_fd, lock_fd, identity)
+            lease.validate()
+            yield lease
+            lease.validate()
         except OSError as exc:
-            raise ValueError("evaluation run identity is unavailable or unsafe") from exc
+            raise ValueError("evaluation run lease is unavailable or unsafe") from exc
         finally:
-            if observed_lock_fd >= 0:
-                os.close(observed_lock_fd)
+            if lease is not None:
+                lease._active = False
+            if lock_fd >= 0:
+                os.close(lock_fd)
             if run_fd >= 0:
                 os.close(run_fd)
             os.close(root_fd)
-
-    @contextmanager
-    def evaluation_run_lock(self, run_id: str) -> Iterator[RunDirectoryIdentity]:
-        """Hold and continuously pin the canonical in-run lock and directory inodes."""
-        lock_path = self._run_dir(run_id) / ".lock"
-        reject_symlinks(lock_path)
-        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_mode & 0o077:
-                raise ValueError("evaluation run lock is unsafe")
-            fcntl.flock(fd, fcntl.LOCK_EX)
-            identity = self.evaluation_run_identity(run_id, lock_fd=fd)
-            yield identity
-            self.evaluation_run_identity(run_id, locked=identity, lock_fd=fd)
-        finally:
-            os.close(fd)
 
     def _save(self, manifest: RunManifest) -> None:
         directory = self._run_dir(manifest.id)
@@ -401,9 +524,7 @@ class RunStore:
             self._save(run)
             return run
 
-    def activate_evaluation(
-        self, verifier: "EvaluationScheduleVerifier", run_id: str
-    ) -> RunManifest:
+    def activate_evaluation(self, verifier: EvaluationScheduleVerifier, run_id: str) -> RunManifest:
         """Atomically verify and perform the only evaluation activation transition."""
         from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
@@ -412,8 +533,8 @@ class RunStore:
         EvaluationScheduleVerifier.require_store(verifier, self)
         if self._evaluation_verifier is not verifier:
             raise ValueError("evaluation activation verifier is not store-bound")
-        with self._lock(run_id):
-            run = self.load(run_id)
+        with self.evaluation_run_lease(run_id) as lease:
+            run = lease.load()
             if (
                 run.kind != "evaluation"
                 or run.binding is None
@@ -421,21 +542,21 @@ class RunStore:
             ):
                 raise ValueError("run is not a bound evaluation")
             if run.status == RunStatus.RUNNING and run.current_phase == CurrentPhase.EXECUTING:
-                EvaluationScheduleVerifier.verify(verifier, run_id)
+                EvaluationScheduleVerifier._verify_leased(verifier, lease)
                 return run
             if run.status != RunStatus.QUEUED or run.current_phase is not None:
                 raise ValueError("evaluation is not in the activatable QUEUED state")
-            EvaluationScheduleVerifier.verify(verifier, run_id)
+            EvaluationScheduleVerifier._verify_leased(verifier, lease)
             run.status = RunStatus.RUNNING
             run.current_phase = CurrentPhase.EXECUTING
             run.events.append(StateEvent(status=RunStatus.RUNNING, phase=CurrentPhase.EXECUTING))
-            self._save(run)
+            lease.save(run)
             return run
 
     def validate_and_create_evaluation_child(
         self,
-        verifier: "EvaluationScheduleVerifier",
-        unit: "EvaluationUnitBinding",
+        verifier: EvaluationScheduleVerifier,
+        unit: EvaluationUnitBinding,
     ) -> RunManifest:
         """Validate and reserve one diagnosis child while holding the parent lock."""
         from gpu_agent.benchmark.evaluation import EvaluationUnitBinding
@@ -449,9 +570,9 @@ class RunStore:
         EvaluationScheduleVerifier.require_store(verifier, self)
         if self._evaluation_verifier is not verifier:
             raise ValueError("evaluation child verifier is not store-bound")
-        with self._lock(unit.evaluation_run_id):
-            EvaluationScheduleVerifier.validate_unit(verifier, self, unit)
-            parent = self.load(unit.evaluation_run_id)
+        with self.evaluation_run_lease(unit.evaluation_run_id) as lease:
+            EvaluationScheduleVerifier._validate_unit_leased(verifier, lease, unit)
+            parent = lease.load()
             child_id = hashlib.sha256(
                 f"evaluation-diagnosis-v1:{parent.id}:{unit.ordinal}".encode()
             ).hexdigest()[:32]

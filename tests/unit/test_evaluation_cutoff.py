@@ -39,6 +39,13 @@ def _artifact(store, run_id: str, name: str) -> bytes:
     return store.read(ref)
 
 
+def _reservation(executor, run_id: str):
+    binding = executor.service.binding
+    assert binding is not None
+    with executor.service.store.evaluation_run_lease(run_id) as lease:
+        return executor._corpus_family.ledger.evaluation_cutoff_reservation(lease, binding)
+
+
 def test_development_resume_uses_signed_cutoff_after_later_commit(
     native_evaluation_executor, monkeypatch
 ):
@@ -301,7 +308,7 @@ def test_reserved_pre_schedule_crash_recovers_at_old_cutoff(
         for path in runner.store.root.iterdir()
         if path.is_dir() and runner.store.load(path.name).kind == "evaluation"
     )
-    reservation = executor._corpus_family.ledger.evaluation_cutoff_reservation(run_id)
+    reservation = _reservation(executor, run_id)
     assert reservation.corpus_cutoff == 1 and reservation.schedule_hash is not None
 
     future = executor._register_future_case_for_test()
@@ -333,8 +340,6 @@ def test_reservation_rejects_a_future_evaluation_run_id(native_evaluation_execut
             max_cost_usd=runner.bindings.max_cost_usd,
             max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
         )
-    with pytest.raises(ValueError, match="unavailable"):
-        executor._corpus_family.ledger.evaluation_cutoff_reservation("f" * 32)
 
 
 def test_reservation_rejects_rebuilt_run_in_another_store(native_evaluation_executor, tmp_path):
@@ -407,7 +412,7 @@ def test_wrong_schedule_cannot_win_or_poison_first_hash_cas(native_evaluation_ex
     )
     with pytest.raises(ValueError, match="schedule differs"):
         bind_reserved_schedule(executor._corpus_family, runner.store, run.id, wrong, binding)
-    unbound = executor._corpus_family.ledger.evaluation_cutoff_reservation(run.id)
+    unbound = _reservation(executor, run.id)
     assert unbound.schedule_hash is None
 
     future = executor._register_future_case_for_test()
@@ -429,7 +434,7 @@ def test_copytree_replacement_cannot_reuse_a_reserved_run_inode(
     binding = executor.service.binding
     assert binding is not None
     run = runner.store.create_run("evaluation", binding=binding)
-    reservation = reserve_evaluation_cutoff(
+    reserve_evaluation_cutoff(
         executor._corpus_family,
         runner.store,
         run.id,
@@ -449,8 +454,8 @@ def test_copytree_replacement_cannot_reuse_a_reserved_run_inode(
 
     with pytest.raises(ValueError, match="prestate"):
         rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)
-    observed = executor._corpus_family.ledger.evaluation_cutoff_reservation(run.id)
-    assert observed == reservation and observed.schedule_hash is None
+    with pytest.raises(ValueError, match="prestate"):
+        _reservation(executor, run.id)
 
 
 def test_swap_after_lock_acquisition_cannot_create_a_reservation(
@@ -492,5 +497,130 @@ def test_swap_after_lock_acquisition_cannot_create_a_reservation(
             max_cost_usd=runner.bindings.max_cost_usd,
             max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
         )
+    with pytest.raises(ValueError, match="prestate|canonical|unavailable"):
+        _reservation(executor, run.id)
+
+
+@pytest.mark.parametrize("swap_after_save", [1, 2])
+def test_save_then_directory_swap_leaves_only_prepared_reservation(
+    native_evaluation_executor, tmp_path, monkeypatch, swap_after_save
+):
+    import json
+
+    from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    ledger = executor._corpus_family.ledger
+    native_save = ledger._save
+    canonical = runner.store.root / run.id
+    displaced = tmp_path / "save-original-run"
+    save_count = 0
+
+    def save_then_swap(state):
+        nonlocal save_count
+        native_save(state)
+        save_count += 1
+        if save_count == swap_after_save:
+            canonical.rename(displaced)
+            shutil.copytree(displaced, canonical)
+
+    monkeypatch.setattr(ledger, "_save", save_then_swap)
+    with pytest.raises(ValueError, match="canonical"):
+        reserve_evaluation_cutoff(
+            executor._corpus_family,
+            runner.store,
+            run.id,
+            binding,
+            selection="D",
+            modes=["D"],
+            split="development",
+            repeats=3,
+            random_seed=runner.random_seed,
+            max_cost_usd=runner.bindings.max_cost_usd,
+            max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+        )
+    state = json.loads((ledger.root / "transactions.json").read_bytes())
+    reservations = state["evaluation_reservations"]
+    assert len(reservations) == 1
+    assert reservations[0]["state"] == "PREPARED"
+
+    shutil.rmtree(canonical)
+    displaced.rename(canonical)
     with pytest.raises(ValueError, match="unavailable"):
-        ledger.evaluation_cutoff_reservation(run.id)
+        _reservation(executor, run.id)
+
+
+@pytest.mark.parametrize("unsafe_target", ["root", "run"])
+def test_reservation_rejects_world_accessible_authority_directories(
+    native_evaluation_executor, unsafe_target
+):
+    from gpu_agent.benchmark.schedule_authority import reserve_evaluation_cutoff
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    target = runner.store.root if unsafe_target == "root" else runner.store.root / run.id
+    target.chmod(0o777)
+    with pytest.raises(ValueError, match="private real directory|canonical or safe"):
+        reserve_evaluation_cutoff(
+            executor._corpus_family,
+            runner.store,
+            run.id,
+            binding,
+            selection="D",
+            modes=["D"],
+            split="development",
+            repeats=3,
+            random_seed=runner.random_seed,
+            max_cost_usd=runner.bindings.max_cost_usd,
+            max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+        )
+
+
+@pytest.mark.parametrize("replacement", ["run-symlink", "lock-file"])
+def test_reserved_authority_rejects_canonical_path_replacement(
+    native_evaluation_executor, tmp_path, replacement
+):
+    from gpu_agent.benchmark.schedule_authority import (
+        rebuild_reserved_schedule,
+        reserve_evaluation_cutoff,
+    )
+
+    executor = native_evaluation_executor
+    runner = _runner(executor)
+    binding = executor.service.binding
+    assert binding is not None
+    run = runner.store.create_run("evaluation", binding=binding)
+    reserve_evaluation_cutoff(
+        executor._corpus_family,
+        runner.store,
+        run.id,
+        binding,
+        selection="D",
+        modes=["D"],
+        split="development",
+        repeats=3,
+        random_seed=runner.random_seed,
+        max_cost_usd=runner.bindings.max_cost_usd,
+        max_unit_cost_usd=runner.bindings.max_unit_cost_usd,
+    )
+    canonical = runner.store.root / run.id
+    if replacement == "run-symlink":
+        displaced = tmp_path / "symlink-original-run"
+        canonical.rename(displaced)
+        canonical.symlink_to(displaced, target_is_directory=True)
+    else:
+        lock_path = canonical / ".lock"
+        replacement_lock = tmp_path / "replacement.lock"
+        replacement_lock.write_bytes(b"")
+        replacement_lock.chmod(0o600)
+        replacement_lock.replace(lock_path)
+
+    with pytest.raises(ValueError, match="symlink|prestate|unsafe"):
+        rebuild_reserved_schedule(executor._corpus_family, runner.store, run.id, binding)

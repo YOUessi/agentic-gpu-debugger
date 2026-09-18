@@ -15,7 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.contracts import RunBinding, RunManifest, RunStatus, StateEvent, Visibility, new_id
 from gpu_agent.store import (
-    RunDirectoryIdentity,
+    EvaluationRunLease,
     RunStore,
     read_regular,
     reject_symlinks,
@@ -75,7 +75,8 @@ class EvaluationCutoffReservation(BaseModel):
     """Controller-owned snapshot of the corpus head for one evaluation run."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal[3] = 3
+    schema_version: Literal[4] = 4
+    state: Literal["PREPARED", "COMMITTED"]
     evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     target_store_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     target_store_root: str
@@ -511,24 +512,14 @@ class CorpusLedger:
 
     @staticmethod
     def _reservation_prestate(
-        store: RunStore,
-        run_id: str,
+        lease: EvaluationRunLease,
         binding: RunBinding,
         *,
         require_pristine: bool,
-        locked_run: RunDirectoryIdentity | None = None,
     ) -> _EvaluationReservationPrestate:
-        """Reconstruct the exact zero-artifact QUEUED state captured at reservation.
-
-        Callers performing a reservation or schedule-hash CAS hold the target run's
-        flock before acquiring the ledger flock.  This store-before-ledger order is
-        the same order used by evaluation activation and avoids an inverse wait.
-        Read-only receipt verification may call this without either flock because it
-        validates immutable prefixes and never mutates the reservation.
-        """
-        identity = store.identity
-        run_identity = store.evaluation_run_identity(run_id, locked=locked_run)
-        run = RunStore.load(store, run_id)
+        """Reconstruct the initial state solely through the pinned run lease."""
+        lease.validate()
+        run = lease.load()
         if (
             run.kind != "evaluation"
             or run.binding != binding
@@ -548,43 +539,42 @@ class CorpusLedger:
                 "artifact_refs": [],
             }
         )
-        children = RunStore.children(store, run_id) if require_pristine else []
+        children = lease.children() if require_pristine else []
         if require_pristine and (
             run != initial or len(run.events) != 1 or run.artifact_refs or children
         ):
             raise ValueError("evaluation reservation requires an untouched QUEUED run")
-        return _EvaluationReservationPrestate(
-            target_store_root=identity.resolved_root,
-            target_store_device=identity.device,
-            target_store_inode=identity.inode,
-            target_visibility=identity.visibility,
-            target_run_path=run_identity.resolved_path,
-            target_run_device=run_identity.device,
-            target_run_inode=run_identity.inode,
-            target_run_lock_device=run_identity.lock_device,
-            target_run_lock_inode=run_identity.lock_inode,
+        identity = lease.identity
+        prestate = _EvaluationReservationPrestate(
+            target_store_root=str(Path(identity.resolved_path).parent),
+            target_store_device=identity.root_device,
+            target_store_inode=identity.root_inode,
+            target_visibility=lease.store.visibility,
+            target_run_path=identity.resolved_path,
+            target_run_device=identity.device,
+            target_run_inode=identity.inode,
+            target_run_lock_device=identity.lock_device,
+            target_run_lock_inode=identity.lock_inode,
             queued_manifest_hash=_reservation_manifest_hash(initial),
             event_prefix_hash=_reservation_sequence_hash(_RESERVATION_EVENT_DOMAIN, initial_events),
             artifact_prefix_hash=_reservation_sequence_hash(_RESERVATION_ARTIFACT_DOMAIN, []),
             child_inventory_hash=_empty_reservation_child_hash(),
         )
+        lease.validate()
+        return prestate
 
     @staticmethod
     def validate_evaluation_reservation_prestate(
         reservation: EvaluationCutoffReservation,
-        store: RunStore,
-        run_id: str,
+        lease: EvaluationRunLease,
         binding: RunBinding,
         *,
         require_pristine: bool = False,
-        locked_run: RunDirectoryIdentity | None = None,
     ) -> None:
         observed = CorpusLedger._reservation_prestate(
-            store,
-            run_id,
+            lease,
             binding,
             require_pristine=require_pristine,
-            locked_run=locked_run,
         )
         expected = _EvaluationReservationPrestate(
             target_store_root=reservation.target_store_root,
@@ -601,14 +591,13 @@ class CorpusLedger:
             artifact_prefix_hash=reservation.artifact_prefix_hash,
             child_inventory_hash=reservation.child_inventory_hash,
         )
-        if observed != expected or reservation.evaluation_run_id != run_id:
+        if observed != expected or reservation.evaluation_run_id != lease.run_id:
             raise ValueError("evaluation run prestate differs from cutoff reservation")
 
     def reserve_evaluation_cutoff(
         self,
         *,
-        store: RunStore,
-        evaluation_run_id: str,
+        lease: EvaluationRunLease,
         target_store_hash: str,
         binding: RunBinding,
         selection: EvaluationSelectionName,
@@ -622,125 +611,157 @@ class CorpusLedger:
         holdout_aliases_hash: str | None,
         holdout_aliases: list[str],
     ) -> EvaluationCutoffReservation:
-        """Bind an existing pristine run to the current head under one ledger flock."""
-        # Global order: target RunStore run flock, then CorpusLedger flock.  No
-        # ledger-held path acquires a RunStore flock.
-        with store.evaluation_run_lock(evaluation_run_id) as locked_run:
-            fd, state = self._locked_state()
-            try:
-                prestate = self._reservation_prestate(
-                    store,
-                    evaluation_run_id,
-                    binding,
-                    require_pristine=True,
-                    locked_run=locked_run,
+        """Two-phase reservation under the global lease -> ledger lock order."""
+        lease.validate()
+        fd, state = self._locked_state()
+        try:
+            prestate = self._reservation_prestate(lease, binding, require_pristine=True)
+            raw_reservations = state["evaluation_reservations"]
+            assert isinstance(raw_reservations, list)
+
+            def candidate(
+                cutoff: int, status: Literal["PREPARED", "COMMITTED"]
+            ) -> EvaluationCutoffReservation:
+                return EvaluationCutoffReservation(
+                    state=status,
+                    evaluation_run_id=lease.run_id,
+                    target_store_hash=target_store_hash,
+                    binding=binding,
+                    selection=selection,
+                    modes=modes,
+                    split=split,
+                    repeats=repeats,
+                    random_seed=random_seed,
+                    max_cost_usd=max_cost_usd,
+                    max_unit_cost_usd=max_unit_cost_usd,
+                    holdout_public_run_id=holdout_public_run_id,
+                    holdout_aliases_hash=holdout_aliases_hash,
+                    holdout_aliases=holdout_aliases,
+                    corpus_cutoff=cutoff,
+                    target_store_root=prestate.target_store_root,
+                    target_store_device=prestate.target_store_device,
+                    target_store_inode=prestate.target_store_inode,
+                    target_visibility=prestate.target_visibility,
+                    target_run_path=prestate.target_run_path,
+                    target_run_device=prestate.target_run_device,
+                    target_run_inode=prestate.target_run_inode,
+                    target_run_lock_device=prestate.target_run_lock_device,
+                    target_run_lock_inode=prestate.target_run_lock_inode,
+                    queued_manifest_hash=prestate.queued_manifest_hash,
+                    event_prefix_hash=prestate.event_prefix_hash,
+                    artifact_prefix_hash=prestate.artifact_prefix_hash,
+                    child_inventory_hash=prestate.child_inventory_hash,
                 )
-                raw_reservations = state["evaluation_reservations"]
-                assert isinstance(raw_reservations, list)
 
-                def candidate(cutoff: int) -> EvaluationCutoffReservation:
-                    return EvaluationCutoffReservation(
-                        evaluation_run_id=evaluation_run_id,
-                        target_store_hash=target_store_hash,
-                        binding=binding,
-                        selection=selection,
-                        modes=modes,
-                        split=split,
-                        repeats=repeats,
-                        random_seed=random_seed,
-                        max_cost_usd=max_cost_usd,
-                        max_unit_cost_usd=max_unit_cost_usd,
-                        holdout_public_run_id=holdout_public_run_id,
-                        holdout_aliases_hash=holdout_aliases_hash,
-                        holdout_aliases=holdout_aliases,
-                        corpus_cutoff=cutoff,
-                        target_store_root=prestate.target_store_root,
-                        target_store_device=prestate.target_store_device,
-                        target_store_inode=prestate.target_store_inode,
-                        target_visibility=prestate.target_visibility,
-                        target_run_path=prestate.target_run_path,
-                        target_run_device=prestate.target_run_device,
-                        target_run_inode=prestate.target_run_inode,
-                        target_run_lock_device=prestate.target_run_lock_device,
-                        target_run_lock_inode=prestate.target_run_lock_inode,
-                        queued_manifest_hash=prestate.queued_manifest_hash,
-                        event_prefix_hash=prestate.event_prefix_hash,
-                        artifact_prefix_hash=prestate.artifact_prefix_hash,
-                        child_inventory_hash=prestate.child_inventory_hash,
-                    )
-
-                for raw in raw_reservations:
-                    observed = self._reservation(raw)
-                    if observed.evaluation_run_id != evaluation_run_id:
-                        continue
-                    expected = observed.model_copy(update={"schedule_hash": None})
-                    requested = candidate(observed.corpus_cutoff)
-                    if expected != requested:
-                        raise ValueError("evaluation cutoff reservation differs from run authority")
-                    return observed
+            match: tuple[int, EvaluationCutoffReservation] | None = None
+            for index, raw in enumerate(raw_reservations):
+                observed = self._reservation(raw)
+                if observed.evaluation_run_id == lease.run_id:
+                    if match is not None:
+                        raise ValueError("evaluation cutoff reservation is ambiguous")
+                    match = index, observed
+            if match is None:
                 cutoff = len(self._committed_in_state(state))
                 if cutoff < 1:
                     raise ValueError("evaluation cutoff reservation requires a committed corpus")
-                reservation = candidate(cutoff)
-                raw_reservations.append(reservation.model_dump(mode="json"))
+                prepared = candidate(cutoff, "PREPARED")
+                raw_reservations.append(prepared.model_dump(mode="json"))
+                index = len(raw_reservations) - 1
+                lease.validate()
                 self._save(state)
-                return reservation
-            finally:
-                os.close(fd)
+                lease.validate()
+            else:
+                index, observed = match
+                prepared = candidate(observed.corpus_cutoff, "PREPARED")
+                if (
+                    observed.model_copy(update={"state": "PREPARED", "schedule_hash": None})
+                    != prepared
+                ):
+                    raise ValueError("evaluation cutoff reservation differs from run authority")
+                if observed.state == "COMMITTED":
+                    return observed
+            committed = prepared.model_copy(update={"state": "COMMITTED"})
+            lease.validate()
+            raw_reservations[index] = committed.model_dump(mode="json")
+            try:
+                self._save(state)
+                lease.validate()
+            except BaseException:
+                raw_reservations[index] = prepared.model_dump(mode="json")
+                try:
+                    self._save(state)
+                except BaseException:
+                    # Preserve the original error. A COMMITTED value is still unusable
+                    # unless a reader can revalidate this exact leased prestate.
+                    pass
+                raise
+            return committed
+        finally:
+            os.close(fd)
 
-    def evaluation_cutoff_reservation(self, run_id: str) -> EvaluationCutoffReservation:
+    def evaluation_cutoff_reservation(
+        self, lease: EvaluationRunLease, binding: RunBinding
+    ) -> EvaluationCutoffReservation:
+        """Return one usable reservation; PREPARED state is never authority."""
+        lease.validate()
         fd, state = self._locked_state()
         try:
             raw_reservations = state["evaluation_reservations"]
             assert isinstance(raw_reservations, list)
             observed = [self._reservation(raw) for raw in raw_reservations]
-            matches = [item for item in observed if item.evaluation_run_id == run_id]
-            if len(matches) != 1:
+            matches = [item for item in observed if item.evaluation_run_id == lease.run_id]
+            if len(matches) != 1 or matches[0].state != "COMMITTED":
                 raise ValueError("evaluation cutoff reservation is unavailable or ambiguous")
+            self.validate_evaluation_reservation_prestate(matches[0], lease, binding)
+            lease.validate()
             return matches[0]
         finally:
             os.close(fd)
 
     def bind_evaluation_schedule(
         self,
-        store: RunStore,
-        run_id: str,
+        lease: EvaluationRunLease,
         binding: RunBinding,
         schedule_hash: str,
     ) -> EvaluationCutoffReservation:
         """CAS the authority-derived schedule hash without accepting caller prestate."""
-        with store.evaluation_run_lock(run_id) as locked_run:
-            fd, state = self._locked_state()
-            try:
-                raw_reservations = state["evaluation_reservations"]
-                assert isinstance(raw_reservations, list)
-                match: tuple[int, EvaluationCutoffReservation] | None = None
-                for index, raw in enumerate(raw_reservations):
-                    observed = self._reservation(raw)
-                    if observed.evaluation_run_id == run_id:
-                        if match is not None:
-                            raise ValueError("evaluation cutoff reservation is ambiguous")
-                        match = index, observed
-                if match is None:
-                    raise ValueError("evaluation cutoff reservation is unavailable")
-                index, observed = match
-                self.validate_evaluation_reservation_prestate(
-                    observed,
-                    store,
-                    run_id,
-                    binding,
-                    require_pristine=observed.schedule_hash is None,
-                    locked_run=locked_run,
-                )
-                if observed.schedule_hash not in {None, schedule_hash}:
-                    raise ValueError("evaluation schedule differs from cutoff reservation")
-                bound = observed.model_copy(update={"schedule_hash": schedule_hash})
-                if observed != bound:
-                    raw_reservations[index] = bound.model_dump(mode="json")
+        lease.validate()
+        fd, state = self._locked_state()
+        try:
+            raw_reservations = state["evaluation_reservations"]
+            assert isinstance(raw_reservations, list)
+            match: tuple[int, EvaluationCutoffReservation] | None = None
+            for index, raw in enumerate(raw_reservations):
+                observed = self._reservation(raw)
+                if observed.evaluation_run_id == lease.run_id:
+                    if match is not None:
+                        raise ValueError("evaluation cutoff reservation is ambiguous")
+                    match = index, observed
+            if match is None or match[1].state != "COMMITTED":
+                raise ValueError("evaluation cutoff reservation is unavailable")
+            index, observed = match
+            self.validate_evaluation_reservation_prestate(
+                observed,
+                lease,
+                binding,
+                require_pristine=observed.schedule_hash is None,
+            )
+            if observed.schedule_hash not in {None, schedule_hash}:
+                raise ValueError("evaluation schedule differs from cutoff reservation")
+            bound = observed.model_copy(update={"schedule_hash": schedule_hash})
+            if observed != bound:
+                lease.validate()
+                raw_reservations[index] = bound.model_dump(mode="json")
+                self._save(state)
+                try:
+                    lease.validate()
+                except BaseException:
+                    raw_reservations[index] = observed.model_dump(mode="json")
                     self._save(state)
-                return bound
-            finally:
-                os.close(fd)
+                    raise
+            return bound
+        finally:
+            os.close(fd)
 
     @contextmanager
     def registration_lock(self, transaction: CorpusTransaction) -> Iterator[CorpusTransaction]:

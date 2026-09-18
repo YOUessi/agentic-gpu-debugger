@@ -36,7 +36,7 @@ from gpu_agent.benchmark.ledger import (
 )
 from gpu_agent.benchmark.models import CaseManifest
 from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunBinding, RunManifest, RunStatus
-from gpu_agent.store import RunStore, RunStoreIdentity, reject_symlinks
+from gpu_agent.store import EvaluationRunLease, RunStore, RunStoreIdentity, reject_symlinks
 
 _OPENSSL = Path("/usr/bin/openssl")
 _SIGNING_DOMAIN = b"gpu-agent-evaluation-schedule-v3\0"
@@ -162,43 +162,39 @@ def reserve_evaluation_cutoff(
 ) -> EvaluationCutoffReservation:
     if store.visibility != "public":
         raise ValueError("evaluation cutoff reservation requires the public evaluation store")
-    # Give nonexistent IDs a stable fail-closed error before the ledger enters the
-    # store-run/ledger lock transaction that performs the authoritative recheck.
-    RunStore.load(store, run_id)
-    return family.ledger.reserve_evaluation_cutoff(
-        store=store,
-        evaluation_run_id=run_id,
-        target_store_hash=_store_hash(family.namespace_hash, store),
-        binding=binding,
-        selection=selection,
-        modes=list(modes),
-        split=split,
-        repeats=repeats,
-        random_seed=random_seed,
-        max_cost_usd=max_cost_usd,
-        max_unit_cost_usd=max_unit_cost_usd,
-        holdout_public_run_id=(holdout_proof.public_run_id if holdout_proof else None),
-        holdout_aliases_hash=(holdout_proof.aliases_hash if holdout_proof else None),
-        holdout_aliases=list(holdout_aliases),
-    )
+    with store.evaluation_run_lease(run_id) as lease:
+        return family.ledger.reserve_evaluation_cutoff(
+            lease=lease,
+            target_store_hash=_store_hash(family.namespace_hash, store),
+            binding=binding,
+            selection=selection,
+            modes=list(modes),
+            split=split,
+            repeats=repeats,
+            random_seed=random_seed,
+            max_cost_usd=max_cost_usd,
+            max_unit_cost_usd=max_unit_cost_usd,
+            holdout_public_run_id=(holdout_proof.public_run_id if holdout_proof else None),
+            holdout_aliases_hash=(holdout_proof.aliases_hash if holdout_proof else None),
+            holdout_aliases=list(holdout_aliases),
+        )
 
 
 def _validate_reservation(
     family: CorpusFamily,
-    store: RunStore,
-    run_id: str,
+    lease: EvaluationRunLease,
     schedule: EvaluationSchedule,
     binding: RunBinding,
     reservation: EvaluationCutoffReservation,
     *,
     allow_unbound_schedule: bool = False,
 ) -> None:
-    family.ledger.validate_evaluation_reservation_prestate(reservation, store, run_id, binding)
-    expected = _authority_schedule(family, store, reservation, binding)
+    family.ledger.validate_evaluation_reservation_prestate(reservation, lease, binding)
+    expected = _authority_schedule(family, lease, reservation, binding)
     if (
-        reservation.evaluation_run_id != run_id
-        or reservation.target_store_hash != _store_hash(family.namespace_hash, store)
-        or reservation.target_visibility != store.visibility
+        reservation.evaluation_run_id != lease.run_id
+        or reservation.target_store_hash != _store_hash(family.namespace_hash, lease.store)
+        or reservation.target_visibility != lease.store.visibility
         or reservation.binding != binding
         or reservation.selection != schedule.selection
         or reservation.modes != schedule.modes
@@ -227,11 +223,20 @@ def bind_reserved_schedule(
     schedule: EvaluationSchedule,
     binding: RunBinding,
 ) -> EvaluationCutoffReservation:
-    reservation = family.ledger.evaluation_cutoff_reservation(run_id)
+    with store.evaluation_run_lease(run_id) as lease:
+        return _bind_reserved_schedule_leased(family, lease, schedule, binding)
+
+
+def _bind_reserved_schedule_leased(
+    family: CorpusFamily,
+    lease: EvaluationRunLease,
+    schedule: EvaluationSchedule,
+    binding: RunBinding,
+) -> EvaluationCutoffReservation:
+    reservation = family.ledger.evaluation_cutoff_reservation(lease, binding)
     _validate_reservation(
         family,
-        store,
-        run_id,
+        lease,
         schedule,
         binding,
         reservation,
@@ -239,15 +244,12 @@ def bind_reserved_schedule(
     )
     family.ledger.validate_evaluation_reservation_prestate(
         reservation,
-        store,
-        run_id,
+        lease,
         binding,
         require_pristine=reservation.schedule_hash is None,
     )
-    reservation = family.ledger.bind_evaluation_schedule(
-        store, run_id, binding, _schedule_hash(schedule)
-    )
-    _validate_reservation(family, store, run_id, schedule, binding, reservation)
+    reservation = family.ledger.bind_evaluation_schedule(lease, binding, _schedule_hash(schedule))
+    _validate_reservation(family, lease, schedule, binding, reservation)
     return reservation
 
 
@@ -397,7 +399,7 @@ def _universe_hash(entries: list[CorpusUniverseEntry]) -> str:
 
 def _authority_schedule(
     family: CorpusFamily,
-    store: RunStore,
+    lease: EvaluationRunLease,
     reservation: EvaluationCutoffReservation,
     binding: RunBinding,
 ) -> EvaluationSchedule:
@@ -482,7 +484,7 @@ def _authority_schedule(
     )
     _validate_coverage(schedule)
     if reservation.split == "holdout":
-        aliases = _validated_holdout_aliases(schedule, store, binding)
+        aliases = _validated_holdout_aliases(schedule, lease.store, binding)
         if aliases != reservation.holdout_aliases:
             raise ValueError("holdout alias order differs from cutoff reservation")
     return schedule
@@ -495,9 +497,17 @@ def rebuild_reserved_schedule(
     binding: RunBinding,
 ) -> EvaluationSchedule:
     """Rebuild the canonical schedule without accepting caller-selected order."""
-    reservation = family.ledger.evaluation_cutoff_reservation(run_id)
-    family.ledger.validate_evaluation_reservation_prestate(reservation, store, run_id, binding)
-    return _authority_schedule(family, store, reservation, binding)
+    with store.evaluation_run_lease(run_id) as lease:
+        return _rebuild_reserved_schedule_leased(family, lease, binding)
+
+
+def _rebuild_reserved_schedule_leased(
+    family: CorpusFamily,
+    lease: EvaluationRunLease,
+    binding: RunBinding,
+) -> EvaluationSchedule:
+    reservation = family.ledger.evaluation_cutoff_reservation(lease, binding)
+    return _authority_schedule(family, lease, reservation, binding)
 
 
 def _assemble_signing_request(
@@ -590,7 +600,21 @@ def build_signing_request(
     corpus_cutoff: int | None = None,
 ) -> EvaluationScheduleSigningRequest:
     """Build the one signable snapshot before any evaluation child can exist."""
-    run = store.load(run_id)
+    with store.evaluation_run_lease(run_id) as lease:
+        return _build_signing_request_leased(
+            family, lease, schedule, binding, corpus_cutoff=corpus_cutoff
+        )
+
+
+def _build_signing_request_leased(
+    family: CorpusFamily,
+    lease: EvaluationRunLease,
+    schedule: EvaluationSchedule,
+    binding: RunBinding,
+    *,
+    corpus_cutoff: int | None = None,
+) -> EvaluationScheduleSigningRequest:
+    run = lease.load()
     schedule_refs = [ref for ref in run.artifact_refs if ref.name == "evaluation/schedule.json"]
     if (
         run.kind != "evaluation"
@@ -603,21 +627,21 @@ def build_signing_request(
         or run.events[0].phase is not None
         or len(run.artifact_refs) != 1
         or len(schedule_refs) != 1
-        or EvaluationSchedule.model_validate_json(store.read(schedule_refs[0])) != schedule
+        or EvaluationSchedule.model_validate_json(lease.read(schedule_refs[0])) != schedule
     ):
         raise ValueError("signing requires the exact QUEUED evaluation pre-state")
-    if store.children(run_id):
+    if lease.children():
         raise ValueError("signing requires a zero-child evaluation pre-state")
-    reservation = family.ledger.evaluation_cutoff_reservation(run_id)
-    _validate_reservation(family, store, run_id, schedule, binding, reservation)
+    reservation = family.ledger.evaluation_cutoff_reservation(lease, binding)
+    _validate_reservation(family, lease, schedule, binding, reservation)
     cutoff = reservation.corpus_cutoff if corpus_cutoff is None else corpus_cutoff
     if cutoff != reservation.corpus_cutoff:
         raise ValueError("requested corpus cutoff differs from controller reservation")
     family.ledger.committed_through(cutoff)
     return _assemble_signing_request(
         family,
-        store,
-        run_id,
+        lease.store,
+        lease.run_id,
         schedule,
         binding,
         corpus_cutoff=cutoff,
@@ -668,7 +692,7 @@ def _verify_signature(public_key: Path, receipt: EvaluationScheduleReceipt) -> N
 
 
 def _validate_signed_prestate(
-    store: RunStore,
+    lease: EvaluationRunLease,
     run: RunManifest,
     receipt: EvaluationScheduleReceipt,
 ) -> None:
@@ -710,7 +734,7 @@ def _validate_signed_prestate(
         if (
             len(run.events) != request.event_prefix_count
             or len(run.artifact_refs) != request.artifact_prefix_count + 1
-            or store.children(run.id)
+            or lease.children()
         ):
             raise ValueError("QUEUED evaluation changed after schedule signing")
     else:
@@ -751,29 +775,34 @@ class EvaluationScheduleVerifier:
 
     def verify(self, run_id: str) -> EvaluationScheduleReceipt:
         EvaluationScheduleVerifier.require_store(self, self.__store)
+        with self.__store.evaluation_run_lease(run_id) as lease:
+            return EvaluationScheduleVerifier._verify_leased(self, lease)
+
+    def _verify_leased(self, lease: EvaluationRunLease) -> EvaluationScheduleReceipt:
+        EvaluationScheduleVerifier.require_store(self, lease.store)
         family = CorpusFamily.open(self.__family_root)
-        run = self.__store.load(run_id)
+        run = lease.load()
         schedule_refs = [ref for ref in run.artifact_refs if ref.name == "evaluation/schedule.json"]
         receipt_refs = [
             ref for ref in run.artifact_refs if ref.name == "evaluation/schedule-receipt.json"
         ]
         if len(schedule_refs) != 1 or len(receipt_refs) != 1 or run.binding is None:
             raise ValueError("evaluation schedule authority artifacts are missing or ambiguous")
-        schedule = EvaluationSchedule.model_validate_json(self.__store.read(schedule_refs[0]))
-        receipt = EvaluationScheduleReceipt.model_validate_json(self.__store.read(receipt_refs[0]))
+        schedule = EvaluationSchedule.model_validate_json(lease.read(schedule_refs[0]))
+        receipt = EvaluationScheduleReceipt.model_validate_json(lease.read(receipt_refs[0]))
         if (
             receipt.request.authority_profile != self.__profile
             or receipt.request.authority_key_hash != self.__key_hash
         ):
             raise ValueError("schedule receipt uses another authority")
         _verify_signature(self.__public_key, receipt)
-        _validate_signed_prestate(self.__store, run, receipt)
-        reservation = family.ledger.evaluation_cutoff_reservation(run_id)
-        _validate_reservation(family, self.__store, run_id, schedule, run.binding, reservation)
+        _validate_signed_prestate(lease, run, receipt)
+        reservation = family.ledger.evaluation_cutoff_reservation(lease, run.binding)
+        _validate_reservation(family, lease, schedule, run.binding, reservation)
         expected = _assemble_signing_request(
             family,
-            self.__store,
-            run_id,
+            lease.store,
+            lease.run_id,
             schedule,
             run.binding,
             corpus_cutoff=receipt.request.corpus_cutoff,
@@ -786,10 +815,15 @@ class EvaluationScheduleVerifier:
         )
         if receipt.request != expected:
             raise ValueError("schedule receipt differs from native authority inputs")
+        lease.validate()
         return receipt
 
     def validate_unit(self, store: RunStore, unit: EvaluationUnitBinding) -> None:
-        _validate_evaluation_unit(store, self, unit)
+        with store.evaluation_run_lease(unit.evaluation_run_id) as lease:
+            _validate_evaluation_unit(lease, self, unit)
+
+    def _validate_unit_leased(self, lease: EvaluationRunLease, unit: EvaluationUnitBinding) -> None:
+        _validate_evaluation_unit(lease, self, unit)
 
 
 def _one_ref(run: RunManifest, name: str) -> ArtifactRef:
@@ -814,18 +848,19 @@ def _ordinal_inventory(run: RunManifest, prefix: str) -> list[int]:
 
 
 def _validate_evaluation_unit(
-    store: RunStore,
+    lease: EvaluationRunLease,
     verifier: EvaluationScheduleVerifier,
     unit: EvaluationUnitBinding,
 ) -> None:
     """Revalidate one claimed unit immediately before creating physical work."""
+    store = lease.store
     EvaluationScheduleVerifier.require_store(verifier, store)
-    EvaluationScheduleVerifier.verify(verifier, unit.evaluation_run_id)
-    parent = store.load(unit.evaluation_run_id)
+    EvaluationScheduleVerifier._verify_leased(verifier, lease)
+    parent = lease.load()
     if parent.status != RunStatus.RUNNING or parent.current_phase != CurrentPhase.EXECUTING:
         raise ValueError("evaluation parent is not RUNNING")
     schedule = EvaluationSchedule.model_validate_json(
-        store.read(_one_ref(parent, "evaluation/schedule.json"))
+        lease.read(_one_ref(parent, "evaluation/schedule.json"))
     )
     if unit.ordinal >= len(schedule.items):
         raise ValueError("evaluation unit ordinal is outside the signed schedule")
@@ -834,7 +869,7 @@ def _validate_evaluation_unit(
     if schedule.bindings.max_unit_cost_usd is None:
         raise ValueError("evaluation unit has no frozen reservation")
     attempt = EvaluationAttempt.model_validate_json(
-        store.read(_one_ref(parent, f"evaluation/attempts/{unit.ordinal}.json"))
+        lease.read(_one_ref(parent, f"evaluation/attempts/{unit.ordinal}.json"))
     )
     expected_attempt = EvaluationAttempt(
         run_id=parent.id,
@@ -869,7 +904,7 @@ def _validate_evaluation_unit(
         attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
     )
     claim = EvaluationExecutionClaim.model_validate_json(
-        store.read(_one_ref(parent, f"evaluation/claims/{unit.ordinal}.json"))
+        lease.read(_one_ref(parent, f"evaluation/claims/{unit.ordinal}.json"))
     )
     if unit != expected_unit or attempt != expected_attempt or claim != expected_claim:
         raise ValueError("evaluation unit is not the claimed signed ordinal")
@@ -880,7 +915,7 @@ def _validate_evaluation_unit(
         or _ordinal_inventory(parent, "evaluation/records/") != expected_previous
     ):
         raise ValueError("evaluation unit is not the canonical claimed ordinal")
-    children = store.children(parent.id)
+    children = lease.children()
     child_ordinals: list[int] = []
     for child in children:
         if child.kind != "diagnosis" or child.status != RunStatus.COMPLETED:
