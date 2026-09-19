@@ -8,27 +8,49 @@ from gpu_agent.agent.provider import Invocation
 from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.patching import PatchCandidate
 from gpu_agent.store import RunStore
+from gpu_agent.verification.derivation import resolve_verified_public_projection
 from gpu_agent.verification.models import VerificationResult
 
 
+def _verified_results(
+    store: RunStore, evaluator: RunStore | None, run_id: str
+) -> tuple[list[VerificationResult], int]:
+    manifest = store.load(run_id)
+    results: list[VerificationResult] = []
+    unverified = 0
+    for path in sorted(store.root.iterdir()):
+        if not path.is_dir() or len(path.name) != 32:
+            continue
+        child = store.load(path.name)
+        if child.kind != "verification" or child.parent_run_id != run_id:
+            continue
+        refs = [ref for ref in child.artifact_refs if ref.name == "verification/result.json"]
+        if len(refs) != 1:
+            unverified += 1
+            continue
+        try:
+            stored = VerificationResult.model_validate_json(store.read(refs[0]))
+            results.append(
+                resolve_verified_public_projection(
+                    store, evaluator, run_id, stored, manifest.binding
+                )
+            )
+        except (OSError, ValueError):
+            unverified += 1
+    return results, unverified
+
+
 class ReportExporter:
-    def __init__(self, store: RunStore) -> None:
+    def __init__(self, store: RunStore, evaluator: RunStore | None = None) -> None:
         if store.visibility != "public":
             raise ValueError("public exporter requires public store")
         self.store = store
+        self.evaluator = evaluator
 
     def public(self, run_id: str) -> bytes:
-        self.store.load(run_id)
-        results: list[VerificationResult] = []
-        for path in sorted(self.store.root.iterdir()):
-            if not path.is_dir() or len(path.name) != 32:
-                continue
-            child = self.store.load(path.name)
-            if child.kind != "verification" or child.parent_run_id != run_id:
-                continue
-            refs = [ref for ref in child.artifact_refs if ref.name == "verification/result.json"]
-            if len(refs) == 1:
-                results.append(VerificationResult.model_validate_json(self.store.read(refs[0])))
+        results, unverified = _verified_results(self.store, self.evaluator, run_id)
+        if unverified:
+            raise ValueError("verification has no reproducible native evidence")
         return json.dumps(
             [result.model_dump(mode="json") for result in results],
             sort_keys=True,
@@ -36,7 +58,7 @@ class ReportExporter:
         ).encode()
 
 
-def render_report(store: RunStore, run_id: str) -> str:
+def render_report(store: RunStore, run_id: str, evaluator: RunStore | None = None) -> str:
     manifest = store.load(run_id)
     refs = [r for r in manifest.artifact_refs if r.name == "diagnosis.json"]
     diagnosis = (
@@ -81,7 +103,7 @@ def render_report(store: RunStore, run_id: str) -> str:
     lines.extend(f"- {inference}" for inference in diagnosis.model_inferences)
     lines.append(f"Confidence label: {diagnosis.confidence_label} (not a calibrated probability)")
     candidates: list[PatchCandidate] = []
-    verifications: list[VerificationResult] = []
+    verifications, unverified_verifications = _verified_results(store, evaluator, run_id)
     for path in sorted(store.root.iterdir()):
         if not path.is_dir() or len(path.name) != 32:
             continue
@@ -91,8 +113,6 @@ def render_report(store: RunStore, run_id: str) -> str:
         for ref in child.artifact_refs:
             if child.kind == "candidate" and ref.name == "candidate.json":
                 candidates.append(PatchCandidate.model_validate_json(store.read(ref)))
-            if child.kind == "verification" and ref.name == "verification/result.json":
-                verifications.append(VerificationResult.model_validate_json(store.read(ref)))
     lines.append(
         "Single candidate: " + (candidates[0].patched_source_hash if candidates else "none")
     )
@@ -101,13 +121,15 @@ def render_report(store: RunStore, run_id: str) -> str:
             "Patch SHA256: " + hashlib.sha256(candidates[0].unified_diff.encode()).hexdigest()
         )
     lines.append(
-        "VERIFIED_FIXED requires build/runtime success, original finding absent, "
-        "no blocking new findings and public/private oracle checks passed."
+        "Public verification below is derived only from public input/index 0; "
+        "private holdout outcomes remain evaluator-only."
     )
-    if not verifications:
+    if unverified_verifications:
+        lines.append("Verification: UNVERIFIED (native evaluator evidence unavailable or invalid)")
+    if not verifications and not unverified_verifications:
         lines.append("Verification: NOT_RUN")
     for result in verifications:
-        lines.append(f"Verification: {result.verdict.value} ({result.reason_code})")
+        lines.append(f"Public verification: {result.verdict.value} ({result.reason_code})")
         lines.append(f"Scope: candidate {result.candidate_hash}")
         lines.append("Binary SHA256: " + (", ".join(result.binary_hashes) or "unavailable"))
         lines.append(f"Public passed count: {result.public_passed_count}")
@@ -140,7 +162,9 @@ def render_report(store: RunStore, run_id: str) -> str:
         )
     limitations = [*diagnosis.limitations]
     limitations.extend(item for result in verifications for item in result.limitations)
-    if not verifications:
+    if unverified_verifications:
+        limitations.append("VERIFICATION_UNVERIFIED")
+    elif not verifications:
         limitations.append("VERIFICATION_NOT_RUN")
     if any(
         i.response_model and i.response_model != i.configured_model for i in invocations.values()

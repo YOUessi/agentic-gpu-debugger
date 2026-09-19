@@ -303,7 +303,7 @@ def test_executor_rejects_verification_without_native_children(
     oob_service, native_evaluation_executor
 ):
     executor = native_evaluation_executor
-    with pytest.raises(ValueError, match="child selection"):
+    with pytest.raises(ValueError, match="lineage artifact|child selection"):
         _execute_claimed_test_unit(executor, "E")
     assert oob_service[1].kinds == ["plan", "plan", "plan", "diagnose", "patch"]
 

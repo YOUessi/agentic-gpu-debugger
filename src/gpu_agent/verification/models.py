@@ -67,13 +67,30 @@ class VerificationResult(ExecutionModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+class VerificationSuiteSpec(ExecutionModel):
+    """Evaluator-owned policy input for one native verification derivation."""
+
+    schema_version: Literal[1] = 1
+    mode: Literal["standard", "full"]
+    candidate_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    expected_child_count: int = Field(ge=1)
+    suite_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class VerificationAuditResult(ExecutionModel):
     """Evaluator-only derived result; never serialized into the public store."""
 
-    schema_version: Literal[1] = 1
+    schema_version: Literal[2] = 2
     observation: VerificationObservation
     public_passed_count: int = Field(ge=0)
     private_passed_count: int = Field(ge=0)
     not_run_count: int = Field(ge=0)
     suite_hash: str = Field(pattern=r"^(|[a-f0-9]{64})$")
     child_run_ids: list[str]
+    verdict: VerificationVerdict = VerificationVerdict.INCONCLUSIVE
+    failure_stage: str | None = None
+    reason_code: str = "REQUIRED_EVIDENCE_MISSING"
+    required_checks: dict[str, str] = Field(default_factory=dict)
+    not_run_reasons: dict[SanitizerTool, str] = Field(default_factory=dict)
+    binary_hashes: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)

@@ -15,7 +15,7 @@ def test_fake_diagnose_single_candidate_verify_and_report(oob_service):
     assert len(service.candidates(run.id)) == 1
     assert provider.kinds.count("patch") == 1
     report = service.report(run.id)
-    assert "INCONCLUSIVE" in report and "Single candidate" in report
+    assert "Verification: UNVERIFIED" in report and "Single candidate" in report
     assert "Observed facts" in report and "Model inferences" in report
 
 

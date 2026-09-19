@@ -541,4 +541,8 @@ class ApplicationService:
     def report(self, run_id: str) -> str:
         from gpu_agent.reporting import render_report
 
-        return render_report(self.store, run_id)
+        return render_report(
+            self.store,
+            run_id,
+            RunStore(self.evaluator_root / "runs", visibility="evaluator"),
+        )

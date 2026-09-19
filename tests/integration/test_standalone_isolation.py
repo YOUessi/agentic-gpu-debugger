@@ -108,7 +108,7 @@ def test_standalone_service_keeps_oracle_unavailable(oob_service, tmp_path):
     candidate = service.register_patch(run.id, diff)
     result = service.verify(run.id, candidate, strict=True)
     assert result.verdict.value == "INCONCLUSIVE" and result.reason_code == "ORACLE_UNAVAILABLE"
-    assert "ORACLE_UNAVAILABLE" in service.report(run.id)
+    assert "Verification: UNVERIFIED" in service.report(run.id)
     # The implicit/generated selector must not silently choose a human-supplied candidate.
     assert service.verify(run.id).reason_code == "CANDIDATE_UNAVAILABLE"
 

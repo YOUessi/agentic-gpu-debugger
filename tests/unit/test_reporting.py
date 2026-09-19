@@ -39,12 +39,10 @@ def test_report_includes_recorded_scope_counts_and_tool_versions(store):
     report = render_report(store, run.id)
     for expected in [
         source.sha256,
-        "c" * 64,
         "12.8.93",
         "2025.1.0.0",
         "sm_89",
-        "Public passed count: 2",
-        "Scope: candidate",
+        "Verification: UNVERIFIED",
         "base_repo_digest: unavailable",
     ]:
         assert expected in report

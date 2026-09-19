@@ -66,7 +66,23 @@ def original(store, tmp_path):
         json.dumps({"n": 257, "a": [1] * 257, "b": [2] * 257}).encode(),
         "public",
     )
-    raw = store.put(run.id, "memcheck.log", b"synthetic unit evidence", "public")
+    stdout = store.put(
+        run.id,
+        "memcheck.stdout",
+        json.dumps({"dtype": "float32", "shape": [257], "values": [3.0] * 257}).encode(),
+        "public",
+    )
+    raw = store.put(
+        run.id,
+        "memcheck.log",
+        (
+            b"========= Invalid __global__ write of size 4 bytes\n"
+            b"=========     at vector_add(float const *, float const *, float *, unsigned long) "
+            b"in /input/kernel.cu:9\n"
+            b"========= ERROR SUMMARY: 1 error\n"
+        ),
+        "public",
+    )
     binary = store.put(
         run.id, "build/original-build/binary", b"synthetic baseline binary", "public"
     )
@@ -78,7 +94,7 @@ def original(store, tmp_path):
         elapsed_ms=1,
         exit_code=0,
         timed_out=False,
-        stdout_artifact=raw,
+        stdout_artifact=stdout,
         stderr_artifact=raw,
         typed_payload=BuildPayload(argv=["nvcc"], binary_ref=binary).model_copy(
             update={"source_manifest": hashes}
@@ -92,7 +108,11 @@ def original(store, tmp_path):
         tool="memcheck",
         category="Invalid __global__ write",
         kernel="vector_add(float const *, float const *, float *, unsigned long)",
-        source_location=SourceLocation(path="/input/kernel.cu", line=9),
+        source_location=SourceLocation(
+            path="/input/kernel.cu",
+            line=9,
+            function="vector_add(float const *, float const *, float *, unsigned long)",
+        ),
         raw_ref=raw,
     )
     tool = ToolResult(
@@ -103,19 +123,28 @@ def original(store, tmp_path):
         elapsed_ms=1,
         exit_code=86,
         timed_out=False,
-        stdout_artifact=raw,
+        stdout_artifact=stdout,
         stderr_artifact=raw,
         typed_payload=SanitizerPayload(
+            status="COMPLETED",
             tool="memcheck",
             findings=[finding],
             completed=True,
+            parser_version="compute-sanitizer-2",
             check_outcome="FINDING",
             stdin_ref=stdin,
             binary_ref=binary,
+            program_output_ref=stdout,
         ),
     )
     result = SanitizerResult(
-        completed=True, check_outcome="FINDING", findings=[finding], tool_result=tool
+        status="COMPLETED",
+        completed=True,
+        parser_version="compute-sanitizer-2",
+        check_outcome="FINDING",
+        findings=[finding],
+        program_output_ref=stdout,
+        tool_result=tool,
     )
     store.put(run.id, "sanitizer/original/result.json", tool.model_dump_json().encode(), "public")
     EvidenceRepository(store).save(
@@ -334,7 +363,10 @@ def container_boundary(monkeypatch):
     [
         ("human", "VERIFIED_FIXED"),
         ("zero", "REGRESSION_DETECTED"),
-        ("257", "REGRESSION_DETECTED"),
+        # This defect is holdout-only.  The public projection is intentionally
+        # identical to a fully passing run; the evaluator audit carries the
+        # regression verdict.
+        ("257", "VERIFIED_FIXED"),
         ("oob", "NOT_FIXED"),
         ("syntax", "NOT_FIXED"),
     ],
@@ -350,6 +382,9 @@ def test_evaluator_rejects_semantic_failures(
     assert result.verdict.value == want
     assert result.candidate_hash == candidate.patched_source_hash
     audit_result = _audit_result(tmp_path, result)
+    if variant == "257":
+        assert audit_result.verdict.value == "REGRESSION_DETECTED"
+        assert audit_result.observation.private_holdout_passed is False
     if variant == "human":
         assert audit_result.private_passed_count >= 10
         runs = [x for x in container_boundary if x[1] == "run"]
@@ -497,10 +532,91 @@ def test_holdout_only_memcheck_finding_blocks_success(
     monkeypatch.setattr(IsolatedGPUBackend, "_container", holdout_finding)
     candidate_id, _ = register_variant(store, original, "human")
     result = VerificationEngine(store, tmp_path / "evaluator").verify(original[0], candidate_id)
-    assert result.verdict.value == "REGRESSION_DETECTED"
-    assert result.new_findings == 1
-    assert _audit_result(tmp_path, result).observation.private_holdout_passed is None
+    assert result.verdict.value == "VERIFIED_FIXED"
+    assert result.new_findings == 0
+    audit = _audit_result(tmp_path, result)
+    assert audit.verdict.value == "REGRESSION_DETECTED"
+    assert audit.observation.private_holdout_passed is False
+    assert len(audit.observation.new_blocking_findings) == 1
     assert "private_oracle" not in result.required_checks
+
+
+@pytest.mark.parametrize(
+    "fault,audit_reason",
+    [
+        ("runtime_tool_error", "RUNTIME_TOOL_ERROR"),
+        ("sanitizer_tool_error", "SANITIZER_TOOL_ERROR"),
+        ("oracle_failure", "ORACLE_FAILED"),
+    ],
+)
+def test_private_outcomes_cannot_change_public_projection(
+    store, tmp_path, original, container_boundary, monkeypatch, fault, audit_reason
+):
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+    from gpu_agent.execution.process import ProcessCapture
+    from gpu_agent.store import RunStore
+    from gpu_agent.verification.engine import VerificationEngine
+
+    candidate_id, _ = register_variant(store, original, "human")
+    passing = VerificationEngine(store, tmp_path / "passing-evaluator").verify(
+        original[0], candidate_id, "standard"
+    )
+    native = IsolatedGPUBackend._container
+
+    def private_failure(self, path, operation, timeout, *, stdin=b"", cancel=None):
+        if operation != "build" and json.loads(stdin)["n"] == 1:
+            if fault == "runtime_tool_error" and operation == "run":
+                return (
+                    ProcessCapture(None, b"", b"", False, tool_error="CONTAINER_ERROR"),
+                    b"",
+                    b"",
+                )
+            if fault == "sanitizer_tool_error" and operation == "memcheck":
+                return (
+                    ProcessCapture(None, b"", b"", False, tool_error="CONTAINER_ERROR"),
+                    b"",
+                    b"",
+                )
+            if fault == "oracle_failure":
+                bad = json.dumps({"dtype": "float32", "shape": [1], "values": [999.0]}).encode()
+                if operation == "run":
+                    return ProcessCapture(0, bad, b"", False), b"", b""
+                if operation == "memcheck":
+                    return (
+                        ProcessCapture(0, bad, b"", False),
+                        b"",
+                        b"========= ERROR SUMMARY: 0 errors\n",
+                    )
+        return native(self, path, operation, timeout, stdin=stdin, cancel=cancel)
+
+    monkeypatch.setattr(IsolatedGPUBackend, "_container", private_failure)
+    failing = VerificationEngine(store, tmp_path / "failing-evaluator").verify(
+        original[0], candidate_id, "standard"
+    )
+    assert passing == failing
+    passing_audit = RunStore(tmp_path / "passing-evaluator/runs", visibility="evaluator")
+    failing_audit = RunStore(tmp_path / "failing-evaluator/runs", visibility="evaluator")
+    passing_manifest = passing_audit.load(passing.evaluator_audit_run_id)
+    failing_manifest = failing_audit.load(failing.evaluator_audit_run_id)
+    passing_result = next(
+        ref
+        for ref in passing_manifest.artifact_refs
+        if ref.name == "verification/audit-result.json"
+    )
+    failing_result = next(
+        ref
+        for ref in failing_manifest.artifact_refs
+        if ref.name == "verification/audit-result.json"
+    )
+    from gpu_agent.verification.models import VerificationAuditResult
+
+    assert (
+        VerificationAuditResult.model_validate_json(passing_audit.read(passing_result)).reason_code
+        == "ALL_REQUIRED_CHECKS_PASSED"
+    )
+    private_result = VerificationAuditResult.model_validate_json(failing_audit.read(failing_result))
+    assert private_result.reason_code == audit_reason
+    assert private_result.verdict.value in {"INCONCLUSIVE", "REGRESSION_DETECTED"}
 
 
 def test_unregistered_program_never_acquires_benchmark_oracle(
@@ -555,11 +671,11 @@ def test_required_tool_failure_is_inconclusive(
     elif operation == "run":
         assert result.required_checks["runtime"] == "TOOL_ERROR"
         assert result.required_checks["public_oracle"] == "NOT_RUN"
-        assert result.reason_code == "REQUIRED_EVIDENCE_MISSING"
+        assert result.reason_code == "RUNTIME_TOOL_ERROR"
     else:
         assert result.required_checks["memcheck"] == "TOOL_ERROR"
         assert result.required_checks["public_oracle"] == "NOT_RUN"
-        assert result.reason_code == "REQUIRED_EVIDENCE_MISSING"
+        assert result.reason_code == "SANITIZER_TOOL_ERROR"
 
 
 def test_revalidation_rejects_forged_candidate_hash(store, tmp_path, original, container_boundary):
@@ -632,7 +748,7 @@ def test_original_provenance_from_isolated_backend_is_accepted(
 
     _, snapshot = original
     backend = IsolatedGPUBackend(store, snapshot.root, tmp_path / "baseline-tasks")
-    run = store.create_run("isolated-baseline")
+    run = store.create_run("isolated-baseline", binding=store.load(original[0]).binding)
     handle = backend.prepare(WorkspaceRequest(run_id=run.id, source_manifest=snapshot.hashes))
     try:
         build = backend.build(BuildRequest(workspace_id=handle.id))

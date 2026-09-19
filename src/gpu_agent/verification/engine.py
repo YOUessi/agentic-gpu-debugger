@@ -36,21 +36,20 @@ from gpu_agent.execution.models import (
 from gpu_agent.patching import (
     PatchCandidate,
     SourceSnapshot,
-    candidate_line_map,
     materialize_candidate,
 )
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
+from gpu_agent.verification.derivation import derive_verification
 from gpu_agent.verification.models import (
     OracleResult,
     VerificationAuditResult,
     VerificationObservation,
     VerificationResult,
+    VerificationSuiteSpec,
 )
 from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
 from gpu_agent.verification.policy import (
     decide_verdict,
-    finding_signature,
-    original_presence,
     plan_checks,
 )
 
@@ -243,20 +242,39 @@ class VerificationEngine:
         if mode not in {"standard", "full"}:
             raise ValueError("M1 requires full public/private verification")
         original_manifest = self._store.load(original_run_id)
-        candidate = self._candidate(original_run_id, candidate_id, original_manifest.binding)
+        binding = original_manifest.binding
+        candidate = self._candidate(original_run_id, candidate_id, binding)
         origin = ExternalRunOrigin(run_id=original_run_id, visibility="public")
         audit = self._private.create_run(
             "verification_audit",
-            binding=original_manifest.binding,
+            binding=binding,
             external_origin=origin,
+            _run_id=hashlib.sha256(
+                (
+                    f"verification-audit-v1:{original_run_id}:"
+                    f"{candidate.patched_source_hash}:{mode}"
+                ).encode()
+            ).hexdigest()[:32],
         )
         self._private.transition(audit.id, "RUNNING", "PREPARING")
         bundle = EvidenceRepository(self._store).public_view(original_run_id)
         baseline_hashes = {Path(ref.name).name: ref.sha256 for ref in bundle.source_snapshot}
-        original, input_ref = self._baseline(original_run_id, bundle, baseline_hashes)
+        _, input_ref = self._baseline(original_run_id, bundle, baseline_hashes)
         if input_ref is None:
             empty_observation = self._with_check_plan(VerificationObservation(), {}, mode)
-            self._finish_audit(audit.id, empty_observation, 0, 0, 0, "", [])
+            self._finish_audit(
+                audit.id,
+                VerificationAuditResult(
+                    observation=empty_observation,
+                    public_passed_count=0,
+                    private_passed_count=0,
+                    not_run_count=0,
+                    suite_hash="",
+                    child_run_ids=[],
+                    reason_code="ORACLE_OR_BASELINE_UNAVAILABLE",
+                    failure_stage="precondition",
+                ),
+            )
             return self._publish(
                 original_run_id,
                 VerificationObservation(),
@@ -274,11 +292,22 @@ class VerificationEngine:
         try:
             snapshot = self._snapshot(original_run_id, bundle, base)
             sources = materialize_candidate(snapshot, candidate)
-            line_map = candidate_line_map(snapshot, candidate)
             case = _Case.model_validate_json(read_regular(TRUTH_ROOT / "case.json", 65536))
             if snapshot.hashes != case.source_hashes:
                 empty_observation = self._with_check_plan(VerificationObservation(), {}, mode)
-                self._finish_audit(audit.id, empty_observation, 0, 0, 0, "", [])
+                self._finish_audit(
+                    audit.id,
+                    VerificationAuditResult(
+                        observation=empty_observation,
+                        public_passed_count=0,
+                        private_passed_count=0,
+                        not_run_count=0,
+                        suite_hash="",
+                        child_run_ids=[],
+                        reason_code="ORACLE_OR_BASELINE_UNAVAILABLE",
+                        failure_stage="precondition",
+                    ),
+                )
                 return self._publish(
                     original_run_id,
                     VerificationObservation(),
@@ -298,6 +327,19 @@ class VerificationEngine:
             ).encode()
             suite_hash = hashlib.sha256(suite_bytes).hexdigest()
             self._private.put(audit.id, "private-suite.json", suite_bytes, "evaluator")
+            self._private.put(
+                audit.id,
+                "verification/suite-spec.json",
+                VerificationSuiteSpec(
+                    mode=mode,
+                    candidate_hash=candidate.patched_source_hash,
+                    expected_child_count=len(suite),
+                    suite_hash=suite_hash,
+                )
+                .model_dump_json()
+                .encode(),
+                "evaluator",
+            )
             self._private.put(audit.id, "case.json", case.model_dump_json().encode(), "evaluator")
             self._private.put(
                 audit.id,
@@ -321,28 +363,13 @@ class VerificationEngine:
                 name: hashlib.sha256(content).hexdigest() for name, content in sources.items()
             }
             oracle = NumericOracle(case.atol, case.rtol, False, False)
-            observation = VerificationObservation()
-            checks = dict(
-                build="NOT_RUN",
-                runtime="NOT_RUN",
-                memcheck="NOT_RUN",
-                public_oracle="NOT_RUN",
-                private_oracle="NOT_RUN",
-            )
-            if mode == "full":
-                checks.update(racecheck="NOT_RUN", initcheck="NOT_RUN", synccheck="NOT_RUN")
-            binaries: list[str] = []
-            public_passed = private_passed = 0
-            child_run_ids: list[str] = []
-            reason = "ALL_REQUIRED_CHECKS_PASSED"
             for index, input_data in enumerate(suite):
                 run = self._private.create_run(
                     "verification_input",
                     parent_run_id=audit.id,
-                    binding=original_manifest.binding,
+                    binding=binding,
                     external_origin=origin,
                 )
-                child_run_ids.append(run.id)
                 self._private.put(
                     run.id,
                     "input-index.json",
@@ -378,21 +405,9 @@ class VerificationEngine:
                         "evaluator",
                     )
                     if not build.success:
-                        missing = _infrastructure_failure(build.tool_result)
-                        observation = observation.model_copy(
-                            update={
-                                "build_ok": None if missing else False,
-                                "required_evidence_missing": missing,
-                            }
-                        )
-                        checks["build"] = "TOOL_ERROR" if missing else "FAILED"
-                        reason = "BUILD_TOOL_ERROR" if missing else "CANDIDATE_BUILD_FAILED"
                         break
-                    observation = observation.model_copy(update={"build_ok": True})
-                    checks["build"] = "CLEAN"
                     if build.binary_ref is None:
                         raise ValueError("successful build lacks binary provenance")
-                    binaries.append(build.binary_ref.sha256)
                     expected = reference_add(input_data.a, input_data.b)
                     ordinary = backend.run(
                         ExecutionRequest(workspace_id=handle.id, stdin_ref=stdin)
@@ -436,28 +451,6 @@ class VerificationEngine:
                         for checked in sanitizers
                     )
                     infra = runtime_infra or sanitizer_infra
-                    checks["runtime"] = (
-                        "TOOL_ERROR" if runtime_infra else "CLEAN" if runtime_ok else "FAILED"
-                    )
-                    for checked in sanitizers:
-                        assert checked.tool_result is not None
-                        checks[checked.tool_result.typed_payload.tool] = (
-                            "TOOL_ERROR"
-                            if not checked.completed or _infrastructure_failure(checked.tool_result)
-                            else checked.check_outcome
-                        )
-                    present = observation.original_finding_present
-                    if index == 0:
-                        present = original_presence(original, sanitizer, line_map, same_input=True)
-                    original_signatures = {finding_signature(f) for f in original}
-                    new_findings = [
-                        f
-                        for checked in sanitizers
-                        for f in checked.findings
-                        if index != 0
-                        or finding_signature(f) not in original_signatures
-                        or finding_signature(f) is None
-                    ]
                     numeric_ok: bool | None = None
                     if runtime_ok and not infra:
                         try:
@@ -502,27 +495,6 @@ class VerificationEngine:
                             )
                         except ValueError:
                             numeric_ok = False
-                    key = "public_oracle" if index == 0 else "private_oracle"
-                    checks[key] = (
-                        "CLEAN"
-                        if numeric_ok is True
-                        else "FAILED"
-                        if numeric_ok is False
-                        else "NOT_RUN"
-                    )
-                    updates: dict[str, object] = {
-                        "runtime_ok": runtime_ok,
-                        "original_finding_present": present,
-                        "required_evidence_missing": infra,
-                        "new_blocking_findings": [
-                            *observation.new_blocking_findings,
-                            *new_findings,
-                        ],
-                        "public_oracle_passed"
-                        if index == 0
-                        else "private_holdout_passed": numeric_ok,
-                    }
-                    observation = observation.model_copy(update=updates)
                     passed = (
                         runtime_ok
                         and numeric_ok is True
@@ -531,55 +503,21 @@ class VerificationEngine:
                             for checked in sanitizers
                         )
                     )
-                    if index == 0:
-                        public_passed += int(passed)
-                    else:
-                        private_passed += int(passed)
-                    if not passed or infra or present is not False:
-                        reason = (
-                            "REQUIRED_EVIDENCE_MISSING"
-                            if infra
-                            else "ORIGINAL_FINDING_PRESENT"
-                            if present
-                            else "ORIGINAL_FINDING_UNKNOWN"
-                            if present is None
-                            else "NEW_BLOCKING_FINDING"
-                            if new_findings
-                            else "RUNTIME_FAILED"
-                            if not runtime_ok
-                            else "ORACLE_FAILED"
-                            if numeric_ok is False
-                            else "ORACLE_NOT_RUN"
-                        )
+                    if not passed or infra:
                         break
                 finally:
                     backend.cleanup(handle)
                     self._private.transition(run.id, "RUNNING", "FINALIZING")
                     self._private.transition(run.id, "COMPLETED", None)
-            if len(child_run_ids) < len(suite) and observation.private_holdout_passed is True:
-                observation = observation.model_copy(update={"private_holdout_passed": None})
-                checks["private_oracle"] = "INCOMPLETE"
-            observation = self._with_check_plan(observation, checks, mode)
-            self._finish_audit(
+            derived = derive_verification(
+                self._store,
+                self._private,
                 audit.id,
-                observation,
-                public_passed,
-                private_passed,
-                len(suite) - len(child_run_ids),
-                suite_hash,
-                child_run_ids,
-            )
-            return self._publish(
                 original_run_id,
-                observation,
-                candidate,
-                checks,
-                binaries,
-                public_passed,
-                reason,
-                mode,
-                audit.id,
+                binding,
             )
+            self._finish_audit(audit.id, derived.audit)
+            return self._persist_public(original_run_id, derived.public)
         finally:
             shutil.rmtree(directory)
 
@@ -641,6 +579,11 @@ class VerificationEngine:
             evaluator_audit_run_id=evaluator_audit_run_id,
             limitations=["Containers share the host kernel and GPU driver."],
         )
+        return self._persist_public(original_run_id, result)
+
+    def _persist_public(
+        self, original_run_id: str, result: VerificationResult
+    ) -> VerificationResult:
         run = self._store.create_run("verification", original_run_id)
         self._store.put(
             run.id, "verification/result.json", result.model_dump_json().encode(), "public"
@@ -668,26 +611,13 @@ class VerificationEngine:
     def _finish_audit(
         self,
         audit_run_id: str,
-        observation: VerificationObservation,
-        public_passed_count: int,
-        private_passed_count: int,
-        not_run_count: int,
-        suite_hash: str,
-        child_run_ids: list[str],
+        result: VerificationAuditResult,
     ) -> ArtifactRef:
         self._private.put(
             audit_run_id,
             "observation.json",
-            observation.model_dump_json().encode(),
+            result.observation.model_dump_json().encode(),
             "evaluator",
-        )
-        result = VerificationAuditResult(
-            observation=observation,
-            public_passed_count=public_passed_count,
-            private_passed_count=private_passed_count,
-            not_run_count=not_run_count,
-            suite_hash=suite_hash,
-            child_run_ids=child_run_ids,
         )
         ref = self._private.put(
             audit_run_id,
