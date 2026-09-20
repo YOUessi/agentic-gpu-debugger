@@ -176,6 +176,34 @@ class CaseValidationController:
         )
         return controller
 
+    @classmethod
+    def _for_private_batch(
+        cls,
+        store: RunStore,
+        backend: ExecutionBackend,
+        binding: RunBinding,
+        repository: Path,
+        registry_bytes: bytes,
+    ) -> "CaseValidationController":
+        """Construct the production evaluator controller from already pinned private bytes."""
+        if store.visibility != "evaluator":
+            raise ValueError("private batch requires the evaluator store")
+        before = capture_repository_snapshot(repository, expected_commit=binding.repository.commit)
+        if before != binding.repository:
+            raise ValueError("repository differs from the validation binding")
+        family = CorpusFamily.configured(store)
+        family.reject_repository_overlap(repository)
+        controller = cls.__new__(cls)
+        controller._configure(store, backend, binding, registry_bytes, family)
+        if not controller.specs or any(
+            spec.split != "private" for spec in controller.specs.values()
+        ):
+            raise ValueError("private registry contains a non-private case")
+        after = capture_repository_snapshot(repository, expected_commit=binding.repository.commit)
+        if after != before:
+            raise ValueError("repository changed while loading private case registry")
+        return controller
+
     @staticmethod
     def spec_hash(spec: AuthoritativeCaseSpec) -> str:
         return hashlib.sha256(spec.model_dump_json().encode()).hexdigest()
@@ -188,6 +216,7 @@ class CaseValidationController:
         parent_run_id: str | None = None,
         on_created: Callable[[str], None] | None = None,
         integrity_check: Callable[[], None] | None = None,
+        recovery_check: Callable[[], None] | None = None,
     ) -> str:
         expected_visibility = "public" if plan.split == "public" else "evaluator"
         if self.store.visibility != expected_visibility:
@@ -397,7 +426,21 @@ class CaseValidationController:
                             self._record_cleanup_error(run.id, cleanup_error)
                         except BaseException:
                             pass
-            if not boundary_failed:
+            if boundary_failed and recovery_check is not None and parent_run_id is not None:
+                try:
+                    from gpu_agent.benchmark.batch_security import finalize_seed_child
+
+                    recovery_check()
+                    finalize_seed_child(
+                        self.store,
+                        parent_run_id,
+                        run.id,
+                        self.binding,
+                        RunStatus.FAILED,
+                    )
+                except BaseException:
+                    pass
+            elif not boundary_failed:
                 try:
                     check_boundary()
                     if parent_run_id is None:

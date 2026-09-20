@@ -140,31 +140,37 @@ def data_lock(data: Path) -> Iterator[BatchLease]:
         directory.close()
 
 
-def _require_parent(parent: RunManifest, binding: RunBinding) -> None:
+def _batch_kind(visibility: str) -> str:
+    if visibility == "public":
+        return "seed_batch"
+    if visibility == "evaluator":
+        return "private_seed_batch"
+    raise ValueError("unsupported batch visibility")
+
+
+def _require_parent(parent: RunManifest, binding: RunBinding, visibility: str) -> None:
+    kind = _batch_kind(visibility)
     if (
-        parent.kind != "seed_batch"
+        parent.kind != kind
         or parent.status != RunStatus.RUNNING
+        or parent.current_phase != CurrentPhase.VERIFYING
         or parent.binding != binding
         or parent.binding is None
         or binding.purpose != "corpus_validation"
         or parent.external_origin is not None
     ):
-        raise ValueError("parent must be a RUNNING seed_batch with the same binding")
+        raise ValueError(f"parent must be a RUNNING {kind} with the same binding")
 
 
 def validate_seed_parent(store: RunStore, parent_id: str, binding: RunBinding) -> None:
-    if store.visibility != "public":
-        raise ValueError("seed batches cannot contain evaluator executions")
     with store.evaluation_run_lease(parent_id) as lease:
-        _require_parent(lease.load(), binding)
+        _require_parent(lease.load(), binding, store.visibility)
 
 
 def create_seed_child(store: RunStore, parent_id: str, binding: RunBinding) -> RunManifest:
     """Use the existing fd lease to keep parent validation and creation in one lock."""
-    if store.visibility != "public":
-        raise ValueError("seed batches cannot contain evaluator executions")
     with store.evaluation_run_lease(parent_id) as lease:
-        _require_parent(lease.load(), binding)
+        _require_parent(lease.load(), binding, store.visibility)
         child = store.create_run("case_execution", parent_run_id=parent_id, binding=binding)
         lease.validate()
         return child
@@ -185,10 +191,8 @@ def finalize_seed_child(
     """
     if status not in {RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED}:
         raise ValueError("seed child finalization requires a terminal status")
-    if store.visibility != "public":
-        raise ValueError("seed batches cannot contain evaluator executions")
     with store.evaluation_run_lease(parent_id) as parent_lease:
-        _require_parent(parent_lease.load(), binding)
+        _require_parent(parent_lease.load(), binding, store.visibility)
         with store.evaluation_run_lease(child_id) as child_lease:
             child = child_lease.load()
             if (
