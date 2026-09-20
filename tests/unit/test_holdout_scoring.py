@@ -522,6 +522,71 @@ def test_existing_score_conflict_zero_mutation(scoring_fixture, fault):
     assert f.snapshot() == before
 
 
+@pytest.mark.parametrize(
+    "target",
+    ["attempt", "record", "manifest", "child_binding", "child_private_score"],
+)
+def test_cross_run_artifact_substitution_zero_mutation(scoring_fixture, target):
+    f = scoring_fixture
+    if target.startswith("child_"):
+        store, run_id = f.evaluator, f.seed(99)
+        name = {
+            "child_binding": "holdout/record-binding.json",
+            "child_private_score": "holdout/private-score.json",
+        }[target]
+    else:
+        store, run_id = f.public, f.evaluation_run_id
+        name = {
+            "attempt": "evaluation/attempts/99.json",
+            "record": "evaluation/records/99.json",
+            "manifest": "evaluation/manifest.json",
+        }[target]
+    original = next(ref for ref in store.load(run_id).artifact_refs if ref.name == name)
+    donor = store.create_run("artifact_donor", binding=f.binding)
+    borrowed = store.put(donor.id, name, store.read(original), original.visibility)
+    assert borrowed.run_id != run_id
+    assert store.read(borrowed) == store.read(original)
+    manifest_path = store.root / run_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["artifact_refs"] = [
+        borrowed.model_dump(mode="json") if ref["name"] == name else ref
+        for ref in manifest["artifact_refs"]
+    ]
+    overwrite_fixture_artifact(manifest_path, canonical(manifest))
+    before = f.snapshot()
+    with pytest.raises(ValueError):
+        f.preflight()
+    assert f.snapshot() == before
+
+
+def test_clean_looking_divergent_rubric_is_rejected(tmp_path):
+    import subprocess
+
+    from gpu_agent.benchmark.holdout_scoring import _tracked_rubric_hash
+    from gpu_agent.provenance import capture_repository_snapshot
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args], check=True, capture_output=True
+        ).stdout
+
+    git("init", "-q")
+    (tmp_path / "evaluation").mkdir()
+    rubric = tmp_path / "evaluation/rubric.md"
+    rubric.write_bytes(b"committed evaluator rubric\n")
+    git("add", "evaluation/rubric.md")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "rubric")
+    assert _tracked_rubric_hash(tmp_path) == digest(b"committed evaluator rubric\n")
+    git("update-index", "--assume-unchanged", "evaluation/rubric.md")
+    rubric.write_bytes(b"PRIVATE-DIVERGENT-RUBRIC-CANARY\n")
+    assert git("status", "--porcelain") == b""
+    assert capture_repository_snapshot(tmp_path).clean is True
+    with pytest.raises(ValueError) as error:
+        _tracked_rubric_hash(tmp_path)
+    assert "PRIVATE-DIVERGENT-RUBRIC-CANARY" not in str(error.value)
+    assert str(tmp_path) not in str(error.value)
+
+
 @pytest.mark.parametrize("target", ["mapping", "evaluation"])
 def test_missing_lock_zero_mutation(scoring_fixture, target):
     f = scoring_fixture
@@ -582,7 +647,7 @@ def test_package_judgment_order_does_not_change_ordinal_plan(scoring_fixture):
     assert f.snapshot() == before
 
 
-def test_package_rubric_must_be_tracked(tmp_path):
+def test_package_rubric_must_be_committed(tmp_path):
     import subprocess
 
     from gpu_agent.benchmark.holdout_scoring import _tracked_rubric_hash
@@ -592,10 +657,66 @@ def test_package_rubric_must_be_tracked(tmp_path):
     (tmp_path / ".gitignore").write_text("evaluation/rubric.md\n")
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     subprocess.run(["git", "-C", str(tmp_path), "add", ".gitignore"], check=True)
-    with pytest.raises(ValueError, match="tracked rubric"):
+    with pytest.raises(ValueError):
         _tracked_rubric_hash(tmp_path)
     subprocess.run(["git", "-C", str(tmp_path), "add", "-f", "evaluation/rubric.md"], check=True)
+    with pytest.raises(ValueError):
+        _tracked_rubric_hash(tmp_path)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(tmp_path),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "rubric",
+        ],
+        check=True,
+    )
     assert _tracked_rubric_hash(tmp_path) == digest(b"ignored evaluator rubric\n")
+
+
+@pytest.mark.parametrize("kind", ["blob", "missing", "tree"])
+def test_rubric_uses_exact_bound_commit(tmp_path, kind):
+    import subprocess
+
+    from gpu_agent.benchmark.holdout_scoring import _tracked_rubric_hash
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(tmp_path), *args], check=True, capture_output=True
+        ).stdout
+
+    git("init", "-q")
+    (tmp_path / "evaluation").mkdir()
+    rubric = tmp_path / "evaluation/rubric.md"
+    (tmp_path / "tracked.txt").write_bytes(b"fixture\n")
+    if kind == "blob":
+        rubric.write_bytes(b"bound committed rubric\n")
+    elif kind == "tree":
+        rubric.mkdir()
+        (rubric / "child").write_bytes(b"not a rubric blob\n")
+    git("add", ".")
+    git("-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "bound")
+    bound_commit = git("rev-parse", "HEAD").decode().strip()
+    if kind != "blob":
+        with pytest.raises(ValueError, match="rubric") as error:
+            _tracked_rubric_hash(tmp_path, bound_commit)
+        assert str(tmp_path) not in str(error.value)
+        return
+    assert _tracked_rubric_hash(tmp_path, bound_commit) == digest(b"bound committed rubric\n")
+    rubric.write_bytes(b"new HEAD rubric\n")
+    git("add", ".")
+    git(
+        "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "new HEAD"
+    )
+    assert _tracked_rubric_hash(tmp_path) == digest(b"new HEAD rubric\n")
+    with pytest.raises(ValueError, match="rubric"):
+        _tracked_rubric_hash(tmp_path, bound_commit)
 
 
 def test_package_repository_recapture_zero_mutation(scoring_fixture, monkeypatch):

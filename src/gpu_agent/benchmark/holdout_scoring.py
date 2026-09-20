@@ -37,17 +37,41 @@ def _hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _tracked_rubric_hash(repository: Path) -> str:
-    result = subprocess.run(
-        ["git", "-C", str(repository), "ls-files", "--error-unmatch", "--", "evaluation/rubric.md"],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        timeout=10,
-        check=False,
-    )
-    if result.returncode != 0 or result.stdout != b"evaluation/rubric.md\n":
-        raise ValueError("holdout requires a tracked rubric")
-    return _hash(read_regular(repository / "evaluation/rubric.md", 16 * 1024 * 1024))
+def _tracked_rubric_hash(repository: Path, commit: str = "HEAD") -> str:
+    limit = 16 * 1024 * 1024
+
+    def blob_command(option: str) -> bytes:
+        result = subprocess.run(
+            [
+                "/usr/bin/git",
+                "--no-replace-objects",
+                "-C",
+                str(repository),
+                "cat-file",
+                option,
+                f"{commit}:evaluation/rubric.md",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise ValueError("invalid rubric object")
+        return result.stdout
+
+    try:
+        if blob_command("-t") != b"blob\n" or not 0 <= int(blob_command("-s")) <= limit:
+            raise ValueError("invalid rubric object")
+        committed = blob_command("blob")
+        if (
+            len(committed) > limit
+            or read_regular(repository / "evaluation/rubric.md", limit) != committed
+        ):
+            raise ValueError("rubric content mismatch")
+    except (ValueError, OSError, subprocess.SubprocessError):
+        raise ValueError("holdout committed rubric is invalid") from None
+    return _hash(committed)
 
 
 def _require_existing_lock(store: RunStore, run_id: str) -> None:
@@ -172,7 +196,7 @@ class HoldoutScoringController:
         if len(schedule_refs) != 1:
             raise ValueError("holdout evaluation schedule is invalid")
         schedule = EvaluationSchedule.model_validate_json(self.public.read(schedule_refs[0]))
-        rubric_hash = _tracked_rubric_hash(repository)
+        rubric_hash = _tracked_rubric_hash(repository, self.binding.repository.commit)
         if (
             package.evaluation_run_id != evaluation_run_id
             or package.private_binding_run_id != private_binding_run_id
@@ -265,6 +289,7 @@ class HoldoutScoringController:
                         or child.binding != self.binding
                         or child.parent_run_id != mapping.id
                         or child.external_origin != mapping.external_origin
+                        or any(ref.run_id != child.id for ref in child.artifact_refs)
                     ):
                         raise ValueError("conflict")
                     binding_refs = [

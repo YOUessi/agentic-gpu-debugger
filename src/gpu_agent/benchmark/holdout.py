@@ -458,6 +458,7 @@ class HoldoutController:
             run.kind != "evaluation"
             or run.status != RunStatus.COMPLETED
             or run.binding != self.binding
+            or any(ref.run_id != run.id for ref in run.artifact_refs)
         ):
             raise ValueError("public evaluation record is invalid")
         from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
