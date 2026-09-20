@@ -3,7 +3,7 @@
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 import typer
 from pydantic import ValidationError
@@ -19,9 +19,76 @@ from gpu_agent.config import Settings
 from gpu_agent.environment import probe_environment
 from gpu_agent.store import RunStore
 
+if TYPE_CHECKING:
+    from gpu_agent.benchmark.release import ReleaseEvidenceIndex
+
 app = typer.Typer(no_args_is_help=True, help="Evidence-driven CUDA debugger.")
 benchmark_app = typer.Typer(no_args_is_help=True)
+release_app = typer.Typer(no_args_is_help=True)
 app.add_typer(benchmark_app, name="benchmark")
+app.add_typer(release_app, name="release")
+
+
+def _derive_release_evidence(selection_path: Path, repository: Path) -> "ReleaseEvidenceIndex":
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.benchmark.release import ReleaseEvidenceIndex, ReleaseEvidenceSelection
+    from gpu_agent.provenance import capture_repository_snapshot
+    from gpu_agent.store import read_regular
+
+    family_root = os.environ.get("GPU_AGENT_CORPUS_FAMILY_ROOT")
+    if not family_root:
+        raise ValueError("trusted corpus family configuration is required")
+    family = CorpusFamily.open(Path(family_root))
+    selection = ReleaseEvidenceSelection.model_validate_json(
+        read_regular(selection_path.absolute(), 1024 * 1024)
+    )
+    actual = capture_repository_snapshot(
+        repository.absolute(), expected_commit=selection.repository.commit
+    )
+    return ReleaseEvidenceIndex.derive(
+        selection,
+        family.corpus_store("public"),
+        family.corpus_store("evaluator"),
+        family,
+        actual,
+    )
+
+
+@release_app.command("derive-manifest")
+def release_derive_manifest(
+    selection: Annotated[Path, typer.Option("--selection")],
+    repository: Annotated[Path, typer.Option("--repository")] = Path("."),
+) -> None:
+    """Print release claims derived from a frozen native evidence selection."""
+    from gpu_agent.benchmark.release import ReleaseManifest
+
+    try:
+        evidence = _derive_release_evidence(selection, repository)
+        manifest = ReleaseManifest.from_evidence(evidence)
+    except (OSError, ValueError):
+        raise typer.BadParameter("RELEASE_EVIDENCE_INCOMPLETE") from None
+    typer.echo(manifest.model_dump_json(indent=2))
+
+
+@release_app.command("check")
+def release_check(
+    manifest: Annotated[Path, typer.Option("--manifest")],
+    selection: Annotated[Path, typer.Option("--selection")],
+    repository: Annotated[Path, typer.Option("--repository")] = Path("."),
+) -> None:
+    """Validate declarative release claims against native, same-commit evidence."""
+    from gpu_agent.benchmark.release import ReleaseGate, ReleaseManifest
+    from gpu_agent.store import read_regular
+
+    try:
+        claims = ReleaseManifest.model_validate_json(read_regular(manifest.absolute(), 1024 * 1024))
+        evidence = _derive_release_evidence(selection, repository)
+        result = ReleaseGate().check(claims, evidence)
+    except (OSError, ValueError):
+        raise typer.BadParameter("RELEASE_EVIDENCE_INVALID") from None
+    typer.echo(result.model_dump_json(indent=2))
+    if not result.passed:
+        raise typer.Exit(1)
 
 
 @benchmark_app.command("provision-family")

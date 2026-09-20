@@ -60,6 +60,28 @@ class ReleaseManifest(ExecutionModel):
     evidence_run_ids: dict[str, list[str]]
     unresolved_items: list[str]
 
+    @classmethod
+    def from_evidence(cls, evidence: ReleaseEvidenceIndex) -> ReleaseManifest:
+        """Create claims only after a complete evidence index has been derived."""
+        if (
+            evidence.reason_codes
+            or evidence.toolchain_hash is None
+            or evidence.corpus_hash is None
+            or evidence.model_config_hash is None
+        ):
+            raise ValueError("complete release evidence is required")
+        return cls(
+            commit=evidence.repository.commit,
+            toolchain_hash=evidence.toolchain_hash,
+            corpus_hash=evidence.corpus_hash,
+            model_config_hash=evidence.model_config_hash,
+            test_counts=evidence.test_counts,
+            public_case_count=evidence.public_case_count,
+            private_case_count=evidence.private_case_count,
+            evidence_run_ids=evidence.evidence_run_ids,
+            unresolved_items=[],
+        )
+
 
 class ReleaseEvidenceSelection(ExecutionModel):
     """Frozen, explicit roots of the release evidence graph."""

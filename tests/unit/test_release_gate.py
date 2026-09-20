@@ -231,6 +231,33 @@ def test_derivation_rejects_nonexistent_selected_runs(tmp_path, repository):
     assert result.reason_codes == ["EVALUATION_EVIDENCE_INVALID"]
 
 
+def test_manifest_can_only_be_created_from_complete_derived_evidence(repository):
+    from gpu_agent.benchmark.release import (
+        ReleaseEvidenceIndex,
+        ReleaseManifest,
+        TestCounts,
+    )
+
+    incomplete = ReleaseEvidenceIndex(repository=repository)
+    with pytest.raises(ValueError, match="complete"):
+        ReleaseManifest.from_evidence(incomplete)
+
+    evidence = ReleaseEvidenceIndex(
+        repository=repository,
+        toolchain_hash="1" * 64,
+        corpus_hash="2" * 64,
+        model_config_hash="3" * 64,
+        test_counts=TestCounts(expected=10, executed=10, skipped_required=0, failed=0),
+        public_case_count=16,
+        private_case_count=8,
+        evidence_run_ids={"five_mode_evaluation": ["4" * 32]},
+    )
+    manifest = ReleaseManifest.from_evidence(evidence)
+    assert manifest.commit == repository.commit
+    assert manifest.public_case_count == 16
+    assert manifest.unresolved_items == []
+
+
 def _selection(repository):
     from gpu_agent.benchmark.release import ReleaseEvidenceSelection
 
