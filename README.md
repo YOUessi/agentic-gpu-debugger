@@ -90,6 +90,9 @@ gpu-agent verify RUN_ID /absolute/path/to/candidate.diff --strict
 `GPU_AGENT_KNOWLEDGE_INDEX` 指向 T05 已 ingest 的本地索引，
 `GPU_AGENT_KNOWLEDGE_VERSION` 使用 `cuda=VERSION;compute-sanitizer=VERSION`。
 版本缺失或不兼容时返回知识证据不可用，不会猜测版本或联网搜索任意 URL。
+V2 已提供完全离线的 BM25、确定性向量余弦和 hybrid RRF 三种检索候选；24 条公开
+development 标注的 hit@k/延迟比较、默认方法选择边界和复现代码见
+[V2 本地检索比较](docs/retrieval-comparison.md)。该比较不读取 private holdout。
 
 每次诊断最多 6 次物理 LLM 请求（含整个 run 唯一一次格式重试），预留最终诊断和补丁，
 最多 4 次 planner 请求。SDK 自动重试关闭；timeout 记为 `UNCERTAIN`，不重放。

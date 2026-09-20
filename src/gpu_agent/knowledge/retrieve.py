@@ -1,4 +1,4 @@
-"""Small local inverted BM25 index; no URL fetching and no embedding dependency."""
+"""Local lexical, semantic-vector and hybrid retrieval; never fetches URLs."""
 
 import json
 import math
@@ -19,6 +19,7 @@ from gpu_agent.knowledge.models import (
     StrictModel,
     corpus_digest,
 )
+from gpu_agent.knowledge.semantic import RetrievalMethod, SemanticVectorizer, cosine_similarity
 
 ATOM = re.compile(
     r"[A-Za-z]+(?:-[A-Za-z]+)+|(?:__)?[A-Za-z_][A-Za-z0-9_]*"
@@ -90,26 +91,35 @@ class KnowledgeIndex:
         )
         self._postings: dict[str, dict[int, int]] = defaultdict(dict)
         self._lengths: list[int] = []
+        vectorizer = SemanticVectorizer()
+        self._semantic_vectors = []
         for ordinal, chunk in enumerate(chunks):
             counts = Counter(tokenize(chunk.text) + tokenize(chunk.section_title) * 2)
             self._lengths.append(counts.total())
+            self._semantic_vectors.append(
+                vectorizer.encode(f"{chunk.section_title} {chunk.section_title} {chunk.text}")
+            )
             for token, count in counts.items():
                 self._postings[token][ordinal] = count
 
-    def retrieve(self, query: str, version: str, k: int = 5) -> RetrievalResult:
-        if not 1 <= k <= 100:
-            raise ValueError("k must be between 1 and 100")
+    def _eligible(self, version: str) -> set[int]:
         versions = parse_version(version)
         eligible = {
             i
-            for i, c in enumerate(self.chunks)
-            if all(versions[name] in SpecifierSet(spec) for name, spec in c.compatibility.items())
+            for i, chunk in enumerate(self.chunks)
+            if all(
+                versions[name] in SpecifierSet(spec) for name, spec in chunk.compatibility.items()
+            )
         }
         if not eligible:
             raise KnowledgeVersionUnavailableError(f"No knowledge for {version}")
+        return eligible
+
+    def _lexical_scores(self, query: str, eligible: set[int]) -> dict[int, float]:
         average = sum(self._lengths[i] for i in eligible) / len(eligible)
         scores: dict[int, float] = defaultdict(float)
-        for token in set(tokenize(query)):
+        query_tokens = set(tokenize(query))
+        for token in query_tokens:
             postings = self._postings.get(token, {})
             candidates = eligible.intersection(postings)
             idf = math.log(1 + (len(eligible) - len(candidates) + 0.5) / (len(candidates) + 0.5))
@@ -118,11 +128,48 @@ class KnowledgeIndex:
                 scores[i] += (
                     idf * tf * 2.5 / (tf + 1.5 * (0.25 + 0.75 * self._lengths[i] / average))
                 )
-        if "out_of_bounds" in tokenize(query):
+        if "out_of_bounds" in query_tokens:
             for i in scores:
                 if "out_of_bounds" in tokenize(self.chunks[i].text):
                     scores[i] += 1.0
-        selected = sorted(scores, key=lambda i: (-scores[i], self.chunks[i].chunk_id))[:k]
+        return scores
+
+    def _semantic_scores(self, query: str, eligible: set[int]) -> dict[int, float]:
+        query_vector = SemanticVectorizer().encode(query)
+        return {
+            ordinal: score
+            for ordinal in eligible
+            if (score := cosine_similarity(query_vector, self._semantic_vectors[ordinal])) > 0
+        }
+
+    def _ordered(self, scores: dict[int, float]) -> list[int]:
+        return sorted(scores, key=lambda i: (-scores[i], self.chunks[i].chunk_id))
+
+    def retrieve(
+        self,
+        query: str,
+        version: str,
+        k: int = 5,
+        *,
+        method: RetrievalMethod = "lexical",
+    ) -> RetrievalResult:
+        if not 1 <= k <= 100:
+            raise ValueError("k must be between 1 and 100")
+        eligible = self._eligible(version)
+        lexical = self._lexical_scores(query, eligible)
+        if method == "lexical":
+            selected = self._ordered(lexical)[:k]
+        elif method == "semantic":
+            selected = self._ordered(self._semantic_scores(query, eligible))[:k]
+        elif method == "hybrid":
+            semantic = self._semantic_scores(query, eligible)
+            combined: dict[int, float] = defaultdict(float)
+            for ranking in (self._ordered(lexical), self._ordered(semantic)):
+                for rank, ordinal in enumerate(ranking, start=1):
+                    combined[ordinal] += 1 / (60 + rank)
+            selected = self._ordered(combined)[:k]
+        else:
+            raise ValueError(f"Unknown retrieval method: {method}")
         return RetrievalResult(
             chunks=[self.chunks[i] for i in selected], corpus_hash=self.corpus_hash, query=query
         )
