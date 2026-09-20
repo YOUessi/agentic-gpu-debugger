@@ -27,7 +27,7 @@
       "input_set_hash": "cf0543984883076336c51558e4fd160184fac5b20498e92e4e2fd05707facd39",
       "oracle_id": "vector-add-cpu-v1",
       "target_tool": "racecheck",
-      "expected_finding": "Race reported between Write access and Write access",
+      "expected_finding": "Race reported between Write access and Read access",
       "sanitizer_repetitions": 5,
       "mutation_provenance_hash": "0bca00e69e9982d5adbf14b6ccc3faec928f550759d3fc86c441e667a9a3988a"
     },

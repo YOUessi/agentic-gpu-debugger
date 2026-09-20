@@ -19,6 +19,14 @@ RACE = (
     b"unsigned long)+0x130 in /input/kernel.cu:9 [34 hazards]\n"
     b"========= RACECHECK SUMMARY: 1 hazard displayed (1 error, 0 warnings)\n"
 )
+RACE_WRITE_READ = (
+    b"========= COMPUTE-SANITIZER\n"
+    b"========= Error: Race reported between Write access at vector_add(float const *, "
+    b"float const *, float *, float *, unsigned long)+0x180 in kernel.cu:12\n"
+    b"=========     and Read access at vector_add(float const *, float const *, float *, "
+    b"float *, unsigned long)+0x220 in kernel.cu:18 [1020 hazards]\n"
+    b"========= RACECHECK SUMMARY: 1 hazard displayed (1 error, 0 warnings)\n"
+)
 INIT = (
     b"========= COMPUTE-SANITIZER\n"
     b"========= Uninitialized __global__ memory read of size 4 bytes\n"
@@ -147,3 +155,25 @@ def test_racecheck_rejects_generic_error_summary_as_completion():
     result = parse_sanitizer(SanitizerTool.RACECHECK, ProcessCapture(0, b"", CLEAN, False))
     assert not result.completed
     assert result.check_outcome == "TOOL_ERROR"
+
+
+def test_case_0002_registry_matches_observed_write_read_race():
+    from pathlib import Path
+
+    from gpu_agent.benchmark.models import AuthoritativeCaseRegistry
+    from gpu_agent.evidence.sanitizer import parse_sanitizer
+    from gpu_agent.execution.models import SanitizerTool
+
+    repository = Path(__file__).resolve().parents[2]
+    registry = AuthoritativeCaseRegistry.model_validate_json(
+        (repository / "benchmarks/corpus-registry.json").read_bytes()
+    )
+    case = next(item for item in registry.cases if item.case_id == "case_0002")
+    observed = parse_sanitizer(
+        SanitizerTool.RACECHECK,
+        ProcessCapture(0, b"", RACE_WRITE_READ, False),
+    )
+
+    assert observed.completed
+    assert observed.check_outcome == "FINDING"
+    assert {finding.category for finding in observed.findings} == {case.expected_finding}
