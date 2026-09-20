@@ -60,8 +60,15 @@ def release_derive_manifest(
     repository: Annotated[Path, typer.Option("--repository")] = Path("."),
 ) -> None:
     """Print release claims derived from a frozen native evidence selection."""
-    from gpu_agent.benchmark.release import ReleaseManifest
+    from gpu_agent.benchmark.release import (
+        ReleaseManifest,
+        validate_external_release_artifact_path,
+    )
 
+    try:
+        selection = validate_external_release_artifact_path(selection, repository)
+    except ValueError:
+        raise typer.BadParameter("RELEASE_ARTIFACT_PATH_INVALID") from None
     try:
         evidence = _derive_release_evidence(selection, repository)
         manifest = ReleaseManifest.from_evidence(evidence)
@@ -77,9 +84,18 @@ def release_check(
     repository: Annotated[Path, typer.Option("--repository")] = Path("."),
 ) -> None:
     """Validate declarative release claims against native, same-commit evidence."""
-    from gpu_agent.benchmark.release import ReleaseGate, ReleaseManifest
+    from gpu_agent.benchmark.release import (
+        ReleaseGate,
+        ReleaseManifest,
+        validate_external_release_artifact_path,
+    )
     from gpu_agent.store import read_regular
 
+    try:
+        manifest = validate_external_release_artifact_path(manifest, repository)
+        selection = validate_external_release_artifact_path(selection, repository)
+    except ValueError:
+        raise typer.BadParameter("RELEASE_ARTIFACT_PATH_INVALID") from None
     try:
         claims = ReleaseManifest.model_validate_json(read_regular(manifest.absolute(), 1024 * 1024))
         evidence = _derive_release_evidence(selection, repository)

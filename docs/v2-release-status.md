@@ -42,8 +42,29 @@ work. A passing unit test or a configured command is not counted as a live GPU/m
   provider usage, latency, and cost.
 - Complete blind scoring/private score bindings and generate the real evaluation report.
 - Capture a zero-skip, zero-failure release-test run on the same commit/config/cutoff.
-- Generate `evaluation/release-manifest.json`, derive the evidence index, and pass
-  `gpu-agent release check` from a clean checkout.
+- Generate the selection and manifest under a controller-owned directory outside the Git
+  checkout, set `GPU_AGENT_RELEASE_SELECTION` and `GPU_AGENT_RELEASE_MANIFEST` to those
+  absolute paths, derive the evidence index, and pass `gpu-agent release check` from a clean
+  checkout. Repository-local release artifacts are rejected because they would invalidate the
+  repository snapshot they claim to bind.
+
+The final gate uses the same external paths both as explicit CLI inputs and as the release-test
+environment:
+
+```bash
+export GPU_AGENT_RELEASE_SELECTION=/controller/release-selection.json
+export GPU_AGENT_RELEASE_MANIFEST=/controller/release-manifest.json
+
+gpu-agent release derive-manifest \
+  --selection "$GPU_AGENT_RELEASE_SELECTION" \
+  --repository /path/to/clean/agentic-gpu-debugger \
+  >"$GPU_AGENT_RELEASE_MANIFEST"
+
+gpu-agent release check \
+  --selection "$GPU_AGENT_RELEASE_SELECTION" \
+  --manifest "$GPU_AGENT_RELEASE_MANIFEST" \
+  --repository /path/to/clean/agentic-gpu-debugger
+```
 
 Until every blocker is closed, README and reports must continue to say that V2 is not a final
 Portfolio Release.

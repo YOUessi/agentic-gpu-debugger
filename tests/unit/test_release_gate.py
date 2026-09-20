@@ -258,6 +258,95 @@ def test_manifest_can_only_be_created_from_complete_derived_evidence(repository)
     assert manifest.unresolved_items == []
 
 
+@pytest.mark.parametrize("configured", [None, "relative/release-selection.json", "inside"])
+def test_release_artifact_path_rejects_missing_relative_or_repository_local_configuration(
+    tmp_path, monkeypatch, configured
+):
+    from gpu_agent.benchmark.release import external_release_artifact_path
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    variable = "GPU_AGENT_RELEASE_SELECTION"
+    if configured is None:
+        monkeypatch.delenv(variable, raising=False)
+    elif configured == "inside":
+        monkeypatch.setenv(variable, str(repository / "evaluation/release-selection.json"))
+    else:
+        monkeypatch.setenv(variable, configured)
+
+    with pytest.raises(ValueError, match="external absolute path"):
+        external_release_artifact_path(variable, repository)
+
+
+def test_release_artifact_path_accepts_controller_owned_absolute_path(tmp_path, monkeypatch):
+    from gpu_agent.benchmark.release import external_release_artifact_path
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    configured = tmp_path / "controller" / "release-selection.json"
+    monkeypatch.setenv("GPU_AGENT_RELEASE_SELECTION", str(configured))
+
+    assert external_release_artifact_path("GPU_AGENT_RELEASE_SELECTION", repository) == configured
+
+
+@pytest.mark.parametrize("command", ["derive-manifest", "check"])
+def test_release_cli_rejects_repository_local_artifact_paths(tmp_path, command):
+    from typer.testing import CliRunner
+
+    from gpu_agent.cli import app
+
+    repository = tmp_path / "repository"
+    evaluation = repository / "evaluation"
+    evaluation.mkdir(parents=True)
+    selection = evaluation / "release-selection.json"
+    manifest = evaluation / "release-manifest.json"
+    selection.write_text("{}")
+    manifest.write_text("{}")
+    arguments = [
+        "release",
+        command,
+        "--selection",
+        str(selection),
+        "--repository",
+        str(repository),
+    ]
+    if command == "check":
+        arguments.extend(["--manifest", str(manifest)])
+
+    result = CliRunner().invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert "RELEASE_ARTIFACT_PATH_INVALID" in result.output
+
+
+def test_release_cli_accepts_external_artifact_path_before_evidence_validation(tmp_path):
+    from typer.testing import CliRunner
+
+    from gpu_agent.cli import app
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    selection = tmp_path / "controller" / "release-selection.json"
+    selection.parent.mkdir()
+    selection.write_text("{}")
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "release",
+            "derive-manifest",
+            "--selection",
+            str(selection),
+            "--repository",
+            str(repository),
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "RELEASE_ARTIFACT_PATH_INVALID" not in result.output
+    assert "RELEASE_EVIDENCE_INCOMPLETE" in result.output
+
+
 def _selection(repository):
     from gpu_agent.benchmark.release import ReleaseEvidenceSelection
 

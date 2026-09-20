@@ -10,7 +10,9 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import os
 from collections import Counter
+from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -37,6 +39,28 @@ from gpu_agent.contracts import (
 )
 from gpu_agent.execution.models import ExecutionModel, SanitizerTool
 from gpu_agent.store import RunStore
+
+
+def validate_external_release_artifact_path(path: Path, repository: Path) -> Path:
+    """Reject release artifacts that could become part of the bound Git checkout."""
+    if not path.is_absolute():
+        raise ValueError("release artifact must use an external absolute path")
+    resolved = path.resolve(strict=False)
+    repository_root = repository.resolve(strict=False)
+    if resolved == repository_root or repository_root in resolved.parents:
+        raise ValueError("release artifact must use an external absolute path")
+    return resolved
+
+
+def external_release_artifact_path(variable: str, repository: Path) -> Path:
+    """Resolve a required controller artifact without dirtying the bound repository."""
+    configured = os.environ.get(variable)
+    if not configured:
+        raise ValueError(f"{variable} must name an external absolute path")
+    try:
+        return validate_external_release_artifact_path(Path(configured), repository)
+    except ValueError as exc:
+        raise ValueError(f"{variable} must name an external absolute path") from exc
 
 
 class TestCounts(ExecutionModel):
