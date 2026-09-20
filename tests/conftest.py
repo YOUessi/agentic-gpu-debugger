@@ -206,8 +206,36 @@ def native_evaluation_executor(
         model_config_hash="5" * 64,
     )
     requested_split = getattr(request, "param", "public")
+    eight_private = requested_split == "private_eight"
+    if eight_private:
+        import subprocess
+
+        from gpu_agent.provenance import capture_repository_snapshot
+
+        test_repository = tmp_path / "repository"
+        (test_repository / "evaluation").mkdir(parents=True)
+        (test_repository / "evaluation/rubric.md").write_text("Evaluator rubric v1\n")
+        for args in (
+            ["init", "-q"],
+            ["add", "."],
+            [
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.org",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+        ):
+            subprocess.run(["git", "-C", str(test_repository), *args], check=True)
+        service._binding = service.binding.model_copy(
+            update={"repository": capture_repository_snapshot(test_repository)}
+        )
     exact_verification_source = requested_split == "public_exact"
-    split = "public" if exact_verification_source else requested_split
+    split = (
+        "private" if eight_private else ("public" if exact_verification_source else requested_split)
+    )
     if split not in {"public", "private"}:
         raise ValueError("invalid native evaluation fixture split")
     if exact_verification_source:
@@ -233,7 +261,13 @@ def native_evaluation_executor(
     corpus = RunStore(tmp_path / "corpus", visibility=visibility)
     family = CorpusFamily._provision_for_test(
         tmp_path / "corpus-controller",
-        public_store=corpus.root if visibility == "public" else tmp_path / "public-corpus",
+        public_store=(
+            service.store.root
+            if eight_private
+            else corpus.root
+            if visibility == "public"
+            else tmp_path / "public-corpus"
+        ),
         evaluator_store=corpus.root if visibility == "evaluator" else tmp_path / "evaluator-corpus",
         repository=tmp_path / "repository",
         schedule_public_key=test_schedule_commit_client.public_key,
@@ -314,10 +348,42 @@ def native_evaluation_executor(
         sanitizer_repetitions=1,
         mutation_provenance_hash="8" * 64,
     )
-    registry_bytes = AuthoritativeCaseRegistry(cases=[spec, future_spec]).model_dump_json().encode()
+    additional_specs = []
+    additional_sources = []
+    if eight_private:
+        for index in range(2, 9):
+            case_root = tmp_path / f"corpus-source-{index}"
+            for role, content in (("clean", clean_bytes), ("mutant", mutant_bytes)):
+                (case_root / role).mkdir(parents=True)
+                (case_root / role / "kernel.cu").write_bytes(
+                    content + f"\n// independent template {index}\n".encode()
+                )
+            (case_root / "harness").mkdir()
+            for name in ("vector_io.cpp", "vector_api.h", "json.hpp"):
+                (case_root / "harness" / name).write_bytes((harness_root / name).read_bytes())
+            additional_specs.append(
+                spec.model_copy(
+                    update={
+                        "case_id": f"case_{100 + index:04d}",
+                        "template_id": f"vector-add-{index}",
+                        "clean_source_hash": hashlib.sha256(
+                            (case_root / "clean/kernel.cu").read_bytes()
+                        ).hexdigest(),
+                        "mutant_source_hash": hashlib.sha256(
+                            (case_root / "mutant/kernel.cu").read_bytes()
+                        ).hexdigest(),
+                    }
+                )
+            )
+            additional_sources.append(case_root)
+    registry_bytes = (
+        AuthoritativeCaseRegistry(cases=[spec, future_spec, *additional_specs])
+        .model_dump_json()
+        .encode()
+    )
     registry_hash = hashlib.sha256(registry_bytes).hexdigest()
     corpus_binding = RunBinding(
-        repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
+        repository=service.binding.repository,
         purpose="corpus_validation",
         toolchain_lock_hash=toolchain_hash,
         case_registry_hash=registry_hash,
@@ -389,12 +455,22 @@ def native_evaluation_executor(
     mutant_id = execute_case(controller, spec, source_root, "mutant")
     builder = BenchmarkBuilder(corpus)
     builder.register(builder.validate(clean_id, mutant_id))
+    sources = {"case_0100": source}
+    for case_spec, case_root in zip(additional_specs, additional_sources, strict=True):
+        case_backend = CorpusBackend(corpus, case_root, tmp_path / f"tasks-{case_spec.case_id}")
+        case_controller = CaseValidationController._for_test(
+            corpus, case_backend, corpus_binding, registry_bytes
+        )
+        clean_id = execute_case(case_controller, case_spec, case_root, "clean")
+        mutant_id = execute_case(case_controller, case_spec, case_root, "mutant")
+        builder.register(builder.validate(clean_id, mutant_id))
+        sources[case_spec.case_id] = case_root / "mutant"
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
     executor = EvaluationExecutor(
         service,
         corpus,
-        {"case_0100": source},
+        sources,
         _corpus_family=family,
         _schedule_verifier=EvaluationScheduleVerifier._for_test(family, service.store),
     )

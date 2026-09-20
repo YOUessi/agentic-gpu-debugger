@@ -1006,6 +1006,47 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
         location_correct=True,
         inconclusive_correct=False,
     )
+    before_preparation = {
+        str(path): path.read_bytes()
+        for root in (executor.service.store.root, evaluator.root)
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    prepared = controller.prepare_score(
+        batch,
+        alias,
+        record_ref,
+        labels=labels,
+        score=private_score,
+        should_be_inconclusive=False,
+        private_holdout_passed=True,
+    )
+    assert prepared.binding.public_record_id == manifest.records[0].record_id
+    assert prepared.binding.private_case_id == "case_0100"
+    assert {
+        str(path): path.read_bytes()
+        for root in (executor.service.store.root, evaluator.root)
+        for path in root.rglob("*")
+        if path.is_file()
+    } == before_preparation
+    evaluation_lock = executor.service.store.root / manifest.run_id / ".lock"
+    displaced_lock = tmp_path / "preserved-evaluation.lock"
+    evaluation_lock.rename(displaced_lock)
+    try:
+        with pytest.raises(ValueError):
+            controller.prepare_score(
+                batch,
+                alias,
+                record_ref,
+                labels=labels,
+                score=private_score,
+                should_be_inconclusive=False,
+                private_holdout_passed=True,
+            )
+        assert not evaluation_lock.exists()
+    finally:
+        evaluation_lock.unlink(missing_ok=True)
+        displaced_lock.rename(evaluation_lock)
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(
             pool.map(
@@ -1022,6 +1063,13 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
             )
         )
     result = results[0]
+    assert result == prepared.binding
+    persisted_score_ref = next(
+        ref
+        for ref in evaluator.load(prepared.run_id).artifact_refs
+        if ref.name == "holdout/private-score.json"
+    )
+    assert evaluator.read(persisted_score_ref) == prepared.private_score_content
     assert results == [result, result]
     assert result.public_record_id == manifest.records[0].record_id
     assert result.private_case_id == "case_0100"
