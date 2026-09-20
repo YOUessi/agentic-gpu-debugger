@@ -10,9 +10,10 @@ import stat
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
-from pydantic import Field, ValidationError
+from pydantic import Field, ValidationError, model_validator
 
 from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.benchmark.metrics import EvaluationLabels, Score
@@ -76,16 +77,60 @@ class EvaluationProviderPolicy(ExecutionModel):
 
 
 class PricingAttestation(ExecutionModel):
-    """Controller-owned pricing evidence; only a private test producer exists today."""
+    """Controller-owned rate card bound to one repository/model configuration."""
 
     schema_version: Literal[1] = 1
-    source: Literal["TEST_ONLY"]
+    source: Literal["REVIEWED", "TEST_ONLY"]
     provider: str
     model: str
     repository_commit: str = Field(pattern=r"^[a-f0-9]{40}$")
     model_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     input_usd_per_million: float = Field(ge=0)
     output_usd_per_million: float = Field(ge=0)
+    source_uri: str | None = None
+    reviewed_at: datetime | None = None
+    source_content_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def complete_review_evidence(self) -> "PricingAttestation":
+        review_fields = (self.source_uri, self.reviewed_at, self.source_content_hash)
+        if self.source == "REVIEWED":
+            if (
+                any(value is None for value in review_fields)
+                or self.source_uri is None
+                or not self.source_uri.startswith("https://")
+            ):
+                raise ValueError("reviewed pricing requires HTTPS source evidence")
+        elif any(value is not None for value in review_fields):
+            raise ValueError("test pricing cannot carry reviewed source evidence")
+        return self
+
+    @classmethod
+    def reviewed(
+        cls,
+        *,
+        provider: str,
+        model: str,
+        commit: str,
+        model_config_hash: str,
+        input_usd_per_million: float,
+        output_usd_per_million: float,
+        source_uri: str,
+        reviewed_at: datetime,
+        source_content_hash: str,
+    ) -> "PricingAttestation":
+        return cls(
+            source="REVIEWED",
+            provider=provider,
+            model=model,
+            repository_commit=commit,
+            model_config_hash=model_config_hash,
+            input_usd_per_million=input_usd_per_million,
+            output_usd_per_million=output_usd_per_million,
+            source_uri=source_uri,
+            reviewed_at=reviewed_at,
+            source_content_hash=source_content_hash,
+        )
 
     @classmethod
     def _for_test(
@@ -115,6 +160,9 @@ class PricingAttestation(ExecutionModel):
                 "model": self.model,
                 "input_usd_per_million": self.input_usd_per_million,
                 "output_usd_per_million": self.output_usd_per_million,
+                "source_uri": self.source_uri,
+                "reviewed_at": self.reviewed_at.isoformat() if self.reviewed_at else None,
+                "source_content_hash": self.source_content_hash,
             },
             sort_keys=True,
             separators=(",", ":"),

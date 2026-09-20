@@ -1,5 +1,6 @@
 """CLI workflows delegate to the same controller service and verification guard."""
 
+import os
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -20,6 +21,127 @@ from gpu_agent.store import RunStore
 app = typer.Typer(no_args_is_help=True, help="Evidence-driven CUDA debugger.")
 benchmark_app = typer.Typer(no_args_is_help=True)
 app.add_typer(benchmark_app, name="benchmark")
+
+
+def _configured_evaluation_runner(
+    *,
+    repository: Path,
+    case_root: Path,
+    corpus_root: Path,
+    split: str,
+    commit: str,
+    toolchain_hash: str,
+    model_config_hash: str,
+    max_cost_usd: float,
+    max_unit_cost_usd: float,
+) -> EvaluationRunner:
+    """Build the paid runner only from controller-owned, pre-attested configuration."""
+    from urllib.parse import urlsplit
+
+    from gpu_agent.agent.policy import LLMCallGate
+    from gpu_agent.agent.prompts import PROMPT_VERSION
+    from gpu_agent.agent.provider import OpenAIProviderSettings, OpenAIResponsesProvider
+    from gpu_agent.benchmark.evaluation import EvaluationProviderPolicy, PricingAttestation
+    from gpu_agent.benchmark.executor import EvaluationExecutor, registered_cases
+    from gpu_agent.benchmark.holdout import HoldoutController
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.benchmark.schedule_authority import (
+        EvaluationScheduleVerifier,
+        ExternalCommandScheduleCommitClient,
+    )
+    from gpu_agent.service import ApplicationService
+    from gpu_agent.store import read_regular
+
+    family_root = os.environ.get("GPU_AGENT_CORPUS_FAMILY_ROOT")
+    authority_command = os.environ.get("GPU_AGENT_SCHEDULE_AUTHORITY_COMMAND")
+    pricing_path = os.environ.get("GPU_AGENT_PRICING_ATTESTATION")
+    if not family_root or not authority_command or not pricing_path:
+        raise ValueError("production evaluation controller is incomplete")
+    family = CorpusFamily.open(Path(family_root))
+    if family.schedule_authority_profile != "PRODUCTION":
+        raise ValueError("production schedule authority is not configured")
+    visibility: Literal["public", "evaluator"] = "public" if split == "development" else "evaluator"
+    corpus = family.corpus_store(visibility)
+    if corpus.root != corpus_root.absolute():
+        raise ValueError("requested corpus root differs from trusted family")
+    service = ApplicationService.for_release(
+        repository,
+        purpose="evaluation",
+        expected_commit=commit,
+        prompt_version=PROMPT_VERSION,
+        model_config_hash=model_config_hash,
+        require_corpus_family=True,
+    )
+    binding = service.binding
+    if (
+        binding is None
+        or binding.toolchain_lock_hash != toolchain_hash
+        or binding.model_config_hash != model_config_hash
+    ):
+        raise ValueError("evaluation binding differs from requested configuration")
+    pricing = PricingAttestation.model_validate_json(
+        read_regular(Path(pricing_path).absolute(), 256 * 1024)
+    )
+    if pricing.source != "REVIEWED":
+        raise ValueError("reviewed pricing attestation is required")
+    settings = OpenAIProviderSettings.from_environment()
+    probe = OpenAIResponsesProvider(settings, LLMCallGate(), service.store, "0" * 32)
+    probe.ensure_available()
+    endpoint_host = urlsplit(settings.endpoint or "").hostname or ""
+    policy = EvaluationProviderPolicy(
+        provider=probe.provider_name,
+        endpoint_host=endpoint_host,
+        configured_model=probe.model_name or "",
+        allowed_response_models=[probe.model_name or ""],
+        prompt_version=PROMPT_VERSION,
+        pricing_hash=pricing.rate_card_hash,
+    )
+    if (
+        policy.sha256 != model_config_hash
+        or pricing.provider != policy.provider
+        or pricing.model != policy.configured_model
+    ):
+        raise ValueError("provider, pricing, and model binding differ")
+    service._bind_pricing_attestation(pricing)
+    verifier = EvaluationScheduleVerifier.for_family(family, service.store)
+    cases = registered_cases(corpus, binding, family)
+    source_root = case_root.absolute()
+    sources = {case_id: source_root / case_id / "public_input" for case_id in cases}
+    if not sources or any(not path.is_dir() for path in sources.values()):
+        raise ValueError("registered evaluation source is unavailable")
+    holdout_controller = None
+    holdout_batch = None
+    if split == "holdout":
+        holdout_controller = HoldoutController(
+            service.store,
+            corpus,
+            binding=binding,
+            _schedule_verifier=verifier,
+        )
+        holdout_batch = holdout_controller.prepare()
+    executor = EvaluationExecutor(
+        service,
+        corpus,
+        sources,
+        holdout_controller=holdout_controller,
+        holdout_batch=holdout_batch,
+        _corpus_family=family,
+        _schedule_verifier=verifier,
+    )
+    return EvaluationRunner(
+        service.store,
+        executor,
+        commit=commit,
+        prompt_version=PROMPT_VERSION,
+        toolchain_hash=toolchain_hash,
+        model_config_hash=model_config_hash,
+        binding=binding,
+        max_cost_usd=max_cost_usd,
+        max_unit_cost_usd=max_unit_cost_usd,
+        holdout_controller=holdout_controller,
+        holdout_batch=holdout_batch,
+        schedule_client=ExternalCommandScheduleCommitClient(Path(authority_command)),
+    )
 
 
 @benchmark_app.command("validate")
@@ -124,6 +246,7 @@ def benchmark_evaluate(
     max_unit_cost_usd: Annotated[float | None, typer.Option("--max-unit-cost-usd")] = None,
     corpus_root: Annotated[Path | None, typer.Option("--corpus-root")] = None,
     case_root: Annotated[Path | None, typer.Option("--case-root")] = None,
+    repository: Annotated[Path, typer.Option("--repository")] = Path("."),
     commit: Annotated[str | None, typer.Option("--commit")] = None,
     toolchain_hash: Annotated[str | None, typer.Option("--toolchain-hash")] = None,
     model_config_hash: Annotated[str | None, typer.Option("--model-config-hash")] = None,
@@ -136,13 +259,27 @@ def benchmark_evaluate(
     # This check precedes any configured service, corpus, or provider construction.
     if max_cost_usd is None or max_unit_cost_usd is None:
         raise typer.BadParameter("COST_CAP_REQUIRED: both total and unit caps must be explicit.")
-    # The shipped command has no configured provider path until reviewed pricing attestation
-    # exists. Context injection is a Python/controller dependency, not a flag or environment knob.
     try:
-        if not isinstance(ctx.obj, EvaluationRunner):
-            raise CostBoundUnavailable("COST_BOUND_UNAVAILABLE")
-        runner = ctx.obj
-    except CostBoundUnavailable:
+        if isinstance(ctx.obj, EvaluationRunner):
+            runner = ctx.obj
+        else:
+            if None in {corpus_root, case_root, commit, toolchain_hash, model_config_hash}:
+                raise CostBoundUnavailable("COST_BOUND_UNAVAILABLE")
+            assert corpus_root is not None and case_root is not None
+            assert commit is not None and toolchain_hash is not None
+            assert model_config_hash is not None
+            runner = _configured_evaluation_runner(
+                repository=repository,
+                case_root=case_root,
+                corpus_root=corpus_root,
+                split=split,
+                commit=commit,
+                toolchain_hash=toolchain_hash,
+                model_config_hash=model_config_hash,
+                max_cost_usd=max_cost_usd,
+                max_unit_cost_usd=max_unit_cost_usd,
+            )
+    except (CostBoundUnavailable, OSError, ValueError):
         raise typer.BadParameter(
             "COST_BOUND_UNAVAILABLE: paid evaluation requires reviewed pricing attestation "
             "before provider execution."

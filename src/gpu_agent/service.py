@@ -114,6 +114,19 @@ class ApplicationService:
             raise ValueError("evaluation service authority is already bound")
         self._evaluation_schedule_verifier = verifier
 
+    def _bind_pricing_attestation(self, attestation: PricingAttestation) -> None:
+        """Bind one controller-reviewed rate card before any evaluation provider call."""
+        if self._binding is None or self._binding.purpose != "evaluation":
+            raise ValueError("pricing attestation requires an evaluation-bound service")
+        if (
+            attestation.repository_commit != self._binding.repository.commit
+            or attestation.model_config_hash != self._binding.model_config_hash
+        ):
+            raise ValueError("pricing attestation differs from evaluation binding")
+        if self._pricing_attestation is not None and self._pricing_attestation != attestation:
+            raise ValueError("evaluation pricing is already bound")
+        self._pricing_attestation = attestation
+
     @property
     def binding(self) -> RunBinding | None:
         return self._binding
@@ -144,6 +157,7 @@ class ApplicationService:
         expected_commit: str | None = None,
         prompt_version: str | None = None,
         model_config_hash: str | None = None,
+        require_corpus_family: bool = False,
     ) -> "ApplicationService":
         """Construct a bound service only from controller-observed repository state."""
         snapshot = capture_repository_snapshot(repository, expected_commit=expected_commit)
@@ -157,10 +171,10 @@ class ApplicationService:
         )
         family = (
             CorpusFamily.open(Path(os.environ["GPU_AGENT_CORPUS_FAMILY_ROOT"]))
-            if purpose == "corpus_validation" and "GPU_AGENT_CORPUS_FAMILY_ROOT" in os.environ
+            if "GPU_AGENT_CORPUS_FAMILY_ROOT" in os.environ
             else None
         )
-        if purpose == "corpus_validation" and family is None:
+        if (purpose == "corpus_validation" or require_corpus_family) and family is None:
             raise ValueError("trusted corpus family configuration is required")
         if family is not None:
             family.reject_repository_overlap(repository)
@@ -179,6 +193,10 @@ class ApplicationService:
         ordinary = cls.configured()
         if family is not None:
             family.require_store(ordinary.store)
+            if purpose == "evaluation":
+                family.require_store(
+                    RunStore(ordinary.evaluator_root / "runs", visibility="evaluator")
+                )
         return cls(
             ordinary.store,
             ordinary.evaluator_root,
@@ -319,13 +337,11 @@ class ApplicationService:
                     endpoint_host = urlsplit(settings.endpoint or "").hostname or ""
                     if not endpoint_host:
                         raise ProviderError("MODEL_CONFIG_MISMATCH")
-                    if isinstance(provider, MockResponsesProvider):
-                        pricing = self._pricing_attestation
-                        if pricing is None or pricing.source != "TEST_ONLY":
-                            raise ProviderError("PRICING_ATTESTATION_REQUIRED")
-                    else:
-                        # V2 deliberately has no production pricing trust root.  A provider
-                        # that could perform a paid call therefore remains hard-closed.
+                    pricing = self._pricing_attestation
+                    expected_pricing_source = (
+                        "TEST_ONLY" if isinstance(provider, MockResponsesProvider) else "REVIEWED"
+                    )
+                    if pricing is None or pricing.source != expected_pricing_source:
                         raise ProviderError("PRICING_ATTESTATION_REQUIRED")
                     policy = EvaluationProviderPolicy(
                         provider=provider.provider_name,

@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import random
+import stat
 import subprocess
 import tempfile
 from collections import Counter
@@ -37,6 +39,7 @@ from gpu_agent.benchmark.ledger import (
 )
 from gpu_agent.benchmark.models import CaseManifest
 from gpu_agent.contracts import ArtifactRef, CurrentPhase, RunBinding, RunManifest, RunStatus
+from gpu_agent.execution.process import ProcessExecutor
 from gpu_agent.store import EvaluationRunLease, RunStore, RunStoreIdentity, reject_symlinks
 
 _OPENSSL = Path("/usr/bin/openssl")
@@ -104,6 +107,58 @@ class ScheduleCommitClient(Protocol):
     """External trust boundary; no implementation exists in production code."""
 
     def commit(self, request: EvaluationScheduleSigningRequest) -> EvaluationScheduleReceipt: ...
+
+
+class ExternalCommandScheduleCommitClient:
+    """Bounded JSON client for an operator-owned schedule signing service.
+
+    The application stores only the public key. The external command receives one
+    signing request on stdin and returns one receipt on stdout; no shell or inherited
+    environment is used.
+    """
+
+    def __init__(self, executable: Path, *, timeout_seconds: float = 10) -> None:
+        target = executable.absolute()
+        if executable != target or not 0 < timeout_seconds <= 60:
+            raise ValueError("schedule authority command must be absolute and bounded")
+        reject_symlinks(target)
+        metadata = target.stat()
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o022
+            or not metadata.st_mode & 0o100
+        ):
+            raise ValueError("schedule authority command is unsafe")
+        self._executable = target
+        self._timeout_seconds = timeout_seconds
+
+    def commit(self, request: EvaluationScheduleSigningRequest) -> EvaluationScheduleReceipt:
+        with tempfile.TemporaryDirectory(prefix="gpu-agent-schedule-client-") as raw:
+            capture = ProcessExecutor().execute(
+                [str(self._executable)],
+                Path(raw),
+                self._timeout_seconds,
+                256 * 1024,
+                stdin=request.model_dump_json().encode(),
+                env={"PATH": "/usr/bin:/bin", "LANG": "C", "LC_ALL": "C"},
+            )
+        if (
+            capture.exit_code != 0
+            or capture.timed_out
+            or capture.cancelled
+            or capture.truncated
+            or capture.tool_error is not None
+            or capture.stderr
+        ):
+            raise ValueError("external schedule authority failed")
+        try:
+            receipt = EvaluationScheduleReceipt.model_validate_json(capture.stdout)
+        except ValueError as exc:
+            raise ValueError("external schedule authority returned an invalid receipt") from exc
+        if receipt.request != request:
+            raise ValueError("external schedule authority returned another transaction")
+        return receipt
 
 
 def _canonical(value: BaseModel) -> bytes:

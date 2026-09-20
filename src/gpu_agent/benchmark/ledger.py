@@ -223,7 +223,30 @@ class CorpusFamily:
             public_store=public_store,
             evaluator_store=evaluator_store,
             repository=repository,
-            test_schedule_public_key=None,
+            schedule_public_key=None,
+            schedule_authority_profile="UNCONFIGURED",
+        )
+
+    @classmethod
+    def provision_production(
+        cls,
+        root: Path,
+        *,
+        public_store: Path,
+        evaluator_store: Path,
+        repository: Path,
+        schedule_public_key: bytes,
+    ) -> "CorpusFamily":
+        """Provision verification for an external production schedule signer."""
+        if not schedule_public_key:
+            raise ValueError("production schedule public key is required")
+        return cls._provision(
+            root,
+            public_store=public_store,
+            evaluator_store=evaluator_store,
+            repository=repository,
+            schedule_public_key=schedule_public_key,
+            schedule_authority_profile="PRODUCTION",
         )
 
     @classmethod
@@ -242,7 +265,8 @@ class CorpusFamily:
             public_store=public_store,
             evaluator_store=evaluator_store,
             repository=repository,
-            test_schedule_public_key=schedule_public_key,
+            schedule_public_key=schedule_public_key,
+            schedule_authority_profile="TEST_ONLY",
         )
 
     @classmethod
@@ -253,7 +277,8 @@ class CorpusFamily:
         public_store: Path,
         evaluator_store: Path,
         repository: Path,
-        test_schedule_public_key: bytes | None,
+        schedule_public_key: bytes | None,
+        schedule_authority_profile: Literal["UNCONFIGURED", "PRODUCTION", "TEST_ONLY"],
     ) -> "CorpusFamily":
         controller_root = root.absolute()
         public = public_store.absolute()
@@ -267,17 +292,17 @@ class CorpusFamily:
         reject_symlinks(controller_root)
         controller_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(controller_root, 0o700)
+        if (schedule_authority_profile == "UNCONFIGURED") != (schedule_public_key is None):
+            raise ValueError("schedule authority profile and public key differ")
         key_hash = (
-            hashlib.sha256(test_schedule_public_key).hexdigest()
-            if test_schedule_public_key is not None
+            hashlib.sha256(schedule_public_key).hexdigest()
+            if schedule_public_key is not None
             else None
         )
         config = _FamilyConfig(
             public_store=str(public),
             evaluator_store=str(evaluator),
-            schedule_authority_profile=(
-                "TEST_ONLY" if test_schedule_public_key is not None else "UNCONFIGURED"
-            ),
+            schedule_authority_profile=schedule_authority_profile,
             schedule_public_key_hash=key_hash,
         )
         config_path = controller_root / "family.json"
@@ -285,11 +310,11 @@ class CorpusFamily:
         observed = _FamilyConfig.model_validate_json(read_regular(config_path, 64 * 1024))
         if observed != config:
             raise ValueError("corpus family is already configured for different stores")
-        if test_schedule_public_key is not None:
+        if schedule_public_key is not None:
             key_path = controller_root / "schedule-authority.pub"
-            _atomic_create(key_path, test_schedule_public_key, 0o400)
-            if read_regular(key_path, 64 * 1024) != test_schedule_public_key:
-                raise ValueError("test schedule public key differs from family configuration")
+            _atomic_create(key_path, schedule_public_key, 0o400)
+            if read_regular(key_path, 64 * 1024) != schedule_public_key:
+                raise ValueError("schedule public key differs from family configuration")
         family = cls(controller_root, observed, CorpusLedger(controller_root / "ledger"))
         family._verify_schedule_key()
         family._pin_store(public)
