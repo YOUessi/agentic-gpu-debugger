@@ -192,6 +192,23 @@ class ScoringFixture:
             self.evaluation_run_id, self.mapping_run_id, self.labels_path, self.repository
         )
 
+    def score(self, labels_path=None):
+        return self.controller.score(
+            self.evaluation_run_id,
+            self.mapping_run_id,
+            labels_path or self.labels_path,
+            self.repository,
+        )
+
+    def changed_package(self):
+        payload = self.package.model_dump(mode="json")
+        for judgment in payload["judgments"]:
+            judgment["score"]["root_cause_correct"] = True
+        path = self.labels_path.with_name("changed-labels.json")
+        path.write_bytes(canonical(payload))
+        path.chmod(0o600)
+        return path
+
     def snapshot(self):
         return {
             (str(store.root), str(path.relative_to(store.root))): path.read_bytes()
@@ -759,3 +776,296 @@ def test_existing_lock_guard_is_read_only(store):
     content = lock.read_bytes()
     _require_existing_lock(store, run.id)
     assert lock.read_bytes() == content
+
+
+def _session_id(f):
+    return digest(f"holdout-scoring-v1:{f.evaluation_run_id}:{f.mapping_run_id}".encode())[:32]
+
+
+def _assert_scoring_complete(f, result):
+    run = f.evaluator.load(_session_id(f))
+    assert result.scoring_run_id == run.id
+    assert result.scored_count == 120
+    assert run.kind == "holdout_scoring" and run.parent_run_id is None
+    assert run.external_origin.run_id == f.evaluation_run_id
+    assert run.external_origin.visibility == "public" and run.binding == f.binding
+    assert [(e.status.value, e.phase.value if e.phase else None) for e in run.events] == [
+        ("QUEUED", None),
+        ("RUNNING", "PREPARING"),
+        ("RUNNING", "FINALIZING"),
+        ("COMPLETED", None),
+    ]
+    artifacts = {ref.name: f.evaluator.read(ref) for ref in run.artifact_refs}
+    assert set(artifacts) == {
+        f"holdout-scoring/{name}.json"
+        for name in ("input-binding", "bindings", "metrics", "result")
+    }
+    bindings = json.loads(artifacts["holdout-scoring/bindings.json"])
+    assert [b["public_record_id"] for b in bindings] == [r.record_id for r in f.records]
+    assert len({b["evaluator_score_run_id"] for b in bindings}) == 120
+    assert result.metrics_hash == digest(artifacts["holdout-scoring/metrics.json"])
+    assert json.loads(artifacts["holdout-scoring/result.json"]) == result.model_dump(mode="json")
+    assert (
+        json.loads(artifacts["holdout-scoring/input-binding.json"])["package_hash"]
+        == result.package_hash
+    )
+    metrics = json.loads(artifacts["holdout-scoring/metrics.json"])
+    assert metrics["overall"]["record_count"] == 120
+    assert metrics["overall"]["case_count"] == 8
+    assert set(metrics["by_mode"]) == set("ABCDE")
+    assert all(group["record_count"] == 24 for group in metrics["by_mode"].values())
+    assert all(group["record_count"] == 15 for group in metrics["by_case"].values())
+    children = [
+        f.evaluator.load(path.name)
+        for path in f.evaluator.root.iterdir()
+        if path.is_dir() and len(path.name) == 32
+    ]
+    assert len([r for r in children if r.kind == "holdout_scoring"]) == 1
+    scores = [r for r in children if r.parent_run_id == f.mapping_run_id]
+    assert len(scores) == 120
+    for child in scores:
+        assert child.kind == "holdout_score" and child.status == RunStatus.COMPLETED
+        assert [e.status.value for e in child.events] == ["QUEUED", "RUNNING", "COMPLETED"]
+    return artifacts
+
+
+def test_session_lifecycle_and_completed_retry_is_read_only(scoring_fixture, monkeypatch):
+    f = scoring_fixture
+    result = f.score()
+    _assert_scoring_complete(f, result)
+    before = f.snapshot()
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("completed retry attempted mutation")
+
+    monkeypatch.setattr(f.evaluator, "put", forbidden)
+    monkeypatch.setattr(f.evaluator, "put_if_absent_exact", forbidden)
+    monkeypatch.setattr(f.evaluator, "transition", forbidden)
+    monkeypatch.setattr(f.controller.holdout, "_bind_prepared_score", forbidden)
+    assert f.score() == result
+    assert f.snapshot() == before
+    with pytest.raises(ValueError, match="holdout scoring package conflicts"):
+        f.score(f.changed_package())
+    assert f.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        "created",
+        "running",
+        "input-binding",
+        "score-0",
+        "score-1",
+        "score-119",
+        "bindings",
+        "metrics",
+        "result",
+        "finalizing",
+        "completed",
+    ],
+)
+def test_session_crash_recovery_at_every_durable_boundary(scoring_fixture, monkeypatch, boundary):
+    f = scoring_fixture
+    session_id = _session_id(f)
+
+    class Crash(RuntimeError):
+        pass
+
+    def fail_if(name):
+        if name == boundary:
+            raise Crash(name)
+
+    with monkeypatch.context() as patch:
+        create = f.evaluator.create_run
+        transition = f.evaluator.transition
+        put = f.evaluator.put_if_absent_exact
+        bind = f.controller.holdout._bind_prepared_score
+        ordinal = 0
+
+        def crash_create(*args, **kwargs):
+            run = create(*args, **kwargs)
+            if run.id == session_id:
+                fail_if("created")
+            return run
+
+        def crash_transition(run_id, status, phase):
+            run = transition(run_id, status, phase)
+            if run_id == session_id:
+                fail_if(
+                    "completed"
+                    if status == RunStatus.COMPLETED
+                    else "finalizing"
+                    if str(phase) == "FINALIZING"
+                    else "running"
+                )
+            return run
+
+        def crash_put(run_id, name, *args, **kwargs):
+            ref = put(run_id, name, *args, **kwargs)
+            if run_id == session_id:
+                fail_if(Path(name).stem)
+            return ref
+
+        def crash_bind(*args, **kwargs):
+            nonlocal ordinal
+            result = bind(*args, **kwargs)
+            current = ordinal
+            ordinal += 1
+            fail_if(f"score-{current}")
+            return result
+
+        patch.setattr(f.evaluator, "create_run", crash_create)
+        patch.setattr(f.evaluator, "transition", crash_transition)
+        patch.setattr(f.evaluator, "put_if_absent_exact", crash_put)
+        patch.setattr(f.controller.holdout, "_bind_prepared_score", crash_bind)
+        with pytest.raises(Crash, match=boundary):
+            f.score()
+    result = f.score()
+    _assert_scoring_complete(f, result)
+    assert result.package_hash == digest(f.labels_path.read_bytes())
+
+
+def _scoring_worker(f, labels, barrier, output):
+    # fork workers inherit the native test verifier; stores still use real process locks.
+    barrier.wait(timeout=30)
+    try:
+        output.put(("ok", f.score(labels).model_dump(mode="json")))
+    except Exception as exc:
+        output.put(("error", str(exc)))
+
+
+@pytest.mark.parametrize("processes", [False, True], ids=["threads", "processes"])
+@pytest.mark.parametrize("different", [False, True], ids=["same_package", "package_race"])
+def test_session_concurrent_packages(scoring_fixture, processes, different):
+    import multiprocessing
+    import queue
+    import threading
+
+    f = scoring_fixture
+    if processes:
+        context = multiprocessing.get_context("fork")
+        barrier, output, worker = context.Barrier(2), context.Queue(), context.Process
+    else:
+        barrier, output, worker = threading.Barrier(2), queue.Queue(), threading.Thread
+    labels = [f.labels_path, f.changed_package() if different else f.labels_path]
+    workers = [worker(target=_scoring_worker, args=(f, path, barrier, output)) for path in labels]
+    for task in workers:
+        task.start()
+    results = [output.get(timeout=600) for _ in workers]
+    for task in workers:
+        task.join(timeout=30)
+        assert not task.is_alive()
+        if processes:
+            assert task.exitcode == 0
+    success = [value for status, value in results if status == "ok"]
+    errors = [value for status, value in results if status == "error"]
+    assert len(success) == (1 if different else 2), results
+    assert errors == (["holdout scoring package conflicts"] if different else [])
+    assert all(item == success[0] for item in success)
+    winning_path = next(
+        path for path in labels if digest(path.read_bytes()) == success[0]["package_hash"]
+    )
+    result = f.score(winning_path)
+    artifacts = _assert_scoring_complete(f, result)
+    expected_root = json.loads(winning_path.read_bytes())["judgments"][0]["score"][
+        "root_cause_correct"
+    ]
+    for binding in json.loads(artifacts["holdout-scoring/bindings.json"]):
+        child = f.evaluator.load(binding["evaluator_score_run_id"])
+        ref = next(r for r in child.artifact_refs if r.name == "holdout/private-score.json")
+        assert json.loads(f.evaluator.read(ref))["score"]["root_cause_correct"] == expected_root
+
+
+@pytest.mark.parametrize("unsafe", ["symlink", "permissions", "hardlink"])
+def test_session_claim_rejects_unsafe_lock(scoring_fixture, unsafe):
+    f = scoring_fixture
+    path = f.evaluator.root / f".holdout-scoring-{_session_id(f)}.lock"
+    other = f.labels_path.with_name("lock-target")
+    other.write_bytes(b"do not touch")
+    other.chmod(0o600)
+    if unsafe == "symlink":
+        path.symlink_to(other)
+    elif unsafe == "hardlink":
+        path.hardlink_to(other)
+    else:
+        path.touch(mode=0o644)
+    with pytest.raises(ValueError, match="claim"):
+        f.score()
+    assert not (f.evaluator.root / _session_id(f)).exists()
+    assert other.read_bytes() == b"do not touch"
+
+
+def test_prepared_persistence_checks_identity_and_matches_standalone(scoring_fixture):
+    f = scoring_fixture
+    prepared = f.preflight().items[0].prepared_score
+    before = f.snapshot()
+    stale = (
+        prepared.model_copy(update={"run_id": "f" * 32}),
+        prepared.model_copy(
+            update={
+                "binding": prepared.binding.model_copy(update={"evaluator_score_run_id": "f" * 32})
+            }
+        ),
+        prepared.model_copy(
+            update={"binding": prepared.binding.model_copy(update={"private_score_hash": "f" * 64})}
+        ),
+        prepared.model_copy(update={"private_score_content": b"{}"}),
+    )
+    for candidate in stale:
+        with pytest.raises(ValueError):
+            f.controller.holdout._bind_prepared_score(f.batch, candidate)
+        assert f.snapshot() == before
+    binding = f.controller.holdout._bind_prepared_score(f.batch, prepared)
+    expected = f.package.judgments[0]
+    assert (
+        f.controller.holdout.bind_score(
+            f.batch,
+            f.records[0].case_id,
+            f.refs[0],
+            labels=expected.labels,
+            score=expected.score,
+            should_be_inconclusive=expected.should_be_inconclusive,
+            private_holdout_passed=expected.private_holdout_passed,
+        )
+        == binding
+    )
+    assert binding == prepared.binding
+
+
+def test_grouped_metrics_load_once_and_match_independent_aggregate(scoring_fixture, monkeypatch):
+    from gpu_agent.benchmark.holdout import EvaluatorRecordBinding
+    from gpu_agent.benchmark.metrics import aggregate, aggregate_grouped
+
+    f = scoring_fixture
+    bindings = []
+    for ordinal in (0, 1):
+        child = f.evaluator.load(f.seed(ordinal))
+        ref = next(r for r in child.artifact_refs if r.name == "holdout/record-binding.json")
+        bindings.append(EvaluatorRecordBinding.model_validate_json(f.evaluator.read(ref)))
+    context = dict(
+        public_store=f.public,
+        evaluator_store=f.evaluator,
+        run_binding=f.binding,
+        schedule_verifier=f.controller.holdout._schedule_verifier,
+    )
+    expected = aggregate(bindings, **context)
+    loads = []
+    validations = []
+    original = HoldoutController._load_metric_record
+    original_validation = HoldoutController.validated_evaluation
+
+    def counted(self, binding, *args, **kwargs):
+        loads.append(binding.public_record_id)
+        return original(self, binding, *args, **kwargs)
+
+    def counted_validation(self, batch, evaluation_run_id):
+        validations.append(evaluation_run_id)
+        return original_validation(self, batch, evaluation_run_id)
+
+    monkeypatch.setattr(HoldoutController, "_load_metric_record", counted)
+    monkeypatch.setattr(HoldoutController, "validated_evaluation", counted_validation)
+    result = aggregate_grouped(bindings, **context)
+    assert result.overall == expected
+    assert loads == [binding.public_record_id for binding in bindings]
+    assert validations == [f.evaluation_run_id]

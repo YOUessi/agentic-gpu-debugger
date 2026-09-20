@@ -1,5 +1,8 @@
 """Controller commands fail closed before provider construction and use durable scheduling."""
 
+import hashlib
+import stat
+
 import pytest
 from schedule_authority_support import schedule_client_for_test
 from typer.testing import CliRunner
@@ -325,3 +328,207 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(
     assert "Cost reservation: $0.00" in result.output
     assert "Hard maximum" not in result.output
     assert calls == []
+
+
+def _holdout_cli_family(tmp_path, monkeypatch):
+    from schedule_authority_support import TestScheduleCommitClient
+
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.contracts import RepositorySnapshot, RunBinding
+
+    repository = tmp_path / "repository"
+    repository.mkdir(mode=0o700)
+    signer = TestScheduleCommitClient.create(tmp_path / "test-only-schedule-authority")
+    family = CorpusFamily.provision_production(
+        tmp_path / "controller",
+        public_store=tmp_path / "public",
+        evaluator_store=tmp_path / "evaluator",
+        repository=repository,
+        schedule_public_key=signer.public_key,
+    )
+    public = family.corpus_store("public")
+    binding = RunBinding(
+        repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
+        purpose="evaluation",
+    )
+    evaluation_run_id = "1" * 32
+    public.create_run("evaluation", binding=binding, _run_id=evaluation_run_id)
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
+    return family, repository, evaluation_run_id, "2" * 32
+
+
+def _tree_bytes(root):
+    return {
+        str(path.relative_to(root)): path.read_bytes() if path.is_file() else None
+        for path in root.rglob("*")
+    }
+
+
+@pytest.mark.parametrize("location", ["missing", "relative", "repository", "public", "evaluator"])
+def test_score_holdout_rejects_unsafe_labels_before_store_mutation(tmp_path, monkeypatch, location):
+    from gpu_agent.cli import app
+
+    family, repository, evaluation_run_id, mapping_run_id = _holdout_cli_family(
+        tmp_path, monkeypatch
+    )
+    public = family.corpus_store("public")
+    evaluator = family.corpus_store("evaluator")
+    if location == "missing":
+        labels = tmp_path / "missing.json"
+    elif location == "relative":
+        labels = "labels.json"
+    else:
+        root = {"repository": repository, "public": public.root, "evaluator": evaluator.root}[
+            location
+        ]
+        labels = root / "PRIVATE-HOLDOUT-CANARY.json"
+        labels.write_bytes(b"PRIVATE-HOLDOUT-CANARY")
+        labels.chmod(0o600)
+    before = (_tree_bytes(public.root), _tree_bytes(evaluator.root))
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "score-holdout",
+            "--evaluation-run-id",
+            evaluation_run_id,
+            "--private-binding-run-id",
+            mapping_run_id,
+            "--labels",
+            str(labels),
+            "--repository",
+            str(repository.absolute()),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "HOLDOUT_LABEL_PACKAGE_INVALID" in result.output
+    assert "PRIVATE-HOLDOUT-CANARY" not in result.output
+    assert (_tree_bytes(public.root), _tree_bytes(evaluator.root)) == before
+
+
+@pytest.mark.parametrize(
+    "failure,code",
+    [
+        (
+            ValueError("holdout label package is incomplete or invalid"),
+            "HOLDOUT_LABEL_PACKAGE_INVALID",
+        ),
+        (
+            ValueError("holdout evaluation schedule is invalid"),
+            "HOLDOUT_SCORING_EVIDENCE_MISMATCH",
+        ),
+        (ValueError("holdout scoring package conflicts"), "HOLDOUT_SCORING_CONFLICT"),
+        (OSError("PRIVATE-HOLDOUT-CANARY"), "HOLDOUT_SCORING_FAILED"),
+    ],
+)
+def test_score_holdout_maps_stable_private_errors(tmp_path, monkeypatch, failure, code):
+    from gpu_agent.benchmark.holdout_scoring import HoldoutScoringController
+    from gpu_agent.cli import app
+
+    _, repository, evaluation_run_id, mapping_run_id = _holdout_cli_family(tmp_path, monkeypatch)
+    labels = tmp_path / "labels.json"
+    labels.write_bytes(b"{}")
+    labels.chmod(0o600)
+
+    def fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr(HoldoutScoringController, "score", fail)
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "score-holdout",
+            "--evaluation-run-id",
+            evaluation_run_id,
+            "--private-binding-run-id",
+            mapping_run_id,
+            "--labels",
+            str(labels),
+            "--repository",
+            str(repository),
+        ],
+    )
+    assert result.exit_code == 2 and code in result.output
+    assert "PRIVATE-HOLDOUT-CANARY" not in result.output
+
+
+def test_score_holdout_publishes_exact_private_metrics_and_safe_stdout(tmp_path, monkeypatch):
+    from gpu_agent.benchmark.holdout_scoring import (
+        HoldoutScoringController,
+        HoldoutScoringResult,
+    )
+    from gpu_agent.cli import app
+    from gpu_agent.contracts import ExternalRunOrigin, RunStatus
+
+    family, repository, evaluation_run_id, mapping_run_id = _holdout_cli_family(
+        tmp_path, monkeypatch
+    )
+    canary = b"PRIVATE-HOLDOUT-CANARY-8eaa"
+    labels = tmp_path / "labels.json"
+    labels.write_bytes(b'{"private":"' + canary + b'"}')
+    labels.chmod(0o600)
+    output_parent = tmp_path / "output"
+    output_parent.mkdir(mode=0o700)
+    metrics_output = output_parent / "metrics.json"
+    metrics = b'{"safe":true}'
+
+    def score(self, requested_evaluation, requested_mapping, labels_path, requested_repository):
+        assert (requested_evaluation, requested_mapping) == (evaluation_run_id, mapping_run_id)
+        assert labels_path == labels and requested_repository == repository
+        run_id = hashlib.sha256(
+            f"holdout-scoring-v1:{evaluation_run_id}:{mapping_run_id}".encode()
+        ).hexdigest()[:32]
+        run = self.evaluator.create_run(
+            "holdout_scoring",
+            binding=self.binding,
+            external_origin=ExternalRunOrigin(run_id=evaluation_run_id, visibility="public"),
+            _run_id=run_id,
+        )
+        self.evaluator.transition(run.id, RunStatus.RUNNING, "FINALIZING")
+        self.evaluator.put(run.id, "holdout-scoring/metrics.json", metrics, "evaluator")
+        self.evaluator.transition(run.id, RunStatus.COMPLETED, None)
+        return HoldoutScoringResult(
+            scoring_run_id=run_id,
+            evaluation_run_id=evaluation_run_id,
+            private_binding_run_id=mapping_run_id,
+            package_hash="3" * 64,
+            input_binding_hash="4" * 64,
+            bindings_hash="5" * 64,
+            metrics_hash=hashlib.sha256(metrics).hexdigest(),
+        )
+
+    monkeypatch.setattr(HoldoutScoringController, "score", score)
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "score-holdout",
+            "--evaluation-run-id",
+            evaluation_run_id,
+            "--private-binding-run-id",
+            mapping_run_id,
+            "--labels",
+            str(labels),
+            "--repository",
+            str(repository),
+            "--metrics-output",
+            str(metrics_output),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    expected_run_id = hashlib.sha256(
+        f"holdout-scoring-v1:{evaluation_run_id}:{mapping_run_id}".encode()
+    ).hexdigest()[:32]
+    assert result.stdout == (
+        f"scoring_run_id {expected_run_id}\n"
+        "scored 120/120\n"
+        f"metrics_sha256 {hashlib.sha256(metrics).hexdigest()}\n"
+    )
+    assert metrics_output.read_bytes() == metrics
+    assert stat.S_IMODE(metrics_output.stat().st_mode) == 0o600
+    for root in (repository, family.corpus_store("public").root):
+        assert canary not in b"".join(
+            path.read_bytes() for path in root.rglob("*") if path.is_file()
+        )
+    assert canary not in result.stdout_bytes and canary not in result.stderr_bytes

@@ -141,7 +141,8 @@ def _load_records(
         binding=run_binding,
         _schedule_verifier=schedule_verifier,
     )
-    return [controller._load_metric_record(record) for record in records]
+    context = controller._metric_load_context(records[0])
+    return [controller._load_metric_record(record, _context=context) for record in records]
 
 
 def score(
@@ -193,6 +194,14 @@ def aggregate(
     retrieval_k: int = 5,
 ) -> MetricSummary:
     loaded = _load_records(records, public_store, evaluator_store, run_binding, schedule_verifier)
+    return _aggregate_loaded(records, loaded, retrieval_k)
+
+
+def _aggregate_loaded(
+    records: list[EvaluatorRecordBinding],
+    loaded: list[EvaluationRecord],
+    retrieval_k: int,
+) -> MetricSummary:
     corpus_cutoff = records[0].corpus_cutoff
     evaluation_authority_id = records[0].public_evaluation_run_id
     if retrieval_k < 1:
@@ -367,32 +376,22 @@ def aggregate_grouped(
     loaded = _load_records(records, public_store, evaluator_store, run_binding, schedule_verifier)
 
     def grouped(field: str, mode: str | None = None) -> dict[str, MetricSummary]:
-        groups: dict[str, list[EvaluatorRecordBinding]] = defaultdict(list)
-        for persisted, record in zip(records, loaded, strict=True):
+        groups: dict[str, list[int]] = defaultdict(list)
+        for index, record in enumerate(loaded):
             if mode is None or record.mode == mode:
-                groups[str(getattr(record, field))].append(persisted)
+                groups[str(getattr(record, field))].append(index)
         return {
-            key: aggregate(
-                group,
-                public_store=public_store,
-                evaluator_store=evaluator_store,
-                run_binding=run_binding,
-                schedule_verifier=schedule_verifier,
-                retrieval_k=retrieval_k,
+            key: _aggregate_loaded(
+                [records[index] for index in indices],
+                [loaded[index] for index in indices],
+                retrieval_k,
             )
-            for key, group in sorted(groups.items())
+            for key, indices in sorted(groups.items())
         }
 
     modes = sorted({record.mode for record in loaded})
     return GroupedMetricSummary(
-        overall=aggregate(
-            records,
-            public_store=public_store,
-            evaluator_store=evaluator_store,
-            run_binding=run_binding,
-            schedule_verifier=schedule_verifier,
-            retrieval_k=retrieval_k,
-        ),
+        overall=_aggregate_loaded(records, loaded, retrieval_k),
         by_mode=grouped("mode"),
         by_case=grouped("case_id"),
         by_template=grouped("template_id"),

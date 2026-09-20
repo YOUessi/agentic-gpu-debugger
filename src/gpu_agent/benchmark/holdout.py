@@ -13,7 +13,7 @@ import stat
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from pydantic import Field
 
@@ -26,7 +26,7 @@ from gpu_agent.benchmark.evaluation import (
     PublicEvaluationRecord,
 )
 from gpu_agent.benchmark.metrics import EvaluationLabels, Score
-from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, RunStatus
+from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, RunManifest, RunStatus
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
 
@@ -81,6 +81,12 @@ class _PrivateAliasMap(ExecutionModel):
     corpus_cutoff: int = Field(ge=1)
     nonce_hex: str = Field(pattern=r"^[a-f0-9]{64}$")
     identities: list[_PrivateIdentity]
+
+
+class _MetricLoadContext(NamedTuple):
+    batch: HoldoutBatch
+    evaluation: ValidatedHoldoutEvaluation
+    identities: dict[str, _PrivateIdentity]
 
 
 class _PrivateScore(ExecutionModel):
@@ -352,7 +358,32 @@ class HoldoutController:
             should_be_inconclusive=should_be_inconclusive,
             private_holdout_passed=private_holdout_passed,
         )
+        return self._bind_prepared_score(batch, prepared)
+
+    def _bind_prepared_score(
+        self,
+        batch: HoldoutBatch,
+        prepared: PreparedHoldoutScore,
+        *,
+        _reload: bool = True,
+    ) -> EvaluatorRecordBinding:
+        """Persist one score already derived from current native validation."""
         score_run_id, binding = prepared.run_id, prepared.binding
+        try:
+            private_score = _PrivateScore.model_validate_json(prepared.private_score_content)
+        except ValueError:
+            raise ValueError("prepared holdout score is invalid") from None
+        if (
+            score_run_id != binding.evaluator_score_run_id
+            or score_run_id != self._score_run_id(batch, binding.public_record_id)
+            or binding.corpus_cutoff != batch.corpus_cutoff
+            or private_score.content() != prepared.private_score_content
+            or private_score.public_record_hash != binding.public_record_hash
+            or private_score.corpus_cutoff != binding.corpus_cutoff
+            or hashlib.sha256(prepared.private_score_content).hexdigest()
+            != binding.private_score_hash
+        ):
+            raise ValueError("prepared holdout score is invalid")
         with self._score_claim(score_run_id):
             try:
                 run = self.evaluator.load(score_run_id)
@@ -383,12 +414,18 @@ class HoldoutController:
             run = self.evaluator.load(run.id)
             if run.status == RunStatus.RUNNING:
                 self.evaluator.transition(run.id, RunStatus.COMPLETED, None)
-            self._load_score(binding)
+            if _reload:
+                self._load_score(binding)
             return binding
 
-    def _load_metric_record(self, binding: EvaluatorRecordBinding) -> EvaluationRecord:
+    def _load_metric_record(
+        self,
+        binding: EvaluatorRecordBinding,
+        *,
+        _context: _MetricLoadContext | None = None,
+    ) -> EvaluationRecord:
         """Reload a scored record for the metric module's persisted-reference API."""
-        private_score, public = self._load_score(binding)
+        private_score, public = self._load_score(binding, _context=_context)
         raw = public.model_dump(mode="json")
         build = public.executed_checks.get("verification/build")
         raw.update(
@@ -401,6 +438,21 @@ class HoldoutController:
             ),
         )
         return EvaluationRecord.model_validate(raw)
+
+    def _metric_load_context(self, binding: EvaluatorRecordBinding) -> _MetricLoadContext:
+        """Validate shared native evaluation state once for one metric invocation."""
+        run = self.evaluator.load(binding.evaluator_score_run_id)
+        if (
+            run.kind != "holdout_score"
+            or run.status != RunStatus.COMPLETED
+            or run.binding != self.binding
+            or run.parent_run_id is None
+        ):
+            raise ValueError("holdout score transaction is invalid")
+        batch = self._score_batch(run)
+        evaluation = self.validated_evaluation(batch, binding.public_evaluation_run_id)
+        identities = {alias: self._identity(batch, alias) for alias in batch.aliases}
+        return _MetricLoadContext(batch=batch, evaluation=evaluation, identities=identities)
 
     def resolve_private(self, batch: HoldoutBatch, alias: str) -> tuple[str, str]:
         """Resolve privately; callers must never persist the result publicly."""
@@ -623,8 +675,44 @@ class HoldoutController:
             finally:
                 os.close(fd)
 
+    def _score_batch(self, run: RunManifest) -> HoldoutBatch:
+        if run.parent_run_id is None:
+            raise ValueError("holdout score transaction is invalid")
+        mapping_run = self.evaluator.load(run.parent_run_id)
+        if (
+            mapping_run.kind != "holdout_alias_mapping"
+            or mapping_run.status != RunStatus.COMPLETED
+            or mapping_run.binding != self.binding
+            or mapping_run.external_origin is None
+            or mapping_run.external_origin.visibility != "public"
+        ):
+            raise ValueError("holdout score transaction is invalid")
+        public_alias_run = self.public.load(mapping_run.external_origin.run_id)
+        mapping_refs = [
+            ref for ref in mapping_run.artifact_refs if ref.name == "holdout/private-alias-map.json"
+        ]
+        if len(mapping_refs) != 1:
+            raise ValueError("holdout score transaction is invalid")
+        mapping = _PrivateAliasMap.model_validate_json(self.evaluator.read(mapping_refs[0]))
+        alias_refs = [
+            ref for ref in public_alias_run.artifact_refs if ref.name == "holdout/aliases.json"
+        ]
+        if len(alias_refs) != 1:
+            raise ValueError("holdout score transaction is invalid")
+        alias_payload = json.loads(self.public.read(alias_refs[0]))
+        return HoldoutBatch(
+            public_run_id=public_alias_run.id,
+            evaluator_run_id=mapping_run.id,
+            aliases=alias_payload.get("aliases", []),
+            public_alias_hash=alias_refs[0].sha256,
+            corpus_cutoff=mapping.corpus_cutoff,
+        )
+
     def _load_score(
-        self, binding: EvaluatorRecordBinding
+        self,
+        binding: EvaluatorRecordBinding,
+        *,
+        _context: _MetricLoadContext | None = None,
     ) -> tuple[_PrivateScore, PublicEvaluationRecord]:
         run = self.evaluator.load(binding.evaluator_score_run_id)
         score_refs = [r for r in run.artifact_refs if r.name == "holdout/private-score.json"]
@@ -656,37 +744,21 @@ class HoldoutController:
         ]
         if len(refs) != 1:
             raise ValueError("holdout score transaction is invalid")
-        mapping_run = self.evaluator.load(run.parent_run_id)
-        if (
-            mapping_run.kind != "holdout_alias_mapping"
-            or mapping_run.status != RunStatus.COMPLETED
-            or mapping_run.binding != self.binding
-            or mapping_run.external_origin is None
-            or mapping_run.external_origin.visibility != "public"
-        ):
-            raise ValueError("holdout score transaction is invalid")
-        public_alias_run = self.public.load(mapping_run.external_origin.run_id)
-        mapping_refs = [
-            ref for ref in mapping_run.artifact_refs if ref.name == "holdout/private-alias-map.json"
-        ]
-        if len(mapping_refs) != 1:
-            raise ValueError("holdout score transaction is invalid")
-        mapping = _PrivateAliasMap.model_validate_json(self.evaluator.read(mapping_refs[0]))
-        alias_refs = [
-            ref for ref in public_alias_run.artifact_refs if ref.name == "holdout/aliases.json"
-        ]
-        if len(alias_refs) != 1:
-            raise ValueError("holdout score transaction is invalid")
-        alias_payload = json.loads(self.public.read(alias_refs[0]))
-        batch = HoldoutBatch(
-            public_run_id=public_alias_run.id,
-            evaluator_run_id=mapping_run.id,
-            aliases=alias_payload.get("aliases", []),
-            public_alias_hash=alias_refs[0].sha256,
-            corpus_cutoff=mapping.corpus_cutoff,
-        )
-        public = self._validated_public_record(refs[0], batch)
-        identity = self._identity(batch, public.case_id)
+        batch = self._score_batch(run)
+        if _context is None:
+            public = self._validated_public_record(refs[0], batch)
+            identity = self._identity(batch, public.case_id)
+        else:
+            if batch != _context.batch or binding.public_evaluation_run_id != (
+                _context.evaluation.evaluation_run_id
+            ):
+                raise ValueError("holdout score transaction is invalid")
+            try:
+                ordinal = _context.evaluation.record_refs.index(refs[0])
+                public = _context.evaluation.records[ordinal]
+                identity = _context.identities[public.case_id]
+            except (KeyError, ValueError, IndexError):
+                raise ValueError("holdout score transaction is invalid") from None
         if (
             run.id != self._score_run_id(batch, public.record_id)
             or binding.evaluator_score_run_id != run.id

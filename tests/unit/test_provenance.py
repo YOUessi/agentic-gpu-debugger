@@ -1,5 +1,8 @@
 import hashlib
+import subprocess
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -19,10 +22,11 @@ class FakeGit:
             ("rev-parse", "--verify", "HEAD^{commit}"): [COMMIT.encode() + b"\n"],
             ("rev-parse", "--verify", "HEAD^{tree}"): [TREE.encode() + b"\n"],
             ("status", "--porcelain=v1", "-z", "--untracked-files=all"): [b""],
-            ("write-tree",): [TREE.encode() + b"\n"],
+            ("diff-index", "--quiet", "--cached", "HEAD", "--"): [b""],
             ("ls-files", "-z", "--cached"): [b"kernel.cu\0"],
         }
         self.before: dict[tuple[str, ...], Callable[[], None]] = {}
+        self.exit_codes: dict[tuple[str, ...], int] = {}
 
     def execute(
         self, argv: list[str], cwd: Path, timeout_seconds: float, max_log_bytes: int
@@ -35,7 +39,7 @@ class FakeGit:
             del self.before[command]
         values = self.outputs[command]
         value = values.pop(0) if len(values) > 1 else values[0]
-        return ProcessCapture(0, value, b"", False)
+        return ProcessCapture(self.exit_codes.get(command, 0), value, b"", False)
 
 
 def _repo(tmp_path: Path) -> tuple[Path, FakeGit]:
@@ -153,9 +157,40 @@ def test_repository_snapshot_rejects_head_and_index_tree_disagreement(tmp_path):
     from gpu_agent.provenance import capture_repository_snapshot
 
     repo, git = _repo(tmp_path)
-    git.outputs[("write-tree",)] = [("5" * 40).encode() + b"\n"]
+    git.exit_codes[("diff-index", "--quiet", "--cached", "HEAD", "--")] = 1
     with pytest.raises(ValueError, match="tree"):
         capture_repository_snapshot(repo, process=git)
+
+
+def test_repository_snapshot_supports_concurrent_readers(tmp_path):
+    from gpu_agent.provenance import capture_repository_snapshot
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "tracked.txt").write_text("stable\n")
+    for arguments in (
+        ("init", "-q"),
+        ("add", "."),
+        (
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ),
+    ):
+        subprocess.run(["/usr/bin/git", "-C", str(repo), *arguments], check=True)
+    barrier = threading.Barrier(4)
+
+    def capture():
+        barrier.wait(timeout=10)
+        return capture_repository_snapshot(repo)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        snapshots = list(pool.map(lambda _: capture(), range(4)))
+    assert snapshots == [snapshots[0]] * 4
 
 
 def test_toolchain_lock_is_bounded_hash_checked_and_runtime_bound(tmp_path):

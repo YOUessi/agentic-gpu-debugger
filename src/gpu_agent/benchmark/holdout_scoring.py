@@ -1,10 +1,17 @@
-"""Read-only evaluator-owned holdout judgment validation and score preparation."""
+"""Evaluator-owned holdout judgment validation and durable scoring sessions."""
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
+import os
+import re
+import stat
 import subprocess
+import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from itertools import product
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -19,14 +26,25 @@ from gpu_agent.benchmark.holdout import (
     HoldoutController,
     PreparedHoldoutScore,
 )
-from gpu_agent.benchmark.metrics import EvaluationLabels, Score
-from gpu_agent.contracts import ArtifactRef, RepositorySnapshot, RunBinding, RunStatus
+from gpu_agent.benchmark.metrics import EvaluationLabels, Score, aggregate_grouped
+from gpu_agent.contracts import (
+    ArtifactRef,
+    CurrentPhase,
+    ExternalRunOrigin,
+    RepositorySnapshot,
+    RunBinding,
+    RunManifest,
+    RunStatus,
+)
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.provenance import capture_repository_snapshot
-from gpu_agent.store import RunStore, read_regular
+from gpu_agent.store import RunStore, read_regular, reject_symlinks
 
 if TYPE_CHECKING:
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+_SESSION_GUARD = threading.Lock()
+_SESSION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
 
 
 def _canonical(value: object) -> bytes:
@@ -125,8 +143,21 @@ class HoldoutScoringPlan(ExecutionModel):
     items: tuple[HoldoutScoringPlanItem, ...] = Field(min_length=120, max_length=120)
 
 
+class HoldoutScoringResult(ExecutionModel):
+    schema_version: Literal[1] = 1
+    scoring_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    private_binding_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    package_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    scored_count: Literal[120] = 120
+    expected_record_count: Literal[120] = 120
+    input_binding_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    bindings_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    metrics_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class HoldoutScoringController:
-    """Validate a complete evaluator package before a future persistence operation."""
+    """Validate and score a complete package under one durable evaluator claim."""
 
     def __init__(
         self,
@@ -140,6 +171,167 @@ class HoldoutScoringController:
         self.holdout = HoldoutController(
             public, evaluator, binding=binding, _schedule_verifier=_schedule_verifier
         )
+        self.schedule_verifier = self.holdout._schedule_verifier
+
+    @contextmanager
+    def _session_claim(self, run_id: str) -> Iterator[None]:
+        key = (str(self.evaluator.root), run_id)
+        with _SESSION_GUARD:
+            local = _SESSION_LOCKS.setdefault(key, threading.Lock())
+        with local:
+            path = self.evaluator.root / f".holdout-scoring-{run_id}.lock"
+            try:
+                reject_symlinks(path)
+                # A terminal retry must never even create a replacement lock.
+                exists = (self.evaluator.root / run_id).exists()
+                completed = exists and self.evaluator.load(run_id).status == RunStatus.COMPLETED
+                flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+                fd = os.open(path, flags if completed else flags | os.O_CREAT, 0o600)
+            except (OSError, ValueError):
+                raise ValueError("holdout scoring claim is unsafe") from None
+            try:
+                info = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o077
+                    or info.st_nlink != 1
+                ):
+                    raise ValueError("holdout scoring claim is unsafe")
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                yield
+            finally:
+                os.close(fd)
+
+    def _check_package_claim(self, run_id: str, labels_path: Path, repository: Path) -> None:
+        """Give a losing package one stable conflict, including before native preflight."""
+        content = read_private_external(
+            labels_path,
+            repository=repository,
+            forbidden_roots=(self.public.root, self.evaluator.root),
+            limit=16 * 1024 * 1024,
+        )
+        if not (self.evaluator.root / run_id).exists():
+            return
+        run = self.evaluator.load(run_id)
+        refs = [r for r in run.artifact_refs if r.name == "holdout-scoring/input-binding.json"]
+        if len(refs) > 1:
+            raise ValueError("holdout scoring session conflicts")
+        if refs:
+            if json.loads(self.evaluator.read(refs[0])).get("package_hash") != _hash(content):
+                raise ValueError("holdout scoring package conflicts")
+
+    def _session(self, run_id: str, evaluation_run_id: str) -> RunManifest:
+        origin = ExternalRunOrigin(run_id=evaluation_run_id, visibility="public")
+        if not (self.evaluator.root / run_id).exists():
+            return self.evaluator.create_run(
+                "holdout_scoring",
+                binding=self.binding,
+                external_origin=origin,
+                _run_id=run_id,
+            )
+        run = self.evaluator.load(run_id)
+        if (
+            run.kind != "holdout_scoring"
+            or run.parent_run_id is not None
+            or run.binding != self.binding
+            or run.external_origin != origin
+            or run.status not in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.COMPLETED}
+            or any(r.run_id != run_id for r in run.artifact_refs)
+        ):
+            raise ValueError("holdout scoring session conflicts")
+        return run
+
+    def score(
+        self,
+        evaluation_run_id: str,
+        private_binding_run_id: str,
+        labels_path: Path,
+        repository: Path,
+    ) -> HoldoutScoringResult:
+        if any(
+            re.fullmatch(r"[a-f0-9]{32}", value) is None
+            for value in (evaluation_run_id, private_binding_run_id)
+        ):
+            raise ValueError("holdout scoring roots are invalid")
+        run_id = _hash(f"holdout-scoring-v1:{evaluation_run_id}:{private_binding_run_id}".encode())[
+            :32
+        ]
+        self._check_package_claim(run_id, labels_path, repository)
+        # Invalid initial evidence cannot leave even a claim file in either store.
+        try:
+            self.preflight(evaluation_run_id, private_binding_run_id, labels_path, repository)
+        except ValueError:
+            self._check_package_claim(run_id, labels_path, repository)
+            raise
+        with self._session_claim(run_id):
+            self._check_package_claim(run_id, labels_path, repository)
+            plan = self.preflight(
+                evaluation_run_id, private_binding_run_id, labels_path, repository
+            )
+            run = self._session(run_id, evaluation_run_id)
+            completed = run.status == RunStatus.COMPLETED
+            if run.status == RunStatus.QUEUED:
+                run = self.evaluator.transition(run_id, RunStatus.RUNNING, "PREPARING")
+            input_content = _canonical(
+                {
+                    **plan.package.model_dump(mode="json", exclude={"judgments"}),
+                    "package_hash": plan.package_hash,
+                }
+            )
+
+            def persist(name: str, content: bytes) -> None:
+                name = f"holdout-scoring/{name}.json"
+                if completed:
+                    refs = [r for r in run.artifact_refs if r.name == name]
+                    if len(refs) != 1 or self.evaluator.read(refs[0]) != content:
+                        raise ValueError("holdout scoring artifacts conflict")
+                else:
+                    self.evaluator.put_if_absent_exact(run_id, name, content, "evaluator")
+
+            persist("input-binding", input_content)
+            bindings: list[EvaluatorRecordBinding] = []
+            for ordinal, item in enumerate(plan.items):
+                if item.ordinal != ordinal:
+                    raise ValueError("holdout scoring plan order is invalid")
+                binding = item.existing_binding
+                if binding is None:
+                    if completed:
+                        raise ValueError("holdout scoring completed session is incomplete")
+                    binding = self.holdout._bind_prepared_score(
+                        plan.batch, item.prepared_score, _reload=False
+                    )
+                bindings.append(binding)
+            bindings_content = _canonical([b.model_dump(mode="json") for b in bindings])
+            persist("bindings", bindings_content)
+            metrics = aggregate_grouped(
+                bindings,
+                public_store=self.public,
+                evaluator_store=self.evaluator,
+                run_binding=self.binding,
+                schedule_verifier=self.schedule_verifier,
+            )
+            metrics_content = _canonical(metrics.model_dump(mode="json"))
+            persist("metrics", metrics_content)
+            result = HoldoutScoringResult(
+                scoring_run_id=run_id,
+                evaluation_run_id=evaluation_run_id,
+                private_binding_run_id=private_binding_run_id,
+                package_hash=plan.package_hash,
+                input_binding_hash=_hash(input_content),
+                bindings_hash=_hash(bindings_content),
+                metrics_hash=_hash(metrics_content),
+            )
+            persist("result", _canonical(result.model_dump(mode="json")))
+            if completed:
+                if len(run.artifact_refs) != 4:
+                    raise ValueError("holdout scoring artifacts conflict")
+            else:
+                run = self.evaluator.load(run_id)
+                if run.current_phase != CurrentPhase.FINALIZING:
+                    self.evaluator.transition(run_id, RunStatus.RUNNING, "FINALIZING")
+                self.evaluator.transition(run_id, RunStatus.COMPLETED, None)
+            return result
 
     def preflight(
         self,

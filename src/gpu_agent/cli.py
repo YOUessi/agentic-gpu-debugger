@@ -44,6 +44,27 @@ def _release_artifact_context() -> tuple["CorpusFamily", tuple[Path, Path]]:
     return family, forbidden_roots
 
 
+def _holdout_scoring_error_code(exc: OSError | ValueError) -> str:
+    if isinstance(exc, OSError):
+        return "HOLDOUT_SCORING_FAILED"
+    message = str(exc)
+    if any(token in message for token in ("conflict", "differs", "ambiguous", "claim is unsafe")):
+        return "HOLDOUT_SCORING_CONFLICT"
+    if any(
+        token in message
+        for token in (
+            "label package",
+            "private external artifact",
+            "external artifact path",
+            "scoring roots are invalid",
+        )
+    ):
+        return "HOLDOUT_LABEL_PACKAGE_INVALID"
+    if "external artifact output is unsafe" in message:
+        return "HOLDOUT_SCORING_FAILED"
+    return "HOLDOUT_SCORING_EVIDENCE_MISMATCH"
+
+
 def _derive_release_evidence(
     selection_path: Path,
     repository: Path,
@@ -272,6 +293,82 @@ def benchmark_attest_pricing(
         raise typer.BadParameter("PRICING_ATTESTATION_FAILED") from None
     typer.echo(f"model_config_hash {attestation.model_config_hash}")
     typer.echo(str(output.absolute()))
+
+
+@benchmark_app.command("score-holdout")
+def benchmark_score_holdout(
+    evaluation_run_id: Annotated[str, typer.Option("--evaluation-run-id")],
+    private_binding_run_id: Annotated[str, typer.Option("--private-binding-run-id")],
+    labels: Annotated[Path, typer.Option("--labels")],
+    repository: Annotated[Path, typer.Option("--repository")],
+    metrics_output: Annotated[Path | None, typer.Option("--metrics-output")] = None,
+) -> None:
+    """Bind one complete private adjudication package to a holdout evaluation."""
+    from gpu_agent.benchmark.controller_artifacts import (
+        read_private_external,
+        write_private_atomic_new,
+    )
+    from gpu_agent.benchmark.holdout_scoring import HoldoutScoringController
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+    from gpu_agent.contracts import RunStatus
+
+    try:
+        family_root = os.environ.get("GPU_AGENT_CORPUS_FAMILY_ROOT")
+        if family_root is None or not repository.is_absolute():
+            raise ValueError("holdout scoring controller input is invalid")
+        family = CorpusFamily.open(Path(family_root))
+        public = family.corpus_store("public")
+        evaluator = family.corpus_store("evaluator")
+        forbidden_roots = (public.root, evaluator.root)
+        # Fail closed on path and private-file metadata before any scoring mutation.
+        read_private_external(
+            labels,
+            repository=repository,
+            forbidden_roots=forbidden_roots,
+            limit=16 * 1024 * 1024,
+        )
+        evaluation = public.load(evaluation_run_id)
+        if evaluation.binding is None or evaluation.binding.purpose != "evaluation":
+            raise ValueError("holdout evaluation binding is invalid")
+        controller = HoldoutScoringController(
+            public,
+            evaluator,
+            binding=evaluation.binding,
+            _schedule_verifier=EvaluationScheduleVerifier.for_family(family, public),
+        )
+        result = controller.score(
+            evaluation_run_id,
+            private_binding_run_id,
+            labels,
+            repository,
+        )
+        session = evaluator.load(result.scoring_run_id)
+        metrics_refs = [
+            ref for ref in session.artifact_refs if ref.name == "holdout-scoring/metrics.json"
+        ]
+        if (
+            session.kind != "holdout_scoring"
+            or session.status != RunStatus.COMPLETED
+            or session.binding != evaluation.binding
+            or len(metrics_refs) != 1
+        ):
+            raise ValueError("holdout scoring evidence is incomplete")
+        metrics = evaluator.read(metrics_refs[0])
+        if metrics_refs[0].sha256 != result.metrics_hash:
+            raise ValueError("holdout scoring metrics hash is invalid")
+        if metrics_output is not None:
+            write_private_atomic_new(
+                metrics_output,
+                metrics,
+                repository=repository,
+                forbidden_roots=forbidden_roots,
+            )
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(_holdout_scoring_error_code(exc)) from None
+    typer.echo(f"scoring_run_id {result.scoring_run_id}")
+    typer.echo(f"scored {result.scored_count}/{result.expected_record_count}")
+    typer.echo(f"metrics_sha256 {result.metrics_hash}")
 
 
 def _configured_evaluation_runner(

@@ -51,6 +51,7 @@ class _RealRepositoryProcess:
                 "LC_ALL": "C",
                 "GIT_CONFIG_NOSYSTEM": "1",
                 "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_OPTIONAL_LOCKS": "0",
             },
         )
 
@@ -134,9 +135,10 @@ def _capture_state(process: RepositoryProcess, repo: Path) -> tuple[str, str, st
     head_tree = _object_id(_git(process, repo, "rev-parse", "--verify", "HEAD^{tree}"), "tree")
     if _git(process, repo, "status", "--porcelain=v1", "-z", "--untracked-files=all"):
         raise ValueError("repository index and worktree must be clean")
-    index_tree = _object_id(_git(process, repo, "write-tree"), "index tree")
-    if index_tree != head_tree:
-        raise ValueError("repository HEAD and index tree disagree")
+    try:
+        _git(process, repo, "diff-index", "--quiet", "--cached", "HEAD", "--")
+    except ValueError:
+        raise ValueError("repository HEAD and index tree disagree") from None
     paths = _tracked_paths(_git(process, repo, "ls-files", "-z", "--cached"))
     return commit, head_tree, _tracked_tree_hash(repo, paths)
 
