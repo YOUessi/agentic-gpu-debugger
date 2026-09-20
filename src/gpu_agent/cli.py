@@ -1,6 +1,7 @@
 """CLI workflows delegate to the same controller service and verification guard."""
 
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
 
@@ -21,6 +22,65 @@ from gpu_agent.store import RunStore
 app = typer.Typer(no_args_is_help=True, help="Evidence-driven CUDA debugger.")
 benchmark_app = typer.Typer(no_args_is_help=True)
 app.add_typer(benchmark_app, name="benchmark")
+
+
+@benchmark_app.command("provision-family")
+def benchmark_provision_family(
+    controller_root: Annotated[Path, typer.Option("--controller-root")],
+    public_store: Annotated[Path, typer.Option("--public-store")],
+    evaluator_store: Annotated[Path, typer.Option("--evaluator-store")],
+    repository: Annotated[Path, typer.Option("--repository")],
+    schedule_public_key: Annotated[Path, typer.Option("--schedule-public-key")],
+) -> None:
+    """Provision a corpus family with an external production schedule public key."""
+    from gpu_agent.benchmark.controller_config import provision_production_family
+
+    try:
+        family = provision_production_family(
+            controller_root=controller_root,
+            public_store=public_store,
+            evaluator_store=evaluator_store,
+            repository=repository,
+            schedule_public_key=schedule_public_key,
+        )
+    except (OSError, ValueError):
+        raise typer.BadParameter("PRODUCTION_FAMILY_PROVISION_FAILED") from None
+    typer.echo(f"controller_root {family.root}")
+    typer.echo(f"namespace_hash {family.namespace_hash}")
+
+
+@benchmark_app.command("attest-pricing")
+def benchmark_attest_pricing(
+    repository: Annotated[Path, typer.Option("--repository")],
+    commit: Annotated[str, typer.Option("--commit")],
+    input_usd_per_million: Annotated[float, typer.Option("--input-usd-per-million", min=0)],
+    output_usd_per_million: Annotated[float, typer.Option("--output-usd-per-million", min=0)],
+    source_uri: Annotated[str, typer.Option("--source-uri")],
+    reviewed_at: Annotated[datetime, typer.Option("--reviewed-at")],
+    source_content_hash: Annotated[str, typer.Option("--source-content-hash")],
+    output: Annotated[Path, typer.Option("--output")],
+) -> None:
+    """Write an owner-only reviewed provider rate card bound to the clean commit."""
+    from gpu_agent.benchmark.controller_config import (
+        reviewed_pricing_attestation,
+        write_private_new,
+    )
+
+    try:
+        attestation = reviewed_pricing_attestation(
+            repository=repository,
+            expected_commit=commit,
+            input_usd_per_million=input_usd_per_million,
+            output_usd_per_million=output_usd_per_million,
+            source_uri=source_uri,
+            reviewed_at=reviewed_at,
+            source_content_hash=source_content_hash,
+        )
+        write_private_new(output, attestation.model_dump_json().encode())
+    except (OSError, ValueError):
+        raise typer.BadParameter("PRICING_ATTESTATION_FAILED") from None
+    typer.echo(f"model_config_hash {attestation.model_config_hash}")
+    typer.echo(str(output.absolute()))
 
 
 def _configured_evaluation_runner(
