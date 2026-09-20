@@ -12,7 +12,7 @@ pytestmark = [pytest.mark.gpu, pytest.mark.container]
 @pytest.mark.parametrize(
     "number,tool,n,repetitions,expected_finding",
     [
-        (1, "memcheck", 257, 1, "Invalid __global__ write"),
+        (1, "memcheck", 257, 1, "Invalid __global__ read"),
         (2, "racecheck", 256, 5, "Race reported between Write access and Write access"),
         (3, "initcheck", 32, 1, "Uninitialized __global__ memory read"),
         (4, "synccheck", 32, 1, "Barrier error detected. Invalid arguments."),
