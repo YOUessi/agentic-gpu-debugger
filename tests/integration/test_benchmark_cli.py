@@ -33,6 +33,64 @@ def test_benchmark_help_exposes_controller_commands():
 
 
 @pytest.mark.parametrize("visibility", ["public", "evaluator"])
+@pytest.mark.parametrize(
+    "command,inside_option",
+    [
+        ("derive-manifest", "selection"),
+        ("check", "selection"),
+        ("check", "manifest"),
+    ],
+)
+def test_release_commands_reject_artifacts_inside_configured_runstores_before_reading(
+    tmp_path, monkeypatch, visibility, command, inside_option
+):
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.cli import app
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    public = tmp_path / "public"
+    evaluator = tmp_path / "evaluator"
+    family = CorpusFamily.provision(
+        tmp_path / "controller",
+        public_store=public,
+        evaluator_store=evaluator,
+        repository=repository,
+    )
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
+    forbidden = public if visibility == "public" else evaluator
+    inside = forbidden / "PRIVATE_CONTROLLER_BYTES.json"
+    inside.write_bytes(b"PRIVATE_CONTROLLER_BYTES")
+    inside.chmod(0o600)
+    external = tmp_path / "external"
+    external.mkdir(mode=0o700)
+    selection = inside if inside_option == "selection" else external / "selection.json"
+    manifest = inside if inside_option == "manifest" else external / "manifest.json"
+    if selection != inside:
+        selection.write_bytes(b"{}")
+        selection.chmod(0o600)
+    if manifest != inside:
+        manifest.write_bytes(b"{}")
+        manifest.chmod(0o600)
+    arguments = [
+        "release",
+        command,
+        "--selection",
+        str(selection),
+        "--repository",
+        str(repository),
+    ]
+    if command == "check":
+        arguments.extend(["--manifest", str(manifest)])
+
+    result = CliRunner().invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert "RELEASE_ARTIFACT_PATH_INVALID" in result.output
+    assert "PRIVATE_CONTROLLER_BYTES" not in result.output
+
+
+@pytest.mark.parametrize("visibility", ["public", "evaluator"])
 def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch, visibility):
     from gpu_agent.benchmark.ledger import CorpusFamily
     from gpu_agent.cli import app

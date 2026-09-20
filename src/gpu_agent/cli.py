@@ -20,6 +20,7 @@ from gpu_agent.environment import probe_environment
 from gpu_agent.store import RunStore
 
 if TYPE_CHECKING:
+    from gpu_agent.benchmark.ledger import CorpusFamily
     from gpu_agent.benchmark.release import ReleaseEvidenceIndex
 
 app = typer.Typer(no_args_is_help=True, help="Evidence-driven CUDA debugger.")
@@ -29,18 +30,38 @@ app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(release_app, name="release")
 
 
-def _derive_release_evidence(selection_path: Path, repository: Path) -> "ReleaseEvidenceIndex":
+def _release_artifact_context() -> tuple["CorpusFamily", tuple[Path, Path]]:
     from gpu_agent.benchmark.ledger import CorpusFamily
-    from gpu_agent.benchmark.release import ReleaseEvidenceIndex, ReleaseEvidenceSelection
-    from gpu_agent.provenance import capture_repository_snapshot
-    from gpu_agent.store import read_regular
 
     family_root = os.environ.get("GPU_AGENT_CORPUS_FAMILY_ROOT")
     if not family_root:
         raise ValueError("trusted corpus family configuration is required")
     family = CorpusFamily.open(Path(family_root))
+    forbidden_roots = (
+        family.corpus_store("public").root,
+        family.corpus_store("evaluator").root,
+    )
+    return family, forbidden_roots
+
+
+def _derive_release_evidence(
+    selection_path: Path,
+    repository: Path,
+    *,
+    family: "CorpusFamily",
+    forbidden_roots: tuple[Path, Path],
+) -> "ReleaseEvidenceIndex":
+    from gpu_agent.benchmark.controller_artifacts import read_private_external
+    from gpu_agent.benchmark.release import ReleaseEvidenceIndex, ReleaseEvidenceSelection
+    from gpu_agent.provenance import capture_repository_snapshot
+
     selection = ReleaseEvidenceSelection.model_validate_json(
-        read_regular(selection_path.absolute(), 1024 * 1024)
+        read_private_external(
+            selection_path,
+            repository=repository,
+            forbidden_roots=forbidden_roots,
+            limit=1024 * 1024,
+        )
     )
     actual = capture_repository_snapshot(
         repository.absolute(), expected_commit=selection.repository.commit
@@ -70,7 +91,24 @@ def release_derive_manifest(
     except ValueError:
         raise typer.BadParameter("RELEASE_ARTIFACT_PATH_INVALID") from None
     try:
-        evidence = _derive_release_evidence(selection, repository)
+        family, forbidden_roots = _release_artifact_context()
+    except ValueError:
+        raise typer.BadParameter("RELEASE_EVIDENCE_INCOMPLETE") from None
+    try:
+        selection = validate_external_release_artifact_path(
+            selection,
+            repository,
+            forbidden_roots=forbidden_roots,
+        )
+    except ValueError:
+        raise typer.BadParameter("RELEASE_ARTIFACT_PATH_INVALID") from None
+    try:
+        evidence = _derive_release_evidence(
+            selection,
+            repository,
+            family=family,
+            forbidden_roots=forbidden_roots,
+        )
         manifest = ReleaseManifest.from_evidence(evidence)
     except (OSError, ValueError):
         raise typer.BadParameter("RELEASE_EVIDENCE_INCOMPLETE") from None
@@ -84,12 +122,12 @@ def release_check(
     repository: Annotated[Path, typer.Option("--repository")] = Path("."),
 ) -> None:
     """Validate declarative release claims against native, same-commit evidence."""
+    from gpu_agent.benchmark.controller_artifacts import read_private_external
     from gpu_agent.benchmark.release import (
         ReleaseGate,
         ReleaseManifest,
         validate_external_release_artifact_path,
     )
-    from gpu_agent.store import read_regular
 
     try:
         manifest = validate_external_release_artifact_path(manifest, repository)
@@ -97,8 +135,37 @@ def release_check(
     except ValueError:
         raise typer.BadParameter("RELEASE_ARTIFACT_PATH_INVALID") from None
     try:
-        claims = ReleaseManifest.model_validate_json(read_regular(manifest.absolute(), 1024 * 1024))
-        evidence = _derive_release_evidence(selection, repository)
+        family, forbidden_roots = _release_artifact_context()
+    except ValueError:
+        raise typer.BadParameter("RELEASE_EVIDENCE_INVALID") from None
+    try:
+        manifest = validate_external_release_artifact_path(
+            manifest,
+            repository,
+            forbidden_roots=forbidden_roots,
+        )
+        selection = validate_external_release_artifact_path(
+            selection,
+            repository,
+            forbidden_roots=forbidden_roots,
+        )
+    except ValueError:
+        raise typer.BadParameter("RELEASE_ARTIFACT_PATH_INVALID") from None
+    try:
+        claims = ReleaseManifest.model_validate_json(
+            read_private_external(
+                manifest,
+                repository=repository,
+                forbidden_roots=forbidden_roots,
+                limit=1024 * 1024,
+            )
+        )
+        evidence = _derive_release_evidence(
+            selection,
+            repository,
+            family=family,
+            forbidden_roots=forbidden_roots,
+        )
         result = ReleaseGate().check(claims, evidence)
     except (OSError, ValueError):
         raise typer.BadParameter("RELEASE_EVIDENCE_INVALID") from None

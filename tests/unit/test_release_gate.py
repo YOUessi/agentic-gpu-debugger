@@ -289,6 +289,20 @@ def test_release_artifact_path_accepts_controller_owned_absolute_path(tmp_path, 
     assert external_release_artifact_path("GPU_AGENT_RELEASE_SELECTION", repository) == configured
 
 
+def test_release_artifact_wrapper_rejects_forbidden_store(tmp_path):
+    from gpu_agent.benchmark.release import validate_external_release_artifact_path
+
+    store = tmp_path / "public"
+    store.mkdir()
+
+    with pytest.raises(ValueError, match="external absolute path"):
+        validate_external_release_artifact_path(
+            store / "selection.json",
+            tmp_path / "repository",
+            forbidden_roots=(store,),
+        )
+
+
 @pytest.mark.parametrize("command", ["derive-manifest", "check"])
 def test_release_cli_rejects_repository_local_artifact_paths(tmp_path, command):
     from typer.testing import CliRunner
