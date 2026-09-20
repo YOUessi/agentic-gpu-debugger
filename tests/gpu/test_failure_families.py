@@ -1,4 +1,4 @@
-"""Live evidence for four CUDA failure families and their clean reference."""
+"""Live filtering for public CUDA candidates and their clean reference."""
 
 import hashlib
 import json
@@ -13,6 +13,18 @@ FAMILIES = [
     ("case_0002", "racecheck", 256, "Race reported", 5),
     ("case_0003", "initcheck", 32, "Uninitialized __global__", 1),
     ("case_0004", "synccheck", 32, "Barrier error detected", 1),
+    ("case_0005", "memcheck", 64, "Invalid __global__ write", 1),
+    ("case_0006", "memcheck", 33, "Invalid __global__ read", 1),
+    ("case_0007", "memcheck", 128, "Invalid __global__ write", 1),
+    ("case_0008", "racecheck", 64, "Race reported", 5),
+    ("case_0009", "racecheck", 32, "Race reported", 5),
+    ("case_0010", "racecheck", 96, "Race reported", 5),
+    ("case_0011", "initcheck", 17, "Uninitialized __global__", 1),
+    ("case_0012", "initcheck", 64, "Uninitialized __global__", 1),
+    ("case_0013", "initcheck", 33, "Uninitialized __global__", 1),
+    ("case_0014", "synccheck", 32, "Barrier error detected", 1),
+    ("case_0015", "synccheck", 32, "Barrier error detected", 1),
+    ("case_0016", "synccheck", 32, "Barrier error detected", 1),
 ]
 
 

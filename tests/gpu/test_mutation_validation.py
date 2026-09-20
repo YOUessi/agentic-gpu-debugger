@@ -16,6 +16,18 @@ pytestmark = [pytest.mark.gpu, pytest.mark.container]
         (2, "racecheck", 256, 5, "Race reported between Write access and Write access"),
         (3, "initcheck", 32, 1, "Uninitialized __global__ memory read"),
         (4, "synccheck", 32, 1, "Barrier error detected. Invalid arguments."),
+        (5, "memcheck", 64, 1, "Invalid __global__ write"),
+        (6, "memcheck", 33, 1, "Invalid __global__ read"),
+        (7, "memcheck", 128, 1, "Invalid __global__ write"),
+        (8, "racecheck", 64, 5, "Race reported between Write access and Write access"),
+        (9, "racecheck", 32, 5, "Race reported between Write access and Write access"),
+        (10, "racecheck", 96, 5, "Race reported between Write access and Write access"),
+        (11, "initcheck", 17, 1, "Uninitialized __global__ memory read"),
+        (12, "initcheck", 64, 1, "Uninitialized __global__ memory read"),
+        (13, "initcheck", 33, 1, "Uninitialized __global__ memory read"),
+        (14, "synccheck", 32, 1, "Barrier error detected. Invalid arguments."),
+        (15, "synccheck", 32, 1, "Barrier error detected. Invalid arguments."),
+        (16, "synccheck", 32, 1, "Barrier error detected. Invalid arguments."),
     ],
 )
 def test_live_mutation_registration(

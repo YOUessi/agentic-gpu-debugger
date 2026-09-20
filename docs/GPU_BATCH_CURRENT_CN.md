@@ -109,7 +109,7 @@ bash gpu_batch.sh export "$BATCH_ID" "$HOME/gpu-batch-current-results.zip"
 
 程序会生成 `inventory.json`，记录其他每个成员的大小和 SHA-256（清单自身不做递归自哈希）。已存在的输出 ZIP 不会被覆盖。
 
-## 6. 四类 seed 全部运行
+## 6. 公开 seed 全部运行
 
 首个 case 的环境和执行路径确认后：
 
@@ -123,8 +123,24 @@ bash gpu_batch.sh all
 | case_0002 | racecheck | 256 | 5 |
 | case_0003 | initcheck | 32 | 1 |
 | case_0004 | synccheck | 32 | 1 |
+| case_0005 | memcheck | 64 | 1 |
+| case_0006 | memcheck | 33 | 1 |
+| case_0007 | memcheck | 128 | 1 |
+| case_0008 | racecheck | 64 | 5 |
+| case_0009 | racecheck | 32 | 5 |
+| case_0010 | racecheck | 96 | 5 |
+| case_0011 | initcheck | 17 | 1 |
+| case_0012 | initcheck | 64 | 1 |
+| case_0013 | initcheck | 33 | 1 |
+| case_0014 | synccheck | 32 | 1 |
+| case_0015 | synccheck | 32 | 1 |
+| case_0016 | synccheck | 32 | 1 |
 
-这些是原仓库的四个 seed，不是新增的 16+8 corpus。每个 case 只运行它的目标 Sanitizer，不把 seed 验证冒充为 candidate 的全套 Strict Verification。Task 4 的 `gpu-agent verify` 原路径继续保留。
+`case_0001`–`case_0004` 是已有真实 GPU family 证据的原始 seed；
+`case_0005`–`case_0016` 目前只是人工审核和静态预检查通过的候选，不能写成已通过。
+每个 case 只运行它的目标 Sanitizer，不把 seed 验证冒充为 candidate 的全套 Strict
+Verification。当前 registry/provenance hash 已随候选集变化，注册前必须重新生成与当前
+提交绑定的真实运行证据。Task 4 的 `gpu-agent verify` 原路径继续保留。
 
 某案例执行失败会留痕，后续案例继续；最终有失败时退出码为 1，用户取消为 130，配置错误通常为 2。`COMPLETED` 只是批次结束，逐案例的 `VALIDATED`/`FAILED` 才反映验证结果。
 

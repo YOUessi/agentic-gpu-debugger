@@ -43,18 +43,32 @@ def seed_repo(tmp_path):
     return root
 
 
-def test_static_preflight_covers_all_four_seed_hashes_without_creating_runs(seed_repo, tmp_path):
+def test_static_preflight_covers_all_sixteen_seed_hashes_without_creating_runs(seed_repo, tmp_path):
     from gpu_agent.benchmark.batch import prepare_seed_batch
 
     data_root = tmp_path / "data"
     prepared = prepare_seed_batch(seed_repo, data_root)
     assert [seed.spec.case_id for seed in prepared.seeds] == [
-        "case_0001",
-        "case_0002",
-        "case_0003",
-        "case_0004",
+        f"case_{number:04d}" for number in range(1, 17)
     ]
-    assert [seed.spec.sanitizer_repetitions for seed in prepared.seeds] == [1, 5, 1, 1]
+    assert [seed.spec.sanitizer_repetitions for seed in prepared.seeds] == [
+        1,
+        5,
+        1,
+        1,
+        1,
+        1,
+        1,
+        5,
+        5,
+        5,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+    ]
     assert prepared.report.gpu_executed is False
     assert not data_root.exists()
     for seed in prepared.seeds:

@@ -15,6 +15,20 @@ A template ID cannot appear in both public and private splits. Case manifests pu
 hashes and high-level provenance, never private inputs, expected outputs, seeds, or
 raw evaluator artifacts.
 
-The current development slice contains four real GPU-validated failure families.
-The 16-public/8-private count is a release gate; unvalidated candidates are reported
-as pending and must not be padded with mocked or skipped runs.
+The public definition now contains 16 source-distinct candidates, four per tool:
+
+- memcheck: `case_0001`, `case_0005`–`case_0007`;
+- racecheck: `case_0002`, `case_0008`–`case_0010`;
+- initcheck: `case_0003`, `case_0011`–`case_0013`;
+- synccheck: `case_0004`, `case_0014`–`case_0016`.
+
+Only `case_0001`–`case_0004` have prior real-GPU family evidence. `case_0005`–
+`case_0016` are human-reviewed **candidates**, not live-validated corpus members. Their
+source, harness, input and mutation-provenance hashes pass static preflight, but each
+must still pass ordinary and instrumented Oracle checks, clean memcheck precheck where
+applicable, exact target finding, and every fixed repetition on the locked GPU stack.
+Mocked, skipped, static-compile or preflight results never count as that evidence.
+
+Adding the candidates changes the registry and mutation-provenance hashes. Current-revision
+registration therefore requires fresh bound runs; old run IDs are not silently reused.
+The 8-private count remains a release gate outside this public repository.
