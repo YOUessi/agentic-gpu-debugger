@@ -270,7 +270,7 @@ def _selection(repository):
         private_binding_run_id="5" * 32,
         acceptance_run_ids={
             "four_tools": ["6" * 32],
-            "isolation": ["7" * 32],
+            "isolation": ["a" * 32],
             "private_oracle": ["8" * 32],
             "live_llm": ["9" * 32],
         },

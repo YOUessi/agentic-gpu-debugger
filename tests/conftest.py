@@ -483,6 +483,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     destination = session.config.getoption("--release-evidence-report")
     if destination is None:
         return
+    import gpu_agent
+
     path = Path(destination).absolute()
     payload = {
         "schema_version": 1,
@@ -498,6 +500,7 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
             key for key, value in _release_outcomes.items() if value == "failed"
         ),
         "exit_status": int(exitstatus),
+        "gpu_agent_origin": str(Path(gpu_agent.__file__).resolve()),
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)

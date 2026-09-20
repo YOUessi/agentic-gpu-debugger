@@ -345,7 +345,8 @@ def test_stream_media_size_and_time_bounds(mode):
 def test_tracked_corpus_boundary():
     tracked = subprocess.check_output(["git", "ls-files"], cwd=ROOT, text=True).splitlines()
     assert not any(p.startswith(".cache/gpu-agent/knowledge/") for p in tracked)
-    assert not any(p.startswith("knowledge/") and p != "knowledge/sources.json" for p in tracked)
+    allowed = {"knowledge/sources.json", "knowledge/retrieval-eval.json"}
+    assert not any(p.startswith("knowledge/") and p not in allowed for p in tracked)
     ignored = subprocess.run(
         ["git", "check-ignore", ".cache/gpu-agent/knowledge/index.json"],
         cwd=ROOT,

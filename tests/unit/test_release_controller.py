@@ -26,6 +26,9 @@ def _binding():
 def _repository(tmp_path: Path) -> tuple[Path, list[dict[str, object]]]:
     root = tmp_path / "repository"
     (root / "evaluation").mkdir(parents=True)
+    module = root / "src/gpu_agent/__init__.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("")
     nodes = [
         {
             "node_id": "tests/test_live.py::test_positive",
@@ -39,14 +42,25 @@ def _repository(tmp_path: Path) -> tuple[Path, list[dict[str, object]]]:
 
 
 class FakeReleaseProcess:
-    def __init__(self, *, outcome: str = "passed", replace_node: str | None = None):
+    def __init__(
+        self,
+        *,
+        outcome: str = "passed",
+        replace_node: str | None = None,
+        valid_junit: bool = True,
+        error: BaseException | None = None,
+    ):
         self.outcome = outcome
         self.replace_node = replace_node
+        self.valid_junit = valid_junit
+        self.error = error
         self.argv: list[str] = []
 
     def execute(self, argv, cwd, timeout_seconds, max_log_bytes, *, env=None):
         from gpu_agent.execution.process import ProcessCapture
 
+        if self.error is not None:
+            raise self.error
         self.argv = list(argv)
         report_path = Path(
             next(
@@ -71,10 +85,17 @@ class FakeReleaseProcess:
                     "skipped_node_ids": outcomes["skipped"],
                     "failed_node_ids": outcomes["failed"],
                     "exit_status": 0 if self.outcome == "passed" else 1,
+                    "gpu_agent_origin": str(cwd / "src/gpu_agent/__init__.py"),
                 }
             )
         )
-        junit_path.write_text('<testsuite tests="1" failures="0" skipped="0"></testsuite>')
+        junit_path.write_text(
+            '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+            '<testcase classname="tests.test_live" name="test_positive" />'
+            "</testsuite>"
+            if self.valid_junit
+            else '<testsuite tests="1" failures="0" skipped="0"></testsuite>'
+        )
         return ProcessCapture(
             0 if self.outcome == "passed" else 1,
             b"one passed",
@@ -95,12 +116,14 @@ def _controller(tmp_path: Path, process: FakeReleaseProcess):
         _binding(),
         process=process,
         snapshot_capture=lambda *_args, **_kwargs: _snapshot(),
+        source_snapshot=lambda _root, _snapshot: (repository, "f" * 64),
     )
     return controller, store
 
 
 def test_collects_fixed_same_commit_release_evidence(tmp_path):
     from gpu_agent.benchmark.release import ReleaseTestEvidence
+    from gpu_agent.release_controller import verify_persisted_release_artifacts
 
     process = FakeReleaseProcess()
     controller, store = _controller(tmp_path, process)
@@ -108,12 +131,14 @@ def test_collects_fixed_same_commit_release_evidence(tmp_path):
 
     run = store.load(run_id)
     assert run.status.value == "COMPLETED"
-    assert process.argv[1:7] == ["-I", "-m", "pytest", "-m", "release_evidence", "--require-live"]
+    assert process.argv[1:3] == ["-I", "-c"]
+    assert process.argv[4:7] == ["-m", "release_evidence", "--require-live"]
     evidence_ref = next(
         ref for ref in run.artifact_refs if ref.name == "release/test-evidence.json"
     )
     evidence = ReleaseTestEvidence.model_validate_json(store.read(evidence_ref))
     assert evidence.corpus_cutoff == 24
+    assert evidence.prompt_version == "v2"
     assert evidence.test_counts.model_dump() == {
         "expected": 1,
         "executed": 1,
@@ -123,7 +148,16 @@ def test_collects_fixed_same_commit_release_evidence(tmp_path):
     invocation_ref = next(
         ref for ref in run.artifact_refs if ref.name == "release/test-invocation.json"
     )
-    assert b"<controller-temp>" in store.read(invocation_ref)
+    invocation = store.read(invocation_ref)
+    assert b"<controller-temp>" in invocation and b"<controller-bootstrap>" in invocation
+    assert {
+        "release/test-allowlist.json",
+        "release/pytest-evidence.json",
+        "release/pytest-junit.xml",
+        "release/pytest-stdout.log",
+        "release/pytest-stderr.log",
+    }.issubset({ref.name for ref in run.artifact_refs})
+    verify_persisted_release_artifacts(store, run)
 
 
 @pytest.mark.parametrize(
@@ -132,11 +166,13 @@ def test_collects_fixed_same_commit_release_evidence(tmp_path):
         FakeReleaseProcess(outcome="skipped"),
         FakeReleaseProcess(outcome="failed"),
         FakeReleaseProcess(replace_node="tests/test_live.py::test_negative"),
+        FakeReleaseProcess(valid_junit=False),
+        FakeReleaseProcess(error=RuntimeError("controller bug")),
     ],
 )
 def test_skips_failures_and_collection_drift_fail_closed(tmp_path, process):
     controller, store = _controller(tmp_path, process)
-    with pytest.raises(ValueError):
+    with pytest.raises((ValueError, RuntimeError)):
         controller.collect(24)
     runs = [path.name for path in store.root.iterdir() if len(path.name) == 32]
     assert len(runs) == 1

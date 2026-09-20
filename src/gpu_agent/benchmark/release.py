@@ -98,6 +98,12 @@ class ReleaseEvidenceSelection(ExecutionModel):
 
     @model_validator(mode="after")
     def unique_roots(self) -> ReleaseEvidenceSelection:
+        for values in self.acceptance_run_ids.values():
+            if len(values) != len(set(values)):
+                raise ValueError("release evidence selection contains duplicate run IDs")
+        isolation = self.acceptance_run_ids.get("isolation", [])
+        if any(run_id != self.release_test_run_id for run_id in isolation):
+            raise ValueError("isolation acceptance must reference the release test run")
         ids = [
             *self.public_case_run_ids,
             *self.private_case_run_ids,
@@ -105,7 +111,12 @@ class ReleaseEvidenceSelection(ExecutionModel):
             self.holdout_evaluation_run_id,
             self.private_binding_run_id,
             self.release_test_run_id,
-            *(run_id for values in self.acceptance_run_ids.values() for run_id in values),
+            *(
+                run_id
+                for category, values in self.acceptance_run_ids.items()
+                if category != "isolation"
+                for run_id in values
+            ),
         ]
         if len(ids) != len(set(ids)):
             raise ValueError("release evidence selection contains duplicate run IDs")
@@ -120,10 +131,12 @@ class ReleaseTestEvidence(ExecutionModel):
     repository: RepositorySnapshot
     toolchain_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     model_config_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    prompt_version: str = Field(min_length=1, max_length=128)
     corpus_cutoff: int = Field(ge=1)
     test_counts: TestCounts
     collected_node_ids: list[str] = Field(min_length=1)
     collection_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    invocation_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     exit_code: Literal[0]
 
 
@@ -750,6 +763,8 @@ class _ReleaseEvidenceDeriver:
 
     def _release_tests(self, binding: RunBinding, cutoff: int) -> TestCounts:
         try:
+            from gpu_agent.release_controller import verify_persisted_release_artifacts
+
             run = self.public.load(self.selection.release_test_run_id)
             if (
                 run.kind != "release_test"
@@ -757,9 +772,10 @@ class _ReleaseEvidenceDeriver:
                 or not _release_test_binding(run, binding)
             ):
                 raise ValueError("release test run is not terminal and bound")
-            evidence = ReleaseTestEvidence.model_validate_json(
-                self.public.read(_one(run, "release/test-evidence.json"))
-            )
+            evidence_ref = _one(run, "release/test-evidence.json")
+            invocation_ref = _one(run, "release/test-invocation.json")
+            evidence = ReleaseTestEvidence.model_validate_json(self.public.read(evidence_ref))
+            verify_persisted_release_artifacts(self.public, run)
             expected_hash = hashlib.sha256(
                 json.dumps(sorted(evidence.collected_node_ids), separators=(",", ":")).encode()
             ).hexdigest()
@@ -768,8 +784,10 @@ class _ReleaseEvidenceDeriver:
                 or evidence.repository != self.actual_repository
                 or evidence.toolchain_hash != binding.toolchain_lock_hash
                 or evidence.model_config_hash != binding.model_config_hash
+                or evidence.prompt_version != binding.prompt_version
                 or evidence.corpus_cutoff != cutoff
                 or evidence.collection_hash != expected_hash
+                or evidence.invocation_hash != invocation_ref.sha256
                 or evidence.test_counts.expected == 0
                 or evidence.test_counts.executed != evidence.test_counts.expected
                 or evidence.test_counts.skipped_required
@@ -794,7 +812,7 @@ class _ReleaseEvidenceDeriver:
             if set(self.selection.acceptance_run_ids) != ReleaseGate.REQUIRED_ACCEPTANCE:
                 raise ValueError("acceptance selection has missing or extra categories")
             expected = {
-                "isolation": {case.validation_run_ids[0] for case in public_cases.values()},
+                "isolation": {self.selection.release_test_run_id},
                 "four_tools": {case.validation_run_ids[1] for case in public_cases.values()},
                 "private_oracle": private_score_run_ids,
                 "live_llm": {
@@ -884,6 +902,7 @@ def _release_test_binding(run: RunManifest, evaluation: RunBinding) -> bool:
         and binding.corpus_ledger_namespace_hash == evaluation.corpus_ledger_namespace_hash
         and binding.case_registry_hash == evaluation.case_registry_hash
         and binding.model_config_hash == evaluation.model_config_hash
+        and binding.prompt_version == evaluation.prompt_version
     )
 
 

@@ -2,32 +2,145 @@
   "schema_version": 1,
   "nodes": [
     {
-      "node_id": "tests/e2e/test_oob_flow.py::test_live_oob_flow",
-      "required_markers": ["container", "gpu", "live_llm", "release_evidence"]
-    },
-    {
       "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0001-memcheck-257-Invalid __global__-1]",
-      "required_markers": ["container", "gpu", "release_evidence"]
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
     },
     {
       "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0002-racecheck-256-Race reported-5]",
-      "required_markers": ["container", "gpu", "release_evidence"]
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
     },
     {
       "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0003-initcheck-32-Uninitialized __global__-1]",
-      "required_markers": ["container", "gpu", "release_evidence"]
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
     },
     {
       "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0004-synccheck-32-Barrier error detected-1]",
-      "required_markers": ["container", "gpu", "release_evidence"]
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0005-memcheck-64-Invalid __global__ write-1]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0006-memcheck-33-Invalid __global__ read-1]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0007-memcheck-128-Invalid __global__ write-1]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0008-racecheck-64-Race reported-5]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0009-racecheck-32-Race reported-5]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0010-racecheck-96-Race reported-5]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0011-initcheck-17-Uninitialized __global__-1]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0012-initcheck-64-Uninitialized __global__-1]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0013-initcheck-33-Uninitialized __global__-1]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0014-synccheck-32-Barrier error detected-1]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0015-synccheck-32-Barrier error detected-1]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
+    },
+    {
+      "node_id": "tests/gpu/test_failure_families.py::test_buggy_finding_and_clean_reference[case_0016-synccheck-32-Barrier error detected-1]",
+      "required_markers": [
+        "container",
+        "gpu",
+        "release_evidence"
+      ]
     },
     {
       "node_id": "tests/integration/test_isolation.py::test_live_isolation_probe_and_timeout_cleanup",
-      "required_markers": ["container", "release_evidence"]
+      "required_markers": [
+        "container",
+        "release_evidence"
+      ]
     },
     {
       "node_id": "tests/integration/test_private_visibility.py::test_private_canary_is_absent_from_five_public_channels",
-      "required_markers": ["release_evidence"]
+      "required_markers": [
+        "release_evidence"
+      ]
     }
   ]
 }

@@ -94,31 +94,39 @@ def release_check(
 @release_app.command("collect-evidence")
 def release_collect_evidence(
     repository: Annotated[Path, typer.Option("--repository")],
-    commit: Annotated[str, typer.Option("--commit")],
-    model_config_hash: Annotated[str, typer.Option("--model-config-hash")],
-    corpus_cutoff: Annotated[int, typer.Option("--corpus-cutoff", min=1)],
+    development_evaluation_run_id: Annotated[str, typer.Option("--development-evaluation-run-id")],
 ) -> None:
-    """Run the fixed live release suite and persist same-commit native evidence."""
-    from gpu_agent.agent.prompts import PROMPT_VERSION
+    """Bind the fixed live suite to an already signed development evaluation."""
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+    from gpu_agent.contracts import RunStatus
     from gpu_agent.release_controller import ReleaseEvidenceController
-    from gpu_agent.service import ApplicationService
 
     try:
-        service = ApplicationService.for_release(
-            repository,
-            purpose="release_acceptance",
-            expected_commit=commit,
-            prompt_version=PROMPT_VERSION,
-            model_config_hash=model_config_hash,
-            require_corpus_family=True,
+        family_root = os.environ.get("GPU_AGENT_CORPUS_FAMILY_ROOT")
+        if family_root is None:
+            raise ValueError("trusted corpus family configuration is required")
+        family = CorpusFamily.open(Path(family_root))
+        store = family.corpus_store("public")
+        evaluation = store.load(development_evaluation_run_id)
+        if (
+            evaluation.kind != "evaluation"
+            or evaluation.status != RunStatus.COMPLETED
+            or evaluation.binding is None
+            or evaluation.binding.purpose != "evaluation"
+        ):
+            raise ValueError("development evaluation is not complete and bound")
+        receipt = EvaluationScheduleVerifier.for_family(family, store).verify(
+            development_evaluation_run_id
         )
-        if service.binding is None:
-            raise ValueError("release binding unavailable")
+        if receipt.request.split != "development":
+            raise ValueError("release tests require the development evaluation binding")
+        binding = evaluation.binding.model_copy(update={"purpose": "release_acceptance"})
         run_id = ReleaseEvidenceController(
-            service.store,
+            store,
             repository,
-            service.binding,
-        ).collect(corpus_cutoff)
+            binding,
+        ).collect(receipt.request.corpus_cutoff)
     except (OSError, ValueError):
         raise typer.BadParameter("RELEASE_TEST_EVIDENCE_FAILED") from None
     typer.echo(f"release_test_run_id {run_id}")
