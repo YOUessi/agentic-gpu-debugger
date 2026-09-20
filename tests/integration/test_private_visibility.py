@@ -5,6 +5,7 @@ import json
 import pytest
 
 
+@pytest.mark.release_evidence
 def test_private_canary_is_absent_from_five_public_channels(tmp_path):
     from gpu_agent.agent.models import PublicEvidence, PublicSource
     from gpu_agent.execution.isolated import IsolatedGPUBackend

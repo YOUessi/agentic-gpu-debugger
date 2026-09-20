@@ -91,6 +91,39 @@ def release_check(
         raise typer.Exit(1)
 
 
+@release_app.command("collect-evidence")
+def release_collect_evidence(
+    repository: Annotated[Path, typer.Option("--repository")],
+    commit: Annotated[str, typer.Option("--commit")],
+    model_config_hash: Annotated[str, typer.Option("--model-config-hash")],
+    corpus_cutoff: Annotated[int, typer.Option("--corpus-cutoff", min=1)],
+) -> None:
+    """Run the fixed live release suite and persist same-commit native evidence."""
+    from gpu_agent.agent.prompts import PROMPT_VERSION
+    from gpu_agent.release_controller import ReleaseEvidenceController
+    from gpu_agent.service import ApplicationService
+
+    try:
+        service = ApplicationService.for_release(
+            repository,
+            purpose="release_acceptance",
+            expected_commit=commit,
+            prompt_version=PROMPT_VERSION,
+            model_config_hash=model_config_hash,
+            require_corpus_family=True,
+        )
+        if service.binding is None:
+            raise ValueError("release binding unavailable")
+        run_id = ReleaseEvidenceController(
+            service.store,
+            repository,
+            service.binding,
+        ).collect(corpus_cutoff)
+    except (OSError, ValueError):
+        raise typer.BadParameter("RELEASE_TEST_EVIDENCE_FAILED") from None
+    typer.echo(f"release_test_run_id {run_id}")
+
+
 @benchmark_app.command("provision-family")
 def benchmark_provision_family(
     controller_root: Annotated[Path, typer.Option("--controller-root")],

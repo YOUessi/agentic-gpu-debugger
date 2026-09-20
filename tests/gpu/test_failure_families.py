@@ -75,6 +75,7 @@ def _exercise(backend, store, case: str, tool: str, n: int, repetitions: int):
 
 
 @pytest.mark.parametrize("case,tool,n,category,repetitions", FAMILIES)
+@pytest.mark.release_evidence
 def test_buggy_finding_and_clean_reference(tmp_path, request, case, tool, n, category, repetitions):
     from gpu_agent.execution.isolated import IsolatedGPUBackend
     from gpu_agent.store import RunStore

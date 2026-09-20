@@ -1,4 +1,6 @@
 import json
+import os
+from pathlib import Path
 
 import pytest
 
@@ -425,6 +427,24 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         default=False,
         help="Treat skipped GPU/container/provider/release tests as failures.",
     )
+    parser.addoption(
+        "--release-evidence-report",
+        default=None,
+        help="Controller-owned output path for exact release-test collection metadata.",
+    )
+
+
+_release_collection: dict[str, list[str]] = {}
+_release_outcomes: dict[str, str] = {}
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    if session.config.getoption("--release-evidence-report") is None:
+        return
+    _release_collection.clear()
+    _release_outcomes.clear()
+    for item in session.items:
+        _release_collection[item.nodeid] = sorted({marker.name for marker in item.iter_markers()})
 
 
 @pytest.hookimpl(hookwrapper=True)
@@ -449,3 +469,42 @@ def pytest_runtest_makereport(item, call):
     ):
         report.outcome = "failed"
         report.longrepr = "Required live test was skipped; this is not acceptance evidence."
+    if item.config.getoption("--release-evidence-report") is not None:
+        previous = _release_outcomes.get(item.nodeid)
+        if report.failed:
+            _release_outcomes[item.nodeid] = "failed"
+        elif report.skipped and previous != "failed":
+            _release_outcomes[item.nodeid] = "skipped"
+        elif report.when == "call" and report.passed and previous not in {"failed", "skipped"}:
+            _release_outcomes[item.nodeid] = "passed"
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
+    destination = session.config.getoption("--release-evidence-report")
+    if destination is None:
+        return
+    path = Path(destination).absolute()
+    payload = {
+        "schema_version": 1,
+        "collected_node_ids": sorted(_release_collection),
+        "markers": {key: _release_collection[key] for key in sorted(_release_collection)},
+        "passed_node_ids": sorted(
+            key for key, value in _release_outcomes.items() if value == "passed"
+        ),
+        "skipped_node_ids": sorted(
+            key for key, value in _release_outcomes.items() if value == "skipped"
+        ),
+        "failed_node_ids": sorted(
+            key for key, value in _release_outcomes.items() if value == "failed"
+        ),
+        "exit_status": int(exitstatus),
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        os.close(descriptor)

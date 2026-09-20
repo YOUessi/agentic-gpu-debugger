@@ -102,6 +102,7 @@ gpu_agent = ["execution/trusted_sources.json"]
 "share/agentic-gpu-debugger/evaluation" = [
   "evaluation/modes.json",
   "evaluation/protocol.md",
+  "evaluation/release-test-allowlist.json",
   "evaluation/rubric.md",
 ]
 "share/agentic-gpu-debugger/knowledge" = [
@@ -117,6 +118,7 @@ markers = [
   "container: requires the isolated GPU container backend",
   "live_llm: requires a real configured model provider",
   "release: required release acceptance evidence",
+  "release_evidence: fixed positive evidence selected by the release controller",
 ]
 
 [tool.ruff]
