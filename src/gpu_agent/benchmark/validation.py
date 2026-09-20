@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
@@ -179,7 +180,15 @@ class CaseValidationController:
     def spec_hash(spec: AuthoritativeCaseSpec) -> str:
         return hashlib.sha256(spec.model_dump_json().encode()).hexdigest()
 
-    def execute(self, plan: CaseExecutionPlan, input_bytes: bytes) -> str:
+    def execute(
+        self,
+        plan: CaseExecutionPlan,
+        input_bytes: bytes,
+        *,
+        parent_run_id: str | None = None,
+        on_created: Callable[[str], None] | None = None,
+        integrity_check: Callable[[], None] | None = None,
+    ) -> str:
         expected_visibility = "public" if plan.split == "public" else "evaluator"
         if self.store.visibility != expected_visibility:
             raise ValueError("case split requires its dedicated visibility store")
@@ -211,12 +220,36 @@ class CaseValidationController:
             or hashlib.sha256(input_bytes).hexdigest() != spec.input_set_hash
         ):
             raise ValueError("execution plan differs from authoritative case registry")
-        run = self.store.create_run("case_execution", binding=self.binding)
-        self.store.transition(run.id, "RUNNING", "PREPARING")
-        case_spec_ref = _put_model(self.store, run.id, "validation/case-spec.json", spec)
-        plan_ref = _put_model(self.store, run.id, "validation/execution-plan.json", plan)
+        if parent_run_id is None:
+            run = self.store.create_run("case_execution", binding=self.binding)
+        else:
+            from gpu_agent.benchmark.batch_security import create_seed_child
+
+            run = create_seed_child(self.store, parent_run_id, self.binding)
         handle = None
+        boundary_failed = False
+
+        def check_boundary() -> None:
+            nonlocal boundary_failed
+            try:
+                if integrity_check is not None:
+                    integrity_check()
+                if parent_run_id is not None:
+                    from gpu_agent.benchmark.batch_security import validate_seed_parent
+
+                    validate_seed_parent(self.store, parent_run_id, self.binding)
+            except BaseException:
+                boundary_failed = True
+                raise
+
         try:
+            check_boundary()
+            self.store.transition(run.id, "RUNNING", "PREPARING")
+            if on_created is not None:
+                on_created(run.id)
+            check_boundary()
+            case_spec_ref = _put_model(self.store, run.id, "validation/case-spec.json", spec)
+            plan_ref = _put_model(self.store, run.id, "validation/execution-plan.json", plan)
             handle = self.backend.prepare(
                 WorkspaceRequest(
                     run_id=run.id,
@@ -224,8 +257,10 @@ class CaseValidationController:
                     trust_level="TRUSTED_LOCAL",
                 )
             )
+            check_boundary()
             self.store.transition(run.id, "RUNNING", "COMPILING")
             build = self.backend.build(BuildRequest(workspace_id=handle.id))
+            check_boundary()
             build_ref = _put_model(self.store, run.id, "validation/build-result.json", build)
             if not build.success or build.binary_ref is None:
                 raise CaseExecutionAttestationUnavailable("validation build did not succeed")
@@ -233,9 +268,11 @@ class CaseValidationController:
             input_ref = self.store.put(
                 run.id, "validation/input.json", input_bytes, self.store.visibility
             )
+            check_boundary()
             runtime = self.backend.run(
                 ExecutionRequest(workspace_id=handle.id, stdin_ref=input_ref)
             )
+            check_boundary()
             runtime_ref = _put_model(self.store, run.id, "validation/runtime-result.json", runtime)
             result = derive_oracle(
                 input_bytes,
@@ -253,6 +290,7 @@ class CaseValidationController:
             sanitizer_refs = []
             sanitizer_oracle_refs = []
             for index in range(plan.sanitizer_repetitions):
+                check_boundary()
                 sanitizer = self.backend.run_sanitizer(
                     SanitizerRequest(
                         workspace_id=handle.id,
@@ -260,6 +298,7 @@ class CaseValidationController:
                         stdin_ref=input_ref,
                     )
                 )
+                check_boundary()
                 sanitizer_ref = _put_model(
                     self.store,
                     run.id,
@@ -329,23 +368,54 @@ class CaseValidationController:
             if not cleaned.removed:
                 self._record_cleanup_error(run.id, cleaned)
                 raise CaseExecutionAttestationUnavailable("validation workspace cleanup failed")
-            self.store.transition(run.id, "RUNNING", "FINALIZING")
-            self.store.transition(run.id, "COMPLETED", None)
+            check_boundary()
+            if parent_run_id is None:
+                self.store.transition(run.id, "RUNNING", "FINALIZING")
+                self.store.transition(run.id, "COMPLETED", None)
+            else:
+                from gpu_agent.benchmark.batch_security import finalize_seed_child
+
+                finalize_seed_child(
+                    self.store,
+                    parent_run_id,
+                    run.id,
+                    self.binding,
+                    RunStatus.COMPLETED,
+                )
             return run.id
         except BaseException as primary_error:
             if handle is not None:
                 try:
                     cleaned = self.backend.cleanup(handle)
-                    if not cleaned.removed:
+                    if not cleaned.removed and not boundary_failed:
+                        check_boundary()
                         self._record_cleanup_error(run.id, cleaned)
                 except BaseException as cleanup_error:
-                    try:
-                        self._record_cleanup_error(run.id, cleanup_error)
-                    except BaseException:
-                        pass
-            current = self.store.load(run.id)
-            if current.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
-                self.store.transition(run.id, "FAILED", None)
+                    if not boundary_failed:
+                        try:
+                            check_boundary()
+                            self._record_cleanup_error(run.id, cleanup_error)
+                        except BaseException:
+                            pass
+            if not boundary_failed:
+                try:
+                    check_boundary()
+                    if parent_run_id is None:
+                        current = self.store.load(run.id)
+                        if current.status in {RunStatus.QUEUED, RunStatus.RUNNING}:
+                            self.store.transition(run.id, "FAILED", None)
+                    else:
+                        from gpu_agent.benchmark.batch_security import finalize_seed_child
+
+                        finalize_seed_child(
+                            self.store,
+                            parent_run_id,
+                            run.id,
+                            self.binding,
+                            RunStatus.FAILED,
+                        )
+                except BaseException:
+                    pass
             raise primary_error
 
     def _record_cleanup_error(self, run_id: str, error: object) -> None:

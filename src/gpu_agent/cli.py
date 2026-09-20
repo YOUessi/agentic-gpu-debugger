@@ -12,7 +12,6 @@ from gpu_agent.benchmark.evaluation import (
     EvaluationSelection,
     EvaluationSplit,
 )
-from gpu_agent.benchmark.executor import CostBoundUnavailable
 from gpu_agent.benchmark.validation import CaseExecutionAttestationUnavailable
 from gpu_agent.config import Settings
 from gpu_agent.environment import probe_environment
@@ -43,6 +42,78 @@ def benchmark_validate(
     typer.echo(f"registered corpus evidence ({manifest.split})")
 
 
+@benchmark_app.command("run-seeds")
+def benchmark_run_seeds(
+    data_root: Annotated[Path, typer.Option("--data-root")],
+    repository: Annotated[Path, typer.Option("--repository")] = Path("."),
+    case: Annotated[list[str] | None, typer.Option("--case")] = None,
+    preflight_only: Annotated[bool, typer.Option("--preflight-only")] = False,
+    register: Annotated[bool, typer.Option("--register")] = False,
+) -> None:
+    """Run public clean/mutant seeds serially; no LLM calls or paid evaluation."""
+    from gpu_agent.benchmark.batch import prepare_seed_batch, run_public_seeds
+    from gpu_agent.benchmark.batch_security import BatchInputError
+
+    try:
+        prepared = prepare_seed_batch(repository, data_root, tuple(case or ()))
+        if preflight_only:
+            typer.echo(prepared.report.model_dump_json(indent=2))
+            return
+        result = run_public_seeds(prepared, register=register, progress=typer.echo)
+    except BatchInputError as exc:
+        raise typer.BadParameter(str(exc)) from None
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(
+            f"BATCH_SETUP_FAILED ({type(exc).__name__}): check the data root and corpus family."
+        ) from None
+    typer.echo(f"Batch {result.batch_run_id}: {result.status}")
+    typer.echo("Use benchmark batch-report or export-batch to inspect retained evidence.")
+    if result.status == "CANCELLED":
+        raise typer.Exit(130)
+    if not result.all_passed:
+        raise typer.Exit(1)
+
+
+@benchmark_app.command("batch-report")
+def benchmark_batch_report(
+    batch_run_id: str,
+    data_root: Annotated[Path, typer.Option("--data-root")],
+    json_output: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Read a saved batch or its last progress snapshot without rerunning any GPU work."""
+    from gpu_agent.benchmark.batch_report import load_batch_summary, render_batch
+    from gpu_agent.benchmark.batch_security import public_store_path
+
+    try:
+        public_root = public_store_path(data_root)
+        if not public_root.is_dir():
+            raise ValueError("RunStore does not exist")
+        summary = load_batch_summary(RunStore(public_root), batch_run_id)
+    except (OSError, ValueError):
+        raise typer.BadParameter("BATCH_REPORT_UNAVAILABLE") from None
+    typer.echo(summary.model_dump_json(indent=2) if json_output else render_batch(summary))
+
+
+@benchmark_app.command("export-batch")
+def benchmark_export_batch(
+    batch_run_id: str,
+    data_root: Annotated[Path, typer.Option("--data-root")],
+    output: Annotated[Path, typer.Option("--output")],
+) -> None:
+    """Export only this public batch's registered artifacts; no evaluator state or keys."""
+    from gpu_agent.benchmark.batch_report import export_batch
+    from gpu_agent.benchmark.batch_security import public_store_path
+
+    try:
+        public_root = public_store_path(data_root)
+        if not public_root.is_dir():
+            raise ValueError("RunStore does not exist")
+        path = export_batch(RunStore(public_root), batch_run_id, output)
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(f"BATCH_EXPORT_FAILED ({type(exc).__name__})") from None
+    typer.echo(str(path))
+
+
 @benchmark_app.command("evaluate")
 def benchmark_evaluate(
     ctx: typer.Context,
@@ -59,6 +130,8 @@ def benchmark_evaluate(
 ) -> None:
     """Paid batches require cost attestation; injected controller runners support offline tests."""
     from typing import cast
+
+    from gpu_agent.benchmark.executor import CostBoundUnavailable
 
     # This check precedes any configured service, corpus, or provider construction.
     if max_cost_usd is None or max_unit_cost_usd is None:

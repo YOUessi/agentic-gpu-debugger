@@ -51,6 +51,19 @@ python -I -m pip check
 
 已注册 `gpu`、`container`、`live_llm`、`release` 标记。`--require-live` 将带这些标记的 skipped 测试变为失败；收集阶段 skip 也失败，防止缺少必需环境时假通过。完整的发布覆盖计数门禁留待 T12；目前单元测试通过不代表 GPU/模型功能通过。
 
+## 公开 Seed 批量验证
+
+已有四个公开 seed 可以通过同一个原生控制器串行执行、读取报告和导出证据：
+
+```bash
+gpu-agent benchmark run-seeds --repository "$PWD" --data-root /可信public_store的父目录 --preflight-only
+gpu-agent benchmark run-seeds --repository "$PWD" --data-root /可信public_store的父目录 --case case_0001
+gpu-agent benchmark batch-report BATCH_ID --data-root /可信public_store的父目录
+gpu-agent benchmark export-batch BATCH_ID --data-root /可信public_store的父目录 --output /tmp/gpu-batch.zip
+```
+
+真实执行要求 `GPU_AGENT_CORPUS_FAMILY_ROOT` 指向已经存在的可信 family；命令不会隐式创建 family、ledger 或注册案例。只有显式使用底层 `--register` 才请求注册，且仍需通过原有 `BenchmarkBuilder` 门禁。详细安全边界和操作步骤见 [公开 GPU Seed 批次运行说明](docs/GPU_BATCH_CURRENT_CN.md)。
+
 ## T06 诊断与单候选工作流
 
 `gpu-agent diagnose PATH` 接受一个 CUDA 源文件或含 `kernel.cu` 的目录，输出实际

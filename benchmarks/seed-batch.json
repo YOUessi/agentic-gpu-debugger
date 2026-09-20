@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "cases": [
+    {"case_id": "case_0001", "clean_source": "public/case_0000/public_input/kernel.cu", "mutant_source": "public/case_0001/public_input/kernel.cu", "n": 257, "a_value": 1.0, "b_value": 2.0},
+    {"case_id": "case_0002", "clean_source": "public/case_0000/public_input/kernel.cu", "mutant_source": "public/case_0002/public_input/kernel.cu", "n": 256, "a_value": 1.0, "b_value": 2.0},
+    {"case_id": "case_0003", "clean_source": "public/case_0000/public_input/kernel.cu", "mutant_source": "public/case_0003/public_input/kernel.cu", "n": 32, "a_value": 1.0, "b_value": 2.0},
+    {"case_id": "case_0004", "clean_source": "public/case_0000/public_input/kernel.cu", "mutant_source": "public/case_0004/public_input/kernel.cu", "n": 32, "a_value": 1.0, "b_value": 2.0}
+  ]
+}
