@@ -15,7 +15,7 @@ from gpu_agent.benchmark.evaluation import EvaluationRunner
 from gpu_agent.benchmark.executor import EvaluationExecutor
 from gpu_agent.benchmark.holdout import HoldoutController
 from gpu_agent.benchmark.holdout_scoring import HoldoutLabelPackage, HoldoutScoringController
-from gpu_agent.contracts import RunStatus
+from gpu_agent.contracts import CurrentPhase, ExternalRunOrigin, RunStatus
 
 
 def canonical(value):
@@ -998,7 +998,8 @@ def test_session_claim_rejects_unsafe_lock(scoring_fixture, unsafe):
 
 def test_prepared_persistence_checks_identity_and_matches_standalone(scoring_fixture):
     f = scoring_fixture
-    prepared = f.preflight().items[0].prepared_score
+    item = f.preflight().items[0]
+    prepared = item.prepared_score
     before = f.snapshot()
     stale = (
         prepared.model_copy(update={"run_id": "f" * 32}),
@@ -1014,9 +1015,9 @@ def test_prepared_persistence_checks_identity_and_matches_standalone(scoring_fix
     )
     for candidate in stale:
         with pytest.raises(ValueError):
-            f.controller.holdout._bind_prepared_score(f.batch, candidate)
+            _persist_prepared_item(f, item, candidate)
         assert f.snapshot() == before
-    binding = f.controller.holdout._bind_prepared_score(f.batch, prepared)
+    binding = _persist_prepared_item(f, item, prepared, reload=True)
     expected = f.package.judgments[0]
     assert (
         f.controller.holdout.bind_score(
@@ -1031,6 +1032,200 @@ def test_prepared_persistence_checks_identity_and_matches_standalone(scoring_fix
         == binding
     )
     assert binding == prepared.binding
+
+
+def _persist_prepared_item(f, item, prepared, *, reload=False):
+    return f.controller.holdout._bind_prepared_score(
+        f.batch,
+        prepared,
+        alias=item.alias,
+        public_record_ref=item.public_record_ref,
+        public_record=f.records[item.ordinal],
+        private_case_id=item.prepared_score.binding.private_case_id,
+        private_template_id=item.prepared_score.binding.private_template_id,
+        _reload=reload,
+    )
+
+
+def test_prepared_persistence_rejects_complete_stale_binding_before_mutation(scoring_fixture):
+    f = scoring_fixture
+    plan = f.preflight()
+    item, other = plan.items[:2]
+    prepared = item.prepared_score
+    private = json.loads(prepared.private_score_content)
+    private["public_record_hash"] = "f" * 64
+    stale_score = canonical(private)
+    stale = (
+        prepared.model_copy(
+            update={
+                "binding": prepared.binding.model_copy(
+                    update={"public_evaluation_run_id": "f" * 32}
+                )
+            }
+        ),
+        prepared.model_copy(
+            update={
+                "run_id": other.prepared_score.run_id,
+                "binding": prepared.binding.model_copy(
+                    update={
+                        "evaluator_score_run_id": other.prepared_score.run_id,
+                        "public_record_id": other.prepared_score.binding.public_record_id,
+                    }
+                ),
+            }
+        ),
+        prepared.model_copy(
+            update={
+                "private_score_content": stale_score,
+                "binding": prepared.binding.model_copy(
+                    update={
+                        "public_record_hash": "f" * 64,
+                        "private_score_hash": digest(stale_score),
+                    }
+                ),
+            }
+        ),
+        prepared.model_copy(
+            update={
+                "binding": prepared.binding.model_copy(update={"private_case_id": "stale-case"})
+            }
+        ),
+        prepared.model_copy(
+            update={
+                "binding": prepared.binding.model_copy(
+                    update={"private_template_id": "stale-template"}
+                )
+            }
+        ),
+    )
+    before = f.snapshot()
+    for candidate in stale:
+        with pytest.raises(ValueError, match="prepared holdout score is invalid"):
+            _persist_prepared_item(f, item, candidate)
+        assert f.snapshot() == before
+
+
+def test_prepared_persistence_rejects_stale_child_lineage_before_mutation(scoring_fixture):
+    f = scoring_fixture
+    item = f.preflight().items[0]
+    run_id = f.seed(0)
+    manifest_path = f.evaluator.root / run_id / "manifest.json"
+    original = manifest_path.read_bytes()
+    changes = {
+        "binding": lambda payload: payload["binding"].update(prompt_version="stale"),
+        "parent": lambda payload: payload.update(parent_run_id="f" * 32),
+        "external_origin": lambda payload: payload.update(
+            external_origin={"run_id": "f" * 32, "visibility": "public"}
+        ),
+    }
+    for change in changes.values():
+        payload = json.loads(original)
+        change(payload)
+        overwrite_fixture_artifact(manifest_path, canonical(payload))
+        before = f.snapshot()
+        with pytest.raises(ValueError, match="holdout score transaction is invalid"):
+            _persist_prepared_item(f, item, item.prepared_score)
+        assert f.snapshot() == before
+    overwrite_fixture_artifact(manifest_path, original)
+
+
+_SESSION_ARTIFACTS = tuple(
+    f"holdout-scoring/{name}.json" for name in ("input-binding", "bindings", "metrics", "result")
+)
+
+
+def _seed_scoring_session(f, status, phase, names):
+    run = f.evaluator.create_run(
+        "holdout_scoring",
+        binding=f.binding,
+        external_origin=ExternalRunOrigin(run_id=f.evaluation_run_id, visibility="public"),
+        _run_id=_session_id(f),
+    )
+    if status != RunStatus.QUEUED:
+        f.evaluator.transition(
+            run.id,
+            RunStatus.RUNNING,
+            CurrentPhase.EXECUTING if phase == CurrentPhase.EXECUTING else CurrentPhase.PREPARING,
+        )
+    for ordinal, name in enumerate(names):
+        f.evaluator.put(run.id, name, f'{{"ordinal":{ordinal}}}'.encode(), "evaluator")
+    if phase == CurrentPhase.FINALIZING or status == RunStatus.COMPLETED:
+        f.evaluator.transition(run.id, RunStatus.RUNNING, CurrentPhase.FINALIZING)
+    if status == RunStatus.COMPLETED:
+        f.evaluator.transition(run.id, RunStatus.COMPLETED, None)
+    return f.evaluator.load(run.id)
+
+
+@pytest.mark.parametrize(
+    "status,phase,names",
+    [
+        (RunStatus.QUEUED, None, ()),
+        (RunStatus.RUNNING, CurrentPhase.PREPARING, ()),
+        (RunStatus.RUNNING, CurrentPhase.PREPARING, _SESSION_ARTIFACTS[:1]),
+        (RunStatus.RUNNING, CurrentPhase.PREPARING, _SESSION_ARTIFACTS[:2]),
+        (RunStatus.RUNNING, CurrentPhase.PREPARING, _SESSION_ARTIFACTS[:3]),
+        (RunStatus.RUNNING, CurrentPhase.PREPARING, _SESSION_ARTIFACTS),
+        (RunStatus.RUNNING, CurrentPhase.FINALIZING, _SESSION_ARTIFACTS),
+        (RunStatus.COMPLETED, None, _SESSION_ARTIFACTS),
+    ],
+)
+def test_session_recovery_accepts_only_valid_durable_boundaries(
+    scoring_fixture, status, phase, names
+):
+    f = scoring_fixture
+    expected = _seed_scoring_session(f, status, phase, names)
+    before = f.snapshot()
+    assert f.controller._session(_session_id(f), f.evaluation_run_id) == expected
+    assert f.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    "status,phase,names,manifest_fault",
+    [
+        (RunStatus.QUEUED, None, _SESSION_ARTIFACTS[:1], None),
+        (
+            RunStatus.RUNNING,
+            CurrentPhase.PREPARING,
+            (*_SESSION_ARTIFACTS[:1], "holdout-scoring/unexpected.json"),
+            None,
+        ),
+        (RunStatus.RUNNING, CurrentPhase.PREPARING, _SESSION_ARTIFACTS[1:2], None),
+        (
+            RunStatus.RUNNING,
+            CurrentPhase.PREPARING,
+            (_SESSION_ARTIFACTS[0], _SESSION_ARTIFACTS[2]),
+            None,
+        ),
+        (RunStatus.RUNNING, CurrentPhase.EXECUTING, (), None),
+        (RunStatus.RUNNING, CurrentPhase.FINALIZING, _SESSION_ARTIFACTS[:1], None),
+        (RunStatus.COMPLETED, None, _SESSION_ARTIFACTS[:3], None),
+        (
+            RunStatus.COMPLETED,
+            None,
+            (*_SESSION_ARTIFACTS, "holdout-scoring/unexpected.json"),
+            None,
+        ),
+        (RunStatus.RUNNING, CurrentPhase.PREPARING, _SESSION_ARTIFACTS[:1], "duplicate"),
+        (RunStatus.RUNNING, CurrentPhase.PREPARING, _SESSION_ARTIFACTS[:1], "foreign"),
+    ],
+)
+def test_session_recovery_rejects_invalid_inventory_before_mutation(
+    scoring_fixture, status, phase, names, manifest_fault
+):
+    f = scoring_fixture
+    run = _seed_scoring_session(f, status, phase, names)
+    if manifest_fault is not None:
+        manifest_path = f.evaluator.root / run.id / "manifest.json"
+        payload = json.loads(manifest_path.read_bytes())
+        if manifest_fault == "duplicate":
+            payload["artifact_refs"].append(payload["artifact_refs"][0])
+        else:
+            payload["artifact_refs"][0]["run_id"] = "f" * 32
+        overwrite_fixture_artifact(manifest_path, canonical(payload))
+    before = f.snapshot()
+    with pytest.raises(ValueError, match="holdout scoring session conflicts"):
+        f.controller._session(_session_id(f), f.evaluation_run_id)
+    assert f.snapshot() == before
 
 
 def test_grouped_metrics_load_once_and_match_independent_aggregate(scoring_fixture, monkeypatch):

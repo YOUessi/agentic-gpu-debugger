@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Literal
 from pydantic import Field, ValidationError
 
 from gpu_agent.benchmark.controller_artifacts import read_private_external
-from gpu_agent.benchmark.evaluation import EvaluationSchedule
+from gpu_agent.benchmark.evaluation import EvaluationSchedule, PublicEvaluationRecord
 from gpu_agent.benchmark.holdout import (
     EvaluatorRecordBinding,
     HoldoutBatch,
@@ -45,6 +45,12 @@ if TYPE_CHECKING:
 
 _SESSION_GUARD = threading.Lock()
 _SESSION_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+_SESSION_ARTIFACT_NAMES = tuple(
+    f"holdout-scoring/{name}.json" for name in ("input-binding", "bindings", "metrics", "result")
+)
+_SESSION_ARTIFACT_PREFIXES = {
+    _SESSION_ARTIFACT_NAMES[:length] for length in range(len(_SESSION_ARTIFACT_NAMES) + 1)
+}
 
 
 def _canonical(value: object) -> bytes:
@@ -128,6 +134,9 @@ class HoldoutScoringPlanItem(ExecutionModel):
     ordinal: int = Field(ge=0, lt=120)
     alias: str = Field(pattern=r"^[a-f0-9]{64}$")
     public_record_ref: ArtifactRef
+    public_record: PublicEvaluationRecord
+    private_case_id: str = Field(min_length=1)
+    private_template_id: str = Field(min_length=1)
     judgment: HoldoutJudgment
     prepared_score: PreparedHoldoutScore
     existing_binding: EvaluatorRecordBinding | None = None
@@ -231,13 +240,51 @@ class HoldoutScoringController:
                 _run_id=run_id,
             )
         run = self.evaluator.load(run_id)
+        names = tuple(ref.name for ref in run.artifact_refs)
+        events = tuple((event.status, event.phase) for event in run.events)
+        queued_events = ((RunStatus.QUEUED, None),)
+        preparing_events = (*queued_events, (RunStatus.RUNNING, CurrentPhase.PREPARING))
+        finalizing_events = (*preparing_events, (RunStatus.RUNNING, CurrentPhase.FINALIZING))
+        completed_events = (*finalizing_events, (RunStatus.COMPLETED, None))
+        valid_state = (
+            (
+                run.status == RunStatus.QUEUED
+                and run.current_phase is None
+                and run.last_completed_phase is None
+                and names == ()
+                and events == queued_events
+            )
+            or (
+                run.status == RunStatus.RUNNING
+                and run.current_phase == CurrentPhase.PREPARING
+                and run.last_completed_phase is None
+                and names in _SESSION_ARTIFACT_PREFIXES
+                and events == preparing_events
+            )
+            or (
+                run.status == RunStatus.RUNNING
+                and run.current_phase == CurrentPhase.FINALIZING
+                and run.last_completed_phase == CurrentPhase.PREPARING
+                and names == _SESSION_ARTIFACT_NAMES
+                and events == finalizing_events
+            )
+            or (
+                run.status == RunStatus.COMPLETED
+                and run.current_phase is None
+                and run.last_completed_phase == CurrentPhase.FINALIZING
+                and names == _SESSION_ARTIFACT_NAMES
+                and events == completed_events
+            )
+        )
         if (
             run.kind != "holdout_scoring"
             or run.parent_run_id is not None
             or run.binding != self.binding
             or run.external_origin != origin
-            or run.status not in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.COMPLETED}
-            or any(r.run_id != run_id for r in run.artifact_refs)
+            or any(
+                ref.run_id != run_id or ref.visibility != "evaluator" for ref in run.artifact_refs
+            )
+            or not valid_state
         ):
             raise ValueError("holdout scoring session conflicts")
         return run
@@ -299,7 +346,14 @@ class HoldoutScoringController:
                     if completed:
                         raise ValueError("holdout scoring completed session is incomplete")
                     binding = self.holdout._bind_prepared_score(
-                        plan.batch, item.prepared_score, _reload=False
+                        plan.batch,
+                        item.prepared_score,
+                        alias=item.alias,
+                        public_record_ref=item.public_record_ref,
+                        public_record=item.public_record,
+                        private_case_id=item.private_case_id,
+                        private_template_id=item.private_template_id,
+                        _reload=False,
                     )
                 bindings.append(binding)
             bindings_content = _canonical([b.model_dump(mode="json") for b in bindings])
@@ -446,6 +500,7 @@ class HoldoutScoringController:
                 or judgment.blind_payload_hash != blind_hashes[ordinal]
             ):
                 raise ValueError("holdout label package record binding is invalid")
+            identity = identities[record.case_id]
             prepared = self.holdout._prepare_validated_score(
                 batch,
                 record.case_id,
@@ -455,13 +510,16 @@ class HoldoutScoringController:
                 score=judgment.score,
                 should_be_inconclusive=judgment.should_be_inconclusive,
                 private_holdout_passed=judgment.private_holdout_passed,
-                identity=identities[record.case_id],
+                identity=identity,
             )
             items.append(
                 HoldoutScoringPlanItem(
                     ordinal=ordinal,
                     alias=record.case_id,
                     public_record_ref=ref,
+                    public_record=record,
+                    private_case_id=identity.private_case_id,
+                    private_template_id=identity.private_template_id,
                     judgment=judgment,
                     prepared_score=prepared,
                 )

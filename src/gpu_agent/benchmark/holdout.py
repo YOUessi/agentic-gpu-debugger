@@ -349,22 +349,41 @@ class HoldoutController:
         should_be_inconclusive: bool,
         private_holdout_passed: bool,
     ) -> EvaluatorRecordBinding:
-        prepared = self.prepare_score(
+        if labels is None:
+            raise ValueError("private evaluation labels are required")
+        record = self._validated_public_record(public_record_ref, batch)
+        identity = self._identity(batch, alias)
+        prepared = self._prepare_validated_score(
             batch,
             alias,
             public_record_ref,
+            record,
             labels=labels,
             score=score,
             should_be_inconclusive=should_be_inconclusive,
             private_holdout_passed=private_holdout_passed,
+            identity=identity,
         )
-        return self._bind_prepared_score(batch, prepared)
+        return self._bind_prepared_score(
+            batch,
+            prepared,
+            alias=alias,
+            public_record_ref=public_record_ref,
+            public_record=record,
+            private_case_id=identity.private_case_id,
+            private_template_id=identity.private_template_id,
+        )
 
     def _bind_prepared_score(
         self,
         batch: HoldoutBatch,
         prepared: PreparedHoldoutScore,
         *,
+        alias: str,
+        public_record_ref: ArtifactRef,
+        public_record: PublicEvaluationRecord,
+        private_case_id: str,
+        private_template_id: str,
         _reload: bool = True,
     ) -> EvaluatorRecordBinding:
         """Persist one score already derived from current native validation."""
@@ -373,17 +392,52 @@ class HoldoutController:
             private_score = _PrivateScore.model_validate_json(prepared.private_score_content)
         except ValueError:
             raise ValueError("prepared holdout score is invalid") from None
+        canonical_score = private_score.content()
+        expected_run_id = self._score_run_id(batch, public_record.record_id)
+        expected_binding = EvaluatorRecordBinding(
+            evaluator_score_run_id=expected_run_id,
+            public_evaluation_run_id=public_record_ref.run_id,
+            public_record_id=public_record.record_id,
+            public_record_hash=public_record_ref.sha256,
+            private_case_id=private_case_id,
+            private_template_id=private_template_id,
+            private_score_hash=hashlib.sha256(canonical_score).hexdigest(),
+            corpus_cutoff=batch.corpus_cutoff,
+        )
         if (
-            score_run_id != binding.evaluator_score_run_id
-            or score_run_id != self._score_run_id(batch, binding.public_record_id)
-            or binding.corpus_cutoff != batch.corpus_cutoff
-            or private_score.content() != prepared.private_score_content
-            or private_score.public_record_hash != binding.public_record_hash
-            or private_score.corpus_cutoff != binding.corpus_cutoff
-            or hashlib.sha256(prepared.private_score_content).hexdigest()
-            != binding.private_score_hash
+            public_record.case_id != alias
+            or public_record.template_id != alias
+            or score_run_id != expected_run_id
+            or binding != expected_binding
+            or canonical_score != prepared.private_score_content
+            or private_score.public_record_hash != public_record_ref.sha256
+            or private_score.corpus_cutoff != batch.corpus_cutoff
         ):
             raise ValueError("prepared holdout score is invalid")
+        expected_origin = ExternalRunOrigin(run_id=batch.public_run_id, visibility="public")
+        mapping = self.evaluator.load(batch.evaluator_run_id)
+        if (
+            mapping.kind != "holdout_alias_mapping"
+            or mapping.parent_run_id is not None
+            or mapping.status != RunStatus.COMPLETED
+            or mapping.binding != self.binding
+            or mapping.external_origin != expected_origin
+        ):
+            raise ValueError("holdout score transaction is invalid")
+
+        def validate_run(run: RunManifest) -> None:
+            if (
+                run.kind != "holdout_score"
+                or run.parent_run_id != batch.evaluator_run_id
+                or run.binding != self.binding
+                or run.external_origin != expected_origin
+                or run.status not in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.COMPLETED}
+                or any(ref.run_id != run.id for ref in run.artifact_refs)
+            ):
+                raise ValueError("holdout score transaction is invalid")
+
+        if (self.evaluator.root / score_run_id).exists():
+            validate_run(self.evaluator.load(score_run_id))
         with self._score_claim(score_run_id):
             try:
                 run = self.evaluator.load(score_run_id)
@@ -393,13 +447,7 @@ class HoldoutController:
                     parent_run_id=batch.evaluator_run_id,
                     _run_id=score_run_id,
                 )
-            if (
-                run.kind != "holdout_score"
-                or run.parent_run_id != batch.evaluator_run_id
-                or run.binding != self.binding
-                or run.status == RunStatus.FAILED
-            ):
-                raise ValueError("holdout score transaction is invalid")
+            validate_run(run)
             if run.status == RunStatus.QUEUED:
                 self.evaluator.transition(run.id, RunStatus.RUNNING, "FINALIZING")
             self.evaluator.put_if_absent_exact(
