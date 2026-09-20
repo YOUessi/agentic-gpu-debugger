@@ -1,6 +1,6 @@
 # Agentic GPU Debugger V2 实施计划
 
-**状态：** T01、T02 完成，M0 的真实 clean kernel 编译运行与证据验收通过。T03 尚未开始。记录见 [T01 验证记录](docs/t01-validation.md)、[T02/M0 验证记录](docs/t02-validation.md)。M0 不代表隔离执行或修复功能完成。
+**当前状态（2026-09-20）：** T01–T07 与 T09 的核心路径已经完成，并有真实 GPU/容器证据；T06 另有真实 DeepSeek OOB 修复记录。T08 的恢复与路由代码已完成，但仍缺一条绑定最终提交的真实多步 Agent 证据。T10–T12 仍在发布收口：正式 family 尚未注册 16 public + 8 private，360 单元 A–E 实验尚未执行，最终 release manifest 尚未生成。详细的实时状态见 [V2 发布状态](docs/v2-release-status.md)。下方任务勾选保留为最初执行计划，不能单独作为当前完成证据。
 
 **Goal：** 在真实 RTX 4090 Laptop 上完成可复现的 CUDA 诊断、单次候选补丁、隔离验证和五组评测。
 
@@ -660,7 +660,7 @@ git diff --check
 - [x] 用户评审并批准开始执行本计划。
 - [x] 开始 T01，并只根据真实结果勾选任务。
 
-本计划中的命令与测试代码是执行规范；计划文件存在不表示这些测试已通过。T01、T02 的真实结果见验证记录；下一项执行是 T03，后续未执行任务仍保持未完成。
+本计划中的命令与测试代码是执行规范；计划文件存在不表示这些测试已通过。T01–T10 的现状以保存的原生 run、当前测试和 [V2 发布状态](docs/v2-release-status.md) 为准。当前依赖顺序是：完成所有会改变提交的发布代码与 corpus 定义，冻结 clean commit，真实注册 16+8 corpus，冻结价格与 schedule，执行 360 单元评测，最后生成 evidence-backed manifest 并运行 release gate。
 
 ## 7. 官方实现依据
 

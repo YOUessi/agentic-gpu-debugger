@@ -84,7 +84,7 @@ This API scopes artifact reads for the supplied run; role authorization must bin
 run ID before exposing a view to an agent. Source paths in findings are observations,
 not file-access authority.
 
-## Live acceptance and current blocker
+## Live acceptance status
 
 `case_0001` intentionally allocates exactly 257 float elements, launches 256-thread
 blocks, and omits the index guard. Ordinary execution may succeed or fail; memcheck
@@ -98,14 +98,18 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 /home/you/conda_env/agentic-gpu-debugger/bin/py
 
 Ordinary tests skip when image/runtime/GPU support is unavailable. `--require-live`
 turns those skips into failures. Skipped tests and CPU-only benign probes cannot satisfy
-M1 acceptance. As observed on 2026-09-15: Ubuntu 22.04.5 x86_64, Docker 29.1.3,
-only `runc`/`io.containerd.runc.v2` runtimes, no NVIDIA Container Toolkit, and no running
-containers before work. Docker's GPU request fails. M1 remains blocked until runtime
-installation and both live acceptance commands succeed with real GPU evidence.
+M1 acceptance. The 2026-09-15 runtime absence was subsequently resolved by the operator.
+On 2026-09-20 the same isolated backend built and ran clean/mutant `case_0001` on the
+RTX 4090 Laptop GPU; Compute Sanitizer produced a real `Invalid __global__ read` finding,
+and batch `82c1d0e92e5f447bbcf62abddcbf37c2` completed with `case_0001` VALIDATED.
+The exported evidence SHA-256 is
+`b8d4574ac9d3d5e23447891770631428f85bec7a2e1eb58159e4147effe3c923`.
+This closes the old T03 runtime blocker, but it is one public validation run—not 16+8
+corpus registration or Portfolio Release evidence.
 
-## Operator-only NVIDIA runtime setup
+## Fresh-host NVIDIA runtime setup
 
-No host packages/configuration were changed by T03. `sudo` needs an operator password.
+The following is retained for a fresh host. `sudo` needs an operator password.
 Use the [official NVIDIA installation guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
 to configure the apt keyring/repository and install the reviewed package version. The
 guide inspected on 2026-09-15 specifies:
