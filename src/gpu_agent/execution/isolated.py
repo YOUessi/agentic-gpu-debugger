@@ -20,6 +20,7 @@ from threading import Event, Lock
 
 from pydantic import BaseModel, ConfigDict
 
+from gpu_agent._resources import runtime_resource
 from gpu_agent.config import Settings
 from gpu_agent.contracts import ArtifactRef, new_id
 from gpu_agent.environment import (
@@ -56,7 +57,7 @@ from gpu_agent.execution.models import (
 from gpu_agent.execution.process import ProcessCapture, ProcessExecutor
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
 
-LOCK_PATH = Path(__file__).resolve().parents[3] / "containers/toolchain.lock.json"
+LOCK_PATH = runtime_resource("containers/toolchain.lock.json")
 LABEL = "io.gpu-agent.operation"
 
 

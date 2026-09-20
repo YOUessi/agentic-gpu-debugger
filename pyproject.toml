@@ -4,17 +4,38 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agentic-gpu-debugger"
-version = "0.1.0"
+version = "0.2.0"
 description = "Evidence-driven CUDA debugging with isolated candidate verification"
+readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11,<3.13"
+license = "MIT"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Agentic GPU Debugger contributors" }]
+keywords = ["cuda", "debugging", "gpu", "compute-sanitizer", "ai-agent"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Debuggers",
+]
 dependencies = [
   "pydantic>=2,<3", "typer>=0.16,<1", "httpx==0.28.1",
   "beautifulsoup4==4.13.5", "packaging==25.0",
   "openai>=3.13.0,<4",
 ]
 
+[project.urls]
+Homepage = "https://github.com/YOUessi/agentic-gpu-debugger"
+Repository = "https://github.com/YOUessi/agentic-gpu-debugger.git"
+Issues = "https://github.com/YOUessi/agentic-gpu-debugger/issues"
+Changelog = "https://github.com/YOUessi/agentic-gpu-debugger/blob/main/CHANGELOG.md"
+
 [project.optional-dependencies]
-dev = ["pytest>=8,<10", "ruff>=0.12,<1", "mypy>=1.16,<2"]
+dev = ["build>=1.2,<2", "pytest>=8,<10", "ruff>=0.12,<1", "mypy>=1.16,<2"]
 
 [project.scripts]
 gpu-agent = "gpu_agent.cli:app"
@@ -24,6 +45,69 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 gpu_agent = ["execution/trusted_sources.json"]
+
+[tool.setuptools.data-files]
+"share/agentic-gpu-debugger/containers" = [
+  "containers/Dockerfile",
+  "containers/runner.py",
+  "containers/toolchain.lock.json",
+]
+"share/agentic-gpu-debugger/benchmarks" = [
+  "benchmarks/corpus-registry.json",
+  "benchmarks/seed-batch.json",
+]
+"share/agentic-gpu-debugger/benchmarks/development_truth/case_0001" = [
+  "benchmarks/development_truth/case_0001/case.json",
+  "benchmarks/development_truth/case_0001/reference.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/development_truth/case_0002" = [
+  "benchmarks/development_truth/case_0002/case.json",
+  "benchmarks/development_truth/case_0002/reference.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/development_truth/case_0003" = [
+  "benchmarks/development_truth/case_0003/case.json",
+  "benchmarks/development_truth/case_0003/reference.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/development_truth/case_0004" = [
+  "benchmarks/development_truth/case_0004/case.json",
+  "benchmarks/development_truth/case_0004/reference.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/harness" = [
+  "benchmarks/harness/vector_api.h",
+  "benchmarks/harness/vector_io.cpp",
+]
+"share/agentic-gpu-debugger/benchmarks/harness/vendor" = [
+  "benchmarks/harness/vendor/LICENSE.MIT",
+  "benchmarks/harness/vendor/README.md",
+  "benchmarks/harness/vendor/json.hpp",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0000/public_input" = [
+  "benchmarks/public/case_0000/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0001/public_input" = [
+  "benchmarks/public/case_0001/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0002/public_input" = [
+  "benchmarks/public/case_0002/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0003/public_input" = [
+  "benchmarks/public/case_0003/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0004/public_input" = [
+  "benchmarks/public/case_0004/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/templates" = [
+  "benchmarks/templates/mutations.json",
+]
+"share/agentic-gpu-debugger/evaluation" = [
+  "evaluation/modes.json",
+  "evaluation/protocol.md",
+  "evaluation/rubric.md",
+]
+"share/agentic-gpu-debugger/knowledge" = [
+  "knowledge/retrieval-eval.json",
+  "knowledge/sources.json",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

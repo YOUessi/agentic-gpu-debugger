@@ -12,8 +12,8 @@ import json
 import random
 import re
 from dataclasses import dataclass
-from pathlib import Path
 
+from gpu_agent._resources import runtime_resource
 from gpu_agent.contracts import (
     ArtifactRef,
     ExternalRunOrigin,
@@ -44,9 +44,7 @@ from gpu_agent.verification.models import (
 from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
 from gpu_agent.verification.policy import decide_verdict, finding_signature, plan_checks
 
-_TRUTH_CASE = (
-    Path(__file__).resolve().parents[3] / "benchmarks/development_truth/case_0001/case.json"
-)
+_TRUTH_CASE = runtime_resource("benchmarks/development_truth/case_0001/case.json")
 _LIMITATIONS = ["Containers share the host kernel and GPU driver."]
 
 

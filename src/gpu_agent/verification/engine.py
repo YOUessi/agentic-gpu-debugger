@@ -18,6 +18,7 @@ from typing import Literal, TypeVar
 
 from pydantic import Field, StrictFloat, model_validator
 
+from gpu_agent._resources import runtime_resource
 from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, ToolResult
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
@@ -53,7 +54,7 @@ from gpu_agent.verification.policy import (
     plan_checks,
 )
 
-TRUTH_ROOT = Path(__file__).resolve().parents[3] / "benchmarks/development_truth/case_0001"
+TRUTH_ROOT = runtime_resource("benchmarks/development_truth/case_0001")
 Payload = TypeVar("Payload")
 
 

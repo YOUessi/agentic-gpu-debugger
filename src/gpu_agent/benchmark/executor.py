@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from gpu_agent._resources import runtime_resource
 from gpu_agent.agent.models import (
     ACTION_ADAPTER,
     AcquisitionUsage,
@@ -63,9 +64,7 @@ if TYPE_CHECKING:
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
 
-_TRUTH_CASE = (
-    Path(__file__).resolve().parents[3] / "benchmarks/development_truth/case_0001/case.json"
-)
+_TRUTH_CASE = runtime_resource("benchmarks/development_truth/case_0001/case.json")
 
 
 class CostBoundUnavailable(ValueError):
