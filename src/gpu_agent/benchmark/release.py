@@ -16,7 +16,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, TypeAdapter, model_validator
 
 from gpu_agent.benchmark.controller_artifacts import validate_external_artifact_path
 from gpu_agent.benchmark.evaluation import (
@@ -30,10 +30,12 @@ from gpu_agent.benchmark.holdout import (
     _PrivateAliasMap,
     _PrivateScore,
 )
+from gpu_agent.benchmark.holdout_scoring import HoldoutScoringResult
 from gpu_agent.benchmark.ledger import CorpusFamily
 from gpu_agent.benchmark.models import CaseManifest
 from gpu_agent.contracts import (
     ArtifactRef,
+    CurrentPhase,
     RepositorySnapshot,
     RunBinding,
     RunManifest,
@@ -164,6 +166,28 @@ class ReleaseEvidenceSelection(ExecutionModel):
         return self
 
 
+class ReleaseEvidenceRoots(ExecutionModel):
+    """The four operator-selected roots from which release evidence is derived."""
+
+    development_evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    holdout_evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    private_binding_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    release_test_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+
+
+class _HoldoutScoringInputBinding(ExecutionModel):
+    schema_version: Literal[1] = 1
+    evaluation_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    private_binding_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    schedule_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    aliases_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    corpus_cutoff: int = Field(ge=1)
+    expected_record_count: Literal[120] = 120
+    record_set_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    rubric_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    package_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
 class ReleaseTestEvidence(ExecutionModel):
     """Bound result of the controller-owned release test invocation."""
 
@@ -218,13 +242,24 @@ class ReleaseEvidenceIndex(ExecutionModel):
         """Derive the complete index, returning a typed closed gate on any defect."""
 
         try:
-            return _ReleaseEvidenceDeriver(
-                selection,
-                public_store,
-                evaluator_store,
-                corpus_family,
-                actual_repository,
-            ).derive()
+            roots = ReleaseEvidenceRoots(
+                development_evaluation_run_id=selection.development_evaluation_run_id,
+                holdout_evaluation_run_id=selection.holdout_evaluation_run_id,
+                private_binding_run_id=selection.private_binding_run_id,
+                release_test_run_id=selection.release_test_run_id,
+            )
+            return (
+                _ReleaseEvidenceResolver(
+                    roots,
+                    public_store,
+                    evaluator_store,
+                    corpus_family,
+                    actual_repository,
+                    expected_selection=selection,
+                )
+                .resolve()
+                .evidence
+            )
         except _ReleaseEvidenceError as exc:
             return cls(repository=actual_repository, reason_codes=[exc.code])
         except (OSError, ValueError, KeyError, IndexError, TypeError):
@@ -232,6 +267,13 @@ class ReleaseEvidenceIndex(ExecutionModel):
                 repository=actual_repository,
                 reason_codes=["EVIDENCE_DERIVATION_FAILED"],
             )
+
+
+class ReleaseEvidenceResolution(ExecutionModel):
+    """A canonical selection and the evidence derived from exactly that selection."""
+
+    selection: ReleaseEvidenceSelection
+    evidence: ReleaseEvidenceIndex
 
 
 class ReleaseGateResult(ExecutionModel):
@@ -334,32 +376,38 @@ class _EvaluationEvidence:
         self.record_hashes = record_hashes
 
 
-class _ReleaseEvidenceDeriver:
+class _ReleaseEvidenceResolver:
     def __init__(
         self,
-        selection: ReleaseEvidenceSelection,
+        roots: ReleaseEvidenceRoots,
         public: RunStore,
         evaluator: RunStore,
         family: CorpusFamily,
         actual_repository: RepositorySnapshot,
+        *,
+        expected_selection: ReleaseEvidenceSelection | None = None,
     ) -> None:
-        self.selection = selection
+        self.roots = roots
         self.public = public
         self.evaluator = evaluator
         self.family = family
         self.actual_repository = actual_repository
+        self.expected_selection = expected_selection
 
-    def derive(self) -> ReleaseEvidenceIndex:
+    def resolve(self) -> ReleaseEvidenceResolution:
         self._validate_roots()
-        development = self._evaluation(self.selection.development_evaluation_run_id, "development")
-        holdout = self._evaluation(self.selection.holdout_evaluation_run_id, "holdout")
+        development = self._evaluation(self.roots.development_evaluation_run_id, "development")
+        holdout = self._evaluation(self.roots.holdout_evaluation_run_id, "holdout")
         self._same_evaluation_binding(development, holdout)
         cutoff = development.schedule.corpus_cutoff
-        public_cases, private_cases = self._corpus(development.binding, cutoff)
-        self._validate_development_records(development, public_cases)
-        private_templates, private_score_run_ids = self._validate_holdout_records(
-            holdout, private_cases, cutoff
+        public_cases, private_cases, public_run_ids, private_run_ids = self._corpus(
+            development.binding, cutoff
         )
+        self._validate_development_records(development, public_cases)
+        private_templates, private_score_bindings, private_score_run_ids = (
+            self._validate_holdout_records(holdout, private_cases, cutoff)
+        )
+        scoring_run_id = self._scoring_session(holdout, private_score_bindings)
         test_counts = self._release_tests(development.binding, cutoff)
         acceptance = self._acceptance(
             public_cases,
@@ -371,13 +419,23 @@ class _ReleaseEvidenceDeriver:
         evidence_ids = {
             **acceptance,
             "five_mode_evaluation": [development.run.id, holdout.run.id],
-            "public_corpus": list(self.selection.public_case_run_ids),
-            "private_corpus": list(self.selection.private_case_run_ids),
-            "private_scoring": [self.selection.private_binding_run_id],
-            "release_tests": [self.selection.release_test_run_id],
+            "public_corpus": public_run_ids,
+            "private_corpus": private_run_ids,
+            "private_scoring": [self.roots.private_binding_run_id, scoring_run_id],
+            "release_tests": [self.roots.release_test_run_id],
         }
         tool_counts = Counter(case.target_tool.value for case in public_cases.values())
-        return ReleaseEvidenceIndex(
+        selection = ReleaseEvidenceSelection(
+            repository=self.actual_repository,
+            public_case_run_ids=public_run_ids,
+            private_case_run_ids=private_run_ids,
+            development_evaluation_run_id=development.run.id,
+            holdout_evaluation_run_id=holdout.run.id,
+            private_binding_run_id=self.roots.private_binding_run_id,
+            acceptance_run_ids=acceptance,
+            release_test_run_id=self.roots.release_test_run_id,
+        )
+        evidence = ReleaseEvidenceIndex(
             repository=self.actual_repository,
             toolchain_hash=development.binding.toolchain_lock_hash,
             corpus_hash=corpus_hash,
@@ -396,9 +454,13 @@ class _ReleaseEvidenceDeriver:
             evaluation_repeats=development.schedule.repeats,
             evidence_run_ids=evidence_ids,
         )
+        return ReleaseEvidenceResolution(selection=selection, evidence=evidence)
 
     def _validate_roots(self) -> None:
-        if self.selection.repository != self.actual_repository:
+        if (
+            self.expected_selection is not None
+            and self.expected_selection.repository != self.actual_repository
+        ):
             raise _ReleaseEvidenceError("ACTUAL_REPOSITORY_MISMATCH")
         try:
             self.family.require_store(self.public)
@@ -550,36 +612,36 @@ class _ReleaseEvidenceDeriver:
 
     def _corpus(
         self, binding: RunBinding, cutoff: int
-    ) -> tuple[dict[str, CaseManifest], dict[str, CaseManifest]]:
+    ) -> tuple[dict[str, CaseManifest], dict[str, CaseManifest], list[str], list[str]]:
         try:
             from gpu_agent.benchmark.executor import registered_cases
 
             transactions = self.family.ledger.committed_through(cutoff)
             public_target = self.family.ledger.target_store_hash(self.public)
             private_target = self.family.ledger.target_store_hash(self.evaluator)
-            authoritative_public = {
+            authoritative_public = [
                 item.run_id
                 for item in transactions
                 if item.visibility == "public" and item.target_store_hash == public_target
-            }
-            authoritative_private = {
+            ]
+            authoritative_private = [
                 item.run_id
                 for item in transactions
                 if item.visibility == "evaluator" and item.target_store_hash == private_target
-            }
-            if authoritative_public != set(self.selection.public_case_run_ids) or (
-                authoritative_private != set(self.selection.private_case_run_ids)
+            ]
+            selected = self.expected_selection
+            if selected is not None and (
+                set(authoritative_public) != set(selected.public_case_run_ids)
+                or set(authoritative_private) != set(selected.private_case_run_ids)
             ):
                 raise _ReleaseEvidenceError("CORPUS_SELECTION_MISMATCH")
             public_cases = registered_cases(self.public, binding, self.family, cutoff=cutoff)
             private_cases = registered_cases(self.evaluator, binding, self.family, cutoff=cutoff)
-            self._selected_manifests(self.public, self.selection.public_case_run_ids, public_cases)
-            self._selected_manifests(
-                self.evaluator, self.selection.private_case_run_ids, private_cases
-            )
+            self._selected_manifests(self.public, authoritative_public, public_cases)
+            self._selected_manifests(self.evaluator, authoritative_private, private_cases)
             if set(public_cases) & set(private_cases):
                 raise ValueError("case identity reused across corpus splits")
-            return public_cases, private_cases
+            return public_cases, private_cases, authoritative_public, authoritative_private
         except _ReleaseEvidenceError:
             raise
         except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
@@ -640,9 +702,9 @@ class _ReleaseEvidenceDeriver:
         evidence: _EvaluationEvidence,
         cases: dict[str, CaseManifest],
         cutoff: int,
-    ) -> tuple[set[str], set[str]]:
+    ) -> tuple[set[str], list[EvaluatorRecordBinding], set[str]]:
         try:
-            mapping_run = self.evaluator.load(self.selection.private_binding_run_id)
+            mapping_run = self.evaluator.load(self.roots.private_binding_run_id)
             if (
                 mapping_run.kind != "holdout_alias_mapping"
                 or mapping_run.status != RunStatus.COMPLETED
@@ -726,9 +788,12 @@ class _ReleaseEvidenceDeriver:
                     self.family,
                     private_case_id,
                 )
-            private_score_run_ids = self._private_scores(mapping_run, mapping, evidence, alias_map)
+            private_score_bindings, private_score_run_ids = self._private_scores(
+                mapping_run, mapping, evidence, alias_map
+            )
             return (
                 {template for _, template in private_identities},
+                private_score_bindings,
                 private_score_run_ids,
             )
         except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
@@ -740,7 +805,7 @@ class _ReleaseEvidenceDeriver:
         mapping: _PrivateAliasMap,
         evidence: _EvaluationEvidence,
         alias_map: dict[str, tuple[str, str]],
-    ) -> set[str]:
+    ) -> tuple[list[EvaluatorRecordBinding], set[str]]:
         with self.evaluator.evaluation_run_lease(mapping_run.id) as lease:
             if lease.load() != mapping_run:
                 raise ValueError("private mapping changed during score inventory")
@@ -793,7 +858,8 @@ class _ReleaseEvidenceDeriver:
             by_record[record.record_id] = binding
         if set(by_record) != {record.record_id for record in evidence.records}:
             raise ValueError("private score bindings are incomplete")
-        return {run.id for run in score_runs}
+        ordered = [by_record[record.record_id] for record in evidence.records]
+        return ordered, {run.id for run in score_runs}
 
     def _attempts(self, evidence: _EvaluationEvidence) -> dict[int, EvaluationAttempt]:
         refs = _ordinal_refs(evidence.run, "attempts")
@@ -802,11 +868,139 @@ class _ReleaseEvidenceDeriver:
             for ordinal, ref in refs.items()
         }
 
+    def _scoring_metrics(
+        self,
+        bindings: list[EvaluatorRecordBinding],
+        binding: RunBinding,
+    ) -> dict[str, object]:
+        from gpu_agent.benchmark.metrics import aggregate_grouped
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        metrics = aggregate_grouped(
+            bindings,
+            public_store=self.public,
+            evaluator_store=self.evaluator,
+            run_binding=binding,
+            schedule_verifier=EvaluationScheduleVerifier.for_family(self.family, self.public),
+        )
+        return metrics.model_dump(mode="json")
+
+    def _scoring_session(
+        self,
+        evidence: _EvaluationEvidence,
+        bindings: list[EvaluatorRecordBinding],
+    ) -> str:
+        try:
+            run_id = hashlib.sha256(
+                (
+                    f"holdout-scoring-v1:{evidence.run.id}:{self.roots.private_binding_run_id}"
+                ).encode()
+            ).hexdigest()[:32]
+            run = self.evaluator.load(run_id)
+            expected_events = (
+                (RunStatus.QUEUED, None),
+                (RunStatus.RUNNING, CurrentPhase.PREPARING),
+                (RunStatus.RUNNING, CurrentPhase.FINALIZING),
+                (RunStatus.COMPLETED, None),
+            )
+            names = {
+                "holdout-scoring/input-binding.json",
+                "holdout-scoring/bindings.json",
+                "holdout-scoring/metrics.json",
+                "holdout-scoring/result.json",
+            }
+            if (
+                run.kind != "holdout_scoring"
+                or run.parent_run_id is not None
+                or run.status != RunStatus.COMPLETED
+                or run.current_phase is not None
+                or run.last_completed_phase != CurrentPhase.FINALIZING
+                or run.binding != evidence.binding
+                or run.external_origin is None
+                or run.external_origin.visibility != "public"
+                or run.external_origin.run_id != evidence.run.id
+                or tuple((event.status, event.phase) for event in run.events) != expected_events
+                or len(run.artifact_refs) != len(names)
+                or {ref.name for ref in run.artifact_refs} != names
+                or any(
+                    ref.run_id != run_id or ref.visibility != "evaluator"
+                    for ref in run.artifact_refs
+                )
+            ):
+                raise ValueError("holdout scoring session is not exact and completed")
+            refs = {ref.name: ref for ref in run.artifact_refs}
+            input_content = self.evaluator.read(refs["holdout-scoring/input-binding.json"])
+            input_binding = _HoldoutScoringInputBinding.model_validate_json(input_content)
+            record_set_hash = hashlib.sha256(
+                _canonical_json(
+                    [
+                        (
+                            ordinal,
+                            evidence.record_hashes[ordinal],
+                            hashlib.sha256(_canonical_json(record.blind())).hexdigest(),
+                        )
+                        for ordinal, record in enumerate(evidence.records)
+                    ]
+                )
+            ).hexdigest()
+            proof = evidence.schedule.holdout_proof
+            if (
+                input_content != _canonical_json(input_binding.model_dump(mode="json"))
+                or input_binding.evaluation_run_id != evidence.run.id
+                or input_binding.private_binding_run_id != self.roots.private_binding_run_id
+                or input_binding.schedule_hash != _model_hash(evidence.schedule)
+                or proof is None
+                or input_binding.aliases_hash != proof.aliases_hash
+                or input_binding.corpus_cutoff != evidence.schedule.corpus_cutoff
+                or input_binding.record_set_hash != record_set_hash
+                or len(evidence.records) != 120
+                or len(bindings) != 120
+            ):
+                raise ValueError("holdout scoring input binding differs")
+            bindings_content = self.evaluator.read(refs["holdout-scoring/bindings.json"])
+            stored_bindings = TypeAdapter(list[EvaluatorRecordBinding]).validate_json(
+                bindings_content
+            )
+            if (
+                bindings_content
+                != _canonical_json([binding.model_dump(mode="json") for binding in stored_bindings])
+                or stored_bindings != bindings
+            ):
+                raise ValueError("holdout scoring bindings differ")
+            metrics_content = self.evaluator.read(refs["holdout-scoring/metrics.json"])
+            metrics_payload = json.loads(metrics_content)
+            expected_metrics = self._scoring_metrics(bindings, evidence.binding)
+            if (
+                metrics_content != _canonical_json(metrics_payload)
+                or metrics_payload != expected_metrics
+            ):
+                raise ValueError("holdout scoring metrics differ")
+            result_content = self.evaluator.read(refs["holdout-scoring/result.json"])
+            result = HoldoutScoringResult.model_validate_json(result_content)
+            if (
+                result_content != _canonical_json(result.model_dump(mode="json"))
+                or result.scoring_run_id != run_id
+                or result.evaluation_run_id != evidence.run.id
+                or result.private_binding_run_id != self.roots.private_binding_run_id
+                or result.package_hash != input_binding.package_hash
+                or result.input_binding_hash != hashlib.sha256(input_content).hexdigest()
+                or result.bindings_hash != hashlib.sha256(bindings_content).hexdigest()
+                or result.metrics_hash != hashlib.sha256(metrics_content).hexdigest()
+                or result.scored_count != len(bindings)
+                or result.expected_record_count != len(bindings)
+            ):
+                raise ValueError("holdout scoring result differs")
+            return run_id
+        except _ReleaseEvidenceError:
+            raise
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise _ReleaseEvidenceError("PRIVATE_SCORING_INCOMPLETE") from exc
+
     def _release_tests(self, binding: RunBinding, cutoff: int) -> TestCounts:
         try:
             from gpu_agent.release_controller import verify_persisted_release_artifacts
 
-            run = self.public.load(self.selection.release_test_run_id)
+            run = self.public.load(self.roots.release_test_run_id)
             if (
                 run.kind != "release_test"
                 or run.status != RunStatus.COMPLETED
@@ -850,31 +1044,36 @@ class _ReleaseEvidenceDeriver:
         """Match each category to native runs already validated above."""
 
         try:
-            if set(self.selection.acceptance_run_ids) != ReleaseGate.REQUIRED_ACCEPTANCE:
-                raise ValueError("acceptance selection has missing or extra categories")
+            mode_e_ids = [
+                record.lineage.diagnosis_run_id
+                for evaluation in (development, holdout)
+                for item, record in zip(
+                    evaluation.schedule.items,
+                    evaluation.records,
+                    strict=True,
+                )
+                if item.mode == "E"
+            ]
+            if len(mode_e_ids) != len(set(mode_e_ids)):
+                raise ValueError("Mode-E diagnosis lineage is not unique")
             expected = {
-                "isolation": {self.selection.release_test_run_id},
+                "isolation": {self.roots.release_test_run_id},
                 "four_tools": {case.validation_run_ids[1] for case in public_cases.values()},
                 "private_oracle": private_score_run_ids,
-                "live_llm": {
-                    record.lineage.diagnosis_run_id
-                    for evaluation in (development, holdout)
-                    for item, record in zip(
-                        evaluation.schedule.items,
-                        evaluation.records,
-                        strict=True,
-                    )
-                    if item.mode == "E"
-                },
+                "live_llm": set(mode_e_ids),
             }
             if any(not run_ids for run_ids in expected.values()):
                 raise ValueError("required native acceptance evidence is empty")
-            for category, expected_ids in expected.items():
-                selected = self.selection.acceptance_run_ids[category]
-                if len(selected) != len(set(selected)) or set(selected) != expected_ids:
-                    raise ValueError("acceptance selection differs from native evidence")
+            selected_evidence = self.expected_selection
+            if selected_evidence is not None:
+                if set(selected_evidence.acceptance_run_ids) != ReleaseGate.REQUIRED_ACCEPTANCE:
+                    raise ValueError("acceptance selection has missing or extra categories")
+                for category, expected_ids in expected.items():
+                    selected = selected_evidence.acceptance_run_ids[category]
+                    if len(selected) != len(set(selected)) or set(selected) != expected_ids:
+                        raise ValueError("acceptance selection differs from native evidence")
             return {
-                category: list(self.selection.acceptance_run_ids[category])
+                category: sorted(expected[category])
                 for category in sorted(ReleaseGate.REQUIRED_ACCEPTANCE)
             }
         except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
@@ -904,6 +1103,26 @@ class _ReleaseEvidenceDeriver:
         ).hexdigest()
 
 
+class ReleaseEvidenceFreezer:
+    """Resolve four explicit roots into one canonical release selection."""
+
+    @staticmethod
+    def resolve(
+        roots: ReleaseEvidenceRoots,
+        public_store: RunStore,
+        evaluator_store: RunStore,
+        corpus_family: CorpusFamily,
+        actual_repository: RepositorySnapshot,
+    ) -> ReleaseEvidenceResolution:
+        return _ReleaseEvidenceResolver(
+            roots,
+            public_store,
+            evaluator_store,
+            corpus_family,
+            actual_repository,
+        ).resolve()
+
+
 def _one(run: RunManifest, name: str) -> ArtifactRef:
     refs = [ref for ref in run.artifact_refs if ref.name == name]
     if len(refs) != 1:
@@ -928,9 +1147,11 @@ def _ordinal_refs(run: RunManifest, kind: Literal["attempts", "records"]) -> dic
 
 
 def _model_hash(model: ExecutionModel) -> str:
-    return hashlib.sha256(
-        json.dumps(model.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return hashlib.sha256(_canonical_json(model.model_dump(mode="json"))).hexdigest()
+
+
+def _canonical_json(value: object) -> bytes:
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
 def _release_test_binding(run: RunManifest, evaluation: RunBinding) -> bool:

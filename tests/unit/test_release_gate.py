@@ -1,3 +1,7 @@
+import hashlib
+import json
+from types import SimpleNamespace
+
 import pytest
 from pydantic import ValidationError
 
@@ -379,3 +383,353 @@ def _selection(repository):
         },
         release_test_run_id="a" * 32,
     )
+
+
+def test_freezer_resolves_the_same_selection_checked_by_release_gate(repository, monkeypatch):
+    from gpu_agent.benchmark.release import (
+        ReleaseEvidenceFreezer,
+        ReleaseEvidenceIndex,
+        ReleaseEvidenceRoots,
+        TestCounts,
+        _ReleaseEvidenceResolver,
+    )
+
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id="4" * 32,
+    )
+    binding = SimpleNamespace(
+        toolchain_lock_hash="1" * 64,
+        model_config_hash="2" * 64,
+        prompt_version="v2",
+    )
+
+    def evaluation(run_id, split):
+        diagnosis_id = "d" * 32 if split == "development" else "e" * 32
+        return SimpleNamespace(
+            run=SimpleNamespace(id=run_id),
+            binding=binding,
+            schedule=SimpleNamespace(
+                corpus_cutoff=4,
+                modes=["A", "B", "C", "D", "E"],
+                repeats=3,
+                items=[SimpleNamespace(mode="E")],
+            ),
+            records=[SimpleNamespace(lineage=SimpleNamespace(diagnosis_run_id=diagnosis_id))],
+        )
+
+    public_cases = {
+        "case-b": SimpleNamespace(
+            target_tool=SimpleNamespace(value="memcheck"),
+            validation_run_ids=["0" * 32, "a" * 32],
+        ),
+        "case-a": SimpleNamespace(
+            target_tool=SimpleNamespace(value="racecheck"),
+            validation_run_ids=["0" * 32, "9" * 32],
+        ),
+    }
+    private_cases = {
+        "private-b": SimpleNamespace(mutation_id="operator-b"),
+        "private-a": SimpleNamespace(mutation_id="operator-a"),
+    }
+    monkeypatch.setattr(_ReleaseEvidenceResolver, "_validate_roots", lambda self: None)
+    monkeypatch.setattr(
+        _ReleaseEvidenceResolver,
+        "_evaluation",
+        lambda self, run_id, split: evaluation(run_id, split),
+    )
+    monkeypatch.setattr(
+        _ReleaseEvidenceResolver,
+        "_same_evaluation_binding",
+        lambda self, development, holdout: None,
+    )
+    monkeypatch.setattr(
+        _ReleaseEvidenceResolver,
+        "_corpus",
+        lambda self, selected_binding, cutoff: (
+            public_cases,
+            private_cases,
+            ["6" * 32, "5" * 32],
+            ["8" * 32, "7" * 32],
+        ),
+    )
+    monkeypatch.setattr(
+        _ReleaseEvidenceResolver,
+        "_validate_development_records",
+        lambda self, development, cases: None,
+    )
+    monkeypatch.setattr(
+        _ReleaseEvidenceResolver,
+        "_validate_holdout_records",
+        lambda self, holdout, cases, cutoff: (
+            {"template-a", "template-b"},
+            [],
+            {"c" * 32, "b" * 32},
+        ),
+    )
+    monkeypatch.setattr(
+        _ReleaseEvidenceResolver,
+        "_scoring_session",
+        lambda self, holdout, bindings: "f" * 32,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        _ReleaseEvidenceResolver,
+        "_release_tests",
+        lambda self, selected_binding, cutoff: TestCounts(
+            expected=1, executed=1, skipped_required=0, failed=0
+        ),
+    )
+    monkeypatch.setattr(
+        _ReleaseEvidenceResolver,
+        "_corpus_hash",
+        lambda self, public, private, cutoff: "3" * 64,
+    )
+
+    public = evaluator = family = object()
+    resolution = ReleaseEvidenceFreezer.resolve(roots, public, evaluator, family, repository)
+    checked = ReleaseEvidenceIndex.derive(
+        resolution.selection, public, evaluator, family, repository
+    )
+
+    assert resolution.selection.public_case_run_ids == ["6" * 32, "5" * 32]
+    assert resolution.selection.private_case_run_ids == ["8" * 32, "7" * 32]
+    assert resolution.selection.acceptance_run_ids == {
+        "four_tools": ["9" * 32, "a" * 32],
+        "isolation": ["4" * 32],
+        "live_llm": ["d" * 32, "e" * 32],
+        "private_oracle": ["b" * 32, "c" * 32],
+    }
+    assert resolution.evidence.evidence_run_ids["private_scoring"] == [
+        "3" * 32,
+        "f" * 32,
+    ]
+    assert checked == resolution.evidence
+    assert checked.reason_codes == []
+
+
+def _scoring_session_fixture(tmp_path, repository, monkeypatch, fault=None):
+    from gpu_agent.benchmark.holdout import EvaluatorRecordBinding
+    from gpu_agent.benchmark.holdout_scoring import HoldoutScoringResult
+    from gpu_agent.benchmark.release import ReleaseEvidenceRoots, _ReleaseEvidenceResolver
+    from gpu_agent.contracts import ExternalRunOrigin, RunBinding, RunStatus
+    from gpu_agent.store import RunStore
+
+    public = RunStore(tmp_path / "public")
+    evaluator = RunStore(tmp_path / "evaluator", visibility="evaluator")
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id="4" * 32,
+    )
+    binding = RunBinding(
+        repository=repository,
+        purpose="evaluation",
+        toolchain_lock_hash="5" * 64,
+        prompt_version="v2",
+        model_config_hash="6" * 64,
+    )
+    schedule_payload = {"schedule": "holdout"}
+    records = [
+        SimpleNamespace(blind=(lambda ordinal=ordinal: {"blind_id": f"{5000 + ordinal:064x}"}))
+        for ordinal in range(120)
+    ]
+    record_hashes = {ordinal: f"{3000 + ordinal:064x}" for ordinal in range(120)}
+    schedule = SimpleNamespace(
+        corpus_cutoff=8,
+        holdout_proof=SimpleNamespace(aliases_hash="7" * 64),
+        model_dump=lambda mode: schedule_payload,
+    )
+    evidence = SimpleNamespace(
+        run=SimpleNamespace(id=roots.holdout_evaluation_run_id),
+        binding=binding,
+        schedule=schedule,
+        records=records,
+        record_hashes=record_hashes,
+    )
+    bindings = [
+        EvaluatorRecordBinding(
+            evaluator_score_run_id=f"{1000 + ordinal:032x}",
+            public_evaluation_run_id=roots.holdout_evaluation_run_id,
+            public_record_id=f"{2000 + ordinal:032x}",
+            public_record_hash=f"{3000 + ordinal:064x}",
+            private_case_id=f"private-{ordinal % 8}",
+            private_template_id=f"template-{ordinal % 8}",
+            private_score_hash=f"{4000 + ordinal:064x}",
+            corpus_cutoff=8,
+        )
+        for ordinal in range(120)
+    ]
+    metrics_payload = {"metrics": "exact"}
+    monkeypatch.setattr(
+        _ReleaseEvidenceResolver,
+        "_scoring_metrics",
+        lambda self, exact_bindings, selected_binding: metrics_payload,
+        raising=False,
+    )
+    resolver = _ReleaseEvidenceResolver(roots, public, evaluator, object(), repository)
+    if fault == "no_session":
+        return resolver, evidence, bindings
+
+    session_id = hashlib.sha256(
+        (
+            f"holdout-scoring-v1:{roots.holdout_evaluation_run_id}:{roots.private_binding_run_id}"
+        ).encode()
+    ).hexdigest()[:32]
+    origin_run_id = "8" * 32 if fault == "other_pair" else roots.holdout_evaluation_run_id
+    run = evaluator.create_run(
+        "holdout_scoring",
+        binding=binding,
+        external_origin=ExternalRunOrigin(run_id=origin_run_id, visibility="public"),
+        _run_id=session_id,
+    )
+    evaluator.transition(run.id, RunStatus.RUNNING, "PREPARING")
+    input_payload = {
+        "schema_version": 1,
+        "evaluation_run_id": roots.holdout_evaluation_run_id,
+        "private_binding_run_id": roots.private_binding_run_id,
+        "schedule_hash": hashlib.sha256(
+            json.dumps(schedule_payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest(),
+        "aliases_hash": "7" * 64,
+        "corpus_cutoff": 8,
+        "expected_record_count": 120,
+        "record_set_hash": hashlib.sha256(
+            json.dumps(
+                [
+                    [
+                        ordinal,
+                        record_hashes[ordinal],
+                        hashlib.sha256(
+                            json.dumps(
+                                records[ordinal].blind(),
+                                sort_keys=True,
+                                separators=(",", ":"),
+                            ).encode()
+                        ).hexdigest(),
+                    ]
+                    for ordinal in range(120)
+                ],
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+        "rubric_hash": "a" * 64,
+        "package_hash": "b" * 64,
+    }
+    if fault == "input":
+        input_payload["record_set_hash"] = "c" * 64
+        input_payload["unexpected"] = True
+    if fault == "other_pair":
+        input_payload["evaluation_run_id"] = origin_run_id
+    input_content = json.dumps(input_payload, sort_keys=True, separators=(",", ":")).encode()
+    ordered = list(reversed(bindings)) if fault == "bindings_order" else bindings
+    bindings_content = json.dumps(
+        [item.model_dump(mode="json") for item in ordered],
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    stored_metrics = {"metrics": "altered"} if fault == "metrics" else metrics_payload
+    metrics_content = json.dumps(stored_metrics, sort_keys=True, separators=(",", ":")).encode()
+    result = HoldoutScoringResult(
+        scoring_run_id=session_id,
+        evaluation_run_id=roots.holdout_evaluation_run_id,
+        private_binding_run_id=roots.private_binding_run_id,
+        package_hash="b" * 64,
+        input_binding_hash=hashlib.sha256(input_content).hexdigest(),
+        bindings_hash=hashlib.sha256(bindings_content).hexdigest(),
+        metrics_hash=(
+            "d" * 64 if fault == "result_hash" else hashlib.sha256(metrics_content).hexdigest()
+        ),
+    )
+    for name, content in (
+        ("input-binding", input_content),
+        ("bindings", bindings_content),
+        ("metrics", metrics_content),
+        (
+            "result",
+            json.dumps(
+                result.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode(),
+        ),
+    ):
+        evaluator.put(run.id, f"holdout-scoring/{name}.json", content, "evaluator")
+    if fault == "failed":
+        evaluator.transition(run.id, RunStatus.FAILED, None)
+    elif fault != "running":
+        evaluator.transition(run.id, RunStatus.RUNNING, "FINALIZING")
+        evaluator.transition(run.id, RunStatus.COMPLETED, None)
+    return resolver, evidence, bindings
+
+
+def test_release_resolver_requires_exact_completed_scoring_session(
+    tmp_path, repository, monkeypatch
+):
+    resolver, holdout, bindings = _scoring_session_fixture(tmp_path, repository, monkeypatch)
+
+    assert (
+        resolver._scoring_session(holdout, bindings)
+        == hashlib.sha256((f"holdout-scoring-v1:{'2' * 32}:{'3' * 32}").encode()).hexdigest()[:32]
+    )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "no_session",
+        "running",
+        "failed",
+        "input",
+        "bindings_order",
+        "metrics",
+        "result_hash",
+        "other_pair",
+    ],
+)
+def test_release_resolver_rejects_inexact_scoring_session(tmp_path, repository, monkeypatch, fault):
+    resolver, holdout, bindings = _scoring_session_fixture(tmp_path, repository, monkeypatch, fault)
+
+    with pytest.raises(ValueError) as error:
+        resolver._scoring_session(holdout, bindings)
+
+    assert getattr(error.value, "code", None) == "PRIVATE_SCORING_INCOMPLETE"
+
+
+def test_release_resolver_rejects_duplicate_mode_e_diagnosis_ids(tmp_path, repository):
+    from gpu_agent.benchmark.release import ReleaseEvidenceRoots, _ReleaseEvidenceResolver
+    from gpu_agent.store import RunStore
+
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id="4" * 32,
+    )
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        RunStore(tmp_path / "public"),
+        RunStore(tmp_path / "evaluator", visibility="evaluator"),
+        object(),
+        repository,
+    )
+    duplicate = "5" * 32
+    evaluation = SimpleNamespace(
+        schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
+        records=[SimpleNamespace(lineage=SimpleNamespace(diagnosis_run_id=duplicate))],
+    )
+    public_cases = {"case": SimpleNamespace(validation_run_ids=["6" * 32, "7" * 32])}
+
+    with pytest.raises(ValueError) as error:
+        resolver._acceptance(
+            public_cases,
+            evaluation,
+            evaluation,
+            {"8" * 32},
+        )
+
+    assert getattr(error.value, "code", None) == "RELEASE_ACCEPTANCE_INVALID"
