@@ -96,6 +96,42 @@ gpu_agent = ["execution/trusted_sources.json"]
 "share/agentic-gpu-debugger/benchmarks/public/case_0004/public_input" = [
   "benchmarks/public/case_0004/public_input/kernel.cu",
 ]
+"share/agentic-gpu-debugger/benchmarks/public/case_0005/public_input" = [
+  "benchmarks/public/case_0005/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0006/public_input" = [
+  "benchmarks/public/case_0006/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0007/public_input" = [
+  "benchmarks/public/case_0007/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0008/public_input" = [
+  "benchmarks/public/case_0008/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0009/public_input" = [
+  "benchmarks/public/case_0009/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0010/public_input" = [
+  "benchmarks/public/case_0010/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0011/public_input" = [
+  "benchmarks/public/case_0011/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0012/public_input" = [
+  "benchmarks/public/case_0012/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0013/public_input" = [
+  "benchmarks/public/case_0013/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0014/public_input" = [
+  "benchmarks/public/case_0014/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0015/public_input" = [
+  "benchmarks/public/case_0015/public_input/kernel.cu",
+]
+"share/agentic-gpu-debugger/benchmarks/public/case_0016/public_input" = [
+  "benchmarks/public/case_0016/public_input/kernel.cu",
+]
 "share/agentic-gpu-debugger/benchmarks/templates" = [
   "benchmarks/templates/mutations.json",
 ]

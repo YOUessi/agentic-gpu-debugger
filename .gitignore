@@ -19,3 +19,5 @@ private/
 .worktrees/
 .cache/gpu-agent/knowledge/
 .gpu-agent/
+/agentic-gpu-debugger-batch1-delivery.zip
+/agentic-gpu-debugger-current-integrated.zip
