@@ -78,6 +78,25 @@ def _private_regular(info: os.stat_result) -> bool:
     )
 
 
+def _open_directory_nofollow(path: Path) -> int:
+    if not path.is_absolute():
+        raise ValueError(_PATH_ERROR)
+    directory_fd = os.open(path.anchor, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        for part in path.parts[1:]:
+            child_fd = os.open(
+                part,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=directory_fd,
+            )
+            os.close(directory_fd)
+            directory_fd = child_fd
+        return directory_fd
+    except BaseException:
+        os.close(directory_fd)
+        raise
+
+
 def read_private_external(
     path: Path,
     *,
@@ -92,7 +111,7 @@ def read_private_external(
             repository=repository,
             forbidden_roots=forbidden_roots,
         )
-        parent_fd = os.open(resolved.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        parent_fd = _open_directory_nofollow(resolved.parent)
         try:
             path_info = os.stat(resolved.name, dir_fd=parent_fd, follow_symlinks=False)
             fd = os.open(
@@ -150,16 +169,11 @@ def _rename_noreplace(parent_fd: int, temporary: str, target: str) -> None:
 
 
 def _open_private_parent(path: Path) -> int:
-    parent_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    parent_fd = _open_directory_nofollow(path)
     try:
-        path_info = os.stat(path, follow_symlinks=False)
         fd_info = os.fstat(parent_fd)
         if (
             not stat.S_ISDIR(fd_info.st_mode)
-            or path_info.st_dev != fd_info.st_dev
-            or path_info.st_ino != fd_info.st_ino
-            or path_info.st_mode != fd_info.st_mode
-            or path_info.st_uid != fd_info.st_uid
             or fd_info.st_uid != os.geteuid()
             or fd_info.st_mode & 0o077
         ):
@@ -251,6 +265,7 @@ def write_private_atomic_new(
                 raise ValueError(_OUTPUT_ERROR) from exc
             if existing != content:
                 raise ValueError(_CONFLICT_ERROR) from None
+            os.fsync(parent_fd)
             return digest
         except OSError as exc:
             raise ValueError(_OUTPUT_ERROR) from exc

@@ -5,6 +5,12 @@ from schedule_authority_support import schedule_client_for_test
 from typer.testing import CliRunner
 
 
+def _private_json(path):
+    path.write_bytes(b"{}")
+    path.chmod(0o600)
+    return path
+
+
 @pytest.mark.parametrize("cap", [[], ["--max-cost-usd", "10"], ["--max-unit-cost-usd", "1"]])
 def test_missing_caps_exit_before_service_construction(monkeypatch, cap):
     from gpu_agent.cli import app
@@ -88,6 +94,57 @@ def test_release_commands_reject_artifacts_inside_configured_runstores_before_re
     assert result.exit_code == 2
     assert "RELEASE_ARTIFACT_PATH_INVALID" in result.output
     assert "PRIVATE_CONTROLLER_BYTES" not in result.output
+
+
+@pytest.mark.parametrize(
+    "command,reason_code",
+    [
+        ("derive-manifest", "RELEASE_EVIDENCE_INCOMPLETE"),
+        ("check", "RELEASE_EVIDENCE_INVALID"),
+    ],
+)
+def test_release_commands_sanitize_family_setup_oserrors(
+    tmp_path, monkeypatch, command, reason_code
+):
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.cli import app
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    family = CorpusFamily.provision(
+        tmp_path / "PRIVATE_FAMILY_ROOT",
+        public_store=tmp_path / "public",
+        evaluator_store=tmp_path / "evaluator",
+        repository=repository,
+    )
+    ledger = family.root / "ledger"
+    for child in ledger.iterdir():
+        child.unlink()
+    ledger.rmdir()
+    ledger.write_bytes(b"PRIVATE_FAMILY_BYTES")
+    ledger.chmod(0o600)
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
+    external = tmp_path / "external"
+    external.mkdir(mode=0o700)
+    selection = _private_json(external / "selection.json")
+    manifest = _private_json(external / "manifest.json")
+    arguments = [
+        "release",
+        command,
+        "--selection",
+        str(selection),
+        "--repository",
+        str(repository),
+    ]
+    if command == "check":
+        arguments.extend(["--manifest", str(manifest)])
+
+    result = CliRunner().invoke(app, arguments)
+
+    assert result.exit_code == 2
+    assert reason_code in result.output
+    assert str(family.root) not in result.output
+    assert "PRIVATE_FAMILY" not in result.output
 
 
 @pytest.mark.parametrize("visibility", ["public", "evaluator"])

@@ -92,7 +92,7 @@ def release_derive_manifest(
         raise typer.BadParameter("RELEASE_ARTIFACT_PATH_INVALID") from None
     try:
         family, forbidden_roots = _release_artifact_context()
-    except ValueError:
+    except (OSError, ValueError):
         raise typer.BadParameter("RELEASE_EVIDENCE_INCOMPLETE") from None
     try:
         selection = validate_external_release_artifact_path(
@@ -136,7 +136,7 @@ def release_check(
         raise typer.BadParameter("RELEASE_ARTIFACT_PATH_INVALID") from None
     try:
         family, forbidden_roots = _release_artifact_context()
-    except ValueError:
+    except (OSError, ValueError):
         raise typer.BadParameter("RELEASE_EVIDENCE_INVALID") from None
     try:
         manifest = validate_external_release_artifact_path(

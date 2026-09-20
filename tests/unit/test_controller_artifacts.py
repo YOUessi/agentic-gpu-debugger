@@ -212,6 +212,49 @@ def test_private_reader_reads_valid_owner_only_file(tmp_path):
     ) == b'{"private":true}'
 
 
+def test_private_reader_rejects_ancestor_replaced_by_repository_symlink(
+    tmp_path, monkeypatch
+):
+    from gpu_agent.benchmark import controller_artifacts
+
+    repository = tmp_path / "repository"
+    repository_parent = repository / "private"
+    repository_parent.mkdir(parents=True, mode=0o700)
+    repository_file = _private_file(repository_parent / "labels.json", b"repository-secret")
+    external_ancestor = tmp_path / "controller" / "ancestor"
+    external_parent = external_ancestor / "private"
+    external_parent.mkdir(parents=True, mode=0o700)
+    external_file = _private_file(external_parent / "labels.json", b"external")
+    displaced = tmp_path / "displaced-reader-ancestor"
+    native_validate = controller_artifacts.validate_external_artifact_path
+
+    def replace_after_validation(path, *, repository, forbidden_roots=()):
+        resolved = native_validate(
+            path,
+            repository=repository,
+            forbidden_roots=forbidden_roots,
+        )
+        external_ancestor.rename(displaced)
+        external_ancestor.symlink_to(repository, target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(
+        controller_artifacts,
+        "validate_external_artifact_path",
+        replace_after_validation,
+    )
+
+    with pytest.raises(ValueError, match="private external artifact is unsafe"):
+        read_private_external(
+            external_file,
+            repository=repository,
+            forbidden_roots=(),
+            limit=1024,
+        )
+
+    assert repository_file.read_bytes() == b"repository-secret"
+
+
 def test_atomic_writer_publishes_new_owner_only_file(tmp_path):
     output = _secure_parent(tmp_path) / "selection.json"
     content = b'{"selection":true}'
@@ -228,6 +271,47 @@ def test_atomic_writer_publishes_new_owner_only_file(tmp_path):
     assert list(output.parent.iterdir()) == [output]
 
 
+def test_atomic_writer_rejects_ancestor_replaced_by_repository_symlink(
+    tmp_path, monkeypatch
+):
+    from gpu_agent.benchmark import controller_artifacts
+
+    repository = tmp_path / "repository"
+    repository_parent = repository / "private"
+    repository_parent.mkdir(parents=True, mode=0o700)
+    external_ancestor = tmp_path / "controller" / "ancestor"
+    external_parent = external_ancestor / "private"
+    external_parent.mkdir(parents=True, mode=0o700)
+    output = external_parent / "selection.json"
+    displaced = tmp_path / "displaced-writer-ancestor"
+    native_validate = controller_artifacts.validate_external_artifact_path
+
+    def replace_after_validation(path, *, repository, forbidden_roots=()):
+        resolved = native_validate(
+            path,
+            repository=repository,
+            forbidden_roots=forbidden_roots,
+        )
+        external_ancestor.rename(displaced)
+        external_ancestor.symlink_to(repository, target_is_directory=True)
+        return resolved
+
+    monkeypatch.setattr(
+        controller_artifacts,
+        "validate_external_artifact_path",
+        replace_after_validation,
+    )
+
+    with pytest.raises(ValueError, match="external artifact output is unsafe"):
+        write_private_atomic_new(
+            output,
+            b"private-selection",
+            repository=repository,
+        )
+
+    assert not (repository_parent / "selection.json").exists()
+
+
 def test_atomic_writer_accepts_byte_identical_retry_without_replacing_target(tmp_path):
     output = _secure_parent(tmp_path) / "selection.json"
     content = b'{"selection":true}'
@@ -239,6 +323,34 @@ def test_atomic_writer_accepts_byte_identical_retry_without_replacing_target(tmp
     assert observed == expected
     assert output.stat().st_ino == inode
     assert output.read_bytes() == content
+
+
+def test_atomic_writer_identical_retry_recovers_parent_fsync_failure(tmp_path, monkeypatch):
+    from gpu_agent.benchmark import controller_artifacts
+
+    output = _secure_parent(tmp_path) / "selection.json"
+    content = b'{"selection":true}'
+    native_fsync = controller_artifacts.os.fsync
+    parent_sync_attempts = 0
+
+    def fail_first_parent_sync(fd):
+        nonlocal parent_sync_attempts
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            parent_sync_attempts += 1
+            if parent_sync_attempts == 1:
+                raise OSError(errno.EIO, "simulated parent fsync failure")
+        return native_fsync(fd)
+
+    monkeypatch.setattr(controller_artifacts.os, "fsync", fail_first_parent_sync)
+
+    with pytest.raises(ValueError, match="external artifact output is unsafe"):
+        write_private_atomic_new(output, content, repository=tmp_path / "repo")
+    assert output.read_bytes() == content
+
+    digest = write_private_atomic_new(output, content, repository=tmp_path / "repo")
+
+    assert digest == hashlib.sha256(content).hexdigest()
+    assert parent_sync_attempts == 2
 
 
 def test_atomic_writer_never_overwrites_different_content(tmp_path):
