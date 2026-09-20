@@ -65,6 +65,19 @@ def _holdout_scoring_error_code(exc: OSError | ValueError) -> str:
     return "HOLDOUT_SCORING_EVIDENCE_MISMATCH"
 
 
+def _release_freeze_error_code(exc: OSError | ValueError) -> str:
+    message = str(exc)
+    if "output conflicts" in message:
+        return "RELEASE_SELECTION_OUTPUT_CONFLICT"
+    if "output is unsafe" in message or "artifact path is unsafe" in message:
+        return "RELEASE_SELECTION_OUTPUT_UNSAFE"
+    if "repository changed" in message:
+        return "RELEASE_REPOSITORY_CHANGED"
+    if "evidence is incomplete" in message:
+        return "RELEASE_EVIDENCE_INCOMPLETE"
+    return "RELEASE_ROOTS_INVALID"
+
+
 def _derive_release_evidence(
     selection_path: Path,
     repository: Path,
@@ -234,6 +247,52 @@ def release_collect_evidence(
     except (OSError, ValueError):
         raise typer.BadParameter("RELEASE_TEST_EVIDENCE_FAILED") from None
     typer.echo(f"release_test_run_id {run_id}")
+
+
+@release_app.command("freeze-selection")
+def release_freeze_selection(
+    development_evaluation_run_id: Annotated[str, typer.Option("--development-evaluation-run-id")],
+    holdout_evaluation_run_id: Annotated[str, typer.Option("--holdout-evaluation-run-id")],
+    private_binding_run_id: Annotated[str, typer.Option("--private-binding-run-id")],
+    release_test_run_id: Annotated[str, typer.Option("--release-test-run-id")],
+    output: Annotated[Path, typer.Option("--output")],
+    repository: Annotated[Path, typer.Option("--repository")],
+) -> None:
+    """Gate and atomically publish a canonical four-root release selection."""
+    from gpu_agent.benchmark.controller_artifacts import validate_external_artifact_path
+    from gpu_agent.benchmark.release import ReleaseEvidenceFreezer, ReleaseEvidenceRoots
+
+    try:
+        if not repository.is_absolute():
+            raise ValueError("release roots are invalid")
+        family, forbidden_roots = _release_artifact_context()
+        output = validate_external_artifact_path(
+            output,
+            repository=repository,
+            forbidden_roots=forbidden_roots,
+        )
+        roots = ReleaseEvidenceRoots(
+            development_evaluation_run_id=development_evaluation_run_id,
+            holdout_evaluation_run_id=holdout_evaluation_run_id,
+            private_binding_run_id=private_binding_run_id,
+            release_test_run_id=release_test_run_id,
+        )
+        frozen = ReleaseEvidenceFreezer().freeze(
+            roots,
+            family.corpus_store("public"),
+            family.corpus_store("evaluator"),
+            family,
+            repository,
+            output,
+        )
+    except (OSError, ValueError) as exc:
+        raise typer.BadParameter(_release_freeze_error_code(exc)) from None
+    typer.echo(f"selection_path {frozen.output}")
+    typer.echo(f"selection_sha256 {frozen.selection_sha256}")
+    typer.echo(f"corpus_cutoff {frozen.corpus_cutoff}")
+    typer.echo(f"public_case_count {frozen.public_case_count}")
+    typer.echo(f"private_case_count {frozen.private_case_count}")
+    typer.echo(f"acceptance_run_count {frozen.acceptance_run_count}")
 
 
 @benchmark_app.command("provision-family")

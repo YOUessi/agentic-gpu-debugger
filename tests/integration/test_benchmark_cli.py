@@ -532,3 +532,291 @@ def test_score_holdout_publishes_exact_private_metrics_and_safe_stdout(tmp_path,
             path.read_bytes() for path in root.rglob("*") if path.is_file()
         )
     assert canary not in result.stdout_bytes and canary not in result.stderr_bytes
+
+
+def _freeze_cli_args(repository, output):
+    return [
+        "release",
+        "freeze-selection",
+        "--development-evaluation-run-id",
+        "1" * 32,
+        "--holdout-evaluation-run-id",
+        "2" * 32,
+        "--private-binding-run-id",
+        "3" * 32,
+        "--release-test-run-id",
+        "4" * 32,
+        "--output",
+        str(output),
+        "--repository",
+        str(repository),
+    ]
+
+
+@pytest.mark.parametrize(
+    "failure,code",
+    [
+        (ValueError("release roots are invalid"), "RELEASE_ROOTS_INVALID"),
+        (
+            ValueError("release evidence is incomplete: CORPUS_COUNT_INSUFFICIENT"),
+            "RELEASE_EVIDENCE_INCOMPLETE",
+        ),
+        (ValueError("release repository changed"), "RELEASE_REPOSITORY_CHANGED"),
+        (
+            ValueError("external artifact output is unsafe"),
+            "RELEASE_SELECTION_OUTPUT_UNSAFE",
+        ),
+        (
+            ValueError("external artifact output conflicts"),
+            "RELEASE_SELECTION_OUTPUT_CONFLICT",
+        ),
+    ],
+)
+def test_freeze_selection_maps_stable_private_errors(tmp_path, monkeypatch, failure, code):
+    from gpu_agent.benchmark.release import ReleaseEvidenceFreezer
+    from gpu_agent.cli import app
+
+    _, repository, _, _ = _holdout_cli_family(tmp_path, monkeypatch)
+    output_parent = tmp_path / "output"
+    output_parent.mkdir(mode=0o700)
+
+    def fail(*_args, **_kwargs):
+        raise failure
+
+    monkeypatch.setattr(ReleaseEvidenceFreezer, "freeze", fail)
+    result = CliRunner().invoke(
+        app,
+        _freeze_cli_args(repository, output_parent / "selection.json"),
+    )
+
+    assert result.exit_code == 2
+    assert code in result.output
+    assert "CORPUS_COUNT_INSUFFICIENT" not in result.output
+
+
+def test_freeze_selection_prints_only_safe_aggregates(tmp_path, monkeypatch):
+    from gpu_agent.benchmark.release import (
+        FrozenReleaseSelection,
+        ReleaseEvidenceFreezer,
+        ReleaseEvidenceSelection,
+    )
+    from gpu_agent.cli import app
+    from gpu_agent.contracts import RepositorySnapshot
+
+    _, repository, _, _ = _holdout_cli_family(tmp_path, monkeypatch)
+    output_parent = tmp_path / "output"
+    output_parent.mkdir(mode=0o700)
+    output = output_parent / "selection.json"
+    snapshot = RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True)
+    selection = ReleaseEvidenceSelection(
+        repository=snapshot,
+        public_case_run_ids=["5" * 32],
+        private_case_run_ids=["6" * 32],
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        acceptance_run_ids={
+            "four_tools": ["7" * 32],
+            "isolation": ["4" * 32],
+            "live_llm": ["8" * 32],
+            "private_oracle": ["9" * 32],
+        },
+        release_test_run_id="4" * 32,
+    )
+    frozen = FrozenReleaseSelection(
+        output=output,
+        selection=selection,
+        selection_sha256="c" * 64,
+        corpus_cutoff=24,
+        public_case_count=16,
+        private_case_count=8,
+        acceptance_run_count=4,
+    )
+    canaries = (
+        "PRIVATE_ALIAS_CANARY",
+        "PRIVATE_NONCE_CANARY",
+        "PRIVATE_LABEL_CANARY",
+        "PRIVATE_CASE_CANARY",
+        "PRIVATE_TEMPLATE_CANARY",
+        "/private/evaluator/artifact/path",
+    )
+
+    monkeypatch.setattr(ReleaseEvidenceFreezer, "freeze", lambda *_args, **_kwargs: frozen)
+    result = CliRunner().invoke(app, _freeze_cli_args(repository, output))
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == (
+        f"selection_path {output}\n"
+        f"selection_sha256 {'c' * 64}\n"
+        "corpus_cutoff 24\n"
+        "public_case_count 16\n"
+        "private_case_count 8\n"
+        "acceptance_run_count 4\n"
+    )
+    assert all(canary not in result.stdout + result.stderr for canary in canaries)
+
+
+@pytest.mark.parametrize("location", ["relative", "repository", "public", "evaluator"])
+def test_freeze_selection_rejects_unsafe_output_before_freezing(tmp_path, monkeypatch, location):
+    from gpu_agent.benchmark.release import ReleaseEvidenceFreezer
+    from gpu_agent.cli import app
+
+    family, repository, _, _ = _holdout_cli_family(tmp_path, monkeypatch)
+    if location == "relative":
+        output = "selection.json"
+    else:
+        root = {
+            "repository": repository,
+            "public": family.corpus_store("public").root,
+            "evaluator": family.corpus_store("evaluator").root,
+        }[location]
+        output = root / "selection.json"
+    calls = []
+    monkeypatch.setattr(ReleaseEvidenceFreezer, "freeze", lambda *_args: calls.append(True))
+
+    result = CliRunner().invoke(app, _freeze_cli_args(repository, output))
+
+    assert result.exit_code == 2
+    assert "RELEASE_SELECTION_OUTPUT_UNSAFE" in result.output
+    assert not calls
+
+
+def test_freeze_selection_round_trips_through_derive_and_check_read_only(tmp_path, monkeypatch):
+    from gpu_agent import provenance
+    from gpu_agent.benchmark.release import (
+        ReleaseEvidenceFreezer,
+        ReleaseEvidenceIndex,
+        ReleaseEvidenceResolution,
+        ReleaseEvidenceSelection,
+        ReleaseManifest,
+        TestCounts,
+    )
+    from gpu_agent.cli import _derive_release_evidence, app
+    from gpu_agent.contracts import RepositorySnapshot
+
+    family, repository, _, _ = _holdout_cli_family(tmp_path, monkeypatch)
+    public = family.corpus_store("public")
+    evaluator = family.corpus_store("evaluator")
+    evaluator_canary = evaluator.root / ".PRIVATE-EVALUATOR-PATH-CANARY"
+    evaluator_canary.write_bytes(b"PRIVATE-LABEL-NONCE-ALIAS-CANARY")
+    snapshot = RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True)
+    selection = ReleaseEvidenceSelection(
+        repository=snapshot,
+        public_case_run_ids=["5" * 32],
+        private_case_run_ids=["6" * 32],
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        acceptance_run_ids={
+            "four_tools": ["7" * 32],
+            "isolation": ["4" * 32],
+            "live_llm": ["8" * 32],
+            "private_oracle": ["9" * 32],
+        },
+        release_test_run_id="4" * 32,
+    )
+    evidence_ids = {
+        **selection.acceptance_run_ids,
+        "five_mode_evaluation": ["1" * 32, "2" * 32],
+        "public_corpus": selection.public_case_run_ids,
+        "private_corpus": selection.private_case_run_ids,
+        "private_scoring": ["3" * 32, "a" * 32],
+        "release_tests": ["4" * 32],
+    }
+    evidence = ReleaseEvidenceIndex(
+        repository=snapshot,
+        toolchain_hash="c" * 64,
+        corpus_hash="d" * 64,
+        model_config_hash="e" * 64,
+        prompt_version="v2",
+        corpus_cutoff=24,
+        test_counts=TestCounts(expected=12, executed=12, skipped_required=0, failed=0),
+        public_case_count=16,
+        private_case_count=8,
+        private_template_count=8,
+        private_operator_count=8,
+        public_tool_case_counts={
+            "memcheck": 4,
+            "racecheck": 4,
+            "initcheck": 4,
+            "synccheck": 4,
+        },
+        development_units=240,
+        holdout_units=120,
+        evaluation_modes=["A", "B", "C", "D", "E"],
+        evaluation_repeats=3,
+        evidence_run_ids=evidence_ids,
+    )
+    monkeypatch.setattr(
+        ReleaseEvidenceFreezer,
+        "expected_development_commit",
+        staticmethod(lambda *_args, **_kwargs: snapshot.commit),
+    )
+    monkeypatch.setattr(
+        ReleaseEvidenceFreezer,
+        "capture_repository",
+        staticmethod(lambda *_args, **_kwargs: snapshot),
+    )
+    monkeypatch.setattr(
+        ReleaseEvidenceFreezer,
+        "resolve",
+        staticmethod(
+            lambda *_args, **_kwargs: ReleaseEvidenceResolution(
+                selection=selection,
+                evidence=evidence,
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        provenance,
+        "capture_repository_snapshot",
+        lambda *_args, **_kwargs: snapshot,
+    )
+    observed = []
+
+    def derive(cls, parsed, *args):
+        observed.append((parsed, args))
+        return evidence
+
+    monkeypatch.setattr(ReleaseEvidenceIndex, "derive", classmethod(derive))
+    output_parent = tmp_path / "output"
+    output_parent.mkdir(mode=0o700)
+    selection_path = output_parent / "selection.json"
+    before = (_tree_bytes(public.root), _tree_bytes(evaluator.root), _tree_bytes(family.root))
+
+    frozen = CliRunner().invoke(app, _freeze_cli_args(repository, selection_path))
+    derived = _derive_release_evidence(
+        selection_path,
+        repository,
+        family=family,
+        forbidden_roots=(public.root, evaluator.root),
+    )
+    manifest_path = output_parent / "manifest.json"
+    manifest_path.write_bytes(ReleaseManifest.from_evidence(derived).model_dump_json().encode())
+    manifest_path.chmod(0o600)
+    checked = CliRunner().invoke(
+        app,
+        [
+            "release",
+            "check",
+            "--manifest",
+            str(manifest_path),
+            "--selection",
+            str(selection_path),
+            "--repository",
+            str(repository),
+        ],
+    )
+
+    assert frozen.exit_code == 0, frozen.output
+    assert checked.exit_code == 0, checked.output
+    assert '"passed": true' in checked.stdout
+    assert derived == evidence
+    assert [item[0] for item in observed] == [selection, selection]
+    assert b"PRIVATE-LABEL-NONCE-ALIAS-CANARY" not in selection_path.read_bytes()
+    assert "PRIVATE" not in frozen.stdout + frozen.stderr
+    assert (
+        _tree_bytes(public.root),
+        _tree_bytes(evaluator.root),
+        _tree_bytes(family.root),
+    ) == before

@@ -18,7 +18,10 @@ from typing import Literal
 
 from pydantic import Field, TypeAdapter, model_validator
 
-from gpu_agent.benchmark.controller_artifacts import validate_external_artifact_path
+from gpu_agent.benchmark.controller_artifacts import (
+    validate_external_artifact_path,
+    write_private_atomic_new,
+)
 from gpu_agent.benchmark.evaluation import (
     EvaluationAttempt,
     EvaluationManifest,
@@ -42,6 +45,7 @@ from gpu_agent.contracts import (
     RunStatus,
 )
 from gpu_agent.execution.models import ExecutionModel, SanitizerTool
+from gpu_agent.provenance import capture_repository_snapshot
 from gpu_agent.store import RunStore
 
 
@@ -274,6 +278,18 @@ class ReleaseEvidenceResolution(ExecutionModel):
 
     selection: ReleaseEvidenceSelection
     evidence: ReleaseEvidenceIndex
+
+
+class FrozenReleaseSelection(ExecutionModel):
+    """Safe publication summary for one canonical release selection."""
+
+    output: Path
+    selection: ReleaseEvidenceSelection
+    selection_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    corpus_cutoff: int = Field(ge=1)
+    public_case_count: int = Field(ge=0)
+    private_case_count: int = Field(ge=0)
+    acceptance_run_count: int = Field(ge=0)
 
 
 class ReleaseGateResult(ExecutionModel):
@@ -1106,6 +1122,19 @@ class _ReleaseEvidenceResolver:
 class ReleaseEvidenceFreezer:
     """Resolve four explicit roots into one canonical release selection."""
 
+    capture_repository = staticmethod(capture_repository_snapshot)
+
+    @staticmethod
+    def expected_development_commit(roots: ReleaseEvidenceRoots, public_store: RunStore) -> str:
+        """Read only the selected development root needed to bind the first snapshot."""
+        try:
+            run = public_store.load(roots.development_evaluation_run_id)
+            if run.kind != "evaluation" or run.binding is None:
+                raise ValueError("selected development root is invalid")
+            return run.binding.repository.commit
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise ValueError("release roots are invalid") from exc
+
     @staticmethod
     def resolve(
         roots: ReleaseEvidenceRoots,
@@ -1121,6 +1150,72 @@ class ReleaseEvidenceFreezer:
             corpus_family,
             actual_repository,
         ).resolve()
+
+    def freeze(
+        self,
+        roots: ReleaseEvidenceRoots,
+        public_store: RunStore,
+        evaluator_store: RunStore,
+        corpus_family: CorpusFamily,
+        repository: Path,
+        output: Path,
+    ) -> FrozenReleaseSelection:
+        """Gate and atomically publish the selection derived from exactly four roots."""
+        try:
+            expected_commit = self.expected_development_commit(roots, public_store)
+            actual = self.capture_repository(repository, expected_commit=expected_commit)
+            resolution = self.resolve(
+                roots,
+                public_store,
+                evaluator_store,
+                corpus_family,
+                actual,
+            )
+        except _ReleaseEvidenceError as exc:
+            raise ValueError(f"release roots are invalid: {exc.code}") from exc
+        except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+            raise ValueError("release roots are invalid") from exc
+
+        evidence = resolution.evidence
+        try:
+            manifest = ReleaseManifest.from_evidence(evidence)
+        except ValueError as exc:
+            raise ValueError("release evidence is incomplete") from exc
+        gate = ReleaseGate().check(manifest, evidence)
+        if not gate.passed:
+            raise ValueError("release evidence is incomplete: " + ",".join(gate.reason_codes))
+        cutoff = evidence.corpus_cutoff
+        if cutoff is None:
+            raise ValueError("release evidence is incomplete")
+
+        try:
+            recaptured = self.capture_repository(
+                repository,
+                expected_commit=actual.commit,
+            )
+        except (OSError, ValueError) as exc:
+            raise ValueError("release repository changed") from exc
+        if recaptured != actual:
+            raise ValueError("release repository changed")
+
+        content = resolution.selection.model_dump_json(indent=2).encode() + b"\n"
+        digest = write_private_atomic_new(
+            output,
+            content,
+            repository=repository,
+            forbidden_roots=(public_store.root, evaluator_store.root),
+        )
+        return FrozenReleaseSelection(
+            output=output,
+            selection=resolution.selection,
+            selection_sha256=digest,
+            corpus_cutoff=cutoff,
+            public_case_count=evidence.public_case_count,
+            private_case_count=evidence.private_case_count,
+            acceptance_run_count=sum(
+                len(run_ids) for run_ids in resolution.selection.acceptance_run_ids.values()
+            ),
+        )
 
 
 def _one(run: RunManifest, name: str) -> ArtifactRef:

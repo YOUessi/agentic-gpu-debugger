@@ -1,5 +1,6 @@
 import hashlib
 import json
+import stat
 from types import SimpleNamespace
 
 import pytest
@@ -733,3 +734,250 @@ def test_release_resolver_rejects_duplicate_mode_e_diagnosis_ids(tmp_path, repos
         )
 
     assert getattr(error.value, "code", None) == "RELEASE_ACCEPTANCE_INVALID"
+
+
+def _freeze_resolution(repository, evidence):
+    from gpu_agent.benchmark.release import ReleaseEvidenceResolution
+
+    return ReleaseEvidenceResolution(selection=_selection(repository), evidence=evidence)
+
+
+def _freezer_stores(tmp_path):
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.store import RunStore
+
+    public = RunStore(tmp_path / "public")
+    evaluator = RunStore(tmp_path / "evaluator", visibility="evaluator")
+    family = CorpusFamily.provision(
+        tmp_path / "controller",
+        public_store=public.root,
+        evaluator_store=evaluator.root,
+        repository=tmp_path / "repository",
+    )
+    return public, evaluator, family
+
+
+def _freezer_roots():
+    from gpu_agent.benchmark.release import ReleaseEvidenceRoots
+
+    return ReleaseEvidenceRoots(
+        development_evaluation_run_id="3" * 32,
+        holdout_evaluation_run_id="4" * 32,
+        private_binding_run_id="5" * 32,
+        release_test_run_id="a" * 32,
+    )
+
+
+def test_freezer_gate_precedes_private_atomic_publication(
+    tmp_path, repository, evidence, monkeypatch
+):
+    from gpu_agent.benchmark.release import ReleaseEvidenceFreezer, ReleaseEvidenceIndex
+
+    public, evaluator, family = _freezer_stores(tmp_path)
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir(exist_ok=True)
+    output_parent = tmp_path / "output"
+    output_parent.mkdir(mode=0o700)
+    output = output_parent / "selection.json"
+    incomplete = ReleaseEvidenceIndex.model_validate(
+        {**evidence.model_dump(), "public_case_count": 15}
+    )
+    freezer = ReleaseEvidenceFreezer()
+    monkeypatch.setattr(
+        freezer,
+        "expected_development_commit",
+        lambda *_args, **_kwargs: repository.commit,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        freezer,
+        "capture_repository",
+        lambda *_args, **_kwargs: repository,
+    )
+    monkeypatch.setattr(
+        freezer,
+        "resolve",
+        lambda *_args, **_kwargs: _freeze_resolution(repository, incomplete),
+    )
+
+    with pytest.raises(ValueError, match="CORPUS_COUNT_INSUFFICIENT"):
+        freezer.freeze(_freezer_roots(), public, evaluator, family, repository_path, output)
+
+    assert not output.exists()
+
+
+def test_freezer_preserves_resolver_reason_code_without_publication(
+    tmp_path, repository, monkeypatch
+):
+    from gpu_agent.benchmark.release import (
+        ReleaseEvidenceFreezer,
+        _ReleaseEvidenceError,
+    )
+
+    public, evaluator, family = _freezer_stores(tmp_path)
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir(exist_ok=True)
+    output_parent = tmp_path / "output"
+    output_parent.mkdir(mode=0o700)
+    output = output_parent / "selection.json"
+    freezer = ReleaseEvidenceFreezer()
+    monkeypatch.setattr(
+        freezer,
+        "expected_development_commit",
+        lambda *_args, **_kwargs: repository.commit,
+    )
+    monkeypatch.setattr(
+        freezer,
+        "capture_repository",
+        lambda *_args, **_kwargs: repository,
+    )
+
+    def reject(*_args, **_kwargs):
+        raise _ReleaseEvidenceError("PRIVATE_SCORING_INCOMPLETE")
+
+    monkeypatch.setattr(freezer, "resolve", reject)
+
+    with pytest.raises(ValueError, match="PRIVATE_SCORING_INCOMPLETE"):
+        freezer.freeze(_freezer_roots(), public, evaluator, family, repository_path, output)
+
+    assert not output.exists()
+
+
+def test_freezer_requires_cutoff_before_publication(tmp_path, repository, evidence, monkeypatch):
+    from gpu_agent.benchmark.release import ReleaseEvidenceFreezer, ReleaseEvidenceIndex
+
+    public, evaluator, family = _freezer_stores(tmp_path)
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir(exist_ok=True)
+    output_parent = tmp_path / "output"
+    output_parent.mkdir(mode=0o700)
+    output = output_parent / "selection.json"
+    incomplete = ReleaseEvidenceIndex.model_validate(
+        {**evidence.model_dump(), "corpus_cutoff": None}
+    )
+    freezer = ReleaseEvidenceFreezer()
+    monkeypatch.setattr(
+        freezer,
+        "expected_development_commit",
+        lambda *_args, **_kwargs: repository.commit,
+    )
+    monkeypatch.setattr(
+        freezer,
+        "capture_repository",
+        lambda *_args, **_kwargs: repository,
+    )
+    monkeypatch.setattr(
+        freezer,
+        "resolve",
+        lambda *_args, **_kwargs: _freeze_resolution(repository, incomplete),
+    )
+
+    with pytest.raises(ValueError, match="release evidence is incomplete"):
+        freezer.freeze(_freezer_roots(), public, evaluator, family, repository_path, output)
+
+    assert not output.exists()
+
+
+def test_freezer_never_publishes_when_repository_changes(
+    tmp_path, repository, evidence, monkeypatch
+):
+    from gpu_agent.benchmark.release import ReleaseEvidenceFreezer
+    from gpu_agent.contracts import RepositorySnapshot
+
+    public, evaluator, family = _freezer_stores(tmp_path)
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir(exist_ok=True)
+    output_parent = tmp_path / "output"
+    output_parent.mkdir(mode=0o700)
+    output = output_parent / "selection.json"
+    changed = RepositorySnapshot(
+        commit=repository.commit,
+        tracked_tree_hash="0" * 64,
+        clean=True,
+    )
+    snapshots = iter((repository, changed))
+    freezer = ReleaseEvidenceFreezer()
+    monkeypatch.setattr(
+        freezer,
+        "expected_development_commit",
+        lambda *_args, **_kwargs: repository.commit,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        freezer,
+        "capture_repository",
+        lambda *_args, **_kwargs: next(snapshots),
+    )
+    monkeypatch.setattr(
+        freezer,
+        "resolve",
+        lambda *_args, **_kwargs: _freeze_resolution(repository, evidence),
+    )
+
+    with pytest.raises(ValueError, match="release repository changed"):
+        freezer.freeze(_freezer_roots(), public, evaluator, family, repository_path, output)
+
+    assert not output.exists()
+
+
+def test_freezer_publishes_canonical_private_selection_read_only(
+    tmp_path, repository, evidence, monkeypatch
+):
+    from gpu_agent.benchmark.release import FrozenReleaseSelection, ReleaseEvidenceFreezer
+
+    public, evaluator, family = _freezer_stores(tmp_path)
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir(exist_ok=True)
+    output_parent = tmp_path / "output"
+    output_parent.mkdir(mode=0o700)
+    output = output_parent / "selection.json"
+    resolution = _freeze_resolution(repository, evidence)
+    freezer = ReleaseEvidenceFreezer()
+    monkeypatch.setattr(
+        freezer,
+        "expected_development_commit",
+        lambda *_args, **_kwargs: repository.commit,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        freezer,
+        "capture_repository",
+        lambda *_args, **_kwargs: repository,
+    )
+    observed = []
+
+    def resolve(*args):
+        observed.append(args)
+        return resolution
+
+    monkeypatch.setattr(freezer, "resolve", resolve)
+    before = (_tree_bytes(public.root), _tree_bytes(evaluator.root), _tree_bytes(family.root))
+
+    frozen = freezer.freeze(_freezer_roots(), public, evaluator, family, repository_path, output)
+
+    assert isinstance(frozen, FrozenReleaseSelection)
+    assert observed == [(_freezer_roots(), public, evaluator, family, repository)]
+    expected = resolution.selection.model_dump_json(indent=2).encode() + b"\n"
+    assert output.read_bytes() == expected
+    assert stat.S_IMODE(output.stat().st_mode) == 0o600
+    assert frozen.output == output
+    assert frozen.selection == resolution.selection
+    assert frozen.selection_sha256 == hashlib.sha256(expected).hexdigest()
+    assert frozen.corpus_cutoff == evidence.corpus_cutoff
+    assert frozen.public_case_count == 16
+    assert frozen.private_case_count == 8
+    assert frozen.acceptance_run_count == sum(
+        len(run_ids) for run_ids in resolution.selection.acceptance_run_ids.values()
+    )
+    assert (
+        _tree_bytes(public.root),
+        _tree_bytes(evaluator.root),
+        _tree_bytes(family.root),
+    ) == before
+
+
+def _tree_bytes(root):
+    return {
+        str(path.relative_to(root)): path.read_bytes() if path.is_file() else None
+        for path in root.rglob("*")
+    }
