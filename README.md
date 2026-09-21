@@ -114,7 +114,11 @@ GPU 或容器验收；M1 仍需通过带 `--require-live` 的真实 OOB 闭环�
 五组评测 A–E 的协议见 [evaluation/protocol.md](evaluation/protocol.md)。完整批次至少为
 `24×5×3=360` 个单元；没有显式 API 费用上限时 runner 在第一次外部调用前停止。
 当前状态与边界见 [验收](docs/acceptance.md)、[评测](docs/evaluation-report.md) 和
-[限制](docs/limitations.md)。
+[限制](docs/limitations.md)。生产执行必须按
+[V2 操作员手册](docs/v2-operator-runbook.md) 依次完成外部 Ed25519 signer、16+8 注册、
+明确的总额/单元预算授权、240+120 评测、120 条盲评标签、score/collect/freeze/derive/check
+及构建发布。仓库不提供生产 signer，也不包含生产私钥；在真实原生证据通过最终 release
+check 之前，V2 仍为关闭状态，不得发布。
 
 ## M0：真实 clean kernel 验收
 

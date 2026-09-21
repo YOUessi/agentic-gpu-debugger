@@ -47,6 +47,9 @@ where = ["src"]
 gpu_agent = ["execution/trusted_sources.json"]
 
 [tool.setuptools.data-files]
+"share/agentic-gpu-debugger/docs" = [
+  "docs/v2-operator-runbook.md",
+]
 "share/agentic-gpu-debugger/containers" = [
   "containers/Dockerfile",
   "containers/runner.py",

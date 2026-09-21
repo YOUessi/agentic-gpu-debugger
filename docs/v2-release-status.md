@@ -28,7 +28,15 @@ work. A passing unit test or a configured command is not counted as a live GPU/m
 - Evidence-derived release gate that validates ledger membership, 16+8 counts, sanitizer
   coverage, private diversity, 240 development + 120 holdout units, same-commit/config/cutoff
   lineage, live acceptance selections, and release-test evidence.
+- Resumable evaluator-only scoring for one exact 120-record label package, canonical selection
+  freezing from four explicit roots, and no-replace publication outside the checkout/RunStores.
+- A production operator sequence for the external Ed25519 signer, family provisioning, 16+8
+  registration, explicit budget approval, 240+120 execution, scoring, freezing, and release.
 - Python 3.11/3.12 zero-cost CI, MIT distribution metadata, and verified sdist/wheel resources.
+
+The detailed sequence is [the V2 production evidence operator runbook](v2-operator-runbook.md).
+The repository contains only the external signer client and Ed25519 verification path; it ships
+no production signer or private key.
 
 ## Hard blockers before Portfolio Release
 
@@ -40,7 +48,8 @@ work. A passing unit test or a configured command is not counted as a live GPU/m
   reviewed price source, total cost cap, unit cap, and signed development/holdout schedules.
 - Execute all 360 A–E units serially, retaining failures, timeouts, inconclusive results,
   provider usage, latency, and cost.
-- Complete blind scoring/private score bindings and generate the real evaluation report.
+- Supply the canonical 120-record evaluator label package, complete blind scoring/private score
+  bindings, and generate the real evaluation report.
 - Capture a zero-skip, zero-failure release-test run on the same commit/config/cutoff.
 - Generate the selection and manifest under a controller-owned directory outside the Git
   checkout, set `GPU_AGENT_RELEASE_SELECTION` and `GPU_AGENT_RELEASE_MANIFEST` to those
@@ -48,23 +57,36 @@ work. A passing unit test or a configured command is not counted as a live GPU/m
   checkout. Repository-local release artifacts are rejected because they would invalidate the
   repository snapshot they claim to bind.
 
-The final gate uses the same external paths both as explicit CLI inputs and as the release-test
-environment:
+The final gate uses the same controller-owned external paths both as explicit CLI inputs and as
+the release-test environment. First freeze the selection from the four reviewed roots, then derive
+and check the manifest:
 
 ```bash
-export GPU_AGENT_RELEASE_SELECTION=/controller/release-selection.json
-export GPU_AGENT_RELEASE_MANIFEST=/controller/release-manifest.json
+export GPU_AGENT_RELEASE_SELECTION=/srv/gpu-agent-controller/release-v2/release-selection.json
+export GPU_AGENT_RELEASE_MANIFEST=/srv/gpu-agent-controller/release-v2/release-manifest.json
 
+gpu-agent release freeze-selection \
+  --development-evaluation-run-id DEVELOPMENT_EVALUATION_RUN_ID \
+  --holdout-evaluation-run-id HOLDOUT_EVALUATION_RUN_ID \
+  --private-binding-run-id PRIVATE_ALIAS_MAPPING_RUN_ID \
+  --release-test-run-id RELEASE_TEST_RUN_ID \
+  --output /srv/gpu-agent-controller/release-v2/release-selection.json \
+  --repository /opt/releases/agentic-gpu-debugger
+
+umask 077
+set -o noclobber
 gpu-agent release derive-manifest \
-  --selection "$GPU_AGENT_RELEASE_SELECTION" \
-  --repository /path/to/clean/agentic-gpu-debugger \
-  >"$GPU_AGENT_RELEASE_MANIFEST"
+  --selection /srv/gpu-agent-controller/release-v2/release-selection.json \
+  --repository /opt/releases/agentic-gpu-debugger \
+  >/srv/gpu-agent-controller/release-v2/release-manifest.json
+set +o noclobber
 
 gpu-agent release check \
-  --selection "$GPU_AGENT_RELEASE_SELECTION" \
-  --manifest "$GPU_AGENT_RELEASE_MANIFEST" \
-  --repository /path/to/clean/agentic-gpu-debugger
+  --selection /srv/gpu-agent-controller/release-v2/release-selection.json \
+  --manifest /srv/gpu-agent-controller/release-v2/release-manifest.json \
+  --repository /opt/releases/agentic-gpu-debugger
 ```
 
-Until every blocker is closed, README and reports must continue to say that V2 is not a final
-Portfolio Release.
+Until real native evidence closes every blocker and the final check reports `passed: true`, V2 is
+not a final Portfolio Release. Documentation, synthetic tests, or built distributions do not open
+that gate.
