@@ -735,6 +735,36 @@ def test_mode_e_binds_native_provider_policy_invocation_and_usage(
     assert json.loads(executor.service.store.read(policy_ref)) == policy
 
 
+def test_mode_e_persists_policy_denied_duplicate_as_bounded_failure(
+    oob_service, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.agent.models import MemcheckAction
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    oob_service[1].actions = [MemcheckAction(), MemcheckAction()]
+    binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
+
+    result = EvaluationRunner(
+        executor.service.store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+
+    assert result.executed_units == 1
+    assert result.records[0].status == "FAILED"
+    assert result.records[0].failure_reason == "DUPLICATE_NO_BENEFIT"
+    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+
+
 @pytest.mark.parametrize("native_evaluation_executor", ["public_exact"], indirect=True)
 def test_scheduled_repair_resolves_native_private_verification(
     monkeypatch, native_evaluation_executor

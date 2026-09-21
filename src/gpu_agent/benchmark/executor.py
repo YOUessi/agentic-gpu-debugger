@@ -264,8 +264,19 @@ def _validate_evaluation_record_against_case(
         key=lambda ref: int(ref.name.split("/")[1]),
     )
     decisions = [PolicyDecision.model_validate_json(store.read(ref)) for ref in decision_refs]
-    if any(not decision.allowed for decision in decisions):
-        raise ValueError("controller route contains a rejected decision")
+    rejected_decisions = [
+        (index, decision) for index, decision in enumerate(decisions) if not decision.allowed
+    ]
+    if rejected_decisions:
+        rejected_index, rejected = rejected_decisions[0]
+        if (
+            len(rejected_decisions) != 1
+            or rejected_index != len(decisions) - 1
+            or diagnosis.diagnostic_outcome != "INCONCLUSIVE"
+            or len(rejected.reason_codes) != 1
+            or diagnosis.limitations != rejected.reason_codes
+        ):
+            raise ValueError("controller route contains an invalid rejected decision")
     acquisition_policy = json.loads(store.read(policy_ref))
     if (
         set(acquisition_policy) != {"mode", "required_tools"}
