@@ -19,7 +19,7 @@ from typing import Literal, TypeVar
 from pydantic import Field, StrictFloat, model_validator
 
 from gpu_agent._resources import runtime_resource
-from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, ToolResult
+from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, RunStatus, ToolResult
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import _evidence
 from gpu_agent.execution.isolated import IsolatedGPUBackend
@@ -63,10 +63,17 @@ def candidate_run_id(parent_run_id: str) -> str:
     return hashlib.sha256(f"candidate-v1:{parent_run_id}".encode()).hexdigest()[:32]
 
 
-def verification_run_id(original_run_id: str, candidate_hash: str) -> str:
-    """Return the exact public verification slot for one candidate."""
+def verification_run_id(
+    original_run_id: str,
+    candidate_hash: str,
+    mode: Literal["standard", "full"] = "standard",
+) -> str:
+    """Return the exact public verification slot for one candidate and public plan."""
+    if mode not in {"standard", "full"}:
+        raise ValueError("invalid verification mode")
+    mode_suffix = "" if mode == "standard" else ":full"
     return hashlib.sha256(
-        f"verification-v1:{original_run_id}:{candidate_hash}".encode()
+        f"verification-v1:{original_run_id}:{candidate_hash}{mode_suffix}".encode()
     ).hexdigest()[:32]
 
 
@@ -551,7 +558,7 @@ class VerificationEngine:
                 binding,
             )
             self._finish_audit(audit.id, derived.audit)
-            return self._persist_public(original_run_id, derived.public)
+            return self._persist_public(original_run_id, derived.public, mode)
         finally:
             shutil.rmtree(directory)
 
@@ -613,25 +620,60 @@ class VerificationEngine:
             evaluator_audit_run_id=evaluator_audit_run_id,
             limitations=["Containers share the host kernel and GPU driver."],
         )
-        return self._persist_public(original_run_id, result)
+        return self._persist_public(original_run_id, result, mode)
 
     def _persist_public(
-        self, original_run_id: str, result: VerificationResult
+        self,
+        original_run_id: str,
+        result: VerificationResult,
+        mode: Literal["standard", "full"] = "standard",
     ) -> VerificationResult:
-        run = self._store.create_run(
-            "verification",
-            original_run_id,
-            _run_id=verification_run_id(original_run_id, result.candidate_hash),
-        )
-        self._store.put(
-            run.id,
-            "verification/result.json",
-            result.model_dump_json().encode(),
-            self._store.visibility,
-        )
-        self._store.transition(run.id, "RUNNING", "FINALIZING")
-        self._store.transition(run.id, "COMPLETED", None)
-        return result
+        run_id = verification_run_id(original_run_id, result.candidate_hash, mode)
+        content = result.model_dump_json().encode()
+        # The parent lock is pre-existing authority shared by every publisher of
+        # this deterministic child ID; it serializes both threads and processes
+        # without creating conflict-path state in the public store.
+        with self._store._lock(original_run_id):
+            parent = self._store.load(original_run_id)
+            try:
+                os.lstat(self._store.root / run_id)
+            except FileNotFoundError:
+                run = self._store.create_run(
+                    "verification",
+                    original_run_id,
+                    _run_id=run_id,
+                )
+                self._store.put(
+                    run.id,
+                    "verification/result.json",
+                    content,
+                    self._store.visibility,
+                )
+                self._store.transition(run.id, "RUNNING", "FINALIZING")
+                self._store.transition(run.id, "COMPLETED", None)
+                return result
+
+            try:
+                run = self._store.load(run_id)
+                refs = [ref for ref in run.artifact_refs if ref.name == "verification/result.json"]
+                persisted_content = self._store.read(refs[0]) if len(refs) == 1 else None
+                if (
+                    run.kind != "verification"
+                    or run.parent_run_id != original_run_id
+                    or run.binding != parent.binding
+                    or run.external_origin != parent.external_origin
+                    or run.status != RunStatus.COMPLETED
+                    or run.current_phase is not None
+                    or len(run.artifact_refs) != 1
+                    or len(refs) != 1
+                    or persisted_content != content
+                ):
+                    raise ValueError
+                assert persisted_content is not None
+                persisted = VerificationResult.model_validate_json(persisted_content)
+            except (OSError, ValueError):
+                raise ValueError("existing public verification conflicts") from None
+            return persisted
 
     @staticmethod
     def _with_check_plan(

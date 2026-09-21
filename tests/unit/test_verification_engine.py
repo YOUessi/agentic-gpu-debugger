@@ -3,6 +3,7 @@
 import difflib
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,14 @@ def _engine(store, tmp_path, name="evaluator"):
     from gpu_agent.verification.engine import VerificationEngine
 
     return VerificationEngine(store, _evaluator_store(tmp_path, name))
+
+
+def _public_tree(root):
+    return {
+        path.relative_to(root): (path.stat().st_mode, path.read_bytes())
+        for path in root.rglob("*")
+        if path.is_file()
+    }
 
 
 def _audit_result(tmp_path, result):
@@ -936,6 +945,8 @@ def test_revalidation_rejects_forged_candidate_hash(store, tmp_path, original, c
 
 
 def test_standard_mode_runs_all_holdouts(store, tmp_path, original, container_boundary):
+    from gpu_agent.verification.engine import verification_run_id
+
     candidate_id, _ = register_variant(store, original, "human")
     engine = _engine(store, tmp_path)
     result = engine.verify(original[0], candidate_id, "standard")
@@ -955,6 +966,68 @@ def test_standard_mode_runs_all_holdouts(store, tmp_path, original, container_bo
         if store.load(path.name).kind == "verification"
     ]
     assert len(verifications) == 2
+    candidate_hash = result.candidate_hash
+    assert verification_run_id(original[0], candidate_hash) == verification_run_id(
+        original[0], candidate_hash, "standard"
+    )
+    assert {run.id for run in verifications} == {
+        verification_run_id(original[0], candidate_hash, "standard"),
+        verification_run_id(original[0], candidate_hash, "full"),
+    }
+
+
+def test_conflicting_exact_public_verification_replay_has_zero_mutation(
+    store, tmp_path, original, container_boundary
+):
+    candidate_id, _ = register_variant(store, original, "human")
+    engine = _engine(store, tmp_path)
+    result = engine.verify(original[0], candidate_id, "standard")
+    before = _public_tree(store.root)
+    forged = result.model_copy(update={"reason_code": "FORGED_CONFLICT"})
+    with pytest.raises(ValueError, match="existing public verification conflicts"):
+        engine._persist_public(original[0], forged, "standard")
+    assert _public_tree(store.root) == before
+
+
+def test_incomplete_public_verification_replay_fails_closed_without_mutation(
+    store, tmp_path, original, container_boundary
+):
+    from gpu_agent.verification.engine import verification_run_id
+
+    candidate_id, candidate = register_variant(store, original, "human")
+    store.create_run(
+        "verification",
+        original[0],
+        _run_id=verification_run_id(original[0], candidate.patched_source_hash),
+    )
+    before = _public_tree(store.root)
+    with pytest.raises(ValueError, match="existing public verification conflicts"):
+        _engine(store, tmp_path).verify(original[0], candidate_id, "standard")
+    assert _public_tree(store.root) == before
+
+
+def test_concurrent_exact_public_verification_replay_is_idempotent(
+    store, tmp_path, original, container_boundary
+):
+    candidate_id, _ = register_variant(store, original, "human")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(
+                _engine(store, tmp_path, f"concurrent-evaluator-{index}").verify,
+                original[0],
+                candidate_id,
+                "standard",
+            )
+            for index in range(2)
+        ]
+    results = [future.result() for future in futures]
+    assert results[0] == results[1]
+    verifications = [
+        store.load(path.name)
+        for path in store.root.iterdir()
+        if path.is_dir() and len(path.name) == 32 and store.load(path.name).kind == "verification"
+    ]
+    assert len(verifications) == 1
 
 
 def test_changed_binary_is_rejected_before_execution(

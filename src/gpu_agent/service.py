@@ -636,34 +636,42 @@ class ApplicationService:
         self, run_id: str, candidate_id: str | None = None, strict: bool = False
     ) -> tuple[VerificationResult, str]:
         """Verify and return the exact persisted verification run without discovery."""
+        mode: Literal["standard", "full"] = "full" if strict else "standard"
         self.store.load(run_id)
         if candidate_id is None:
             ids = self.candidates(run_id)
             if len(ids) != 1:
-                result = self._inconclusive_verification(run_id, "CANDIDATE_UNAVAILABLE")
-                return result, verification_run_id(run_id, result.candidate_hash)
+                result = self._inconclusive_verification(run_id, "CANDIDATE_UNAVAILABLE", mode=mode)
+                return result, verification_run_id(run_id, result.candidate_hash, mode)
             candidate_id = ids[0]
             candidate_ref = next(
                 r for r in self.store.load(candidate_id).artifact_refs if r.name == "candidate.json"
             )
             generated = PatchCandidate.model_validate_json(self.store.read(candidate_ref))
             if generated.generated_by != "agent":
-                result = self._inconclusive_verification(run_id, "CANDIDATE_UNAVAILABLE")
-                return result, verification_run_id(run_id, result.candidate_hash)
+                result = self._inconclusive_verification(run_id, "CANDIDATE_UNAVAILABLE", mode=mode)
+                return result, verification_run_id(run_id, result.candidate_hash, mode)
         registration = self.store.load(candidate_id)
         if registration.kind != "candidate" or registration.parent_run_id != run_id:
             raise ValueError("candidate does not belong to original run")
         bundle = _evidence(self.store).view(run_id)
         if len(bundle.source_snapshot) != 4:
-            result = self._inconclusive_verification(run_id, "ORACLE_UNAVAILABLE", candidate_id)
-            return result, verification_run_id(run_id, result.candidate_hash)
+            result = self._inconclusive_verification(
+                run_id, "ORACLE_UNAVAILABLE", candidate_id, mode=mode
+            )
+            return result, verification_run_id(run_id, result.candidate_hash, mode)
         result = VerificationEngine(self.store, self.evaluator_store).verify(
-            run_id, candidate_id, "full" if strict else "standard"
+            run_id, candidate_id, mode
         )
-        return result, verification_run_id(run_id, result.candidate_hash)
+        return result, verification_run_id(run_id, result.candidate_hash, mode)
 
     def _inconclusive_verification(
-        self, run_id: str, code: str, candidate_id: str | None = None
+        self,
+        run_id: str,
+        code: str,
+        candidate_id: str | None = None,
+        *,
+        mode: Literal["standard", "full"] = "standard",
     ) -> VerificationResult:
         candidate_hash = ""
         if candidate_id:
@@ -683,20 +691,9 @@ class ApplicationService:
             candidate_hash=candidate_hash,
             limitations=[code],
         )
-        verification = self.store.create_run(
-            "verification",
-            run_id,
-            _run_id=verification_run_id(run_id, result.candidate_hash),
+        return VerificationEngine(self.store, self.evaluator_store)._persist_public(
+            run_id, result, mode
         )
-        self.store.put(
-            verification.id,
-            "verification/result.json",
-            result.model_dump_json().encode(),
-            self.store.visibility,
-        )
-        self.store.transition(verification.id, "RUNNING", "FINALIZING")
-        self.store.transition(verification.id, "COMPLETED", None)
-        return result
 
     def report(self, run_id: str) -> str:
         from gpu_agent.reporting import render_report
