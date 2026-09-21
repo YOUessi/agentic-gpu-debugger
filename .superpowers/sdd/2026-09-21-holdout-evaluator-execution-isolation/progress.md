@@ -29,7 +29,11 @@
   passed; independent review found 0 Blocker, 0 Major, 0 Minor
 - Task 4 — APPROVED at `0047567`; remediation and broader Task 4 checks passed; independent
   rereview found 0 Blocker, 0 Major, 0 Minor
-- Task 5 — pending
+- Task 5 — APPROVED at `27632a0`; the planned 1,150-test offline selection was
+  executed once in retained segments (`640 + 1 + 509` outcomes), with only the
+  failing nodes rerun after remediation; final independent review found 0 Blocker,
+  0 Major, 0 Minor. Ruff, repository-wide format check, mypy, diff-check, isolated
+  wheel/sdist build, and Twine checks passed. No GPU or model API was used.
 
 ## Review/fix ledger
 
@@ -89,3 +93,31 @@
 - Task 4 review wave 2: APPROVED at `0047567`; 0 Blocker, 0 Major, 0 Minor. Verification:
   remediation `27 passed, 46 deselected`; broader Task 4 `44 passed, 77 deselected`; Ruff,
   mypy, and diff-check passed.
+- Task 5 review wave 1: CHANGES REQUIRED; 0 Blocker, 2 Major, 1 Minor.
+  - Closed Major: eliminate caller-supplied trusted holdout resolution and revalidate the
+    evaluator-owned commitment at every scoring/release boundary.
+  - Closed Major: prevent private aggregate serialization into public-facing structures.
+  - Closed Minor: replace the structurally loose evaluator test double.
+  - Remediation approved at `4a3124b`; 0 Blocker, 0 Major, 0 Minor.
+- Task 5 offline regression wave 1: the first retained segment completed with `635 passed,
+  5 failed`; all five failures were remediated at `222790d` and `22dafa4` and rerun focused.
+  - Preserve public holdout metric identity instead of returning private/native record IDs.
+  - Preserve validated Mode E acquisition failures and correct budget-exhaustion validation.
+  - Restore cutoff-fixture service wiring and self-authored verification error compatibility.
+- Task 5 offline regression wave 2: after the one already-passing boundary node, the remaining
+  retained segment completed with `504 passed, 5 failed`; only those failures were rerun.
+  - Closed metrics discriminator failure at `1e5d6a1`.
+  - Closed deterministic public verification replay collisions at `092e490`.
+  - Closed same-evaluator audit replay, exact-once concurrency, public artifact ownership, and
+    canonical lifecycle gaps at `f931c31`.
+  - Closed legal precondition-audit replay while retaining original-evidence recomputation and
+    fail-closed tamper handling at `27632a0`.
+- Task 5 performance remediation: `570faf2` makes secure batch authority validation fixed-cost
+  per batch rather than quadratic while keeping public single-record resolution self-validating;
+  independent review approved the change.
+- Task 5 final review: APPROVED at `27632a0`; 0 Blocker, 0 Major, 0 Minor. Fresh checks covered
+  normal success, legal precondition replay, same-authority sequential/concurrent exact-once,
+  different evaluator authorities, standard/full mode separation, incomplete/conflicting state,
+  artifact ownership/hash/path tampering, canonical terminal lifecycle, and zero physical backend
+  calls on replay. Ruff, format, mypy, and diff-check passed. Isolated package build produced both
+  `agentic_gpu_debugger-0.2.0` wheel and sdist; Twine reported `PASSED` for both.
