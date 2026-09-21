@@ -13,11 +13,11 @@ Identifier = Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]
 
 class AgentBudget(ExecutionModel):
     budget_version: Literal["m1-v1"] = "m1-v1"
-    max_agent_steps: int = Field(default=8, ge=0, le=8)
+    max_agent_steps: int = Field(default=38, ge=0, le=38)
     max_sanitizer_calls: int = Field(default=4, ge=0, le=4)
     max_rag_calls: int = Field(default=3, ge=0, le=3)
     max_source_reads: int = Field(default=5, ge=0, le=5)
-    max_llm_calls: int = Field(default=6, ge=0, le=6)
+    max_llm_calls: int = Field(default=40, ge=0, le=40)
     max_wall_time_seconds: float = Field(default=600, gt=0, le=600)
     agent_steps: int = Field(default=0, ge=0)
     sanitizer_calls: int = Field(default=0, ge=0)

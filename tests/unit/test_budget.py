@@ -9,7 +9,7 @@ def test_final_calls_are_reserved():
     from gpu_agent.agent.policy import BudgetExceeded, BudgetLedger
 
     ledger = BudgetLedger()
-    for _ in range(4):
+    for _ in range(38):
         ledger.reserve("planner_llm")
     with pytest.raises(BudgetExceeded):
         ledger.reserve("planner_llm")

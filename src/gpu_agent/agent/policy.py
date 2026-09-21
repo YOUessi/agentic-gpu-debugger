@@ -67,8 +67,6 @@ class BudgetLedger:
                     reserve_final = 2 if action == "planner_llm" else int(action == "diagnosis_llm")
                     if self._counts["llm"] + reserve_final >= self.budget.max_llm_calls:
                         raise BudgetExceeded("LLM_BUDGET_EXHAUSTED")
-                    if action == "planner_llm" and self._counts["planner"] >= 4:
-                        raise BudgetExceeded("PLANNER_BUDGET_EXHAUSTED")
                     self._counts["llm"] += 1
                     self._counts["planner"] += int(action == "planner_llm")
                 elif action.startswith("run_") and action.endswith("check"):
@@ -149,11 +147,7 @@ class LLMCallGate:
                 if kind == "plan"
                 else (int(not self._patched) if kind == "diagnose" else 0)
             )
-            if (
-                remaining <= 0
-                or self._calls + reserve >= self._budget.max_llm_calls
-                or (kind == "plan" and self._plans >= 4)
-            ):
+            if remaining <= 0 or self._calls + reserve >= self._budget.max_llm_calls:
                 raise ProviderError("AGENT_BUDGET_EXHAUSTED")
             self._calls += 1
             self._plans += int(kind == "plan")

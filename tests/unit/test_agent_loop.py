@@ -135,7 +135,7 @@ def test_authoritative_budget_reserves_diagnosis_and_patch():
     from gpu_agent.agent.provider import ProviderError
 
     gate = LLMCallGate()
-    for _ in range(4):
+    for _ in range(38):
         gate.reserve("plan")
     with pytest.raises(ProviderError, match="AGENT_BUDGET_EXHAUSTED"):
         gate.reserve("plan")
@@ -143,7 +143,7 @@ def test_authoritative_budget_reserves_diagnosis_and_patch():
     gate.reserve("patch")
     with pytest.raises(ProviderError):
         gate.reserve("patch")
-    assert gate.snapshot().llm_calls == 6
+    assert gate.snapshot().llm_calls == 40
 
 
 def test_wall_budget_prevents_send():
