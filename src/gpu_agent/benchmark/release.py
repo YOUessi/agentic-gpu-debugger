@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 from collections import Counter
 from collections.abc import Sequence
 from pathlib import Path
@@ -1103,7 +1104,12 @@ class _ReleaseEvidenceResolver:
 
     def _release_tests(self, binding: RunBinding, cutoff: int) -> TestCounts:
         try:
-            from gpu_agent.release_controller import verify_persisted_release_artifacts
+            from gpu_agent.release_controller import (
+                RELEASE_TEST_ARTIFACT_NAMES,
+                RELEASE_TEST_EVIDENCE_ARTIFACT,
+                RELEASE_TEST_INVOCATION_ARTIFACT,
+                verify_persisted_release_artifacts,
+            )
 
             try:
                 run = self.public.load(self.roots.release_test_run_id)
@@ -1120,14 +1126,11 @@ class _ReleaseEvidenceResolver:
             refs = _owned_artifacts(
                 run,
                 expected_visibility="public",
-                expected_names={
-                    "release/test-evidence.json",
-                    "release/test-invocation.json",
-                },
+                expected_names=set(RELEASE_TEST_ARTIFACT_NAMES),
                 expected_external_origin=None,
             )
-            evidence_ref = refs["release/test-evidence.json"]
-            invocation_ref = refs["release/test-invocation.json"]
+            evidence_ref = refs[RELEASE_TEST_EVIDENCE_ARTIFACT]
+            invocation_ref = refs[RELEASE_TEST_INVOCATION_ARTIFACT]
             evidence = ReleaseTestEvidence.model_validate_json(self.public.read(evidence_ref))
             verify_persisted_release_artifacts(self.public, run)
             expected_hash = hashlib.sha256(
@@ -1337,15 +1340,22 @@ def _owned_artifacts(
 ) -> dict[str, ArtifactRef]:
     """Validate one containing run's complete owned artifact inventory."""
     refs: dict[str, ArtifactRef] = {}
+    artifact_ids: set[str] = set()
+    artifact_paths: set[str] = set()
     for ref in run.artifact_refs:
         if (
             ref.name in refs
+            or re.fullmatch(r"[a-f0-9]{32}", ref.id) is None
+            or ref.id in artifact_ids
+            or ref.relative_path in artifact_paths
             or ref.run_id != run.id
             or ref.visibility != expected_visibility
             or ref.relative_path != f"{run.id}/artifacts/{ref.id}"
         ):
             raise ValueError("run artifact inventory is not owned and canonical")
         refs[ref.name] = ref
+        artifact_ids.add(ref.id)
+        artifact_paths.add(ref.relative_path)
     if run.external_origin != expected_external_origin or (
         expected_names is not None and set(refs) != expected_names
     ):

@@ -40,13 +40,19 @@ Visibility = Literal["public", "evaluator"]
 
 class ArtifactRef(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
-    id: str
-    run_id: str
+    id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     name: str
     sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     visibility: Visibility
     relative_path: str
     byte_count: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def canonical_path(self) -> "ArtifactRef":
+        if self.relative_path != f"{self.run_id}/artifacts/{self.id}":
+            raise ValueError("artifact path does not match its owner and ID")
+        return self
 
 
 class StateEvent(BaseModel):
@@ -98,6 +104,14 @@ class RunManifest(BaseModel):
     def valid_phase(self) -> "RunManifest":
         if (self.status == RunStatus.RUNNING) != (self.current_phase is not None):
             raise ValueError("only RUNNING requires an active phase")
+        artifact_ids = [ref.id for ref in self.artifact_refs]
+        artifact_paths = [ref.relative_path for ref in self.artifact_refs]
+        if (
+            any(ref.run_id != self.id for ref in self.artifact_refs)
+            or len(artifact_ids) != len(set(artifact_ids))
+            or len(artifact_paths) != len(set(artifact_paths))
+        ):
+            raise ValueError("manifest artifact inventory is not uniquely owned")
         return self
 
 

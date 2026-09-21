@@ -121,6 +121,68 @@ def _controller(tmp_path: Path, process: FakeReleaseProcess):
     return controller, store
 
 
+def _collector_release_resolver(tmp_path: Path):
+    from gpu_agent.benchmark.release import ReleaseEvidenceRoots, _ReleaseEvidenceResolver
+    from gpu_agent.store import RunStore
+
+    controller, public = _controller(tmp_path, FakeReleaseProcess())
+    run_id = controller.collect(24)
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id=run_id,
+    )
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        public,
+        RunStore(tmp_path / "evaluator", visibility="evaluator"),
+        object(),
+        controller.repository,
+        _snapshot(),
+    )
+    evaluation_binding = _binding().model_copy(update={"purpose": "evaluation"})
+    return resolver, public, evaluation_binding, run_id
+
+
+def test_collector_inventory_is_accepted_by_release_resolver(tmp_path):
+    resolver, _public, evaluation_binding, _run_id = _collector_release_resolver(tmp_path)
+
+    counts = resolver._release_tests(evaluation_binding, 24)
+
+    assert counts.model_dump() == {
+        "expected": 1,
+        "executed": 1,
+        "skipped_required": 0,
+        "failed": 0,
+    }
+
+
+def test_release_resolver_rejects_extra_artifact_in_collector_inventory(tmp_path):
+    from gpu_agent.benchmark.release import _ReleaseRootError
+    from gpu_agent.contracts import ArtifactRef
+
+    resolver, public, evaluation_binding, run_id = _collector_release_resolver(tmp_path)
+    manifest_path = public.root / run_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    artifact_id = "f" * 32
+    manifest["artifact_refs"].append(
+        ArtifactRef(
+            id=artifact_id,
+            run_id=run_id,
+            name="release/unrelated.json",
+            sha256="0" * 64,
+            visibility="public",
+            relative_path=f"{run_id}/artifacts/{artifact_id}",
+            byte_count=2,
+        ).model_dump(mode="json")
+    )
+    manifest_path.write_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
+
+    with pytest.raises(_ReleaseRootError):
+        resolver._release_tests(evaluation_binding, 24)
+
+
 def test_collects_fixed_same_commit_release_evidence(tmp_path):
     from gpu_agent.benchmark.release import ReleaseTestEvidence
     from gpu_agent.release_controller import verify_persisted_release_artifacts

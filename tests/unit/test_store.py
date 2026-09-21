@@ -13,6 +13,50 @@ def _binding(commit="1" * 40, purpose="evaluation", toolchain_hash="2" * 64):
     )
 
 
+def _artifact_ref(*, artifact_id="2" * 32, run_id="1" * 32, name="evidence.json"):
+    from gpu_agent.contracts import ArtifactRef
+
+    return ArtifactRef(
+        id=artifact_id,
+        run_id=run_id,
+        name=name,
+        sha256="3" * 64,
+        visibility="public",
+        relative_path=f"{run_id}/artifacts/{artifact_id}",
+        byte_count=2,
+    )
+
+
+def test_artifact_ref_accepts_canonical_opaque_identity():
+    ref = _artifact_ref()
+
+    assert ref.id == "2" * 32
+    assert ref.relative_path == f"{'1' * 32}/artifacts/{'2' * 32}"
+
+
+def test_artifact_ref_rejects_noncanonical_opaque_identity():
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        _artifact_ref(artifact_id="artifact-01")
+
+
+def test_run_manifest_rejects_duplicate_artifact_identity_and_path():
+    from pydantic import ValidationError
+
+    from gpu_agent.contracts import RunManifest
+
+    first = _artifact_ref(name="first.json")
+    duplicate = first.model_copy(update={"name": "second.json"})
+
+    with pytest.raises(ValidationError):
+        RunManifest(
+            id=first.run_id,
+            kind="diagnosis",
+            artifact_refs=[first, duplicate],
+        )
+
+
 def test_terminal_state_preserves_last_successful_phase(store):
     run = store.create_run("diagnosis")
     store.transition(run.id, "RUNNING", "PREPARING")

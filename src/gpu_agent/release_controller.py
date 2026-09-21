@@ -45,6 +45,15 @@ _RAW_ARTIFACTS = {
     "stdout": "release/pytest-stdout.log",
     "stderr": "release/pytest-stderr.log",
 }
+RELEASE_TEST_INVOCATION_ARTIFACT = "release/test-invocation.json"
+RELEASE_TEST_EVIDENCE_ARTIFACT = "release/test-evidence.json"
+RELEASE_TEST_ARTIFACT_NAMES = frozenset(
+    {
+        *_RAW_ARTIFACTS.values(),
+        RELEASE_TEST_INVOCATION_ARTIFACT,
+        RELEASE_TEST_EVIDENCE_ARTIFACT,
+    }
+)
 _NORMALIZED_ARGV = [
     "<python-executable>",
     "-I",
@@ -245,7 +254,7 @@ class ReleaseEvidenceController:
                 )
                 invocation_ref = self.store.put(
                     run.id,
-                    "release/test-invocation.json",
+                    RELEASE_TEST_INVOCATION_ARTIFACT,
                     invocation.model_dump_json().encode(),
                     "public",
                 )
@@ -276,7 +285,7 @@ class ReleaseEvidenceController:
                 )
                 self.store.put(
                     run.id,
-                    "release/test-evidence.json",
+                    RELEASE_TEST_EVIDENCE_ARTIFACT,
                     evidence.model_dump_json().encode(),
                     "public",
                 )
@@ -396,7 +405,7 @@ def verify_persisted_release_artifacts(store: RunStore, run: RunManifest) -> Non
     if run.kind != "release_test" or run.binding is None:
         raise ValueError("run is not release test evidence")
     raw_refs = {key: _one(run, name) for key, name in _RAW_ARTIFACTS.items()}
-    invocation_ref = _one(run, "release/test-invocation.json")
+    invocation_ref = _one(run, RELEASE_TEST_INVOCATION_ARTIFACT)
     invocation = ReleaseTestInvocation.model_validate_json(store.read(invocation_ref))
     allowlist_bytes = store.read(raw_refs["allowlist"])
     report_bytes = store.read(raw_refs["report"])

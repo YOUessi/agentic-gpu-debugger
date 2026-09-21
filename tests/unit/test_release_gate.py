@@ -1123,6 +1123,37 @@ def test_release_resolver_rejects_donor_corpus_manifest(tmp_path):
         )
 
 
+def test_owned_artifacts_defensively_rejects_duplicate_artifact_identity():
+    from gpu_agent.benchmark.release import _owned_artifacts
+    from gpu_agent.contracts import ArtifactRef, RunManifest
+
+    run_id = "1" * 32
+    artifact_id = "2" * 32
+    first = ArtifactRef(
+        id=artifact_id,
+        run_id=run_id,
+        name="first.json",
+        sha256="3" * 64,
+        visibility="public",
+        relative_path=f"{run_id}/artifacts/{artifact_id}",
+        byte_count=2,
+    )
+    duplicate = first.model_copy(update={"name": "second.json"})
+    run = RunManifest.model_construct(
+        id=run_id,
+        kind="diagnosis",
+        artifact_refs=[first, duplicate],
+    )
+
+    with pytest.raises(ValueError, match="owned and canonical"):
+        _owned_artifacts(
+            run,
+            expected_visibility="public",
+            expected_names={"first.json", "second.json"},
+            expected_external_origin=None,
+        )
+
+
 def test_release_resolver_classifies_malformed_mapping_root_as_root_error(tmp_path, repository):
     from gpu_agent.benchmark.release import (
         ReleaseEvidenceRoots,
