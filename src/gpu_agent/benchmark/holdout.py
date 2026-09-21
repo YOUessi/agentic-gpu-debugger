@@ -426,9 +426,7 @@ class HoldoutController:
         )
         if execution is None or diagnosis is None:
             raise ValueError("holdout execution transaction is incomplete")
-        unit_refs = [
-            ref for ref in diagnosis.artifact_refs if ref.name == "evaluation/unit.json"
-        ]
+        unit_refs = [ref for ref in diagnosis.artifact_refs if ref.name == "evaluation/unit.json"]
         if (
             execution.kind != "holdout_execution"
             or execution.parent_run_id is not None
@@ -439,8 +437,7 @@ class HoldoutController:
             or diagnosis.parent_run_id != execution.id
             or diagnosis.binding != self.binding
             or diagnosis.external_origin != expected_origin
-            or diagnosis.status
-            not in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.COMPLETED}
+            or diagnosis.status not in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.COMPLETED}
             or len(unit_refs) != 1
             or EvaluationUnitBinding.model_validate_json(
                 lease.read(unit_refs[0]) if lease is not None else self.evaluator.read(unit_refs[0])
@@ -584,9 +581,7 @@ class HoldoutController:
                 ("evaluation/records/", record_ordinals),
             ):
                 if ref.name.startswith(prefix):
-                    match = re.fullmatch(
-                        re.escape(prefix) + r"([0-9]+)\.json", ref.name
-                    )
+                    match = re.fullmatch(re.escape(prefix) + r"([0-9]+)\.json", ref.name)
                     if match is None:
                         raise ValueError("holdout artifact namespace is invalid")
                     target.append(int(match.group(1)))
@@ -819,9 +814,7 @@ class HoldoutController:
             failure_reason=None,
             lineage=HoldoutEvaluationLineage(
                 corpus_cutoff=prepared.binding.corpus_cutoff,
-                execution_commitment=self._execution_commitment(
-                    batch, prepared, native_hash
-                ),
+                execution_commitment=self._execution_commitment(batch, prepared, native_hash),
                 diagnosis_hash=lineage.diagnosis_hash,
                 evidence_hash=lineage.evidence_hash,
                 provider_invocation_hashes=lineage.provider_invocation_hashes,
@@ -830,9 +823,7 @@ class HoldoutController:
             ),
         )
 
-    def _validate_prepared_execution(
-        self, prepared: PreparedHoldoutExecution
-    ) -> HoldoutBatch:
+    def _validate_prepared_execution(self, prepared: PreparedHoldoutExecution) -> HoldoutBatch:
         batch = self._batch_for_execution(prepared)
         unit = prepared.evaluation_unit
         item = EvaluationScheduleItem(
@@ -933,9 +924,10 @@ class HoldoutController:
             "holdout/public-record.json",
             "holdout/execution-binding.json",
         }
-        if execution.status != RunStatus.COMPLETED or {
-            ref.name for ref in execution.artifact_refs
-        } != expected_names:
+        if (
+            execution.status != RunStatus.COMPLETED
+            or {ref.name for ref in execution.artifact_refs} != expected_names
+        ):
             raise ValueError("holdout execution transaction is incomplete")
         native_ref = self._one_named_ref(execution, "holdout/native-record.json")
         public_ref = self._one_named_ref(execution, "holdout/public-record.json")

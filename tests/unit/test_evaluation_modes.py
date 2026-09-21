@@ -167,9 +167,10 @@ def test_development_lineage_and_source_remain_public(native_evaluation_executor
         run = executor.service.store.load(record.lineage.diagnosis_run_id)
         source_ref = next(ref for ref in run.artifact_refs if ref.name == "sources/kernel.cu")
         assert source_ref.visibility == "public"
-        assert executor.service.store.read(source_ref) == (
-            executor.sources[record.case_id] / "kernel.cu"
-        ).read_bytes()
+        assert (
+            executor.service.store.read(source_ref)
+            == (executor.sources[record.case_id] / "kernel.cu").read_bytes()
+        )
 
 
 def test_mode_e_uses_planner_and_never_rule_substitution(oob_service):
@@ -570,9 +571,9 @@ def _configure_responses_provider(
             elif full_script and request.kind == "diagnose":
                 evidence = request.payload["evidence"]
                 if getattr(scripted, "force_limitation", False):
-                    value = DiagnosisResult.inconclusive(
-                        scripted.limitation_canary
-                    ).model_dump(mode="json")
+                    value = DiagnosisResult.inconclusive(scripted.limitation_canary).model_dump(
+                        mode="json"
+                    )
                 else:
                     value = DiagnosisResult(
                         diagnostic_outcome="DIAGNOSED",
@@ -594,9 +595,7 @@ def _configure_responses_provider(
                             for item in evidence["tool_findings"]
                         ],
                         documentation_evidence=[
-                            EvidenceClaim(
-                                text=item["text"], citation_ids=[item["chunk_id"]]
-                            )
+                            EvidenceClaim(text=item["text"], citation_ids=[item["chunk_id"]])
                             for item in evidence["documentation"]
                         ],
                         model_inferences=[
@@ -1700,9 +1699,11 @@ def prepared_holdout_execution(native_evaluation_executor, monkeypatch):
     monkeypatch.setattr(
         executor.corpus,
         "validate_and_create_evaluation_child",
-        lambda verifier, unit: executor.corpus.load(prepared.diagnosis_run_id)
-        if unit == prepared.evaluation_unit
-        else (_ for _ in ()).throw(ValueError("unexpected evaluation unit")),
+        lambda verifier, unit: (
+            executor.corpus.load(prepared.diagnosis_run_id)
+            if unit == prepared.evaluation_unit
+            else (_ for _ in ()).throw(ValueError("unexpected evaluation unit"))
+        ),
     )
     case = registered_cases(
         executor.corpus,
@@ -1851,9 +1852,11 @@ def prepared_holdout_repair_execution(native_evaluation_executor, monkeypatch):
     monkeypatch.setattr(
         executor.corpus,
         "validate_and_create_evaluation_child",
-        lambda verifier, unit: executor.corpus.load(prepared.diagnosis_run_id)
-        if unit == prepared.evaluation_unit
-        else (_ for _ in ()).throw(ValueError("unexpected evaluation unit")),
+        lambda verifier, unit: (
+            executor.corpus.load(prepared.diagnosis_run_id)
+            if unit == prepared.evaluation_unit
+            else (_ for _ in ()).throw(ValueError("unexpected evaluation unit"))
+        ),
     )
     cases = registered_cases(
         executor.corpus,
@@ -1895,10 +1898,7 @@ def test_task2_holdout_repair_transaction_completes_and_recovers_exactly(
 ):
     case = prepared_holdout_repair_execution
     public = case.controller.complete_execution(case.prepared, case.native)
-    assert (
-        case.controller.recover_execution(case.batch, case.item, case.attempt)
-        == public
-    )
+    assert case.controller.recover_execution(case.batch, case.item, case.attempt) == public
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private_exact"], indirect=True)
@@ -1929,9 +1929,7 @@ def test_forged_reserved_diagnosis_capability_has_zero_side_effects(
     controller = executor.holdout_controller
     batch = executor.holdout_batch
     assert service is not None and controller is not None and batch is not None
-    private_case_id, private_template_id = controller.resolve_private(
-        batch, batch.aliases[0]
-    )
+    private_case_id, private_template_id = controller.resolve_private(batch, batch.aliases[0])
     unit = EvaluationUnitBinding(
         evaluation_run_id="f" * 32,
         ordinal=0,
@@ -2034,8 +2032,7 @@ def test_holdout_constructor_rejects_identity_mismatch_before_mutation(
         path.relative_to(service.store.root) for path in service.store.root.rglob("*")
     )
     before_evaluator = sorted(
-        path.relative_to(executor.corpus.root)
-        for path in executor.corpus.root.rglob("*")
+        path.relative_to(executor.corpus.root) for path in executor.corpus.root.rglob("*")
     )
     wrong_store = RunStore(tmp_path / "wrong-evaluator", visibility="evaluator")
     mismatched = holdout_service
@@ -2068,18 +2065,17 @@ def test_holdout_constructor_rejects_identity_mismatch_before_mutation(
             _corpus_family=executor._corpus_family,
             _schedule_verifier=executor._schedule_verifier,
         )
-    assert sorted(
-        path.relative_to(service.store.root) for path in service.store.root.rglob("*")
-    ) == before_public
-    assert sorted(
-        path.relative_to(executor.corpus.root)
-        for path in executor.corpus.root.rglob("*")
-    ) == before_evaluator
+    assert (
+        sorted(path.relative_to(service.store.root) for path in service.store.root.rglob("*"))
+        == before_public
+    )
+    assert (
+        sorted(path.relative_to(executor.corpus.root) for path in executor.corpus.root.rglob("*"))
+        == before_evaluator
+    )
 
 
-@pytest.mark.parametrize(
-    "native_evaluation_executor", ["private_exact_canary"], indirect=True
-)
+@pytest.mark.parametrize("native_evaluation_executor", ["private_exact_canary"], indirect=True)
 def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_scan(
     native_evaluation_executor, monkeypatch, tmp_path
 ):
@@ -2106,9 +2102,12 @@ def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_s
     scripted.path_canary = " " + path_canary.decode()
     source_path = original.sources["case_0100"] / "kernel.cu"
     source_text = source_path.read_text()
-    fixed_text = source_text.replace(
-        "out[i] = a[i] + b[i];", "if (i < n) out[i] = a[i] + b[i];"
-    ).replace("n != 257", "n == 0") + f"\n// {candidate_canary.decode()}\n"
+    fixed_text = (
+        source_text.replace("out[i] = a[i] + b[i];", "if (i < n) out[i] = a[i] + b[i];").replace(
+            "n != 257", "n == 0"
+        )
+        + f"\n// {candidate_canary.decode()}\n"
+    )
     scripted.diff = "".join(
         difflib.unified_diff(
             source_text.splitlines(True),
@@ -2120,29 +2119,22 @@ def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_s
     truth_root = tmp_path / "canary-truth"
     shutil.copytree(verification_engine.TRUTH_ROOT, truth_root)
     truth_case = json.loads((truth_root / "case.json").read_bytes())
-    truth_case["source_hashes"]["kernel.cu"] = hashlib.sha256(
-        source_path.read_bytes()
-    ).hexdigest()
+    truth_case["source_hashes"]["kernel.cu"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
     (truth_root / "case.json").write_text(json.dumps(truth_case))
     (truth_root / "reference.cu").write_bytes(
-        (truth_root / "reference.cu").read_bytes()
-        + b"\n// "
-        + verification_canary
-        + b"\n"
+        (truth_root / "reference.cu").read_bytes() + b"\n// " + verification_canary + b"\n"
     )
     monkeypatch.setattr(verification_engine, "TRUTH_ROOT", truth_root)
-    monkeypatch.setattr(
-        verification_derivation, "_TRUTH_CASE", truth_root / "case.json"
-    )
+    monkeypatch.setattr(verification_derivation, "_TRUTH_CASE", truth_root / "case.json")
     binding, _ = _configure_responses_provider(original, monkeypatch, full_script=True)
     original.service.evaluator_store = original.corpus
     marker = original.corpus.create_run("holdout_private_canaries", binding=binding)
     original.corpus.put(
         marker.id,
         "labels/private-labels.json",
-        EvaluationLabels(
-            evidence_relevance={label_canary.decode(): True}
-        ).model_dump_json().encode(),
+        EvaluationLabels(evidence_relevance={label_canary.decode(): True})
+        .model_dump_json()
+        .encode(),
         "evaluator",
     )
     original.corpus.put(
@@ -2212,9 +2204,7 @@ def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_s
         if path.is_file()
     )
     evaluator_bytes = b"\n".join(
-        path.read_bytes()
-        for path in sorted(executor.corpus.root.rglob("*"))
-        if path.is_file()
+        path.read_bytes() for path in sorted(executor.corpus.root.rglob("*")) if path.is_file()
     )
 
     def assert_evaluator_only(label, secret):
@@ -2301,9 +2291,7 @@ def test_holdout_mode_e_provider_limitation_is_evaluator_only(
         if path.is_file()
     )
     evaluator_bytes = b"\n".join(
-        path.read_bytes()
-        for path in sorted(executor.corpus.root.rglob("*"))
-        if path.is_file()
+        path.read_bytes() for path in sorted(executor.corpus.root.rglob("*")) if path.is_file()
     )
     if limitation_canary in public_bytes:
         pytest.fail("limitation canary crossed the public boundary", pytrace=False)
@@ -2412,9 +2400,7 @@ def test_holdout_mode_e_started_provider_call_is_not_reexecuted_on_resume(
     attempt_ref = next(
         ref for ref in public_run.artifact_refs if ref.name == "evaluation/attempts/0.json"
     )
-    attempt = EvaluationAttempt.model_validate_json(
-        executor.service.store.read(attempt_ref)
-    )
+    attempt = EvaluationAttempt.model_validate_json(executor.service.store.read(attempt_ref))
     expected_request_id = hashlib.sha256(
         f"{attempt.idempotency_key}:0:plan:0".encode()
     ).hexdigest()[:32]
@@ -2549,9 +2535,7 @@ def test_task2_holdout_completion_rejects_untrusted_child_artifacts(
             case.evaluator, candidate_id, lambda value: value.update(external_origin=None)
         )
     if fault == "verification_binding":
-        _rewrite_manifest(
-            case.evaluator, verification_id, lambda value: value.update(binding=None)
-        )
+        _rewrite_manifest(case.evaluator, verification_id, lambda value: value.update(binding=None))
     elif fault == "verification_status":
         _rewrite_manifest(
             case.evaluator,
@@ -2590,9 +2574,7 @@ def _rewrite_artifact(store, run_id, name, change):
         if item["id"] == ref.id:
             item["sha256"] = hashlib.sha256(content).hexdigest()
             item["byte_count"] = len(content)
-    manifest_path.write_bytes(
-        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
-    )
+    manifest_path.write_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
     return store.load(run_id).artifact_refs[run.artifact_refs.index(ref)]
 
 
@@ -2614,9 +2596,7 @@ def _inject_terminal_artifact(store, run_id, name, content):
             "byte_count": len(content),
         }
     )
-    manifest_path.write_bytes(
-        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
-    )
+    manifest_path.write_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
@@ -2654,9 +2634,7 @@ def test_task2_reservation_does_not_repair_terminal_incomplete_execution(
     import shutil
 
     shutil.rmtree(case.evaluator.root / case.prepared.diagnosis_run_id)
-    case.evaluator.transition(
-        case.prepared.execution_run_id, "RUNNING", "FINALIZING"
-    )
+    case.evaluator.transition(case.prepared.execution_run_id, "RUNNING", "FINALIZING")
     case.evaluator.transition(case.prepared.execution_run_id, "COMPLETED", None)
     with pytest.raises(ValueError):
         case.controller.reserve_execution(
@@ -2768,9 +2746,7 @@ def test_task2_execution_directory_swap_between_probe_and_use_fails_closed(
     from gpu_agent.store import RunDirectorySetLease
 
     fixture = (
-        "completed_holdout_execution"
-        if operation == "recover"
-        else "prepared_holdout_execution"
+        "completed_holdout_execution" if operation == "recover" else "prepared_holdout_execution"
     )
     case = request.getfixturevalue(fixture)
     execution_path = case.evaluator.root / case.prepared.execution_run_id
@@ -2882,7 +2858,8 @@ def test_task2_execution_claim_rejects_post_acquire_metadata_mutation(
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
 def test_holdout_public_lineage_contains_commitments_not_evaluator_run_ids(
-    completed_holdout_execution, native_evaluation_executor,
+    completed_holdout_execution,
+    native_evaluation_executor,
 ):
     case = completed_holdout_execution
     wire = case.public.model_dump_json().encode()
@@ -2899,7 +2876,8 @@ def test_holdout_public_lineage_contains_commitments_not_evaluator_run_ids(
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
 def test_holdout_execution_reservation_is_exact_and_attempt_scoped(
-    completed_holdout_execution, native_evaluation_executor,
+    completed_holdout_execution,
+    native_evaluation_executor,
 ):
     case = completed_holdout_execution
     repeated = case.controller.reserve_execution(
@@ -2939,9 +2917,7 @@ def test_holdout_complete_execution_is_exact_byte_idempotent(
 
 def _overwrite_holdout_binding(evaluator, run_id, field, replacement):
     run = evaluator.load(run_id)
-    ref = next(
-        item for item in run.artifact_refs if item.name == "holdout/execution-binding.json"
-    )
+    ref = next(item for item in run.artifact_refs if item.name == "holdout/execution-binding.json")
     artifact_path = evaluator.root / ref.relative_path
     manifest_path = evaluator.root / run_id / "manifest.json"
     artifact_mode = stat.S_IMODE(artifact_path.stat().st_mode)
@@ -2974,8 +2950,6 @@ def test_holdout_execution_binding_rejects_cross_store_tampering(
     completed_holdout_execution, field, replacement, native_evaluation_executor
 ):
     case = completed_holdout_execution
-    _overwrite_holdout_binding(
-        case.evaluator, case.prepared.execution_run_id, field, replacement
-    )
+    _overwrite_holdout_binding(case.evaluator, case.prepared.execution_run_id, field, replacement)
     with pytest.raises(ValueError):
         case.controller.recover_execution(case.batch, case.item, case.attempt)

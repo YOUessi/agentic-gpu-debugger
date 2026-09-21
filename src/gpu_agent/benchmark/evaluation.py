@@ -743,9 +743,7 @@ class EvaluationRunner:
                     EvaluationRunner._validate_record(self, recovered, item, attempt)
                     recovered_records.append(recovered)
                 except (OSError, ValueError):
-                    spent += sum(
-                        value.reserved_cost_usd for value in incomplete_attempts
-                    )
+                    spent += sum(value.reserved_cost_usd for value in incomplete_attempts)
                     return EvaluationRunner._terminal(
                         self,
                         run_id,

@@ -202,9 +202,7 @@ def validate_evaluation_record(
         )
         if changed > 1:
             raise ValueError("evaluation evidence progression combines acquisitions")
-    bundle = EvidenceRepository(
-        store, evaluator=store.visibility == "evaluator"
-    ).view(run.id)
+    bundle = EvidenceRepository(store, evaluator=store.visibility == "evaluator").view(run.id)
     if bundle != bundles[-1]:
         raise ValueError("evaluation final evidence projection is invalid")
     source_refs = [ref for ref in bundle.source_snapshot if ref.name.endswith("/kernel.cu")]
@@ -644,9 +642,7 @@ def validate_evaluation_record(
 
     exact_candidate_id = candidate_run_id(run.id)
     candidates = (
-        [store.load(exact_candidate_id)]
-        if (store.root / exact_candidate_id).exists()
-        else []
+        [store.load(exact_candidate_id)] if (store.root / exact_candidate_id).exists() else []
     )
     candidate: PatchCandidate | None = None
     verification: VerificationResult | None = None
@@ -658,9 +654,7 @@ def validate_evaluation_record(
         candidate = PatchCandidate.model_validate_json(
             store.read(_one_ref(candidate_run, "candidate.json"))
         )
-        exact_verification_id = verification_run_id(
-            run.id, candidate.patched_source_hash
-        )
+        exact_verification_id = verification_run_id(run.id, candidate.patched_source_hash)
         verifications = (
             [store.load(exact_verification_id)]
             if (store.root / exact_verification_id).exists()
@@ -788,9 +782,7 @@ def validate_evaluation_record(
         )
     result = diagnosis
     reason = result.limitations[0] if result.limitations else None
-    expected_status: Literal["COMPLETED", "FAILED", "TIMEOUT", "INCONCLUSIVE"] = (
-        "INCONCLUSIVE"
-    )
+    expected_status: Literal["COMPLETED", "FAILED", "TIMEOUT", "INCONCLUSIVE"] = "INCONCLUSIVE"
     finished = run.events[-1].at
     if verification is not None:
         reason = verification.reason_code
@@ -1098,9 +1090,7 @@ class EvaluationExecutor:
         if item.split == "holdout":
             if self.holdout_controller is None or self.holdout_batch is None:
                 raise ValueError("private evaluation requires validated holdout authority")
-            recovered = self.holdout_controller.recover_execution(
-                self.holdout_batch, item, attempt
-            )
+            recovered = self.holdout_controller.recover_execution(self.holdout_batch, item, attempt)
             if recovered is None or recovered.model_dump_json() != record.model_dump_json():
                 raise ValueError("holdout public record differs from evaluator transaction")
             return
@@ -1329,9 +1319,9 @@ class EvaluationExecutor:
             # Reading the required ref prevents diagnosis()'s missing-result convenience fallback.
             diagnosis_ref = EvaluationExecutor._ref(self, run, "diagnosis.json")
             store.read(diagnosis_ref)
-            bundle = EvidenceRepository(
-                store, evaluator=store.visibility == "evaluator"
-            ).view(run.id)
+            bundle = EvidenceRepository(store, evaluator=store.visibility == "evaluator").view(
+                run.id
+            )
             source_refs = [ref for ref in bundle.source_snapshot if ref.name.endswith("/kernel.cu")]
             if len(source_refs) != 1 or source_refs[0].sha256 != case.source_hash:
                 raise ValueError("diagnosis input differs from registered case")
@@ -1428,9 +1418,7 @@ class EvaluationExecutor:
                 if candidate.generated_by != "agent" or candidate.parent_run_id != run.id:
                     raise ValueError("evaluation candidate is not agent generated")
                 candidate_hash = candidate.patched_source_hash
-                _, verification_run_id = execution_service.verify_exact(
-                    run.id, candidates[0]
-                )
+                _, verification_run_id = execution_service.verify_exact(run.id, candidates[0])
                 verification_run = store.load(verification_run_id)
                 if (
                     verification_run.kind != "verification"
@@ -1440,9 +1428,7 @@ class EvaluationExecutor:
                     raise ValueError("verification artifacts are missing or ambiguous")
                 verification = VerificationResult.model_validate_json(
                     store.read(
-                        EvaluationExecutor._ref(
-                            self, verification_run, "verification/result.json"
-                        )
+                        EvaluationExecutor._ref(self, verification_run, "verification/result.json")
                     )
                 )
                 verification_ref = EvaluationExecutor._ref(
@@ -1587,9 +1573,7 @@ class EvaluationExecutor:
                 schedule.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
             ).encode()
         ).hexdigest()
-        attempt_ref = EvaluationExecutor._ref(
-            self, parent, f"evaluation/attempts/{ordinal}.json"
-        )
+        attempt_ref = EvaluationExecutor._ref(self, parent, f"evaluation/attempts/{ordinal}.json")
         attempt_content = self.service.store.read(attempt_ref)
         attempt = EvaluationAttempt.model_validate_json(attempt_content)
         expected_attempt = EvaluationAttempt(
@@ -1605,9 +1589,7 @@ class EvaluationExecutor:
         item = schedule.items[ordinal]
         claim = EvaluationExecutionClaim.model_validate_json(
             self.service.store.read(
-                EvaluationExecutor._ref(
-                    self, parent, f"evaluation/claims/{ordinal}.json"
-                )
+                EvaluationExecutor._ref(self, parent, f"evaluation/claims/{ordinal}.json")
             )
         )
         expected_claim = EvaluationExecutionClaim(
@@ -1624,9 +1606,7 @@ class EvaluationExecutor:
             or claim != expected_claim
         ):
             return None
-        return self.holdout_controller.recover_execution(
-            self.holdout_batch, item, attempt
-        )
+        return self.holdout_controller.recover_execution(self.holdout_batch, item, attempt)
 
     def _execute(
         self, evaluation_run_id: str, ordinal: int

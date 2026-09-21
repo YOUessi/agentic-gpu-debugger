@@ -654,9 +654,7 @@ def test_family_pin_rejects_replaced_store_identity(tmp_path):
     displaced = tmp_path / "public-old"
     public.rename(displaced)
     public.mkdir(mode=0o700)
-    (public / ".corpus-family.json").write_bytes(
-        (displaced / ".corpus-family.json").read_bytes()
-    )
+    (public / ".corpus-family.json").write_bytes((displaced / ".corpus-family.json").read_bytes())
 
     with pytest.raises(ValueError, match="identity|pin"):
         CorpusFamily.open(family.root)

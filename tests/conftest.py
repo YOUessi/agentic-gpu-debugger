@@ -76,10 +76,7 @@ def oob_service(store, tmp_path):
             self.result = DiagnosisResult(
                 diagnostic_outcome="DIAGNOSED",
                 failure_family="out_of_bounds",
-                root_cause=(
-                    "The thread index can exceed the input length."
-                    f"{response_canary}"
-                ),
+                root_cause=(f"The thread index can exceed the input length.{response_canary}"),
                 source_locations=[SourceLocation(path="kernel.cu", line=9)],
                 observed_facts=evidence.observed_facts,
                 tool_findings=[
@@ -291,8 +288,7 @@ def native_evaluation_executor(
         )
         if requested_split == "private_exact_canary":
             (source / "kernel.cu").write_bytes(
-                (source / "kernel.cu").read_bytes()
-                + b"\n// PRIVATE-SOURCE-CANARY-task3-a91e\n"
+                (source / "kernel.cu").read_bytes() + b"\n// PRIVATE-SOURCE-CANARY-task3-a91e\n"
             )
     visibility = "public" if split == "public" else "evaluator"
     corpus = (
@@ -320,8 +316,7 @@ def native_evaluation_executor(
     mutant_root.mkdir(parents=True)
     if requested_split == "private_split":
         (source / "kernel.cu").write_bytes(
-            (source / "kernel.cu").read_bytes()
-            + b"\n// PRIVATE-SOURCE-CANARY-task3-a91e\n"
+            (source / "kernel.cu").read_bytes() + b"\n// PRIVATE-SOURCE-CANARY-task3-a91e\n"
         )
         provider.response_canary = " PROVIDER-RESPONSE-CANARY-task3-b82f"
     mutant_bytes = (source / "kernel.cu").read_bytes()

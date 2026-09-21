@@ -86,9 +86,9 @@ or template identifiers and no alias-map nonce.
 
 ```python
 class HoldoutJudgment(ExecutionModel):
-    blind_id: str                 # 64 lowercase hex
-    public_record_hash: str       # 64 lowercase hex
-    blind_payload_hash: str       # 64 lowercase hex
+    blind_id: str  # 64 lowercase hex
+    public_record_hash: str  # 64 lowercase hex
+    blind_payload_hash: str  # 64 lowercase hex
     labels: EvaluationLabels
     score: Score
     should_be_inconclusive: bool

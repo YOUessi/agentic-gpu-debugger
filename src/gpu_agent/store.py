@@ -585,9 +585,7 @@ class RunStore:
                         raise
 
     @contextmanager
-    def run_directory_set_lease(
-        self, run_ids: tuple[str, ...]
-    ) -> Iterator[RunDirectorySetLease]:
+    def run_directory_set_lease(self, run_ids: tuple[str, ...]) -> Iterator[RunDirectorySetLease]:
         """Hold a canonical private root fd and pin optional run directories on demand."""
         if not run_ids or len(set(run_ids)) != len(run_ids):
             raise ValueError("run directory lease requires distinct runs")

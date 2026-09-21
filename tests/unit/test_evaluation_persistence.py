@@ -133,9 +133,7 @@ def test_resume_keeps_incomplete_evaluator_attempt_ambiguous_without_reexecution
             )
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(
-        ApplicationService, "_diagnose_reserved", interrupt_evaluator_diagnosis
-    )
+    monkeypatch.setattr(ApplicationService, "_diagnose_reserved", interrupt_evaluator_diagnosis)
     with pytest.raises(KeyboardInterrupt):
         _runner(executor).run("D", "holdout", 3)
     run_id = executor.service.store.recoverable_runs()[0].id

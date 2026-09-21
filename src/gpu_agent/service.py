@@ -511,9 +511,7 @@ class ApplicationService:
                         )
                         source_refs.append(source_ref)
                         hashes[name] = source_ref.sha256
-                _evidence(self.store).save(
-                    run.id, EvidenceBundle(source_snapshot=source_refs)
-                )
+                _evidence(self.store).save(run.id, EvidenceBundle(source_snapshot=source_refs))
                 snapshot = snapshot.model_copy(update={"hashes": hashes})
                 backend = self._backend_factory(self.store, root, root / "tasks")
                 handle = backend.prepare(
@@ -657,9 +655,7 @@ class ApplicationService:
             raise ValueError("candidate does not belong to original run")
         bundle = _evidence(self.store).view(run_id)
         if len(bundle.source_snapshot) != 4:
-            result = self._inconclusive_verification(
-                run_id, "ORACLE_UNAVAILABLE", candidate_id
-            )
+            result = self._inconclusive_verification(run_id, "ORACLE_UNAVAILABLE", candidate_id)
             return result, verification_run_id(run_id, result.candidate_hash)
         result = VerificationEngine(self.store, self.evaluator_store).verify(
             run_id, candidate_id, "full" if strict else "standard"

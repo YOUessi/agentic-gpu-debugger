@@ -66,7 +66,9 @@ def test_evaluator_diagnosis_keeps_all_artifacts_in_evaluator_store(
     for path in service.store.root.rglob("manifest.json"):
         manifest = service.store.load(path.parent.name)
         assert all(ref.visibility == "evaluator" for ref in manifest.artifact_refs)
-    assert not any(b"PRIVATE-SOURCE-CANARY" in p.read_bytes() for p in public.root.rglob("*") if p.is_file())
+    assert not any(
+        b"PRIVATE-SOURCE-CANARY" in p.read_bytes() for p in public.root.rglob("*") if p.is_file()
+    )
 
 
 def test_evaluator_candidate_and_verification_remain_parent_scoped(evaluator_oob_service):
@@ -177,12 +179,12 @@ Add literal, hand-derived tests for these contracts:
 ```python
 def test_holdout_public_lineage_contains_commitments_not_evaluator_run_ids(private_executor):
     prepared = private_executor.holdout_controller.reserve_execution(
-        private_executor.holdout_batch, evaluation_run_id="a" * 32,
-        item=scheduled_item, attempt=attempt,
+        private_executor.holdout_batch,
+        evaluation_run_id="a" * 32,
+        item=scheduled_item,
+        attempt=attempt,
     )
-    public = private_executor.holdout_controller.complete_execution(
-        prepared, native_record
-    )
+    public = private_executor.holdout_controller.complete_execution(prepared, native_record)
     wire = public.model_dump_json().encode()
     assert public.record_id == expected_blind_record_id
     assert public.lineage.kind == "holdout_commitment"
@@ -193,8 +195,13 @@ def test_holdout_public_lineage_contains_commitments_not_evaluator_run_ids(priva
 
 @pytest.mark.parametrize(
     "field,replacement",
-    [("ordinal", 2), ("schedule_hash", "f" * 64), ("attempt_hash", "e" * 64),
-     ("corpus_cutoff", 99), ("public_record_hash", "d" * 64)],
+    [
+        ("ordinal", 2),
+        ("schedule_hash", "f" * 64),
+        ("attempt_hash", "e" * 64),
+        ("corpus_cutoff", 99),
+        ("public_record_hash", "d" * 64),
+    ],
 )
 def test_holdout_execution_binding_rejects_cross_store_tampering(
     completed_execution, field, replacement
@@ -202,7 +209,8 @@ def test_holdout_execution_binding_rejects_cross_store_tampering(
     tamper_evaluator_binding(completed_execution, field, replacement)
     with pytest.raises(ValueError):
         completed_execution.controller.recover_execution(
-            completed_execution.batch, completed_execution.item,
+            completed_execution.batch,
+            completed_execution.item,
             completed_execution.attempt,
         )
 ```
@@ -442,8 +450,7 @@ Add:
 ```python
 def recover_scheduled(
     self, evaluation_run_id: str, ordinal: int
-) -> PublicEvaluationRecord | None:
-    ...
+) -> PublicEvaluationRecord | None: ...
 ```
 
 In `EvaluationRunner._execute()`, inspect an incomplete persisted attempt before the generic
@@ -499,9 +506,7 @@ zero.
 
 ```python
 @pytest.mark.parametrize("fault", STORE_CONFIGURATION_FAULTS)
-def test_production_evaluate_rejects_store_fault_before_side_effect(
-    production_cli_fixture, fault
-):
+def test_production_evaluate_rejects_store_fault_before_side_effect(production_cli_fixture, fault):
     before = production_cli_fixture.snapshot()
     result = production_cli_fixture.invoke_evaluate(fault=fault)
     assert result.exit_code != 0

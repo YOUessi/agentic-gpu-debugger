@@ -320,9 +320,13 @@ python -m pytest tests/gpu/test_oob.py --require-live -q
 ```python
 def test_clean_but_wrong_candidate_is_a_regression():
     observation = VerificationObservation(
-        build_ok=True, runtime_ok=True, original_finding_present=False,
-        public_oracle_passed=True, private_holdout_passed=False,
-        required_evidence_missing=False, new_blocking_findings=[],
+        build_ok=True,
+        runtime_ok=True,
+        original_finding_present=False,
+        public_oracle_passed=True,
+        private_holdout_passed=False,
+        required_evidence_missing=False,
+        new_blocking_findings=[],
     )
     assert decide_verdict(observation) == VerificationVerdict.REGRESSION_DETECTED
 ```

@@ -92,6 +92,7 @@ class CaseExecutionObservation(ExecutionModel):
     sanitizer_refs: list[ArtifactRef]
     oracle_ref: ArtifactRef
 
+
 class CaseValidationArtifact(ExecutionModel):
     clean_run_id: str
     mutant_run_id: str
@@ -131,6 +132,7 @@ class EvaluationLineage(ExecutionModel):
     verification_run_id: str | None
     public_verification_hash: str | None
 
+
 class EvaluatorRecordBinding(ExecutionModel):
     public_record_id: str
     public_record_hash: str
@@ -169,7 +171,9 @@ class ReleaseEvidenceSelection(ExecutionModel):
     acceptance_run_ids: dict[str, list[str]]
     release_test_run_id: str
 
+
 class ReleaseEvidenceIndex(ExecutionModel): ...
+
 
 ReleaseEvidenceIndex.derive(selection, public_store, evaluator_store, actual_repository)
 ReleaseGate.check(manifest, index)

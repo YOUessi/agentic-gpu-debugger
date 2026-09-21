@@ -55,9 +55,7 @@ def _rewrite_child_index(evaluator, audit_id, child_run_ids, *, schema_version=1
             ]
         }
     )
-    (evaluator.root / audit_id / "manifest.json").write_text(
-        updated.model_dump_json(indent=2)
-    )
+    (evaluator.root / audit_id / "manifest.json").write_text(updated.model_dump_json(indent=2))
 
 
 def _original(store, tmp_path, *, holdout_origin=None):
@@ -93,23 +91,17 @@ def _original(store, tmp_path, *, holdout_origin=None):
         model_config_hash="c" * 64,
     )
     parent = (
-        store.create_run(
-            "holdout_execution", binding=binding, external_origin=holdout_origin
-        )
+        store.create_run("holdout_execution", binding=binding, external_origin=holdout_origin)
         if holdout_origin is not None
         else None
     )
-    run = store.create_run(
-        "diagnosis", parent.id if parent is not None else None, binding=binding
-    )
+    run = store.create_run("diagnosis", parent.id if parent is not None else None, binding=binding)
     refs, hashes = [], {}
     for path in source_paths:
         data = path.read_bytes()
         (root / path.name).write_bytes(data)
         hashes[path.name] = hashlib.sha256(data).hexdigest()
-        refs.append(
-            store.put(run.id, "sources/original/" + path.name, data, store.visibility)
-        )
+        refs.append(store.put(run.id, "sources/original/" + path.name, data, store.visibility))
     stdin = store.put(
         run.id,
         "public-input.json",
@@ -537,11 +529,7 @@ def test_derivation_rejects_invalid_verification_child_inventory(
     assert audit_id is not None
     audit = evaluator.load(audit_id)
     index_ref = next(
-        (
-            ref
-            for ref in audit.artifact_refs
-            if ref.name == "verification/child-index.json"
-        ),
+        (ref for ref in audit.artifact_refs if ref.name == "verification/child-index.json"),
         None,
     )
     assert index_ref is not None
@@ -578,9 +566,7 @@ def test_derivation_rejects_boolean_child_inventory_schema_version(
     assert audit_id is not None
     audit = evaluator.load(audit_id)
     index_ref = next(
-        ref
-        for ref in audit.artifact_refs
-        if ref.name == "verification/child-index.json"
+        ref for ref in audit.artifact_refs if ref.name == "verification/child-index.json"
     )
     child_run_ids = json.loads(evaluator.read(index_ref))["child_run_ids"]
     _rewrite_child_index(
@@ -618,9 +604,7 @@ def test_evaluator_local_verification_inherits_holdout_execution_origin(
     assert holdout.kind == "holdout_execution"
     assert diagnosis.external_origin == audit.external_origin == origin
     assert audit.parent_run_id == diagnosis_id
-    assert all(
-        child.external_origin == origin for child in evaluator.children(audit.id)
-    )
+    assert all(child.external_origin == origin for child in evaluator.children(audit.id))
     assert result.verdict.value == "VERIFIED_FIXED"
     assert container_boundary
 
@@ -638,19 +622,13 @@ def test_evaluator_local_derivation_rejects_changed_holdout_origin(
     candidate_id, _ = register_variant(evaluator, original, "human")
     result = VerificationEngine(evaluator, evaluator).verify(diagnosis_id, candidate_id)
     audit_id = result.evaluator_audit_run_id
-    target_id = (
-        audit_id
-        if fault == "audit_origin_removed"
-        else evaluator.children(audit_id)[0].id
-    )
+    target_id = audit_id if fault == "audit_origin_removed" else evaluator.children(audit_id)[0].id
     manifest_path = evaluator.root / target_id / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
     manifest["external_origin"] = (
         None
         if fault == "audit_origin_removed"
-        else ExternalRunOrigin(
-            run_id="e" * 32, visibility="public"
-        ).model_dump(mode="json")
+        else ExternalRunOrigin(run_id="e" * 32, visibility="public").model_dump(mode="json")
     )
     manifest_path.write_text(json.dumps(manifest))
 
@@ -680,9 +658,7 @@ def test_evaluator_local_derivation_rejects_consistent_evaluator_origin_tamper(
     assert audit_id is not None
     audit = evaluator.load(audit_id)
     index_ref = next(
-        ref
-        for ref in audit.artifact_refs
-        if ref.name == "verification/child-index.json"
+        ref for ref in audit.artifact_refs if ref.name == "verification/child-index.json"
     )
     child_run_ids = json.loads(evaluator.read(index_ref))["child_run_ids"]
     impossible_origin = ExternalRunOrigin(
@@ -740,9 +716,7 @@ def test_evaluator_root_must_be_independent(store):
     from gpu_agent.verification.engine import VerificationEngine
 
     with pytest.raises(ValueError):
-        VerificationEngine(
-            store, RunStore(store.root / "private/runs", visibility="evaluator")
-        )
+        VerificationEngine(store, RunStore(store.root / "private/runs", visibility="evaluator"))
     with pytest.raises(ValueError):
         VerificationEngine(store, RunStore(store.root.parent, visibility="evaluator"))
 

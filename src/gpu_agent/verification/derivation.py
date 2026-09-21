@@ -258,9 +258,7 @@ def derive_verification(
     if public.visibility == "public":
         public_root = public.root.resolve()
         evaluator_root = evaluator.root.resolve()
-        if evaluator_root.is_relative_to(public_root) or public_root.is_relative_to(
-            evaluator_root
-        ):
+        if evaluator_root.is_relative_to(public_root) or public_root.is_relative_to(evaluator_root):
             raise ValueError("verification stores have invalid topology")
         audit_parent = None
         origin = ExternalRunOrigin(run_id=diagnosis_run_id, visibility="public")
@@ -317,9 +315,7 @@ def derive_verification(
     ):
         raise ValueError("evaluation verification suite is invalid")
 
-    child_index = json.loads(
-        evaluator.read(_one_ref(audit_run, "verification/child-index.json"))
-    )
+    child_index = json.loads(evaluator.read(_one_ref(audit_run, "verification/child-index.json")))
     if (
         not isinstance(child_index, dict)
         or set(child_index) != {"schema_version", "child_run_ids"}

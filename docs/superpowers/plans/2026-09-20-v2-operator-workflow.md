@@ -162,6 +162,7 @@ Load `renameat2` from libc with `ctypes.CDLL(None, use_errno=True)`, set its sig
 ```python
 _RENAME_NOREPLACE = 1
 
+
 def _rename_noreplace(parent_fd: int, temporary: str, target: str) -> None:
     result = _LIBC.renameat2(
         parent_fd,
