@@ -625,6 +625,7 @@ def _validate_evaluation_record_against_case(
         index = 0
         logical_kinds: list[str] = []
         logical_physical_before: list[int] = []
+        terminal_provider_failure: Invocation | None = None
         while index < len(ordered_started):
             physical_before = index
             first = ordered_started[index]
@@ -657,11 +658,26 @@ def _validate_evaluation_record_against_case(
                     or retry.attempt != 1
                     or retry.format_retry_of != first.invocation_id
                     or retry.client_request_id != expected_retry_id
-                    or retry_final.state != "COMPLETED"
                 ):
                     raise ValueError("provider retry lineage is invalid")
-                completed = retry_final
-                index += 2
+                if retry_final.state == "COMPLETED":
+                    completed = retry_final
+                    index += 2
+                elif (
+                    retry_final.state == "FAILED"
+                    and retry_final.error_code == "LLM_INVALID_OUTPUT"
+                    and not retry_final.retryable
+                    and first.kind == "plan"
+                    and index + 2 == len(ordered_started)
+                    and diagnosis.diagnostic_outcome == "INCONCLUSIVE"
+                    and diagnosis.limitations == ["LLM_INVALID_OUTPUT"]
+                ):
+                    terminal_provider_failure = retry_final
+                    index += 2
+                    sequence += 1
+                    break
+                else:
+                    raise ValueError("provider retry lineage is invalid")
             else:
                 raise ValueError("provider invocation did not complete")
             logical_kinds.append(first.kind)
@@ -857,7 +873,16 @@ def _validate_evaluation_record_against_case(
                     )
                 if index + 1 < len(step_refs) and action.action_type not in acquisition_actions:
                     raise ValueError("agent controller continued after terminal action")
-                expected_budget = step_budget.model_copy(update=agent_updates)
+            expected_budget = step_budget.model_copy(update=agent_updates)
+        if terminal_provider_failure is not None:
+            reservation_id = len(agent_expected_audit) // 3 + 1
+            agent_expected_audit.extend(
+                [
+                    {"id": reservation_id, "action": "planner_llm", "state": "ATTEMPTED"},
+                    {"id": reservation_id, "action": "planner_llm", "state": "STARTED"},
+                    {"id": reservation_id, "action": "planner_llm", "state": "FAILED"},
+                ]
+            )
         expected_final_budget = expected_budget.model_copy(
             update={
                 "llm_calls": len(invocations),
