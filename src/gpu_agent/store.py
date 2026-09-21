@@ -295,6 +295,136 @@ class EvaluationRunLease:
         return data
 
 
+class RunDirectorySetLease:
+    """Pin a store root and a small set of optional run directories by fd."""
+
+    def __init__(self, store: RunStore, run_ids: tuple[str, ...], root_fd: int) -> None:
+        self.store = store
+        self._run_ids = run_ids
+        self._root_fd = root_fd
+        self._root_identity = os.fstat(root_fd)
+        self._run_fds: dict[str, int] = {}
+        self._run_identities: dict[str, os.stat_result] = {}
+        self._absent: set[str] = set()
+        self._active = True
+
+    @staticmethod
+    def _same(left: os.stat_result, right: os.stat_result) -> bool:
+        return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+    def _validate_root(self) -> None:
+        if not self._active:
+            raise ValueError("run directory lease is closed")
+        descriptor = os.fstat(self._root_fd)
+        try:
+            current = os.stat(self.store.root, follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("run store root changed during leased operation") from exc
+        if (
+            not stat.S_ISDIR(descriptor.st_mode)
+            or not stat.S_ISDIR(current.st_mode)
+            or descriptor.st_mode & 0o077
+            or not self._same(descriptor, current)
+            or not self._same(descriptor, self._root_identity)
+        ):
+            raise ValueError("run store root changed during leased operation")
+
+    def validate(self) -> None:
+        self._validate_root()
+        for run_id, descriptor in self._run_fds.items():
+            pinned = os.fstat(descriptor)
+            expected = self._run_identities[run_id]
+            try:
+                current = os.stat(run_id, dir_fd=self._root_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise ValueError("run directory changed during leased operation") from exc
+            if (
+                not stat.S_ISDIR(pinned.st_mode)
+                or not stat.S_ISDIR(current.st_mode)
+                or pinned.st_mode & 0o077
+                or not self._same(pinned, expected)
+                or not self._same(pinned, current)
+            ):
+                raise ValueError("run directory changed during leased operation")
+        for run_id in self._absent:
+            try:
+                os.stat(run_id, dir_fd=self._root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise ValueError("run path changed during leased operation") from exc
+            raise ValueError("run path changed during leased operation")
+
+    def load_optional(self, run_id: str) -> RunManifest | None:
+        if run_id not in self._run_ids:
+            raise ValueError("run is outside the directory lease")
+        self._validate_root()
+        if run_id in self._run_fds:
+            self.validate()
+            manifest = RunManifest.model_validate_json(
+                _read_regular_at(self._run_fds[run_id], "manifest.json", 8 * 1024 * 1024)
+            )
+            if manifest.id != run_id:
+                raise ValueError("manifest ID mismatch")
+            self.validate()
+            return manifest
+        try:
+            descriptor = os.open(
+                run_id,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=self._root_fd,
+            )
+        except FileNotFoundError:
+            self._absent.add(run_id)
+            self.validate()
+            return None
+        except OSError as exc:
+            raise ValueError("run path is unavailable or unsafe") from exc
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode) or info.st_mode & 0o077:
+            os.close(descriptor)
+            raise ValueError("run path is unavailable or unsafe")
+        self._run_fds[run_id] = descriptor
+        self._run_identities[run_id] = info
+        self._absent.discard(run_id)
+        return self.load_optional(run_id)
+
+    def adopt(self, run_id: str) -> RunManifest:
+        """Pin a directory created by the lease owner after proving it absent."""
+        if run_id not in self._absent:
+            raise ValueError("only an absent leased run may be adopted")
+        self._absent.remove(run_id)
+        try:
+            manifest = self.load_optional(run_id)
+        except BaseException:
+            self._absent.add(run_id)
+            raise
+        if manifest is None:
+            self._absent.add(run_id)
+            raise ValueError("created run is absent")
+        return manifest
+
+    def read(self, ref: ArtifactRef) -> bytes:
+        run = self.load_optional(ref.run_id)
+        if run is None or ref.visibility != self.store.visibility or ref not in run.artifact_refs:
+            raise ValueError("unregistered artifact or wrong visibility")
+        if ref.relative_path != f"{ref.run_id}/artifacts/{ref.id}":
+            raise ValueError("artifact path mismatch")
+        artifacts_fd = os.open(
+            "artifacts",
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+            dir_fd=self._run_fds[ref.run_id],
+        )
+        try:
+            data = _read_regular_at(artifacts_fd, ref.id, min(ref.byte_count, 64 * 1024 * 1024))
+        finally:
+            os.close(artifacts_fd)
+        if len(data) != ref.byte_count or hashlib.sha256(data).hexdigest() != ref.sha256:
+            raise ValueError("artifact hash mismatch")
+        self.validate()
+        return data
+
+
 class RunStore:
     def __init__(self, root: Path, *, visibility: Visibility = "public") -> None:
         self.root = root.absolute()
@@ -414,6 +544,30 @@ class RunStore:
                 except OSError:
                     if lease is None or not lease._authority_commit_finalized:
                         raise
+
+    @contextmanager
+    def run_directory_set_lease(
+        self, run_ids: tuple[str, ...]
+    ) -> Iterator[RunDirectorySetLease]:
+        """Hold a canonical private root fd and pin optional run directories on demand."""
+        if not run_ids or len(set(run_ids)) != len(run_ids):
+            raise ValueError("run directory lease requires distinct runs")
+        for run_id in run_ids:
+            if not re.fullmatch(r"[a-f0-9]{32}", run_id):
+                raise ValueError("invalid run ID")
+        try:
+            root_fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise ValueError("run store root is unavailable or unsafe") from exc
+        lease = RunDirectorySetLease(self, run_ids, root_fd)
+        try:
+            lease.validate()
+            yield lease
+            lease.validate()
+        finally:
+            lease._active = False
+            for descriptor in (*lease._run_fds.values(), root_fd):
+                os.close(descriptor)
 
     def _save(self, manifest: RunManifest) -> None:
         directory = self._run_dir(manifest.id)

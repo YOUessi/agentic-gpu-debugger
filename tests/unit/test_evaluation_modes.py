@@ -1745,6 +1745,96 @@ def completed_holdout_execution(prepared_holdout_execution):
     return case
 
 
+@pytest.fixture
+def prepared_holdout_repair_execution(native_evaluation_executor, monkeypatch):
+    from test_holdout_scoring import evaluator_native_record
+
+    from gpu_agent.benchmark.evaluation import EvaluationAttempt, EvaluationScheduleItem
+    from gpu_agent.benchmark.executor import registered_cases
+    from gpu_agent.benchmark.holdout import HoldoutController
+    from gpu_agent.service import ApplicationService
+
+    executor = native_evaluation_executor
+    binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
+    controller = HoldoutController(
+        executor.service.store,
+        executor.corpus,
+        binding=binding,
+        _schedule_verifier=executor._schedule_verifier,
+    )
+    batch = controller.prepare()
+    item = EvaluationScheduleItem(
+        ordinal=0,
+        case_id=batch.aliases[0],
+        template_id=batch.aliases[0],
+        mode="E",
+        repeat=0,
+        split="holdout",
+        holdout_proof=controller.validate_batch(batch),
+    )
+    attempt = EvaluationAttempt(
+        run_id="a" * 32,
+        ordinal=0,
+        schedule_hash="b" * 64,
+        corpus_cutoff=batch.corpus_cutoff,
+        idempotency_key="c" * 64,
+        reserved_cost_usd=1,
+    )
+    prepared = controller.reserve_execution(
+        batch, evaluation_run_id=attempt.run_id, item=item, attempt=attempt
+    )
+    evaluator_service = ApplicationService(
+        executor.corpus,
+        executor.corpus,
+        provider=executor.service._provider,
+        backend_factory=executor.service._backend_factory,
+        knowledge=executor.service.knowledge,
+        knowledge_version=executor.service.knowledge_version,
+        _binding=binding,
+        _evaluation_schedule_verifier=executor._schedule_verifier,
+    )
+    evaluator_service._pricing_attestation = executor.service._pricing_attestation
+    monkeypatch.setattr(
+        executor.corpus,
+        "validate_and_create_evaluation_child",
+        lambda verifier, unit: executor.corpus.load(prepared.diagnosis_run_id)
+        if unit == prepared.evaluation_unit
+        else (_ for _ in ()).throw(ValueError("unexpected evaluation unit")),
+    )
+    cases = registered_cases(
+        executor.corpus,
+        binding,
+        executor._corpus_family,
+        cutoff=batch.corpus_cutoff,
+    )
+    case = cases[prepared.binding.private_case_id]
+    evaluator_service.diagnose(
+        executor.sources[case.id],
+        mode=item.mode,
+        required_tools=(case.target_tool,),
+        expected_source_hash=case.source_hash,
+        evaluation_unit=prepared.evaluation_unit,
+    )
+    native = evaluator_native_record(
+        evaluator_service,
+        executor.corpus,
+        prepared,
+        item,
+        case,
+    )
+    assert native.lineage.candidate_run_id is not None
+    assert native.lineage.verification_run_id is not None
+    return SimpleNamespace(
+        controller=controller,
+        batch=batch,
+        item=item,
+        attempt=attempt,
+        prepared=prepared,
+        native=native,
+        evaluator=executor.corpus,
+    )
+
+
 @pytest.mark.parametrize(
     "field,replacement",
     [
@@ -1797,57 +1887,92 @@ def test_task2_holdout_completion_rejects_dangling_provider_started(
 
 
 @pytest.mark.parametrize(
-    "fault",
+    "fault,error",
     [
-        "candidate_payload",
-        "candidate_status",
-        "candidate_binding",
-        "verification_payload",
-        "verification_status",
-        "verification_binding",
+        ("candidate_payload", "evaluation candidate lineage is invalid"),
+        ("candidate_status", "evaluation candidate lineage is invalid"),
+        ("candidate_binding", "evaluation candidate lineage is invalid"),
+        ("candidate_origin", "evaluation candidate topology is invalid"),
+        ("candidate_parent", "evaluation candidate provenance is invalid"),
+        ("candidate_base_source_hash", "evaluation candidate provenance is invalid"),
+        ("verification_payload", "evaluation verification lineage is invalid"),
+        ("verification_status", "evaluation verification lineage is invalid"),
+        ("verification_binding", "evaluation verification lineage is invalid"),
+        ("verification_origin", "evaluation verification topology is invalid"),
     ],
 )
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
 def test_task2_holdout_completion_rejects_untrusted_child_artifacts(
-    prepared_holdout_execution, native_evaluation_executor, fault
+    prepared_holdout_repair_execution, native_evaluation_executor, fault, error
 ):
-    case = prepared_holdout_execution
-    candidate = case.evaluator.create_run(
-        "candidate", parent_run_id=case.prepared.diagnosis_run_id
-    )
-    case.evaluator.put(candidate.id, "candidate.json", b"{}", "evaluator")
-    if fault != "candidate_status":
-        case.evaluator.transition(candidate.id, "RUNNING", "FINALIZING")
-        case.evaluator.transition(candidate.id, "COMPLETED", None)
+    case = prepared_holdout_repair_execution
+    candidate_id = case.native.lineage.candidate_run_id
+    verification_id = case.native.lineage.verification_run_id
+    assert candidate_id is not None and verification_id is not None
+    native = case.native
+    if fault == "candidate_payload":
+        _rewrite_artifact(
+            case.evaluator,
+            candidate_id,
+            "candidate.json",
+            lambda value: value.update(provider="forged-provider"),
+        )
+    elif fault == "candidate_base_source_hash":
+        _rewrite_artifact(
+            case.evaluator,
+            candidate_id,
+            "candidate.json",
+            lambda value: value.update(base_source_hash="f" * 64),
+        )
+    elif fault == "candidate_parent":
+        _rewrite_artifact(
+            case.evaluator,
+            candidate_id,
+            "candidate.json",
+            lambda value: value.update(parent_run_id="f" * 32),
+        )
+    elif fault == "verification_payload":
+        ref = _rewrite_artifact(
+            case.evaluator,
+            verification_id,
+            "verification/result.json",
+            lambda value: value.update(candidate_hash="f" * 64),
+        )
+        native = native.model_copy(
+            update={
+                "lineage": native.lineage.model_copy(
+                    update={"public_verification_hash": ref.sha256}
+                )
+            }
+        )
     if fault == "candidate_binding":
-        _rewrite_manifest(case.evaluator, candidate.id, lambda value: value.update(binding=None))
-    verification = case.evaluator.create_run(
-        "verification", parent_run_id=case.prepared.diagnosis_run_id
-    )
-    case.evaluator.put(verification.id, "verification/result.json", b"{}", "evaluator")
-    if fault != "verification_status":
-        case.evaluator.transition(verification.id, "RUNNING", "FINALIZING")
-        case.evaluator.transition(verification.id, "COMPLETED", None)
+        _rewrite_manifest(case.evaluator, candidate_id, lambda value: value.update(binding=None))
+    elif fault == "candidate_status":
+        _rewrite_manifest(
+            case.evaluator,
+            candidate_id,
+            lambda value: value.update(status="RUNNING", current_phase="FINALIZING"),
+        )
+    elif fault == "candidate_origin":
+        _rewrite_manifest(
+            case.evaluator, candidate_id, lambda value: value.update(external_origin=None)
+        )
     if fault == "verification_binding":
         _rewrite_manifest(
-            case.evaluator, verification.id, lambda value: value.update(binding=None)
+            case.evaluator, verification_id, lambda value: value.update(binding=None)
         )
-    lineage = case.native.lineage.model_copy(
-        update={
-            "candidate_run_id": candidate.id,
-            "verification_run_id": verification.id,
-            "public_verification_hash": next(
-                ref
-                for ref in case.evaluator.load(verification.id).artifact_refs
-                if ref.name == "verification/result.json"
-            ).sha256,
-        }
-    )
-    forged = case.native.model_copy(
-        update={"lineage": lineage, "patch_hash": "a" * 64, "verdict": "FORGED"}
-    )
-    with pytest.raises(ValueError):
-        case.controller.complete_execution(case.prepared, forged)
+    elif fault == "verification_status":
+        _rewrite_manifest(
+            case.evaluator,
+            verification_id,
+            lambda value: value.update(status="RUNNING", current_phase="FINALIZING"),
+        )
+    elif fault == "verification_origin":
+        _rewrite_manifest(
+            case.evaluator, verification_id, lambda value: value.update(external_origin=None)
+        )
+    with pytest.raises(ValueError, match=error):
+        case.controller.complete_execution(case.prepared, native)
 
 
 def _rewrite_manifest(store, run_id, change):
@@ -1855,6 +1980,29 @@ def _rewrite_manifest(store, run_id, change):
     value = json.loads(path.read_bytes())
     change(value)
     path.write_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+
+
+def _rewrite_artifact(store, run_id, name, change):
+    run = store.load(run_id)
+    ref = next(value for value in run.artifact_refs if value.name == name)
+    path = store.root / ref.relative_path
+    mode = stat.S_IMODE(path.stat().st_mode)
+    path.chmod(mode | stat.S_IWUSR)
+    value = json.loads(path.read_bytes())
+    change(value)
+    content = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    path.write_bytes(content)
+    path.chmod(mode)
+    manifest_path = store.root / run_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    for item in manifest["artifact_refs"]:
+        if item["id"] == ref.id:
+            item["sha256"] = hashlib.sha256(content).hexdigest()
+            item["byte_count"] = len(content)
+    manifest_path.write_bytes(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    )
+    return store.load(run_id).artifact_refs[run.artifact_refs.index(ref)]
 
 
 def _inject_terminal_artifact(store, run_id, name, content):
@@ -1981,6 +2129,89 @@ def test_task2_recovery_rejects_non_directory_execution_path(
     execution_path.write_bytes(b"unsafe")
     with pytest.raises(ValueError):
         case.controller.recover_execution(case.batch, case.item, case.attempt)
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_concurrent_same_attempt_reservation_returns_exact_winner(
+    prepared_holdout_execution, native_evaluation_executor, monkeypatch
+):
+    import shutil
+    import threading
+
+    case = prepared_holdout_execution
+    shutil.rmtree(case.evaluator.root / case.prepared.diagnosis_run_id)
+    shutil.rmtree(case.evaluator.root / case.prepared.execution_run_id)
+    original = case.controller._prepared_execution
+    barrier = threading.Barrier(2)
+
+    def synchronized_preparation(*args, **kwargs):
+        prepared = original(*args, **kwargs)
+        barrier.wait(timeout=5)
+        return prepared
+
+    monkeypatch.setattr(case.controller, "_prepared_execution", synchronized_preparation)
+
+    def reserve():
+        return case.controller.reserve_execution(
+            case.batch,
+            evaluation_run_id=case.attempt.run_id,
+            item=case.item,
+            attempt=case.attempt,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = [future.result() for future in [pool.submit(reserve), pool.submit(reserve)]]
+    assert results == [case.prepared, case.prepared]
+
+
+@pytest.mark.parametrize("operation", ["reserve", "recover"])
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_execution_directory_swap_between_probe_and_use_fails_closed(
+    request,
+    native_evaluation_executor,
+    monkeypatch,
+    operation,
+):
+    import shutil
+
+    from gpu_agent.store import RunDirectorySetLease
+
+    fixture = (
+        "completed_holdout_execution"
+        if operation == "recover"
+        else "prepared_holdout_execution"
+    )
+    case = request.getfixturevalue(fixture)
+    execution_path = case.evaluator.root / case.prepared.execution_run_id
+    displaced = execution_path.with_name(f".{execution_path.name}-displaced")
+    original = RunDirectorySetLease.load_optional
+    swapped = False
+
+    def swapping_load(lease, run_id):
+        nonlocal swapped
+        run = original(lease, run_id)
+        if (
+            lease.store is case.evaluator
+            and run_id == case.prepared.execution_run_id
+            and run is not None
+            and not swapped
+        ):
+            swapped = True
+            execution_path.rename(displaced)
+            shutil.copytree(displaced, execution_path)
+        return run
+
+    monkeypatch.setattr(RunDirectorySetLease, "load_optional", swapping_load)
+    with pytest.raises(ValueError):
+        if operation == "reserve":
+            case.controller.reserve_execution(
+                case.batch,
+                evaluation_run_id=case.attempt.run_id,
+                item=case.item,
+                attempt=case.attempt,
+            )
+        else:
+            case.controller.recover_execution(case.batch, case.item, case.attempt)
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import stat
+import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -48,7 +49,7 @@ from gpu_agent.evidence.repository import EvidenceRepository
 from gpu_agent.execution.models import (
     SanitizerTool,
 )
-from gpu_agent.patching import PatchCandidate
+from gpu_agent.patching import PatchCandidate, SourceSnapshot, materialize_candidate
 from gpu_agent.service import ApplicationService
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
 from gpu_agent.verification.derivation import validate_persisted_derivation
@@ -635,6 +636,8 @@ def validate_evaluation_record(
     verification_ref: ArtifactRef | None = None
     if candidates:
         candidate_run = candidates[0]
+        if candidate_run.external_origin != run.external_origin:
+            raise ValueError("evaluation candidate topology is invalid")
         candidate = PatchCandidate.model_validate_json(
             store.read(_one_ref(candidate_run, "candidate.json"))
         )
@@ -651,6 +654,28 @@ def validate_evaluation_record(
             or candidate.prompt_version != policy.prompt_version
         ):
             raise ValueError("evaluation candidate lineage is invalid")
+        snapshot_hashes: dict[str, str] = {}
+        snapshot_contents: dict[str, bytes] = {}
+        for source_ref in bundle.source_snapshot:
+            name = Path(source_ref.name).name
+            if (
+                name not in {"kernel.cu", "vector_io.cpp", "vector_api.h", "json.hpp"}
+                or name in snapshot_hashes
+            ):
+                raise ValueError("evaluation candidate provenance is invalid")
+            snapshot_hashes[name] = source_ref.sha256
+            snapshot_contents[name] = store.read(source_ref)
+        try:
+            with tempfile.TemporaryDirectory(prefix="gpu-agent-evaluation-candidate-") as directory:
+                root = Path(directory)
+                for name, content in snapshot_contents.items():
+                    (root / name).write_bytes(content)
+                materialize_candidate(
+                    SourceSnapshot(parent_run_id=run.id, root=root, hashes=snapshot_hashes),
+                    candidate,
+                )
+        except (OSError, ValueError):
+            raise ValueError("evaluation candidate provenance is invalid") from None
         patch_hashes = [value.output_hash for value in logical_terminals if value.kind == "patch"]
         expected_patch_hash = hashlib.sha256(
             json.dumps({"unified_diff": candidate.unified_diff}, separators=(",", ":")).encode()
@@ -658,6 +683,8 @@ def validate_evaluation_record(
         if patch_hashes != [expected_patch_hash]:
             raise ValueError("provider patch output differs from candidate")
         verification_run = verifications[0]
+        if verification_run.external_origin != run.external_origin:
+            raise ValueError("evaluation verification topology is invalid")
         verification_ref = _one_ref(verification_run, "verification/result.json")
         verification = VerificationResult.model_validate_json(store.read(verification_ref))
         if (

@@ -32,10 +32,12 @@ from gpu_agent.benchmark.evaluation import (
 from gpu_agent.benchmark.metrics import EvaluationLabels, Score
 from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, RunManifest, RunStatus
 from gpu_agent.execution.models import ExecutionModel
-from gpu_agent.store import RunStore, read_regular, reject_symlinks
+from gpu_agent.store import RunDirectorySetLease, RunStore, read_regular, reject_symlinks
 
 _SCORE_GUARD = threading.Lock()
 _SCORE_LOCKS: dict[str, threading.Lock] = {}
+_EXECUTION_GUARD = threading.Lock()
+_EXECUTION_LOCKS: dict[str, threading.Lock] = {}
 
 if TYPE_CHECKING:
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
@@ -373,13 +375,25 @@ class HoldoutController:
         )
 
     def _validate_execution_reservation(
-        self, prepared: PreparedHoldoutExecution
+        self,
+        prepared: PreparedHoldoutExecution,
+        lease: RunDirectorySetLease | None = None,
     ) -> tuple[RunManifest, RunManifest]:
         expected_origin = ExternalRunOrigin(
             run_id=prepared.binding.public_evaluation_run_id, visibility="public"
         )
-        execution = self.evaluator.load(prepared.execution_run_id)
-        diagnosis = self.evaluator.load(prepared.diagnosis_run_id)
+        execution = (
+            lease.load_optional(prepared.execution_run_id)
+            if lease is not None
+            else self.evaluator.load(prepared.execution_run_id)
+        )
+        diagnosis = (
+            lease.load_optional(prepared.diagnosis_run_id)
+            if lease is not None
+            else self.evaluator.load(prepared.diagnosis_run_id)
+        )
+        if execution is None or diagnosis is None:
+            raise ValueError("holdout execution transaction is incomplete")
         unit_refs = [
             ref for ref in diagnosis.artifact_refs if ref.name == "evaluation/unit.json"
         ]
@@ -396,7 +410,9 @@ class HoldoutController:
             or diagnosis.status
             not in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.COMPLETED}
             or len(unit_refs) != 1
-            or EvaluationUnitBinding.model_validate_json(self.evaluator.read(unit_refs[0]))
+            or EvaluationUnitBinding.model_validate_json(
+                lease.read(unit_refs[0]) if lease is not None else self.evaluator.read(unit_refs[0])
+            )
             != prepared.evaluation_unit
         ):
             raise ValueError("holdout execution transaction is invalid")
@@ -443,45 +459,55 @@ class HoldoutController:
         attempt: EvaluationAttempt,
     ) -> PreparedHoldoutExecution:
         prepared = self._prepared_execution(batch, evaluation_run_id, item, attempt)
-        execution_state = self._run_path_state(prepared.execution_run_id)
-        diagnosis_state = self._run_path_state(prepared.diagnosis_run_id)
-        if execution_state == "absent" and diagnosis_state != "absent":
-            raise ValueError("holdout execution transaction is invalid")
-        if execution_state == "absent":
-            self.evaluator.create_run(
-                "holdout_execution",
-                binding=self.binding,
-                external_origin=ExternalRunOrigin(
-                    run_id=evaluation_run_id, visibility="public"
-                ),
-                _run_id=prepared.execution_run_id,
-            )
-            self.evaluator.transition(
-                prepared.execution_run_id, RunStatus.RUNNING, "PREPARING"
-            )
-            execution = self.evaluator.load(prepared.execution_run_id)
-        else:
-            execution = self.evaluator.load(prepared.execution_run_id)
-            self._validate_execution_parent(prepared, execution)
-            if execution.status == RunStatus.COMPLETED:
-                if diagnosis_state == "absent":
-                    raise ValueError("holdout execution transaction is incomplete")
-                self._recover_prepared_execution(prepared)
+        with self._execution_claim(prepared.execution_run_id):
+            with self.evaluator.run_directory_set_lease(
+                (prepared.execution_run_id, prepared.diagnosis_run_id)
+            ) as lease:
+                execution = lease.load_optional(prepared.execution_run_id)
+                diagnosis = lease.load_optional(prepared.diagnosis_run_id)
+                if execution is None and diagnosis is not None:
+                    raise ValueError("holdout execution transaction is invalid")
+                if execution is None:
+                    lease.validate()
+                    self.evaluator.create_run(
+                        "holdout_execution",
+                        binding=self.binding,
+                        external_origin=ExternalRunOrigin(
+                            run_id=evaluation_run_id, visibility="public"
+                        ),
+                        _run_id=prepared.execution_run_id,
+                    )
+                    execution = lease.adopt(prepared.execution_run_id)
+                    self.evaluator.transition(
+                        prepared.execution_run_id, RunStatus.RUNNING, "PREPARING"
+                    )
+                    execution = lease.load_optional(prepared.execution_run_id)
+                    if execution is None:
+                        raise ValueError("holdout execution transaction is incomplete")
+                else:
+                    self._validate_execution_parent(prepared, execution)
+                    if execution.status == RunStatus.COMPLETED:
+                        if diagnosis is None:
+                            raise ValueError("holdout execution transaction is incomplete")
+                        self._recover_prepared_execution(prepared, lease=lease)
+                        return prepared
+                if diagnosis is None:
+                    lease.validate()
+                    self.evaluator.create_run(
+                        "diagnosis",
+                        parent_run_id=prepared.execution_run_id,
+                        _run_id=prepared.diagnosis_run_id,
+                    )
+                    lease.adopt(prepared.diagnosis_run_id)
+                    self.evaluator.put_if_absent_exact(
+                        prepared.diagnosis_run_id,
+                        "evaluation/unit.json",
+                        prepared.evaluation_unit.model_dump_json().encode(),
+                        "evaluator",
+                    )
+                self._validate_execution_reservation(prepared, lease)
+                lease.validate()
                 return prepared
-        if diagnosis_state == "absent":
-            self.evaluator.create_run(
-                "diagnosis",
-                parent_run_id=prepared.execution_run_id,
-                _run_id=prepared.diagnosis_run_id,
-            )
-            self.evaluator.put_if_absent_exact(
-                prepared.diagnosis_run_id,
-                "evaluation/unit.json",
-                prepared.evaluation_unit.model_dump_json().encode(),
-                "evaluator",
-            )
-        self._validate_execution_reservation(prepared)
-        return prepared
 
     @staticmethod
     def _one_named_ref(run: RunManifest, name: str) -> ArtifactRef:
@@ -491,9 +517,12 @@ class HoldoutController:
         return refs[0]
 
     def _validate_native_execution(
-        self, prepared: PreparedHoldoutExecution, native: EvaluationRecord
+        self,
+        prepared: PreparedHoldoutExecution,
+        native: EvaluationRecord,
+        lease: RunDirectorySetLease | None = None,
     ) -> PublicEvaluationRecord:
-        _, diagnosis = self._validate_execution_reservation(prepared)
+        _, diagnosis = self._validate_execution_reservation(prepared, lease)
         if diagnosis.status != RunStatus.COMPLETED:
             raise ValueError("holdout native record is invalid")
         item = EvaluationScheduleItem(
@@ -662,10 +691,12 @@ class HoldoutController:
         )
 
     def _recover_prepared_execution(
-        self, prepared: PreparedHoldoutExecution
+        self,
+        prepared: PreparedHoldoutExecution,
+        lease: RunDirectorySetLease | None = None,
     ) -> PublicEvaluationRecord:
         batch = self._validate_prepared_execution(prepared)
-        execution, _ = self._validate_execution_reservation(prepared)
+        execution, _ = self._validate_execution_reservation(prepared, lease)
         expected_names = {
             "holdout/native-record.json",
             "holdout/public-record.json",
@@ -678,9 +709,15 @@ class HoldoutController:
         native_ref = self._one_named_ref(execution, "holdout/native-record.json")
         public_ref = self._one_named_ref(execution, "holdout/public-record.json")
         binding_ref = self._one_named_ref(execution, "holdout/execution-binding.json")
-        native_content = self.evaluator.read(native_ref)
-        public_content = self.evaluator.read(public_ref)
-        binding_content = self.evaluator.read(binding_ref)
+        native_content = (
+            lease.read(native_ref) if lease is not None else self.evaluator.read(native_ref)
+        )
+        public_content = (
+            lease.read(public_ref) if lease is not None else self.evaluator.read(public_ref)
+        )
+        binding_content = (
+            lease.read(binding_ref) if lease is not None else self.evaluator.read(binding_ref)
+        )
         native = EvaluationRecord.model_validate_json(native_content)
         public = PublicEvaluationRecord.model_validate_json(public_content)
         final_binding = HoldoutExecutionBinding.model_validate_json(binding_content)
@@ -690,7 +727,7 @@ class HoldoutController:
                 "public_record_hash": hashlib.sha256(public_content).hexdigest(),
             }
         )
-        validated_native = self._validate_native_execution(prepared, native)
+        validated_native = self._validate_native_execution(prepared, native, lease)
         expected_public = self._public_projection(
             batch, prepared, validated_native, expected_binding.native_record_hash or ""
         )
@@ -703,6 +740,8 @@ class HoldoutController:
             or expected_public.model_dump_json().encode() != public_content
         ):
             raise ValueError("holdout execution transaction is invalid")
+        if lease is not None:
+            lease.validate()
         return public
 
     def recover_execution(
@@ -712,13 +751,17 @@ class HoldoutController:
         attempt: EvaluationAttempt,
     ) -> PublicEvaluationRecord | None:
         prepared = self._prepared_execution(batch, attempt.run_id, item, attempt)
-        execution_state = self._run_path_state(prepared.execution_run_id)
-        diagnosis_state = self._run_path_state(prepared.diagnosis_run_id)
-        if execution_state == "absent" and diagnosis_state == "absent":
-            return None
-        if execution_state == "absent" or diagnosis_state == "absent":
-            raise ValueError("holdout execution transaction is incomplete")
-        return self._recover_prepared_execution(prepared)
+        with self._execution_claim(prepared.execution_run_id):
+            with self.evaluator.run_directory_set_lease(
+                (prepared.execution_run_id, prepared.diagnosis_run_id)
+            ) as lease:
+                execution = lease.load_optional(prepared.execution_run_id)
+                diagnosis = lease.load_optional(prepared.diagnosis_run_id)
+                if execution is None and diagnosis is None:
+                    return None
+                if execution is None or diagnosis is None:
+                    raise ValueError("holdout execution transaction is incomplete")
+                return self._recover_prepared_execution(prepared, lease=lease)
 
     def prepare_score(
         self,
@@ -1143,6 +1186,71 @@ class HoldoutController:
             f"holdout-score-v1:{record_id}".encode(),
             hashlib.sha256,
         ).hexdigest()[:32]
+
+    @contextmanager
+    def _execution_claim(self, execution_run_id: str) -> Iterator[None]:
+        """Serialize one deterministic evaluator transaction across threads/processes."""
+        with _EXECUTION_GUARD:
+            local = _EXECUTION_LOCKS.setdefault(execution_run_id, threading.Lock())
+        with local:
+            try:
+                root_fd = os.open(
+                    self.evaluator.root,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                )
+            except OSError as exc:
+                raise ValueError("holdout execution claim root is unsafe") from exc
+            fd = -1
+            try:
+                root_info = os.fstat(root_fd)
+                root_path_info = os.stat(self.evaluator.root, follow_symlinks=False)
+                if (
+                    not stat.S_ISDIR(root_info.st_mode)
+                    or root_info.st_mode & 0o077
+                    or (root_info.st_dev, root_info.st_ino)
+                    != (root_path_info.st_dev, root_path_info.st_ino)
+                ):
+                    raise ValueError("holdout execution claim root is unsafe")
+                fd = os.open(
+                    f".holdout-execution-{execution_run_id}.lock",
+                    os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=root_fd,
+                )
+                info = os.fstat(fd)
+                if (
+                    not stat.S_ISREG(info.st_mode)
+                    or stat.S_IMODE(info.st_mode) != 0o600
+                    or info.st_nlink != 1
+                ):
+                    raise ValueError("holdout execution claim must be an owner-only regular file")
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                current_root = os.stat(self.evaluator.root, follow_symlinks=False)
+                if (root_info.st_dev, root_info.st_ino) != (
+                    current_root.st_dev,
+                    current_root.st_ino,
+                ):
+                    raise ValueError("holdout execution claim root changed")
+                yield
+                current_root = os.stat(self.evaluator.root, follow_symlinks=False)
+                current_lock = os.stat(
+                    f".holdout-execution-{execution_run_id}.lock",
+                    dir_fd=root_fd,
+                    follow_symlinks=False,
+                )
+                if (
+                    (root_info.st_dev, root_info.st_ino)
+                    != (current_root.st_dev, current_root.st_ino)
+                    or (info.st_dev, info.st_ino)
+                    != (current_lock.st_dev, current_lock.st_ino)
+                ):
+                    raise ValueError("holdout execution claim changed")
+            except OSError as exc:
+                raise ValueError("holdout execution claim is unavailable or unsafe") from exc
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+                os.close(root_fd)
 
     @contextmanager
     def _score_claim(self, score_run_id: str) -> Iterator[None]:
