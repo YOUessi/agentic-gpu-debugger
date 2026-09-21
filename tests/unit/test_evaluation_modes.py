@@ -2,7 +2,9 @@
 
 import hashlib
 import json
+import stat
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 import pytest
 from schedule_authority_support import reserve_schedule_for_test, schedule_client_for_test
@@ -949,7 +951,7 @@ def test_mode_e_rejects_unattested_response_policy(
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
-def test_holdout_alias_and_score_binding_never_publish_private_identity(
+def test_holdout_alias_and_score_binding_never_publish_private_values(
     oob_service, tmp_path, monkeypatch, native_evaluation_executor
 ):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
@@ -1591,3 +1593,192 @@ def test_executor_rejects_incomplete_or_unbounded_acquisition_usage(
     monkeypatch.setattr(store, "put", malformed)
     with pytest.raises(ValueError):
         _execute_claimed_test_unit(executor, "B")
+
+
+@pytest.fixture
+def completed_holdout_execution(native_evaluation_executor):
+    from gpu_agent.agent.models import DiagnosisResult
+    from gpu_agent.benchmark import evaluation as evaluation_module
+    from gpu_agent.benchmark.evaluation import EvaluationAttempt, EvaluationScheduleItem
+    from gpu_agent.benchmark.holdout import HoldoutController
+
+    executor = native_evaluation_executor
+    controller = HoldoutController(
+        executor.service.store,
+        executor.corpus,
+        binding=executor.service.binding,
+        _schedule_verifier=executor._schedule_verifier,
+    )
+    batch = controller.prepare()
+    item = EvaluationScheduleItem(
+        ordinal=0,
+        case_id=batch.aliases[0],
+        template_id=batch.aliases[0],
+        mode="D",
+        repeat=0,
+        split="holdout",
+        holdout_proof=controller.validate_batch(batch),
+    )
+    attempt = EvaluationAttempt(
+        run_id="a" * 32,
+        ordinal=0,
+        schedule_hash="b" * 64,
+        corpus_cutoff=batch.corpus_cutoff,
+        idempotency_key="c" * 64,
+        reserved_cost_usd=1,
+    )
+    prepared = controller.reserve_execution(
+        batch, evaluation_run_id=attempt.run_id, item=item, attempt=attempt
+    )
+    diagnosis = DiagnosisResult.inconclusive("TEST_NOT_RUN")
+    diagnosis_ref = executor.corpus.put(
+        prepared.diagnosis_run_id,
+        "diagnosis.json",
+        diagnosis.model_dump_json().encode(),
+        "evaluator",
+    )
+    evidence_ref = executor.corpus.put(
+        prepared.diagnosis_run_id,
+        "evidence/bundle.json",
+        b'{"schema_version":1,"PRIVATE-EVIDENCE-CANARY":true}',
+        "evaluator",
+    )
+    executor.corpus.transition(prepared.diagnosis_run_id, "RUNNING", "FINALIZING")
+    executor.corpus.transition(prepared.diagnosis_run_id, "COMPLETED", None)
+    private_case_id, private_template_id = controller.resolve_private(batch, item.case_id)
+    native = evaluation_module.EvaluationRecord(
+        record_id=prepared.diagnosis_run_id,
+        corpus_cutoff=batch.corpus_cutoff,
+        lineage=evaluation_module.NativeEvaluationLineage(
+            corpus_cutoff=batch.corpus_cutoff,
+            diagnosis_run_id=prepared.diagnosis_run_id,
+            diagnosis_hash=diagnosis_ref.sha256,
+            evidence_hash=evidence_ref.sha256,
+            provider_invocation_hashes=[],
+        ),
+        case_id=private_case_id,
+        template_id=private_template_id,
+        mode=item.mode,
+        repeat=item.repeat,
+        input_hash="1" * 64,
+        evidence_hash=evidence_ref.sha256,
+        executed_checks={},
+        status="INCONCLUSIVE",
+        diagnosis=diagnosis.model_dump(mode="json"),
+        usage={"physical_calls": 0},
+        latency_ms=0,
+        cost_usd=0,
+        failure_reason="TEST_NOT_RUN",
+    )
+    public = controller.complete_execution(prepared, native)
+    return SimpleNamespace(
+        controller=controller,
+        batch=batch,
+        item=item,
+        attempt=attempt,
+        prepared=prepared,
+        native=native,
+        public=public,
+        evaluator=executor.corpus,
+    )
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_holdout_public_lineage_contains_commitments_not_evaluator_run_ids(
+    completed_holdout_execution, native_evaluation_executor,
+):
+    case = completed_holdout_execution
+    wire = case.public.model_dump_json().encode()
+    assert case.public.record_id == "6c89c3d549613dfa36f2dd40afc978cd"
+    assert case.public.lineage.kind == "holdout_commitment"
+    assert case.prepared.execution_run_id.encode() not in wire
+    assert case.native.lineage.diagnosis_run_id.encode() not in wire
+    assert b"case_0100" not in wire and b"vector-add" not in wire
+    run = case.evaluator.load(case.prepared.execution_run_id)
+    assert run.parent_run_id is None
+    assert run.external_origin.run_id == case.attempt.run_id
+    assert run.external_origin.visibility == "public"
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_holdout_execution_reservation_is_exact_and_attempt_scoped(
+    completed_holdout_execution, native_evaluation_executor,
+):
+    case = completed_holdout_execution
+    repeated = case.controller.reserve_execution(
+        case.batch,
+        evaluation_run_id=case.attempt.run_id,
+        item=case.item,
+        attempt=case.attempt,
+    )
+    other_attempt = case.attempt.model_copy(update={"idempotency_key": "d" * 64})
+    different = case.controller.reserve_execution(
+        case.batch,
+        evaluation_run_id=case.attempt.run_id,
+        item=case.item,
+        attempt=other_attempt,
+    )
+    assert repeated == case.prepared
+    assert different.execution_run_id != case.prepared.execution_run_id
+    assert different.diagnosis_run_id != case.prepared.diagnosis_run_id
+    with pytest.raises(ValueError):
+        case.controller.recover_execution(case.batch, case.item, other_attempt)
+    absent_attempt = case.attempt.model_copy(update={"idempotency_key": "e" * 64})
+    assert case.controller.recover_execution(case.batch, case.item, absent_attempt) is None
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_holdout_complete_execution_is_exact_byte_idempotent(
+    completed_holdout_execution, native_evaluation_executor
+):
+    case = completed_holdout_execution
+    repeated = case.controller.complete_execution(case.prepared, case.native)
+    assert repeated.model_dump_json().encode() == case.public.model_dump_json().encode()
+    with pytest.raises(ValueError):
+        case.controller.complete_execution(
+            case.prepared, case.native.model_copy(update={"latency_ms": 1})
+        )
+
+
+def _overwrite_holdout_binding(evaluator, run_id, field, replacement):
+    run = evaluator.load(run_id)
+    ref = next(
+        item for item in run.artifact_refs if item.name == "holdout/execution-binding.json"
+    )
+    artifact_path = evaluator.root / ref.relative_path
+    manifest_path = evaluator.root / run_id / "manifest.json"
+    artifact_mode = stat.S_IMODE(artifact_path.stat().st_mode)
+    artifact_path.chmod(artifact_mode | stat.S_IWUSR)
+    payload = json.loads(artifact_path.read_bytes())
+    payload[field] = replacement
+    content = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    artifact_path.write_bytes(content)
+    artifact_path.chmod(artifact_mode)
+    manifest = json.loads(manifest_path.read_bytes())
+    for item in manifest["artifact_refs"]:
+        if item["id"] == ref.id:
+            item["sha256"] = hashlib.sha256(content).hexdigest()
+            item["byte_count"] = len(content)
+    manifest_path.write_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
+
+
+@pytest.mark.parametrize(
+    "field,replacement",
+    [
+        ("ordinal", 2),
+        ("schedule_hash", "f" * 64),
+        ("attempt_hash", "e" * 64),
+        ("corpus_cutoff", 99),
+        ("public_record_hash", "d" * 64),
+    ],
+)
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_holdout_execution_binding_rejects_cross_store_tampering(
+    completed_holdout_execution, field, replacement, native_evaluation_executor
+):
+    case = completed_holdout_execution
+    _overwrite_holdout_binding(
+        case.evaluator, case.prepared.execution_run_id, field, replacement
+    )
+    with pytest.raises(ValueError):
+        case.controller.recover_execution(case.batch, case.item, case.attempt)

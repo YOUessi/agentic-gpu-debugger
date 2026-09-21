@@ -11,7 +11,7 @@ import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Annotated, Literal
 
 from pydantic import Field, ValidationError, model_validator
 
@@ -43,7 +43,8 @@ StoppedReason = Literal[
 ]
 
 
-class EvaluationLineage(ExecutionModel):
+class NativeEvaluationLineage(ExecutionModel):
+    kind: Literal["native"] = "native"
     corpus_cutoff: int = Field(ge=1)
     diagnosis_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     diagnosis_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
@@ -52,6 +53,23 @@ class EvaluationLineage(ExecutionModel):
     candidate_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     verification_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     public_verification_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
+class HoldoutEvaluationLineage(ExecutionModel):
+    kind: Literal["holdout_commitment"] = "holdout_commitment"
+    corpus_cutoff: int = Field(ge=1)
+    execution_commitment: str = Field(pattern=r"^[a-f0-9]{64}$")
+    diagnosis_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    evidence_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
+    provider_invocation_hashes: list[str]
+    candidate_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    verification_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+
+
+EvaluationLineage = Annotated[
+    NativeEvaluationLineage | HoldoutEvaluationLineage,
+    Field(discriminator="kind"),
+]
 
 
 class EvaluationProviderPolicy(ExecutionModel):

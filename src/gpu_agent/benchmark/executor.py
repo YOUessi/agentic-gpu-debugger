@@ -26,12 +26,12 @@ from gpu_agent.agent.rule_router import RuleRouter
 from gpu_agent.benchmark.evaluation import (
     EvaluationAttempt,
     EvaluationExecutionClaim,
-    EvaluationLineage,
     EvaluationProviderPolicy,
     EvaluationRecord,
     EvaluationSchedule,
     EvaluationScheduleItem,
     EvaluationUnitBinding,
+    NativeEvaluationLineage,
     PricingAttestation,
     PublicEvaluationRecord,
 )
@@ -103,6 +103,8 @@ def validate_evaluation_record(
     """Resolve one public record back to immutable native execution artifacts."""
     public = record.public() if isinstance(record, EvaluationRecord) else record
     lineage = public.lineage
+    if not isinstance(lineage, NativeEvaluationLineage):
+        raise ValueError("native evaluation validation requires native lineage")
     if (
         public.corpus_cutoff != attempt.corpus_cutoff
         or lineage.corpus_cutoff != attempt.corpus_cutoff
@@ -1304,7 +1306,7 @@ class EvaluationExecutor:
             if not evidence_refs:
                 raise ValueError("evaluation evidence is unavailable")
             store.read(evidence_refs[-1])
-            lineage = EvaluationLineage(
+            lineage = NativeEvaluationLineage(
                 corpus_cutoff=unit.corpus_cutoff,
                 diagnosis_run_id=run.id,
                 diagnosis_hash=diagnosis_ref.sha256,

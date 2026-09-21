@@ -18,6 +18,38 @@ from gpu_agent.benchmark.holdout_scoring import HoldoutLabelPackage, HoldoutScor
 from gpu_agent.contracts import CurrentPhase, ExternalRunOrigin, RunStatus
 
 
+def test_holdout_lineage_discriminator_rejects_native_shape_with_holdout_kind():
+    from pydantic import ValidationError
+
+    from gpu_agent.benchmark.evaluation import PublicEvaluationRecord
+
+    with pytest.raises(ValidationError):
+        PublicEvaluationRecord.model_validate(
+            {
+                "record_id": "a" * 32,
+                "corpus_cutoff": 1,
+                "lineage": {
+                    "kind": "holdout_commitment",
+                    "corpus_cutoff": 1,
+                    "diagnosis_run_id": "b" * 32,
+                    "diagnosis_hash": "c" * 64,
+                    "evidence_hash": "d" * 64,
+                    "provider_invocation_hashes": [],
+                },
+                "case_id": "e" * 64,
+                "template_id": "e" * 64,
+                "mode": "D",
+                "repeat": 0,
+                "input_hash": "f" * 64,
+                "evidence_hash": "d" * 64,
+                "executed_checks": {},
+                "status": "INCONCLUSIVE",
+                "diagnosis": {},
+                "latency_ms": 0,
+            }
+        )
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
@@ -1020,7 +1052,7 @@ def test_session_claim_rejects_unsafe_lock(scoring_fixture, unsafe):
     assert other.read_bytes() == b"do not touch"
 
 
-def test_prepared_persistence_checks_identity_and_matches_standalone(scoring_fixture):
+def test_prepared_persistence_checks_private_fields_and_matches_standalone(scoring_fixture):
     f = scoring_fixture
     item = f.preflight().items[0]
     prepared = item.prepared_score
@@ -1129,7 +1161,7 @@ def test_prepared_persistence_rejects_complete_stale_binding_before_mutation(sco
         assert f.snapshot() == before
 
 
-def test_prepared_persistence_rejects_stale_child_lineage_before_mutation(scoring_fixture):
+def test_prepared_persistence_rejects_stale_child_ancestry_before_mutation(scoring_fixture):
     f = scoring_fixture
     item = f.preflight().items[0]
     run_id = f.seed(0)
