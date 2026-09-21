@@ -327,19 +327,9 @@ class VerificationEngine:
         baseline_hashes = {Path(ref.name).name: ref.sha256 for ref in bundle.source_snapshot}
         _, input_ref = self._baseline(original_run_id, bundle, baseline_hashes)
         if input_ref is None:
-            empty_observation = self._with_check_plan(VerificationObservation(), {}, mode)
             self._finish_audit(
                 audit.id,
-                VerificationAuditResult(
-                    observation=empty_observation,
-                    public_passed_count=0,
-                    private_passed_count=0,
-                    not_run_count=0,
-                    suite_hash="",
-                    child_run_ids=[],
-                    reason_code="ORACLE_OR_BASELINE_UNAVAILABLE",
-                    failure_stage="precondition",
-                ),
+                self._precondition_audit(mode),
             )
             return self._publish(
                 original_run_id,
@@ -360,19 +350,9 @@ class VerificationEngine:
             sources = materialize_candidate(snapshot, candidate)
             case = _Case.model_validate_json(read_regular(TRUTH_ROOT / "case.json", 65536))
             if snapshot.hashes != case.source_hashes:
-                empty_observation = self._with_check_plan(VerificationObservation(), {}, mode)
                 self._finish_audit(
                     audit.id,
-                    VerificationAuditResult(
-                        observation=empty_observation,
-                        public_passed_count=0,
-                        private_passed_count=0,
-                        not_run_count=0,
-                        suite_hash="",
-                        child_run_ids=[],
-                        reason_code="ORACLE_OR_BASELINE_UNAVAILABLE",
-                        failure_stage="precondition",
-                    ),
+                    self._precondition_audit(mode),
                 )
                 return self._publish(
                     original_run_id,
@@ -616,6 +596,33 @@ class VerificationEngine:
             if checked.binary_ref != binary or checked.stdin_ref != stdin:
                 raise ValueError("sanitizer provenance mismatch")
 
+    def _precondition_audit(self, mode: Literal["standard", "full"]) -> VerificationAuditResult:
+        return VerificationAuditResult(
+            observation=self._with_check_plan(VerificationObservation(), {}, mode),
+            public_passed_count=0,
+            private_passed_count=0,
+            not_run_count=0,
+            suite_hash="",
+            child_run_ids=[],
+            reason_code="ORACLE_OR_BASELINE_UNAVAILABLE",
+            failure_stage="precondition",
+        )
+
+    def _native_precondition_unavailable(self, original_run_id: str) -> bool:
+        """Re-evaluate the precondition directly from registered public artifacts."""
+        bundle = _evidence(self._store).view(original_run_id)
+        source_hashes: dict[str, str] = {}
+        for ref in bundle.source_snapshot:
+            name = Path(ref.name).name
+            if name in source_hashes:
+                raise ValueError("duplicate source snapshot name")
+            source_hashes[name] = hashlib.sha256(self._store.read(ref)).hexdigest()
+        _, input_ref = self._baseline(original_run_id, bundle, source_hashes)
+        if input_ref is None:
+            return True
+        case = _Case.model_validate_json(read_regular(TRUTH_ROOT / "case.json", 65536))
+        return source_hashes != case.source_hashes
+
     @staticmethod
     def _canonical_terminal(
         run: RunManifest,
@@ -718,13 +725,46 @@ class VerificationEngine:
                     )
                 ):
                     raise ValueError
+                audit_artifacts: dict[str, bytes] = {}
                 for ref in audit.artifact_refs:
                     if (
                         ref.run_id != audit.id
                         or ref.relative_path != f"{audit.id}/artifacts/{ref.id}"
+                        or ref.name in audit_artifacts
                     ):
                         raise ValueError
-                    lease.read(ref)
+                    audit_artifacts[ref.name] = lease.read(ref)
+                if public_result.reason_code == "ORACLE_OR_BASELINE_UNAVAILABLE":
+                    if set(audit_artifacts) != {
+                        "observation.json",
+                        "verification/audit-result.json",
+                    }:
+                        raise ValueError
+                    expected_audit = self._precondition_audit(mode)
+                    stored_observation = VerificationObservation.model_validate_json(
+                        audit_artifacts["observation.json"]
+                    )
+                    stored_audit = VerificationAuditResult.model_validate_json(
+                        audit_artifacts["verification/audit-result.json"]
+                    )
+                    expected_public = self._public_result(
+                        VerificationObservation(),
+                        candidate,
+                        {},
+                        [],
+                        0,
+                        "ORACLE_OR_BASELINE_UNAVAILABLE",
+                        mode,
+                        audit_id,
+                    )
+                    if (
+                        not self._native_precondition_unavailable(original_run_id)
+                        or stored_observation != expected_audit.observation
+                        or stored_audit != expected_audit
+                        or public_result != expected_public
+                    ):
+                        raise ValueError
+                    return public_result
                 validate_persisted_derivation(
                     self._store,
                     self._private,
@@ -748,6 +788,29 @@ class VerificationEngine:
         mode: Literal["standard", "full"] = "standard",
         evaluator_audit_run_id: str | None = None,
     ) -> VerificationResult:
+        result = self._public_result(
+            observation,
+            candidate,
+            checks,
+            binaries,
+            public_passed,
+            reason,
+            mode,
+            evaluator_audit_run_id,
+        )
+        return self._persist_public_locked(original_run_id, result, mode)
+
+    def _public_result(
+        self,
+        observation: VerificationObservation,
+        candidate: PatchCandidate,
+        checks: dict[str, str],
+        binaries: list[str],
+        public_passed: int,
+        reason: str,
+        mode: Literal["standard", "full"],
+        evaluator_audit_run_id: str | None,
+    ) -> VerificationResult:
         observation = self._with_check_plan(observation, checks, mode)
         requirements = observation.check_requirements
         outcomes = observation.check_outcomes
@@ -757,7 +820,7 @@ class VerificationEngine:
             if item.required and outcomes[item.tool] == "NOT_RUN"
         }
         # Explicit allowlist construction: never dump/copy private evidence into public storage.
-        result = VerificationResult(
+        return VerificationResult(
             verdict=decide_verdict(observation),
             failure_stage=None if reason == "ALL_REQUIRED_CHECKS_PASSED" else "verification",
             reason_code=reason,
@@ -776,7 +839,6 @@ class VerificationEngine:
             evaluator_audit_run_id=evaluator_audit_run_id,
             limitations=["Containers share the host kernel and GPU driver."],
         )
-        return self._persist_public_locked(original_run_id, result, mode)
 
     def _persist_public(
         self,

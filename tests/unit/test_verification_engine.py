@@ -895,6 +895,79 @@ def test_unregistered_program_never_acquires_benchmark_oracle(
     assert not container_boundary
 
 
+def test_precondition_verification_exact_replay_is_idempotent(
+    store, tmp_path, original, container_boundary
+):
+    from gpu_agent.evidence.repository import EvidenceRepository
+
+    run_id, snapshot = original
+    source = (snapshot.root / "kernel.cu").read_bytes() + b"// ordinary user source\n"
+    (snapshot.root / "kernel.cu").write_bytes(source)
+    snapshot.hashes["kernel.cu"] = hashlib.sha256(source).hexdigest()
+    repository = EvidenceRepository(store)
+    bundle = repository.public_view(run_id)
+    ref = store.put(run_id, "sources/ordinary/kernel.cu", source, "public")
+    refs = [ref if Path(item.name).name == "kernel.cu" else item for item in bundle.source_snapshot]
+    repository.save(run_id, bundle.model_copy(update={"source_snapshot": refs}))
+    candidate_id, _ = register_variant(store, original, "human")
+    engine = _engine(store, tmp_path)
+
+    first = engine.verify(run_id, candidate_id)
+    assert first.reason_code == "ORACLE_OR_BASELINE_UNAVAILABLE"
+    private = _evaluator_store(tmp_path)
+    before_public = _public_tree(store.root)
+    before_private = _public_tree(private.root)
+    second = engine.verify(run_id, candidate_id)
+
+    assert second == first
+    assert container_boundary == []
+    assert _public_tree(store.root) == before_public
+    assert _public_tree(private.root) == before_private
+
+
+@pytest.mark.parametrize("tamper", ["artifact", "incomplete"])
+def test_tampered_precondition_audit_replay_fails_closed_without_mutation(
+    store, tmp_path, original, container_boundary, tamper
+):
+    from gpu_agent.evidence.repository import EvidenceRepository
+
+    run_id, snapshot = original
+    source = (snapshot.root / "kernel.cu").read_bytes() + b"// ordinary user source\n"
+    (snapshot.root / "kernel.cu").write_bytes(source)
+    snapshot.hashes["kernel.cu"] = hashlib.sha256(source).hexdigest()
+    repository = EvidenceRepository(store)
+    bundle = repository.public_view(run_id)
+    ref = store.put(run_id, "sources/ordinary/kernel.cu", source, "public")
+    refs = [ref if Path(item.name).name == "kernel.cu" else item for item in bundle.source_snapshot]
+    repository.save(run_id, bundle.model_copy(update={"source_snapshot": refs}))
+    candidate_id, _ = register_variant(store, original, "human")
+    engine = _engine(store, tmp_path)
+    result = engine.verify(run_id, candidate_id)
+    private = _evaluator_store(tmp_path)
+    audit = private.load(result.evaluator_audit_run_id)
+    if tamper == "artifact":
+        observation = next(ref for ref in audit.artifact_refs if ref.name == "observation.json")
+        path = private.root / observation.relative_path
+        path.chmod(0o600)
+        path.write_bytes(b"{}")
+    else:
+        manifest_path = private.root / audit.id / "manifest.json"
+        manifest = json.loads(manifest_path.read_bytes())
+        manifest["status"] = "RUNNING"
+        manifest["current_phase"] = "FINALIZING"
+        manifest["last_completed_phase"] = "PREPARING"
+        manifest["events"] = manifest["events"][:-1]
+        manifest_path.write_text(json.dumps(manifest))
+    before_public = _public_tree(store.root)
+    before_private = _public_tree(private.root)
+
+    with pytest.raises(ValueError, match="existing evaluator verification audit conflicts"):
+        engine.verify(run_id, candidate_id)
+    assert container_boundary == []
+    assert _public_tree(store.root) == before_public
+    assert _public_tree(private.root) == before_private
+
+
 @pytest.mark.parametrize("operation", ["build", "run", "memcheck"])
 def test_required_tool_failure_is_inconclusive(
     store, tmp_path, original, container_boundary, monkeypatch, operation
