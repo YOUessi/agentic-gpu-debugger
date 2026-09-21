@@ -33,12 +33,13 @@ from gpu_agent.benchmark.holdout import (
     _PrivateAliasMap,
     _PrivateScore,
 )
-from gpu_agent.benchmark.holdout_scoring import HoldoutScoringResult
+from gpu_agent.benchmark.holdout_scoring import HoldoutScoringResult, _tracked_rubric_hash
 from gpu_agent.benchmark.ledger import CorpusFamily
 from gpu_agent.benchmark.models import CaseManifest
 from gpu_agent.contracts import (
     ArtifactRef,
     CurrentPhase,
+    ExternalRunOrigin,
     RepositorySnapshot,
     RunBinding,
     RunManifest,
@@ -241,6 +242,7 @@ class ReleaseEvidenceIndex(ExecutionModel):
         public_store: RunStore,
         evaluator_store: RunStore,
         corpus_family: CorpusFamily,
+        repository: Path,
         actual_repository: RepositorySnapshot,
     ) -> ReleaseEvidenceIndex:
         """Derive the complete index, returning a typed closed gate on any defect."""
@@ -258,6 +260,7 @@ class ReleaseEvidenceIndex(ExecutionModel):
                     public_store,
                     evaluator_store,
                     corpus_family,
+                    repository,
                     actual_repository,
                     expected_selection=selection,
                 )
@@ -374,6 +377,10 @@ class _ReleaseEvidenceError(ValueError):
         self.code = code
 
 
+class _ReleaseRootError(_ReleaseEvidenceError):
+    """A malformed or foreign caller-selected root, not derived evidence."""
+
+
 class _EvaluationEvidence:
     def __init__(
         self,
@@ -399,6 +406,7 @@ class _ReleaseEvidenceResolver:
         public: RunStore,
         evaluator: RunStore,
         family: CorpusFamily,
+        repository: Path,
         actual_repository: RepositorySnapshot,
         *,
         expected_selection: ReleaseEvidenceSelection | None = None,
@@ -407,6 +415,7 @@ class _ReleaseEvidenceResolver:
         self.public = public
         self.evaluator = evaluator
         self.family = family
+        self.repository = repository
         self.actual_repository = actual_repository
         self.expected_selection = expected_selection
 
@@ -477,14 +486,14 @@ class _ReleaseEvidenceResolver:
             self.expected_selection is not None
             and self.expected_selection.repository != self.actual_repository
         ):
-            raise _ReleaseEvidenceError("ACTUAL_REPOSITORY_MISMATCH")
+            raise _ReleaseRootError("ACTUAL_REPOSITORY_MISMATCH")
         try:
             self.family.require_store(self.public)
             self.family.require_store(self.evaluator)
         except ValueError as exc:
-            raise _ReleaseEvidenceError("STORE_FAMILY_MISMATCH") from exc
+            raise _ReleaseRootError("STORE_FAMILY_MISMATCH") from exc
         if self.public.visibility != "public" or self.evaluator.visibility != "evaluator":
-            raise _ReleaseEvidenceError("STORE_FAMILY_MISMATCH")
+            raise _ReleaseRootError("STORE_FAMILY_MISMATCH")
 
     def _evaluation(
         self, run_id: str, split: Literal["development", "holdout"]
@@ -492,11 +501,14 @@ class _ReleaseEvidenceResolver:
         try:
             from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
-            verifier = EvaluationScheduleVerifier.for_family(self.family, self.public)
-            EvaluationScheduleVerifier.verify(verifier, run_id)
-            run = self.public.load(run_id)
+            try:
+                run = self.public.load(run_id)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise _ReleaseRootError("EVALUATION_EVIDENCE_INVALID") from exc
             if (
                 run.kind != "evaluation"
+                or run.parent_run_id is not None
+                or run.external_origin is not None
                 or run.status != RunStatus.COMPLETED
                 or run.binding is None
                 or run.binding.purpose != "evaluation"
@@ -505,12 +517,33 @@ class _ReleaseEvidenceResolver:
                 or run.binding.prompt_version is None
                 or run.binding.model_config_hash is None
             ):
-                raise ValueError("evaluation run is not terminal and bound")
+                raise _ReleaseRootError("EVALUATION_EVIDENCE_INVALID")
+            refs = _owned_artifacts(
+                run,
+                expected_visibility="public",
+                expected_names=None,
+                expected_external_origin=None,
+            )
+            verifier = EvaluationScheduleVerifier.for_family(self.family, self.public)
+            EvaluationScheduleVerifier.verify(verifier, run_id)
             schedule = EvaluationSchedule.model_validate_json(
-                self.public.read(_one(run, "evaluation/schedule.json"))
+                self.public.read(refs["evaluation/schedule.json"])
+            )
+            expected_names = {
+                "evaluation/schedule.json",
+                "evaluation/schedule-receipt.json",
+                "evaluation/manifest.json",
+                *(f"evaluation/attempts/{ordinal}.json" for ordinal in range(len(schedule.items))),
+                *(f"evaluation/records/{ordinal}.json" for ordinal in range(len(schedule.items))),
+            }
+            refs = _owned_artifacts(
+                run,
+                expected_visibility="public",
+                expected_names=expected_names,
+                expected_external_origin=None,
             )
             manifest = EvaluationManifest.model_validate_json(
-                self.public.read(_one(run, "evaluation/manifest.json"))
+                self.public.read(refs["evaluation/manifest.json"])
             )
             schedule_hash = _model_hash(schedule)
             if (
@@ -609,8 +642,10 @@ class _ReleaseEvidenceResolver:
             ):
                 raise ValueError("evaluation terminal manifest differs from records")
             return _EvaluationEvidence(run, run.binding, schedule, manifest, records, record_hashes)
+        except _ReleaseEvidenceError:
+            raise
         except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
-            raise _ReleaseEvidenceError("EVALUATION_EVIDENCE_INVALID") from exc
+            raise _ReleaseRootError("EVALUATION_EVIDENCE_INVALID") from exc
 
     @staticmethod
     def _same_evaluation_binding(
@@ -624,7 +659,7 @@ class _ReleaseEvidenceResolver:
             or left.model_config_hash != right.model_config_hash
             or development.schedule.corpus_cutoff != holdout.schedule.corpus_cutoff
         ):
-            raise _ReleaseEvidenceError("EVALUATION_BINDING_MISMATCH")
+            raise _ReleaseRootError("EVALUATION_BINDING_MISMATCH")
 
     def _corpus(
         self, binding: RunBinding, cutoff: int
@@ -647,8 +682,8 @@ class _ReleaseEvidenceResolver:
             ]
             selected = self.expected_selection
             if selected is not None and (
-                set(authoritative_public) != set(selected.public_case_run_ids)
-                or set(authoritative_private) != set(selected.private_case_run_ids)
+                authoritative_public != selected.public_case_run_ids
+                or authoritative_private != selected.private_case_run_ids
             ):
                 raise _ReleaseEvidenceError("CORPUS_SELECTION_MISMATCH")
             public_cases = registered_cases(self.public, binding, self.family, cutoff=cutoff)
@@ -670,7 +705,16 @@ class _ReleaseEvidenceResolver:
         observed: dict[str, CaseManifest] = {}
         for run_id in run_ids:
             run = store.load(run_id)
-            case = CaseManifest.model_validate_json(store.read(_one(run, "case-manifest.json")))
+            refs = _owned_artifacts(
+                run,
+                expected_visibility=store.visibility,
+                expected_names={
+                    "case-manifest.json",
+                    "validation/ledger-transaction.json",
+                },
+                expected_external_origin=None,
+            )
+            case = CaseManifest.model_validate_json(store.read(refs["case-manifest.json"]))
             if case.id in observed or cases.get(case.id) != case:
                 raise ValueError("selected case registration is duplicated or stale")
             observed[case.id] = case
@@ -720,20 +764,43 @@ class _ReleaseEvidenceResolver:
         cutoff: int,
     ) -> tuple[set[str], list[EvaluatorRecordBinding], set[str]]:
         try:
-            mapping_run = self.evaluator.load(self.roots.private_binding_run_id)
-            if (
-                mapping_run.kind != "holdout_alias_mapping"
-                or mapping_run.status != RunStatus.COMPLETED
-                or mapping_run.binding != evidence.binding
-                or mapping_run.external_origin is None
-                or mapping_run.external_origin.visibility != "public"
-            ):
-                raise ValueError("private mapping run is not terminal and bound")
-            mapping = _PrivateAliasMap.model_validate_json(
-                self.evaluator.read(_one(mapping_run, "holdout/private-alias-map.json"))
-            )
+            try:
+                try:
+                    mapping_run = self.evaluator.load(self.roots.private_binding_run_id)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    raise _ReleaseRootError("PRIVATE_SCORING_INCOMPLETE") from exc
+                proof = evidence.schedule.holdout_proof
+                if (
+                    mapping_run.kind != "holdout_alias_mapping"
+                    or mapping_run.parent_run_id is not None
+                    or mapping_run.status != RunStatus.COMPLETED
+                    or mapping_run.binding != evidence.binding
+                    or proof is None
+                    or mapping_run.external_origin
+                    != ExternalRunOrigin(run_id=proof.public_run_id, visibility="public")
+                ):
+                    raise _ReleaseRootError("PRIVATE_SCORING_INCOMPLETE")
+                mapping_refs = _owned_artifacts(
+                    mapping_run,
+                    expected_visibility="evaluator",
+                    expected_names={"holdout/private-alias-map.json"},
+                    expected_external_origin=mapping_run.external_origin,
+                )
+                mapping = _PrivateAliasMap.model_validate_json(
+                    self.evaluator.read(mapping_refs["holdout/private-alias-map.json"])
+                )
+            except _ReleaseRootError:
+                raise
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise _ReleaseRootError("PRIVATE_SCORING_INCOMPLETE") from exc
             alias_run = self.public.load(mapping_run.external_origin.run_id)
-            alias_ref = _one(alias_run, "holdout/aliases.json")
+            alias_refs = _owned_artifacts(
+                alias_run,
+                expected_visibility="public",
+                expected_names={"holdout/aliases.json"},
+                expected_external_origin=None,
+            )
+            alias_ref = alias_refs["holdout/aliases.json"]
             alias_payload = json.loads(self.public.read(alias_ref))
             aliases = [identity.alias for identity in mapping.identities]
             nonce = bytes.fromhex(mapping.nonce_hex)
@@ -748,9 +815,9 @@ class _ReleaseEvidenceResolver:
                 ).hexdigest()
                 for identity in mapping.identities
             ]
-            proof = evidence.schedule.holdout_proof
             if (
                 alias_run.kind != "holdout_aliases"
+                or alias_run.parent_run_id is not None
                 or alias_run.status != RunStatus.COMPLETED
                 or alias_run.binding != evidence.binding
                 or mapping.corpus_cutoff != cutoff
@@ -812,6 +879,8 @@ class _ReleaseEvidenceResolver:
                 private_score_bindings,
                 private_score_run_ids,
             )
+        except _ReleaseEvidenceError:
+            raise
         except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise _ReleaseEvidenceError("PRIVATE_SCORING_INCOMPLETE") from exc
 
@@ -837,10 +906,23 @@ class _ReleaseEvidenceResolver:
                 run.status != RunStatus.COMPLETED
                 or run.binding != evidence.binding
                 or run.parent_run_id != mapping_run.id
+                or run.external_origin != mapping_run.external_origin
             ):
                 raise ValueError("private score run is not terminal and bound")
-            binding_ref = _one(run, "holdout/record-binding.json")
-            score_ref = _one(run, "holdout/private-score.json")
+            try:
+                refs = _owned_artifacts(
+                    run,
+                    expected_visibility="evaluator",
+                    expected_names={
+                        "holdout/record-binding.json",
+                        "holdout/private-score.json",
+                    },
+                    expected_external_origin=mapping_run.external_origin,
+                )
+            except ValueError:
+                raise ValueError("private score artifact inventory is invalid") from None
+            binding_ref = refs["holdout/record-binding.json"]
+            score_ref = refs["holdout/private-score.json"]
             binding = EvaluatorRecordBinding.model_validate_json(self.evaluator.read(binding_ref))
             private_score = _PrivateScore.model_validate_json(self.evaluator.read(score_ref))
             matches = [
@@ -936,15 +1018,17 @@ class _ReleaseEvidenceResolver:
                 or run.external_origin.visibility != "public"
                 or run.external_origin.run_id != evidence.run.id
                 or tuple((event.status, event.phase) for event in run.events) != expected_events
-                or len(run.artifact_refs) != len(names)
-                or {ref.name for ref in run.artifact_refs} != names
-                or any(
-                    ref.run_id != run_id or ref.visibility != "evaluator"
-                    for ref in run.artifact_refs
-                )
             ):
                 raise ValueError("holdout scoring session is not exact and completed")
-            refs = {ref.name: ref for ref in run.artifact_refs}
+            refs = _owned_artifacts(
+                run,
+                expected_visibility="evaluator",
+                expected_names=names,
+                expected_external_origin=ExternalRunOrigin(
+                    run_id=evidence.run.id,
+                    visibility="public",
+                ),
+            )
             input_content = self.evaluator.read(refs["holdout-scoring/input-binding.json"])
             input_binding = _HoldoutScoringInputBinding.model_validate_json(input_content)
             record_set_hash = hashlib.sha256(
@@ -960,6 +1044,10 @@ class _ReleaseEvidenceResolver:
                 )
             ).hexdigest()
             proof = evidence.schedule.holdout_proof
+            rubric_hash = _tracked_rubric_hash(
+                self.repository,
+                evidence.binding.repository.commit,
+            )
             if (
                 input_content != _canonical_json(input_binding.model_dump(mode="json"))
                 or input_binding.evaluation_run_id != evidence.run.id
@@ -969,6 +1057,7 @@ class _ReleaseEvidenceResolver:
                 or input_binding.aliases_hash != proof.aliases_hash
                 or input_binding.corpus_cutoff != evidence.schedule.corpus_cutoff
                 or input_binding.record_set_hash != record_set_hash
+                or input_binding.rubric_hash != rubric_hash
                 or len(evidence.records) != 120
                 or len(bindings) != 120
             ):
@@ -1016,15 +1105,29 @@ class _ReleaseEvidenceResolver:
         try:
             from gpu_agent.release_controller import verify_persisted_release_artifacts
 
-            run = self.public.load(self.roots.release_test_run_id)
+            try:
+                run = self.public.load(self.roots.release_test_run_id)
+            except (OSError, ValueError, KeyError, TypeError) as exc:
+                raise _ReleaseRootError("RELEASE_TEST_EVIDENCE_INVALID") from exc
             if (
                 run.kind != "release_test"
+                or run.parent_run_id is not None
+                or run.external_origin is not None
                 or run.status != RunStatus.COMPLETED
                 or not _release_test_binding(run, binding)
             ):
-                raise ValueError("release test run is not terminal and bound")
-            evidence_ref = _one(run, "release/test-evidence.json")
-            invocation_ref = _one(run, "release/test-invocation.json")
+                raise _ReleaseRootError("RELEASE_TEST_EVIDENCE_INVALID")
+            refs = _owned_artifacts(
+                run,
+                expected_visibility="public",
+                expected_names={
+                    "release/test-evidence.json",
+                    "release/test-invocation.json",
+                },
+                expected_external_origin=None,
+            )
+            evidence_ref = refs["release/test-evidence.json"]
+            invocation_ref = refs["release/test-invocation.json"]
             evidence = ReleaseTestEvidence.model_validate_json(self.public.read(evidence_ref))
             verify_persisted_release_artifacts(self.public, run)
             expected_hash = hashlib.sha256(
@@ -1047,8 +1150,10 @@ class _ReleaseEvidenceResolver:
             ):
                 raise ValueError("release test evidence is incomplete")
             return evidence.test_counts
+        except _ReleaseEvidenceError:
+            raise
         except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
-            raise _ReleaseEvidenceError("RELEASE_TEST_EVIDENCE_INVALID") from exc
+            raise _ReleaseRootError("RELEASE_TEST_EVIDENCE_INVALID") from exc
 
     def _acceptance(
         self,
@@ -1086,7 +1191,7 @@ class _ReleaseEvidenceResolver:
                     raise ValueError("acceptance selection has missing or extra categories")
                 for category, expected_ids in expected.items():
                     selected = selected_evidence.acceptance_run_ids[category]
-                    if len(selected) != len(set(selected)) or set(selected) != expected_ids:
+                    if selected != sorted(expected_ids):
                         raise ValueError("acceptance selection differs from native evidence")
             return {
                 category: sorted(expected[category])
@@ -1141,6 +1246,7 @@ class ReleaseEvidenceFreezer:
         public_store: RunStore,
         evaluator_store: RunStore,
         corpus_family: CorpusFamily,
+        repository: Path,
         actual_repository: RepositorySnapshot,
     ) -> ReleaseEvidenceResolution:
         return _ReleaseEvidenceResolver(
@@ -1148,6 +1254,7 @@ class ReleaseEvidenceFreezer:
             public_store,
             evaluator_store,
             corpus_family,
+            repository,
             actual_repository,
         ).resolve()
 
@@ -1169,10 +1276,13 @@ class ReleaseEvidenceFreezer:
                 public_store,
                 evaluator_store,
                 corpus_family,
+                repository,
                 actual,
             )
-        except _ReleaseEvidenceError as exc:
+        except _ReleaseRootError as exc:
             raise ValueError(f"release roots are invalid: {exc.code}") from exc
+        except _ReleaseEvidenceError as exc:
+            raise ValueError(f"release evidence is incomplete: {exc.code}") from exc
         except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
             raise ValueError("release roots are invalid") from exc
 
@@ -1218,11 +1328,29 @@ class ReleaseEvidenceFreezer:
         )
 
 
-def _one(run: RunManifest, name: str) -> ArtifactRef:
-    refs = [ref for ref in run.artifact_refs if ref.name == name]
-    if len(refs) != 1:
-        raise ValueError(f"expected exactly one {name} artifact")
-    return refs[0]
+def _owned_artifacts(
+    run: RunManifest,
+    *,
+    expected_visibility: Literal["public", "evaluator"],
+    expected_names: set[str] | None,
+    expected_external_origin: ExternalRunOrigin | None,
+) -> dict[str, ArtifactRef]:
+    """Validate one containing run's complete owned artifact inventory."""
+    refs: dict[str, ArtifactRef] = {}
+    for ref in run.artifact_refs:
+        if (
+            ref.name in refs
+            or ref.run_id != run.id
+            or ref.visibility != expected_visibility
+            or ref.relative_path != f"{run.id}/artifacts/{ref.id}"
+        ):
+            raise ValueError("run artifact inventory is not owned and canonical")
+        refs[ref.name] = ref
+    if run.external_origin != expected_external_origin or (
+        expected_names is not None and set(refs) != expected_names
+    ):
+        raise ValueError("run artifact inventory is not exact")
+    return refs
 
 
 def _ordinal_refs(run: RunManifest, kind: Literal["attempts", "records"]) -> dict[int, ArtifactRef]:

@@ -105,6 +105,7 @@ def _derive_release_evidence(
         family.corpus_store("public"),
         family.corpus_store("evaluator"),
         family,
+        repository,
         actual,
     )
 

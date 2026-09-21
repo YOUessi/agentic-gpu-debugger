@@ -204,17 +204,18 @@ def test_private_reader_rejects_empty_or_oversize_content(tmp_path, content, lim
 def test_private_reader_reads_valid_owner_only_file(tmp_path):
     path = _private_file(tmp_path / "labels.json", b'{"private":true}')
 
-    assert read_private_external(
-        path,
-        repository=tmp_path / "repo",
-        forbidden_roots=(),
-        limit=1024,
-    ) == b'{"private":true}'
+    assert (
+        read_private_external(
+            path,
+            repository=tmp_path / "repo",
+            forbidden_roots=(),
+            limit=1024,
+        )
+        == b'{"private":true}'
+    )
 
 
-def test_private_reader_rejects_ancestor_replaced_by_repository_symlink(
-    tmp_path, monkeypatch
-):
+def test_private_reader_rejects_ancestor_replaced_by_repository_symlink(tmp_path, monkeypatch):
     from gpu_agent.benchmark import controller_artifacts
 
     repository = tmp_path / "repository"
@@ -271,9 +272,7 @@ def test_atomic_writer_publishes_new_owner_only_file(tmp_path):
     assert list(output.parent.iterdir()) == [output]
 
 
-def test_atomic_writer_rejects_ancestor_replaced_by_repository_symlink(
-    tmp_path, monkeypatch
-):
+def test_atomic_writer_rejects_ancestor_replaced_by_repository_symlink(tmp_path, monkeypatch):
     from gpu_agent.benchmark import controller_artifacts
 
     repository = tmp_path / "repository"
@@ -482,9 +481,7 @@ def test_atomic_writer_exposes_only_dot_temporary_before_rename(tmp_path, monkey
     assert list(parent.iterdir()) == []
 
 
-def test_atomic_writer_rejects_target_that_becomes_unsafe_before_retry(
-    tmp_path, monkeypatch
-):
+def test_atomic_writer_rejects_target_that_becomes_unsafe_before_retry(tmp_path, monkeypatch):
     from gpu_agent.benchmark import controller_artifacts
 
     parent = _secure_parent(tmp_path)

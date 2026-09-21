@@ -11,9 +11,9 @@ import conftest
 import pytest
 from schedule_authority_support import schedule_client_for_test
 
-from gpu_agent.benchmark.evaluation import EvaluationRunner
+from gpu_agent.benchmark.evaluation import EvaluationRunner, EvaluationSchedule
 from gpu_agent.benchmark.executor import EvaluationExecutor
-from gpu_agent.benchmark.holdout import HoldoutController
+from gpu_agent.benchmark.holdout import HoldoutController, ValidatedHoldoutEvaluation
 from gpu_agent.benchmark.holdout_scoring import HoldoutLabelPackage, HoldoutScoringController
 from gpu_agent.contracts import CurrentPhase, ExternalRunOrigin, RunStatus
 
@@ -400,6 +400,47 @@ def test_package_exact_binding_rejections_zero_mutation(scoring_fixture, fault):
     assert f.snapshot() == before
 
 
+@pytest.mark.parametrize("fault", ["ordinal", "mode", "repeat", "cartesian"])
+def test_exact_product_mutations_reach_exact_product_branch(scoring_fixture, monkeypatch, fault):
+    f = scoring_fixture
+    schedule_payload = dict(f.schedule)
+    schedule_payload["items"] = [dict(item) for item in f.schedule["items"]]
+    if fault == "ordinal":
+        schedule_payload["items"][-1]["ordinal"] = 0
+    elif fault == "mode":
+        schedule_payload["modes"] = ["A", "B", "C", "D", "D"]
+    elif fault == "repeat":
+        schedule_payload["repeats"] = 4
+    else:
+        schedule_payload["items"][-1].update(
+            {
+                key: schedule_payload["items"][0][key]
+                for key in ("case_id", "template_id", "mode", "repeat")
+            }
+        )
+    evaluation = ValidatedHoldoutEvaluation(
+        evaluation_run_id=f.evaluation_run_id,
+        schedule=EvaluationSchedule.model_validate(schedule_payload),
+        schedule_hash=f.package.schedule_hash,
+        records=tuple(f.records),
+        record_refs=tuple(f.refs),
+    )
+    monkeypatch.setattr(
+        f.controller.holdout,
+        "validated_evaluation",
+        lambda *_args, **_kwargs: evaluation,
+    )
+    before = f.snapshot()
+
+    with pytest.raises(
+        ValueError,
+        match="holdout evaluation requires the exact 8 x 5 x 3 Cartesian product",
+    ):
+        f.preflight()
+
+    assert f.snapshot() == before
+
+
 @pytest.mark.parametrize(
     "fault",
     [
@@ -413,14 +454,10 @@ def test_package_exact_binding_rejections_zero_mutation(scoring_fixture, fault):
         "noncanonical_attempt",
         "noncanonical_record",
         "missing_ordinal",
-        "duplicate_ordinal",
         "duplicate_record_id",
         "manifest_count",
         "manifest_order",
-        "modes",
-        "repeats",
         "aliases",
-        "cartesian",
     ],
 )
 def test_evaluation_root_exact_cartesian_zero_mutation(scoring_fixture, fault):
@@ -464,23 +501,10 @@ def test_evaluation_root_exact_cartesian_zero_mutation(scoring_fixture, fault):
             def change(payload):
                 if fault == "selection":
                     payload["selection"] = "D"
-                elif fault == "modes":
-                    payload["modes"] = ["A", "B", "C", "D", "D"]
-                elif fault == "repeats":
-                    payload["repeats"] = 4
                 elif fault == "missing_ordinal":
                     payload["items"].pop()
-                elif fault == "duplicate_ordinal":
-                    payload["items"][-1]["ordinal"] = 0
                 elif fault == "aliases":
                     payload["items"][-1]["case_id"] = "f" * 64
-                elif fault == "cartesian":
-                    payload["items"][-1].update(
-                        {
-                            key: payload["items"][0][key]
-                            for key in ("case_id", "template_id", "mode", "repeat")
-                        }
-                    )
 
         f.alter_artifact(name, change)
     if fault == "status" or fault.startswith(("119_", "121_", "noncanonical_")):

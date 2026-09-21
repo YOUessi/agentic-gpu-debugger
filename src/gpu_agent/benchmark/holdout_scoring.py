@@ -460,6 +460,7 @@ class HoldoutScoringController:
             schedule.selection != "all"
             or schedule.modes != ["A", "B", "C", "D", "E"]
             or schedule.repeats != 3
+            or [item.ordinal for item in schedule.items] != list(range(len(schedule.items)))
             or len(batch.aliases) != 8
             or len(schedule.items) != 120
             or len(evaluation.records) != 120

@@ -558,6 +558,10 @@ def _freeze_cli_args(repository, output):
     [
         (ValueError("release roots are invalid"), "RELEASE_ROOTS_INVALID"),
         (
+            ValueError("release roots are invalid: PRIVATE_SCORING_INCOMPLETE"),
+            "RELEASE_ROOTS_INVALID",
+        ),
+        (
             ValueError("release evidence is incomplete: CORPUS_COUNT_INSUFFICIENT"),
             "RELEASE_EVIDENCE_INCOMPLETE",
         ),

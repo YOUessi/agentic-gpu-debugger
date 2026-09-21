@@ -1,6 +1,7 @@
 import hashlib
 import json
 import stat
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -213,7 +214,9 @@ def test_derivation_rejects_repository_drift(tmp_path, repository):
     actual = RepositorySnapshot(
         commit="e" * 40, tracked_tree_hash=repository.tracked_tree_hash, clean=True
     )
-    result = ReleaseEvidenceIndex.derive(selection, public, evaluator, family, actual)
+    result = ReleaseEvidenceIndex.derive(
+        selection, public, evaluator, family, tmp_path / "repository", actual
+    )
     assert result.reason_codes == ["ACTUAL_REPOSITORY_MISMATCH"]
 
 
@@ -231,7 +234,12 @@ def test_derivation_rejects_nonexistent_selected_runs(tmp_path, repository):
         repository=tmp_path / "repository",
     )
     result = ReleaseEvidenceIndex.derive(
-        _selection(repository), public, evaluator, family, repository
+        _selection(repository),
+        public,
+        evaluator,
+        family,
+        tmp_path / "repository",
+        repository,
     )
     assert result.reason_codes == ["EVALUATION_EVIDENCE_INVALID"]
 
@@ -386,7 +394,9 @@ def _selection(repository):
     )
 
 
-def test_freezer_resolves_the_same_selection_checked_by_release_gate(repository, monkeypatch):
+def test_freezer_resolves_the_same_selection_checked_by_release_gate(
+    tmp_path, repository, monkeypatch
+):
     from gpu_agent.benchmark.release import (
         ReleaseEvidenceFreezer,
         ReleaseEvidenceIndex,
@@ -490,9 +500,17 @@ def test_freezer_resolves_the_same_selection_checked_by_release_gate(repository,
     )
 
     public = evaluator = family = object()
-    resolution = ReleaseEvidenceFreezer.resolve(roots, public, evaluator, family, repository)
+    repository_path = tmp_path / "repository"
+    resolution = ReleaseEvidenceFreezer.resolve(
+        roots, public, evaluator, family, repository_path, repository
+    )
     checked = ReleaseEvidenceIndex.derive(
-        resolution.selection, public, evaluator, family, repository
+        resolution.selection,
+        public,
+        evaluator,
+        family,
+        repository_path,
+        repository,
     )
 
     assert resolution.selection.public_case_run_ids == ["6" * 32, "5" * 32]
@@ -511,6 +529,121 @@ def test_freezer_resolves_the_same_selection_checked_by_release_gate(repository,
     assert checked.reason_codes == []
 
 
+def test_release_resolver_rejects_noncanonical_corpus_array_order(
+    tmp_path, repository, monkeypatch
+):
+    from gpu_agent.benchmark import executor
+    from gpu_agent.benchmark.release import (
+        ReleaseEvidenceRoots,
+        _ReleaseEvidenceResolver,
+    )
+
+    public = SimpleNamespace(target="public")
+    evaluator = SimpleNamespace(target="evaluator")
+    authoritative_public = ["1" * 32, "2" * 32]
+    authoritative_private = ["3" * 32, "4" * 32]
+    transactions = [
+        SimpleNamespace(run_id=run_id, visibility=visibility, target_store_hash=visibility)
+        for visibility, run_ids in (
+            ("public", authoritative_public),
+            ("evaluator", authoritative_private),
+        )
+        for run_id in run_ids
+    ]
+    ledger = SimpleNamespace(
+        committed_through=lambda cutoff: transactions,
+        target_store_hash=lambda store: store.target,
+    )
+    family = SimpleNamespace(ledger=ledger)
+    selected = _selection(repository).model_copy(
+        update={
+            "public_case_run_ids": list(reversed(authoritative_public)),
+            "private_case_run_ids": list(reversed(authoritative_private)),
+        }
+    )
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id=selected.development_evaluation_run_id,
+        holdout_evaluation_run_id=selected.holdout_evaluation_run_id,
+        private_binding_run_id=selected.private_binding_run_id,
+        release_test_run_id=selected.release_test_run_id,
+    )
+    monkeypatch.setattr(
+        executor,
+        "registered_cases",
+        lambda store, *_args, **_kwargs: {
+            "public-case" if store is public else "private-case": SimpleNamespace()
+        },
+    )
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        public,
+        evaluator,
+        family,
+        tmp_path / "repository",
+        repository,
+        expected_selection=selected,
+    )
+    monkeypatch.setattr(resolver, "_selected_manifests", lambda *_args: None)
+
+    with pytest.raises(ValueError) as error:
+        resolver._corpus(SimpleNamespace(), 4)
+
+    assert getattr(error.value, "code", None) == "CORPUS_SELECTION_MISMATCH"
+
+
+def test_release_resolver_rejects_noncanonical_acceptance_array_order(tmp_path, repository):
+    from gpu_agent.benchmark.release import ReleaseEvidenceRoots, _ReleaseEvidenceResolver
+    from gpu_agent.store import RunStore
+
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id="4" * 32,
+    )
+    selected = _selection(repository).model_copy(
+        update={
+            "acceptance_run_ids": {
+                "four_tools": ["b" * 32, "a" * 32],
+                "isolation": [roots.release_test_run_id],
+                "live_llm": ["d" * 32, "c" * 32],
+                "private_oracle": ["f" * 32, "e" * 32],
+            }
+        }
+    )
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        RunStore(tmp_path / "public"),
+        RunStore(tmp_path / "evaluator", visibility="evaluator"),
+        object(),
+        tmp_path / "repository",
+        repository,
+        expected_selection=selected,
+    )
+    development = SimpleNamespace(
+        schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
+        records=[SimpleNamespace(lineage=SimpleNamespace(diagnosis_run_id="c" * 32))],
+    )
+    holdout = SimpleNamespace(
+        schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
+        records=[SimpleNamespace(lineage=SimpleNamespace(diagnosis_run_id="d" * 32))],
+    )
+    public_cases = {
+        "case-a": SimpleNamespace(validation_run_ids=["0" * 32, "a" * 32]),
+        "case-b": SimpleNamespace(validation_run_ids=["0" * 32, "b" * 32]),
+    }
+
+    with pytest.raises(ValueError) as error:
+        resolver._acceptance(
+            public_cases,
+            development,
+            holdout,
+            {"e" * 32, "f" * 32},
+        )
+
+    assert getattr(error.value, "code", None) == "RELEASE_ACCEPTANCE_INVALID"
+
+
 def _scoring_session_fixture(tmp_path, repository, monkeypatch, fault=None):
     from gpu_agent.benchmark.holdout import EvaluatorRecordBinding
     from gpu_agent.benchmark.holdout_scoring import HoldoutScoringResult
@@ -518,6 +651,31 @@ def _scoring_session_fixture(tmp_path, repository, monkeypatch, fault=None):
     from gpu_agent.contracts import ExternalRunOrigin, RunBinding, RunStatus
     from gpu_agent.store import RunStore
 
+    repository_path = tmp_path / "repository"
+    (repository_path / "evaluation").mkdir(parents=True)
+    rubric_content = b"Evaluator rubric v1\n"
+    (repository_path / "evaluation/rubric.md").write_bytes(rubric_content)
+    for command in (
+        ["init", "-q"],
+        ["add", "."],
+        [
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.org",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+    ):
+        subprocess.run(
+            ["git", "-C", str(repository_path), *command],
+            check=True,
+            capture_output=True,
+        )
+    from gpu_agent.provenance import capture_repository_snapshot
+
+    repository = capture_repository_snapshot(repository_path)
     public = RunStore(tmp_path / "public")
     evaluator = RunStore(tmp_path / "evaluator", visibility="evaluator")
     roots = ReleaseEvidenceRoots(
@@ -571,7 +729,14 @@ def _scoring_session_fixture(tmp_path, repository, monkeypatch, fault=None):
         lambda self, exact_bindings, selected_binding: metrics_payload,
         raising=False,
     )
-    resolver = _ReleaseEvidenceResolver(roots, public, evaluator, object(), repository)
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        public,
+        evaluator,
+        object(),
+        repository_path,
+        repository,
+    )
     if fault == "no_session":
         return resolver, evidence, bindings
 
@@ -618,7 +783,9 @@ def _scoring_session_fixture(tmp_path, repository, monkeypatch, fault=None):
                 separators=(",", ":"),
             ).encode()
         ).hexdigest(),
-        "rubric_hash": "a" * 64,
+        "rubric_hash": (
+            "a" * 64 if fault == "rubric" else hashlib.sha256(rubric_content).hexdigest()
+        ),
         "package_hash": "b" * 64,
     }
     if fault == "input":
@@ -701,6 +868,449 @@ def test_release_resolver_rejects_inexact_scoring_session(tmp_path, repository, 
     assert getattr(error.value, "code", None) == "PRIVATE_SCORING_INCOMPLETE"
 
 
+def test_release_resolver_rejects_scoring_rubric_hash_not_bound_to_exact_commit(
+    tmp_path, repository, monkeypatch
+):
+    resolver, holdout, bindings = _scoring_session_fixture(
+        tmp_path,
+        repository,
+        monkeypatch,
+        "rubric",
+    )
+
+    with pytest.raises(ValueError) as error:
+        resolver._scoring_session(holdout, bindings)
+
+    assert getattr(error.value, "code", None) == "PRIVATE_SCORING_INCOMPLETE"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "donor_binding",
+        "donor_score",
+        "extra_artifact",
+        "wrong_visibility",
+        "noncanonical_path",
+        "wrong_origin",
+    ],
+)
+def test_release_resolver_rejects_unowned_or_inexact_score_child(tmp_path, repository, fault):
+    import hmac
+
+    from gpu_agent.benchmark.holdout import (
+        EvaluatorRecordBinding,
+        _PrivateAliasMap,
+        _PrivateScore,
+    )
+    from gpu_agent.benchmark.metrics import EvaluationLabels, Score
+    from gpu_agent.benchmark.release import ReleaseEvidenceRoots, _ReleaseEvidenceResolver
+    from gpu_agent.contracts import ExternalRunOrigin, RunBinding, RunStatus
+    from gpu_agent.store import RunStore
+
+    public = RunStore(tmp_path / "public")
+    evaluator = RunStore(tmp_path / "evaluator", visibility="evaluator")
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id="4" * 32,
+    )
+    binding = RunBinding(
+        repository=repository,
+        purpose="evaluation",
+        toolchain_lock_hash="5" * 64,
+        prompt_version="v2",
+        model_config_hash="6" * 64,
+    )
+    origin = ExternalRunOrigin(run_id="7" * 32, visibility="public")
+    mapping_run = evaluator.create_run(
+        "holdout_alias_mapping",
+        binding=binding,
+        external_origin=origin,
+        _run_id=roots.private_binding_run_id,
+    )
+    evaluator.transition(mapping_run.id, RunStatus.RUNNING, "FINALIZING")
+    evaluator.transition(mapping_run.id, RunStatus.COMPLETED, None)
+    mapping_run = evaluator.load(mapping_run.id)
+    alias = "8" * 64
+    nonce = bytes.fromhex("9" * 64)
+    record_id = "a" * 32
+    record_hash = "b" * 64
+    score_run_id = hmac.new(
+        nonce,
+        f"holdout-score-v1:{record_id}".encode(),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+    private_score = _PrivateScore(
+        corpus_cutoff=8,
+        public_record_hash=record_hash,
+        labels=EvaluationLabels(claim_support={}),
+        score=Score(
+            family_correct=True,
+            root_cause_correct=True,
+            location_correct=True,
+            inconclusive_correct=True,
+        ),
+        should_be_inconclusive=False,
+        private_holdout_passed=True,
+    )
+    score_content = private_score.content()
+    score_binding = EvaluatorRecordBinding(
+        evaluator_score_run_id=score_run_id,
+        public_evaluation_run_id=roots.holdout_evaluation_run_id,
+        public_record_id=record_id,
+        public_record_hash=record_hash,
+        private_case_id="private-case",
+        private_template_id="private-template",
+        private_score_hash=hashlib.sha256(score_content).hexdigest(),
+        corpus_cutoff=8,
+    )
+    child = evaluator.create_run(
+        "holdout_score",
+        parent_run_id=mapping_run.id,
+        _run_id=score_run_id,
+    )
+    evaluator.transition(child.id, RunStatus.RUNNING, "FINALIZING")
+    evaluator.put(
+        child.id,
+        "holdout/record-binding.json",
+        score_binding.model_dump_json().encode(),
+        "evaluator",
+    )
+    evaluator.put(child.id, "holdout/private-score.json", score_content, "evaluator")
+    if fault == "extra_artifact":
+        evaluator.put(child.id, "holdout/extra.json", b"{}", "evaluator")
+    evaluator.transition(child.id, RunStatus.COMPLETED, None)
+
+    child_path = evaluator.root / child.id / "manifest.json"
+    child_payload = json.loads(child_path.read_bytes())
+    if fault.startswith("donor_"):
+        name = {
+            "donor_binding": "holdout/record-binding.json",
+            "donor_score": "holdout/private-score.json",
+        }[fault]
+        original = next(ref for ref in evaluator.load(child.id).artifact_refs if ref.name == name)
+        donor = evaluator.create_run(
+            "artifact_donor",
+            binding=binding,
+            external_origin=origin,
+        )
+        borrowed = evaluator.put(donor.id, name, evaluator.read(original), "evaluator")
+        child_payload["artifact_refs"] = [
+            borrowed.model_dump(mode="json") if ref["name"] == name else ref
+            for ref in child_payload["artifact_refs"]
+        ]
+    elif fault == "wrong_origin":
+        child_payload["external_origin"] = {
+            "run_id": "c" * 32,
+            "visibility": "public",
+        }
+    elif fault in {"wrong_visibility", "noncanonical_path"}:
+        selected = next(
+            ref
+            for ref in child_payload["artifact_refs"]
+            if ref["name"] == "holdout/private-score.json"
+        )
+        if fault == "wrong_visibility":
+            selected["visibility"] = "public"
+        else:
+            selected["relative_path"] = f"{child.id}/artifacts/{'d' * 32}"
+    child_path.write_bytes(
+        json.dumps(child_payload, sort_keys=True, separators=(",", ":")).encode()
+    )
+
+    mapping = _PrivateAliasMap.model_validate(
+        {
+            "corpus_cutoff": 8,
+            "nonce_hex": nonce.hex(),
+            "identities": [
+                {
+                    "alias": alias,
+                    "private_case_id": "private-case",
+                    "private_template_id": "private-template",
+                }
+            ],
+        }
+    )
+    evidence = SimpleNamespace(
+        run=SimpleNamespace(id=roots.holdout_evaluation_run_id),
+        binding=binding,
+        schedule=SimpleNamespace(corpus_cutoff=8),
+        records=[SimpleNamespace(record_id=record_id, case_id=alias)],
+        record_hashes={0: record_hash},
+    )
+    repository_path = tmp_path / "repository"
+    repository_path.mkdir()
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        public,
+        evaluator,
+        object(),
+        repository_path,
+        repository,
+    )
+
+    with pytest.raises(ValueError):
+        resolver._private_scores(
+            mapping_run,
+            mapping,
+            evidence,
+            {alias: ("private-case", "private-template")},
+        )
+
+
+def test_release_resolver_rejects_donor_corpus_manifest(tmp_path):
+    from gpu_agent.benchmark.models import CaseManifest
+    from gpu_agent.benchmark.release import _ReleaseEvidenceResolver
+    from gpu_agent.contracts import RunStatus
+    from gpu_agent.store import RunStore
+
+    store = RunStore(tmp_path / "public")
+    case = CaseManifest(
+        id="case_0001",
+        source_hash="1" * 64,
+        harness_hash="2" * 64,
+        mutation_id="delete-guard",
+        template_id="vector-add",
+        split="public",
+        oracle_id="vector-add-cpu-v1",
+        target_tool="memcheck",
+        expected_finding="finding",
+        validation_run_ids=["3" * 32, "4" * 32],
+        toolchain_hash="5" * 64,
+        input_set_hash="6" * 64,
+        ledger_namespace_hash="7" * 64,
+        case_identity_hash="8" * 64,
+        template_identity_hash="9" * 64,
+        source_pair_hash="a" * 64,
+    )
+    registration = store.create_run("benchmark_case")
+    store.transition(registration.id, RunStatus.RUNNING, "FINALIZING")
+    original = store.put(
+        registration.id,
+        "case-manifest.json",
+        case.model_dump_json().encode(),
+        "public",
+    )
+    store.put(
+        registration.id,
+        "validation/ledger-transaction.json",
+        b"{}",
+        "public",
+    )
+    store.transition(registration.id, RunStatus.COMPLETED, None)
+    donor = store.create_run("artifact_donor")
+    borrowed = store.put(
+        donor.id,
+        original.name,
+        store.read(original),
+        "public",
+    )
+    manifest_path = store.root / registration.id / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["artifact_refs"] = [
+        borrowed.model_dump(mode="json") if ref["name"] == original.name else ref
+        for ref in manifest["artifact_refs"]
+    ]
+    manifest_path.write_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
+
+    with pytest.raises(ValueError):
+        _ReleaseEvidenceResolver._selected_manifests(
+            store,
+            [registration.id],
+            {case.id: case},
+        )
+
+
+def test_release_resolver_classifies_malformed_mapping_root_as_root_error(tmp_path, repository):
+    from gpu_agent.benchmark.release import (
+        ReleaseEvidenceRoots,
+        _ReleaseEvidenceResolver,
+        _ReleaseRootError,
+    )
+    from gpu_agent.contracts import ExternalRunOrigin, RunBinding, RunStatus
+    from gpu_agent.store import RunStore
+
+    public = RunStore(tmp_path / "public")
+    evaluator = RunStore(tmp_path / "evaluator", visibility="evaluator")
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id="4" * 32,
+    )
+    binding = RunBinding(
+        repository=repository,
+        purpose="evaluation",
+        toolchain_lock_hash="5" * 64,
+        prompt_version="v2",
+        model_config_hash="6" * 64,
+    )
+    origin = ExternalRunOrigin(run_id="7" * 32, visibility="public")
+    mapping = evaluator.create_run(
+        "holdout_alias_mapping",
+        binding=binding,
+        external_origin=origin,
+        _run_id=roots.private_binding_run_id,
+    )
+    evaluator.transition(mapping.id, RunStatus.RUNNING, "FINALIZING")
+    evaluator.put(mapping.id, "holdout/private-alias-map.json", b"{}", "evaluator")
+    evaluator.put(mapping.id, "holdout/extra.json", b"{}", "evaluator")
+    evaluator.transition(mapping.id, RunStatus.COMPLETED, None)
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        public,
+        evaluator,
+        object(),
+        tmp_path / "repository",
+        repository,
+    )
+    evidence = SimpleNamespace(
+        binding=binding,
+        schedule=SimpleNamespace(
+            holdout_proof=SimpleNamespace(public_run_id=origin.run_id),
+        ),
+    )
+
+    with pytest.raises(ValueError) as error:
+        resolver._validate_holdout_records(evidence, {}, 8)
+
+    assert type(error.value) is _ReleaseRootError
+
+
+def test_release_resolver_classifies_malformed_release_test_root_as_root_error(
+    tmp_path, repository
+):
+    from gpu_agent.benchmark.release import (
+        ReleaseEvidenceRoots,
+        _ReleaseEvidenceResolver,
+        _ReleaseRootError,
+    )
+    from gpu_agent.contracts import RunBinding, RunStatus
+    from gpu_agent.store import RunStore
+
+    public = RunStore(tmp_path / "public")
+    evaluator = RunStore(tmp_path / "evaluator", visibility="evaluator")
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id="4" * 32,
+    )
+    evaluation_binding = RunBinding(
+        repository=repository,
+        purpose="evaluation",
+        toolchain_lock_hash="5" * 64,
+        prompt_version="v2",
+        model_config_hash="6" * 64,
+    )
+    release_binding = evaluation_binding.model_copy(update={"purpose": "release_acceptance"})
+    release_run = public.create_run(
+        "release_test",
+        binding=release_binding,
+        _run_id=roots.release_test_run_id,
+    )
+    public.transition(release_run.id, RunStatus.RUNNING, "FINALIZING")
+    public.put(release_run.id, "release/test-evidence.json", b"{}", "public")
+    public.put(release_run.id, "release/test-invocation.json", b"{}", "public")
+    public.put(release_run.id, "release/extra.json", b"{}", "public")
+    public.transition(release_run.id, RunStatus.COMPLETED, None)
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        public,
+        evaluator,
+        object(),
+        tmp_path / "repository",
+        repository,
+    )
+
+    with pytest.raises(ValueError) as error:
+        resolver._release_tests(evaluation_binding, 8)
+
+    assert type(error.value) is _ReleaseRootError
+
+
+def test_release_resolver_classifies_foreign_evaluation_root_pair_as_root_error(
+    repository,
+):
+    from gpu_agent.benchmark.release import _ReleaseEvidenceResolver, _ReleaseRootError
+    from gpu_agent.contracts import RunBinding
+
+    binding = RunBinding(
+        repository=repository,
+        purpose="evaluation",
+        toolchain_lock_hash="5" * 64,
+        prompt_version="v2",
+        model_config_hash="6" * 64,
+    )
+    development = SimpleNamespace(
+        binding=binding,
+        schedule=SimpleNamespace(corpus_cutoff=8),
+    )
+    holdout = SimpleNamespace(
+        binding=binding.model_copy(update={"prompt_version": "foreign"}),
+        schedule=SimpleNamespace(corpus_cutoff=8),
+    )
+
+    with pytest.raises(ValueError) as error:
+        _ReleaseEvidenceResolver._same_evaluation_binding(development, holdout)
+
+    assert type(error.value) is _ReleaseRootError
+
+
+def test_release_resolver_classifies_malformed_evaluation_root_as_root_error(tmp_path, repository):
+    from gpu_agent.benchmark.release import (
+        ReleaseEvidenceRoots,
+        _ReleaseEvidenceResolver,
+        _ReleaseRootError,
+    )
+    from gpu_agent.contracts import RunBinding, RunStatus
+    from gpu_agent.store import RunStore
+
+    public = RunStore(tmp_path / "public")
+    evaluator = RunStore(tmp_path / "evaluator", visibility="evaluator")
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id="4" * 32,
+    )
+    binding = RunBinding(
+        repository=repository,
+        purpose="evaluation",
+        toolchain_lock_hash="5" * 64,
+        prompt_version="v2",
+        model_config_hash="6" * 64,
+    )
+    run = public.create_run(
+        "placeholder",
+        binding=binding,
+        _run_id=roots.development_evaluation_run_id,
+    )
+    public.transition(run.id, RunStatus.RUNNING, "FINALIZING")
+    public.put(run.id, "evaluation/schedule.json", b"{}", "public")
+    public.transition(run.id, RunStatus.COMPLETED, None)
+    manifest_path = public.root / run.id / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["kind"] = "evaluation"
+    manifest["artifact_refs"][0]["visibility"] = "evaluator"
+    manifest_path.write_bytes(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode())
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        public,
+        evaluator,
+        object(),
+        tmp_path / "repository",
+        repository,
+    )
+
+    with pytest.raises(ValueError) as error:
+        resolver._evaluation(run.id, "development")
+
+    assert type(error.value) is _ReleaseRootError
+
+
 def test_release_resolver_rejects_duplicate_mode_e_diagnosis_ids(tmp_path, repository):
     from gpu_agent.benchmark.release import ReleaseEvidenceRoots, _ReleaseEvidenceResolver
     from gpu_agent.store import RunStore
@@ -716,6 +1326,7 @@ def test_release_resolver_rejects_duplicate_mode_e_diagnosis_ids(tmp_path, repos
         RunStore(tmp_path / "public"),
         RunStore(tmp_path / "evaluator", visibility="evaluator"),
         object(),
+        tmp_path / "repository",
         repository,
     )
     duplicate = "5" * 32
@@ -806,12 +1417,20 @@ def test_freezer_gate_precedes_private_atomic_publication(
     assert not output.exists()
 
 
-def test_freezer_preserves_resolver_reason_code_without_publication(
-    tmp_path, repository, monkeypatch
+@pytest.mark.parametrize(
+    ("error_kind", "public_category"),
+    [
+        ("evidence", "release evidence is incomplete"),
+        ("root", "release roots are invalid"),
+    ],
+)
+def test_freezer_preserves_typed_resolver_category_without_publication(
+    tmp_path, repository, monkeypatch, error_kind, public_category
 ):
     from gpu_agent.benchmark.release import (
         ReleaseEvidenceFreezer,
         _ReleaseEvidenceError,
+        _ReleaseRootError,
     )
 
     public, evaluator, family = _freezer_stores(tmp_path)
@@ -833,11 +1452,18 @@ def test_freezer_preserves_resolver_reason_code_without_publication(
     )
 
     def reject(*_args, **_kwargs):
-        raise _ReleaseEvidenceError("PRIVATE_SCORING_INCOMPLETE")
+        error_type = {
+            "evidence": _ReleaseEvidenceError,
+            "root": _ReleaseRootError,
+        }[error_kind]
+        raise error_type("PRIVATE_SCORING_INCOMPLETE")
 
     monkeypatch.setattr(freezer, "resolve", reject)
 
-    with pytest.raises(ValueError, match="PRIVATE_SCORING_INCOMPLETE"):
+    with pytest.raises(
+        ValueError,
+        match=f"{public_category}: PRIVATE_SCORING_INCOMPLETE",
+    ):
         freezer.freeze(_freezer_roots(), public, evaluator, family, repository_path, output)
 
     assert not output.exists()
@@ -956,7 +1582,7 @@ def test_freezer_publishes_canonical_private_selection_read_only(
     frozen = freezer.freeze(_freezer_roots(), public, evaluator, family, repository_path, output)
 
     assert isinstance(frozen, FrozenReleaseSelection)
-    assert observed == [(_freezer_roots(), public, evaluator, family, repository)]
+    assert observed == [(_freezer_roots(), public, evaluator, family, repository_path, repository)]
     expected = resolution.selection.model_dump_json(indent=2).encode() + b"\n"
     assert output.read_bytes() == expected
     assert stat.S_IMODE(output.stat().st_mode) == 0o600
