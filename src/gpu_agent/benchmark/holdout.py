@@ -59,34 +59,29 @@ _CAPABILITY_SEAL = object()
 class _ReservedDiagnosisCapability:
     """Single-use handoff from controller validation to the service transition."""
 
-    __slots__ = ("_service", "_run", "_unit", "_used")
+    __slots__ = ("_issuer", "_service", "_run", "_unit")
 
     def __init__(
         self,
         seal: object,
+        issuer: HoldoutController,
         service: ApplicationService,
         run: RunManifest,
         unit: EvaluationUnitBinding,
     ) -> None:
         if seal is not _CAPABILITY_SEAL:
             raise ValueError("reserved diagnosis capability is internal")
+        self._issuer = issuer
         self._service, self._run, self._unit = service, run, unit
-        self._used = False
 
     def consume(
         self, service: ApplicationService, unit: EvaluationUnitBinding
     ) -> RunManifest:
-        if self._used or service is not self._service or unit != self._unit:
+        if type(self._issuer) is not HoldoutController:
             raise ValueError("reserved diagnosis capability is invalid")
-        current = service.store.load(self._run.id)
-        if (
-            current != self._run
-            or current.status != RunStatus.RUNNING
-            or current.current_phase != "PREPARING"
-        ):
-            raise ValueError("reserved diagnosis capability is invalid")
-        self._used = True
-        return current
+        return HoldoutController._consume_registered_capability(
+            self._issuer, self, service, unit
+        )
 
 
 class HoldoutBatch(ExecutionModel):
@@ -197,6 +192,11 @@ class HoldoutController:
         ):
             raise ValueError("holdout controller requires bound split stores")
         self.public, self.evaluator, self.binding = public, evaluator, binding
+        self.__capability_lock = threading.Lock()
+        self.__active_capabilities: dict[
+            _ReservedDiagnosisCapability,
+            tuple[ApplicationService, object, RunManifest, EvaluationUnitBinding],
+        ] = {}
         from pathlib import Path
 
         from gpu_agent.benchmark.ledger import CorpusFamily
@@ -212,6 +212,55 @@ class HoldoutController:
                 self._schedule_family, public
             )
         self._schedule_verifier = _schedule_verifier
+
+    def __register_reserved_capability(
+        self,
+        capability: _ReservedDiagnosisCapability,
+        service: ApplicationService,
+        run: RunManifest,
+        unit: EvaluationUnitBinding,
+    ) -> None:
+        with self.__capability_lock:
+            if capability in self.__active_capabilities:
+                raise ValueError("reserved diagnosis capability is already registered")
+            self.__active_capabilities[capability] = (
+                service,
+                service.store.identity,
+                run,
+                unit,
+            )
+
+    def _consume_registered_capability(
+        self,
+        capability: _ReservedDiagnosisCapability,
+        service: ApplicationService,
+        unit: EvaluationUnitBinding,
+    ) -> RunManifest:
+        with self.__capability_lock:
+            registered = self.__active_capabilities.pop(capability, None)
+            if registered is None:
+                raise ValueError("reserved diagnosis capability is invalid")
+            expected_service, store_identity, expected_run, expected_unit = registered
+            if (
+                service is not expected_service
+                or service.store.identity != store_identity
+                or unit != expected_unit
+            ):
+                raise ValueError("reserved diagnosis capability is invalid")
+            current = service.store.load(expected_run.id)
+            if (
+                current != expected_run
+                or current.status != RunStatus.RUNNING
+                or current.current_phase != "PREPARING"
+            ):
+                raise ValueError("reserved diagnosis capability is invalid")
+            return current
+
+    def __discard_reserved_capability(
+        self, capability: _ReservedDiagnosisCapability
+    ) -> None:
+        with self.__capability_lock:
+            self.__active_capabilities.pop(capability, None)
 
     def prepare(self) -> HoldoutBatch:
         from gpu_agent.benchmark.executor import registered_cases
@@ -598,130 +647,152 @@ class HoldoutController:
         if expected != prepared:
             raise ValueError("prepared holdout execution is invalid")
         with self._execution_claim(prepared.execution_run_id):
-            with self.public.evaluation_run_lease(
-                prepared.binding.public_evaluation_run_id
-            ) as public_lease:
-                parent = public_lease.load()
-                if (
-                    parent.kind != "evaluation"
-                    or parent.status != RunStatus.RUNNING
-                    or parent.binding != self.binding
-                ):
-                    raise ValueError("holdout public execution authority is invalid")
-                EvaluationScheduleVerifier._verify_leased(
-                    self._schedule_verifier, public_lease
-                )
-                schedule_ref = self._one_named_ref(parent, "evaluation/schedule.json")
-                schedule_content = public_lease.read(schedule_ref)
-                schedule = EvaluationSchedule.model_validate_json(schedule_content)
-                schedule_hash = hashlib.sha256(
-                    json.dumps(
-                        schedule.model_dump(mode="json"),
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-                ).hexdigest()
-                ordinal = prepared.binding.ordinal
-                if ordinal >= len(schedule.items):
-                    raise ValueError("holdout scheduled unit is invalid")
-                attempt_ref = self._one_named_ref(
-                    parent, f"evaluation/attempts/{ordinal}.json"
-                )
-                attempt_content = public_lease.read(attempt_ref)
-                attempt = EvaluationAttempt.model_validate_json(attempt_content)
-                claim_ref = self._one_named_ref(
-                    parent, f"evaluation/claims/{ordinal}.json"
-                )
-                claim = EvaluationExecutionClaim.model_validate_json(
-                    public_lease.read(claim_ref)
-                )
-                attempt_ordinals: list[int] = []
-                claim_ordinals: list[int] = []
-                record_ordinals: list[int] = []
-                for ref in parent.artifact_refs:
-                    for prefix, target in (
-                        ("evaluation/attempts/", attempt_ordinals),
-                        ("evaluation/claims/", claim_ordinals),
-                        ("evaluation/records/", record_ordinals),
+            capability: _ReservedDiagnosisCapability | None = None
+            try:
+                with self.public.evaluation_run_lease(
+                    prepared.binding.public_evaluation_run_id
+                ) as public_lease:
+                    parent = public_lease.load()
+                    if (
+                        parent.kind != "evaluation"
+                        or parent.status != RunStatus.RUNNING
+                        or parent.binding != self.binding
                     ):
-                        if ref.name.startswith(prefix):
-                            match = re.fullmatch(
-                                re.escape(prefix) + r"([0-9]+)\.json", ref.name
+                        raise ValueError("holdout public execution authority is invalid")
+                    EvaluationScheduleVerifier._verify_leased(
+                        self._schedule_verifier, public_lease
+                    )
+                    schedule_ref = self._one_named_ref(
+                        parent, "evaluation/schedule.json"
+                    )
+                    schedule_content = public_lease.read(schedule_ref)
+                    schedule = EvaluationSchedule.model_validate_json(schedule_content)
+                    schedule_hash = hashlib.sha256(
+                        json.dumps(
+                            schedule.model_dump(mode="json"),
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        ).encode()
+                    ).hexdigest()
+                    ordinal = prepared.binding.ordinal
+                    if ordinal >= len(schedule.items):
+                        raise ValueError("holdout scheduled unit is invalid")
+                    attempt_ref = self._one_named_ref(
+                        parent, f"evaluation/attempts/{ordinal}.json"
+                    )
+                    attempt_content = public_lease.read(attempt_ref)
+                    attempt = EvaluationAttempt.model_validate_json(attempt_content)
+                    claim_ref = self._one_named_ref(
+                        parent, f"evaluation/claims/{ordinal}.json"
+                    )
+                    claim = EvaluationExecutionClaim.model_validate_json(
+                        public_lease.read(claim_ref)
+                    )
+                    attempt_ordinals: list[int] = []
+                    claim_ordinals: list[int] = []
+                    record_ordinals: list[int] = []
+                    for ref in parent.artifact_refs:
+                        for prefix, target in (
+                            ("evaluation/attempts/", attempt_ordinals),
+                            ("evaluation/claims/", claim_ordinals),
+                            ("evaluation/records/", record_ordinals),
+                        ):
+                            if ref.name.startswith(prefix):
+                                match = re.fullmatch(
+                                    re.escape(prefix) + r"([0-9]+)\.json", ref.name
+                                )
+                                if match is None:
+                                    raise ValueError(
+                                        "holdout artifact namespace is invalid"
+                                    )
+                                target.append(int(match.group(1)))
+                    expected_ordinals = list(range(ordinal + 1))
+                    if (
+                        schedule_hash != prepared.binding.schedule_hash
+                        or schedule.items[ordinal]
+                        != EvaluationScheduleItem(
+                            ordinal=ordinal,
+                            case_id=prepared.binding.alias,
+                            template_id=prepared.binding.alias,
+                            mode=prepared.evaluation_unit.mode,
+                            repeat=prepared.evaluation_unit.repeat,
+                            split="holdout",
+                            holdout_proof=prepared.evaluation_unit.holdout_proof,
+                        )
+                        or attempt
+                        != EvaluationAttempt(
+                            run_id=prepared.binding.public_evaluation_run_id,
+                            ordinal=ordinal,
+                            schedule_hash=prepared.binding.schedule_hash,
+                            corpus_cutoff=prepared.binding.corpus_cutoff,
+                            idempotency_key=prepared.evaluation_unit.idempotency_key,
+                            reserved_cost_usd=(
+                                prepared.evaluation_unit.reserved_cost_usd
+                            ),
+                        )
+                        or claim
+                        != EvaluationExecutionClaim(
+                            run_id=attempt.run_id,
+                            ordinal=ordinal,
+                            schedule_hash=schedule_hash,
+                            corpus_cutoff=attempt.corpus_cutoff,
+                            attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
+                        )
+                        or sorted(attempt_ordinals) != expected_ordinals
+                        or sorted(claim_ordinals) != expected_ordinals
+                        or sorted(record_ordinals) != list(range(ordinal))
+                        or len(attempt_ordinals) != len(set(attempt_ordinals))
+                        or len(claim_ordinals) != len(set(claim_ordinals))
+                        or len(record_ordinals) != len(set(record_ordinals))
+                    ):
+                        raise ValueError("holdout scheduled authority is invalid")
+                    with self.evaluator.run_directory_set_lease(
+                        (prepared.execution_run_id, prepared.diagnosis_run_id)
+                    ) as lease:
+                        execution, diagnosis = self._validate_execution_reservation(
+                            prepared, lease
+                        )
+                        if (
+                            execution.status != RunStatus.RUNNING
+                            or diagnosis.status != RunStatus.QUEUED
+                        ):
+                            raise ValueError(
+                                "holdout diagnosis reservation is not startable"
                             )
-                            if match is None:
-                                raise ValueError("holdout artifact namespace is invalid")
-                            target.append(int(match.group(1)))
-                expected_ordinals = list(range(ordinal + 1))
-                if (
-                    schedule_hash != prepared.binding.schedule_hash
-                    or schedule.items[ordinal]
-                    != EvaluationScheduleItem(
-                        ordinal=ordinal,
-                        case_id=prepared.binding.alias,
-                        template_id=prepared.binding.alias,
-                        mode=prepared.evaluation_unit.mode,
-                        repeat=prepared.evaluation_unit.repeat,
-                        split="holdout",
-                        holdout_proof=prepared.evaluation_unit.holdout_proof,
-                    )
-                    or attempt
-                    != EvaluationAttempt(
-                        run_id=prepared.binding.public_evaluation_run_id,
-                        ordinal=ordinal,
-                        schedule_hash=prepared.binding.schedule_hash,
-                        corpus_cutoff=prepared.binding.corpus_cutoff,
-                        idempotency_key=prepared.evaluation_unit.idempotency_key,
-                        reserved_cost_usd=prepared.evaluation_unit.reserved_cost_usd,
-                    )
-                    or claim
-                    != EvaluationExecutionClaim(
-                        run_id=attempt.run_id,
-                        ordinal=ordinal,
-                        schedule_hash=schedule_hash,
-                        corpus_cutoff=attempt.corpus_cutoff,
-                        attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
-                    )
-                    or sorted(attempt_ordinals) != expected_ordinals
-                    or sorted(claim_ordinals) != expected_ordinals
-                    or sorted(record_ordinals) != list(range(ordinal))
-                    or len(attempt_ordinals) != len(set(attempt_ordinals))
-                    or len(claim_ordinals) != len(set(claim_ordinals))
-                    or len(record_ordinals) != len(set(record_ordinals))
-                ):
-                    raise ValueError("holdout scheduled authority is invalid")
-                with self.evaluator.run_directory_set_lease(
-                    (prepared.execution_run_id, prepared.diagnosis_run_id)
-                ) as lease:
-                    execution, diagnosis = self._validate_execution_reservation(
-                        prepared, lease
-                    )
-                    if (
-                        execution.status != RunStatus.RUNNING
-                        or diagnosis.status != RunStatus.QUEUED
-                    ):
-                        raise ValueError("holdout diagnosis reservation is not startable")
-                    started = lease.start_queued(
-                        prepared.diagnosis_run_id, CurrentPhase.PREPARING
-                    )
-                    if (
-                        started is None
-                        or started.status != RunStatus.RUNNING
-                        or started.current_phase != "PREPARING"
-                    ):
-                        raise ValueError("holdout diagnosis authorization failed")
-                    lease.validate()
-                public_lease.validate()
-            capability = _ReservedDiagnosisCapability(
-                _CAPABILITY_SEAL, service, started, prepared.evaluation_unit
-            )
-            return service._diagnose_reserved(
-                source,
-                capability=capability,
-                mode=prepared.evaluation_unit.mode,
-                required_tools=required_tools,
-                expected_source_hash=expected_source_hash,
-                evaluation_unit=prepared.evaluation_unit,
-            )
+                        started = lease.start_queued(
+                            prepared.diagnosis_run_id, CurrentPhase.PREPARING
+                        )
+                        if (
+                            started is None
+                            or started.status != RunStatus.RUNNING
+                            or started.current_phase != "PREPARING"
+                        ):
+                            raise ValueError("holdout diagnosis authorization failed")
+                        capability = _ReservedDiagnosisCapability(
+                            _CAPABILITY_SEAL,
+                            self,
+                            service,
+                            started,
+                            prepared.evaluation_unit,
+                        )
+                        self.__register_reserved_capability(
+                            capability, service, started, prepared.evaluation_unit
+                        )
+                        lease.validate()
+                    public_lease.validate()
+                if capability is None:
+                    raise ValueError("holdout diagnosis authorization failed")
+                return service._diagnose_reserved(
+                    source,
+                    capability=capability,
+                    mode=prepared.evaluation_unit.mode,
+                    required_tools=required_tools,
+                    expected_source_hash=expected_source_hash,
+                    evaluation_unit=prepared.evaluation_unit,
+                )
+            finally:
+                if capability is not None:
+                    self.__discard_reserved_capability(capability)
 
     @staticmethod
     def _one_named_ref(run: RunManifest, name: str) -> ArtifactRef:
@@ -819,7 +890,7 @@ class HoldoutController:
             usage=dict(native.usage),
             latency_ms=native.latency_ms,
             cost_usd=native.cost_usd,
-            failure_reason=native.failure_reason,
+            failure_reason=None,
             lineage=HoldoutEvaluationLineage(
                 corpus_cutoff=prepared.binding.corpus_cutoff,
                 execution_commitment=self._execution_commitment(

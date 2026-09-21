@@ -568,32 +568,48 @@ def _configure_responses_provider(
                 self.plan_index += 1
             elif full_script and request.kind == "diagnose":
                 evidence = request.payload["evidence"]
-                value = DiagnosisResult(
-                    diagnostic_outcome="DIAGNOSED",
-                    failure_family="out_of_bounds",
-                    root_cause=(
-                        "The thread index can exceed the input length."
-                        + getattr(scripted, "response_canary", "")
-                    ),
-                    source_locations=[SourceLocation(path="kernel.cu", line=9)],
-                    observed_facts=[
-                        EvidenceClaim.model_validate(item) for item in evidence["observed_facts"]
-                    ],
-                    tool_findings=[
-                        EvidenceClaim(text=item["category"], citation_ids=[item["artifact_id"]])
-                        for item in evidence["tool_findings"]
-                    ],
-                    documentation_evidence=[
-                        EvidenceClaim(text=item["text"], citation_ids=[item["chunk_id"]])
-                        for item in evidence["documentation"]
-                    ],
-                    model_inferences=[
-                        "An index guard may prevent the reported write."
-                        + getattr(scripted, "path_canary", "")
-                    ],
-                    recommended_change="Guard the write with i < n.",
-                    confidence_label="high",
-                ).model_dump(mode="json")
+                if getattr(scripted, "force_limitation", False):
+                    value = DiagnosisResult.inconclusive(
+                        scripted.limitation_canary
+                    ).model_dump(mode="json")
+                else:
+                    value = DiagnosisResult(
+                        diagnostic_outcome="DIAGNOSED",
+                        failure_family="out_of_bounds",
+                        root_cause=(
+                            "The thread index can exceed the input length."
+                            + getattr(scripted, "response_canary", "")
+                        ),
+                        source_locations=[SourceLocation(path="kernel.cu", line=9)],
+                        observed_facts=[
+                            EvidenceClaim.model_validate(item)
+                            for item in evidence["observed_facts"]
+                        ],
+                        tool_findings=[
+                            EvidenceClaim(
+                                text=item["category"],
+                                citation_ids=[item["artifact_id"]],
+                            )
+                            for item in evidence["tool_findings"]
+                        ],
+                        documentation_evidence=[
+                            EvidenceClaim(
+                                text=item["text"], citation_ids=[item["chunk_id"]]
+                            )
+                            for item in evidence["documentation"]
+                        ],
+                        model_inferences=[
+                            "An index guard may prevent the reported write."
+                            + getattr(scripted, "path_canary", "")
+                        ],
+                        recommended_change="Guard the write with i < n.",
+                        confidence_label="high",
+                        limitations=(
+                            [scripted.limitation_canary]
+                            if getattr(scripted, "limitation_canary", "")
+                            else []
+                        ),
+                    ).model_dump(mode="json")
             elif full_script and request.kind == "patch":
                 value = {"unified_diff": scripted.diff}
             else:
@@ -1892,6 +1908,7 @@ def test_holdout_public_projection_drops_provider_diagnosis(
     assert case.native.diagnosis
     public = case.controller.complete_execution(case.prepared, case.native)
     assert public.diagnosis == {}
+    assert public.failure_reason is None
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
@@ -1899,6 +1916,10 @@ def test_forged_reserved_diagnosis_capability_has_zero_side_effects(
     private_split_executor, native_evaluation_executor
 ):
     from gpu_agent.benchmark.evaluation import EvaluationUnitBinding
+    from gpu_agent.benchmark.holdout import (
+        _CAPABILITY_SEAL,
+        _ReservedDiagnosisCapability,
+    )
     from gpu_agent.contracts import ExternalRunOrigin, RunStatus
     from gpu_agent.execution.models import SanitizerTool
 
@@ -1949,16 +1970,20 @@ def test_forged_reserved_diagnosis_capability_has_zero_side_effects(
             evaluation_unit=unit,
             _reserved_run_id=diagnosis.id,
         )
+    started = store.transition(diagnosis.id, RunStatus.RUNNING, "PREPARING")
+    forged = _ReservedDiagnosisCapability(
+        _CAPABILITY_SEAL, controller, service, started, unit
+    )
     with pytest.raises(ValueError, match="capability"):
         service._diagnose_reserved(
             executor.sources[private_case_id],
-            capability=object(),
+            capability=forged,
             mode="E",
             required_tools=(SanitizerTool.MEMCHECK,),
             expected_source_hash=hashlib.sha256(selected.read_bytes()).hexdigest(),
             evaluation_unit=unit,
         )
-    assert store.load(diagnosis.id).status == RunStatus.QUEUED
+    assert store.load(diagnosis.id).status == RunStatus.RUNNING
     assert service._provider.kinds == before_provider
 
 
@@ -2185,6 +2210,81 @@ def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_s
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
+def test_holdout_mode_e_provider_limitation_is_evaluator_only(
+    native_evaluation_executor, monkeypatch
+):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+    from gpu_agent.benchmark.executor import EvaluationExecutor
+    from gpu_agent.benchmark.holdout import HoldoutController
+    from gpu_agent.service import ApplicationService
+
+    original = native_evaluation_executor
+    limitation_canary = b"LIMITATION_SECRET_CANARY_TASK3"
+    original.service._provider.limitation_canary = limitation_canary.decode()
+    original.service._provider.force_limitation = True
+    binding, _ = _configure_responses_provider(original, monkeypatch, full_script=True)
+    original.service.evaluator_store = original.corpus
+    controller = HoldoutController(
+        original.service.store,
+        original.corpus,
+        binding=binding,
+        _schedule_verifier=original._schedule_verifier,
+    )
+    batch = controller.prepare()
+    holdout_service = ApplicationService(
+        original.corpus,
+        original.corpus,
+        backend_factory=original.service._backend_factory,
+        knowledge=original.service.knowledge,
+        knowledge_version=original.service.knowledge_version,
+        _binding=binding,
+    )
+    holdout_service._pricing_attestation = original.service._pricing_attestation
+    executor = EvaluationExecutor(
+        original.service,
+        original.corpus,
+        original.sources,
+        holdout_service=holdout_service,
+        holdout_controller=controller,
+        holdout_batch=batch,
+        _corpus_family=original._corpus_family,
+        _schedule_verifier=original._schedule_verifier,
+    )
+    result = EvaluationRunner(
+        executor.service.store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+        holdout_controller=controller,
+        holdout_batch=batch,
+    ).run("E", "holdout", 3)
+    assert result.executed_units == 1
+    assert result.records[0].usage["physical_calls"] > 0
+    assert result.records[0].failure_reason is None
+    public_bytes = b"\n".join(
+        path.read_bytes()
+        for path in sorted(executor.service.store.root.rglob("*"))
+        if path.is_file()
+    )
+    evaluator_bytes = b"\n".join(
+        path.read_bytes()
+        for path in sorted(executor.corpus.root.rglob("*"))
+        if path.is_file()
+    )
+    if limitation_canary in public_bytes:
+        pytest.fail("limitation canary crossed the public boundary", pytrace=False)
+    if limitation_canary not in evaluator_bytes:
+        pytest.fail("limitation canary missing from evaluator storage", pytrace=False)
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
 def test_holdout_mode_e_started_provider_call_is_not_reexecuted_on_resume(
     native_evaluation_executor, monkeypatch
 ):
@@ -2238,6 +2338,14 @@ def test_holdout_mode_e_started_provider_call_is_not_reexecuted_on_resume(
         return provider
 
     monkeypatch.setattr(service_module, "OpenAIResponsesProvider", interrupting_factory)
+    reserved_calls = []
+    diagnose_reserved = ApplicationService._diagnose_reserved
+
+    def capture_reserved(service, *args, **kwargs):
+        reserved_calls.append((service, args, dict(kwargs)))
+        return diagnose_reserved(service, *args, **kwargs)
+
+    monkeypatch.setattr(ApplicationService, "_diagnose_reserved", capture_reserved)
 
     def runner():
         return EvaluationRunner(
@@ -2258,6 +2366,12 @@ def test_holdout_mode_e_started_provider_call_is_not_reexecuted_on_resume(
 
     with pytest.raises(KeyboardInterrupt):
         runner().run("E", "holdout", 3)
+    assert len(reserved_calls) == 1
+    called_service, replay_args, replay_kwargs = reserved_calls[0]
+    before_replay = list(physical_calls)
+    with pytest.raises(ValueError, match="capability"):
+        diagnose_reserved(called_service, *replay_args, **replay_kwargs)
+    assert physical_calls == before_replay
     run_id = executor.service.store.recoverable_runs()[0].id
     evaluator_started = [
         Invocation.model_validate_json(holdout_service.store.read(ref))

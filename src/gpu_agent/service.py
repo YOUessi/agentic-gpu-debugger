@@ -303,14 +303,6 @@ class ApplicationService:
     ) -> RunManifest:
         if mode not in {"A", "B", "C", "D", "E"}:
             raise ValueError("invalid acquisition mode")
-        selected = source / "kernel.cu" if source.is_dir() else source
-        data = read_regular(selected.absolute(), 4 * 1024 * 1024)
-        if (
-            expected_source_hash is not None
-            and hashlib.sha256(data).hexdigest() != expected_source_hash
-        ):
-            raise ValueError("registered source hash mismatch")
-        text = data.decode("utf-8")
         if evaluation_unit is not None and (
             self._binding is None
             or self._binding.purpose != "evaluation"
@@ -327,14 +319,26 @@ class ApplicationService:
             ):
                 raise ValueError("reserved diagnosis capability is invalid")
             run = _reserved_capability.consume(self, evaluation_unit)
-        elif evaluation_unit is not None:
+        else:
+            run = None
+        selected = source / "kernel.cu" if source.is_dir() else source
+        data = read_regular(selected.absolute(), 4 * 1024 * 1024)
+        if (
+            expected_source_hash is not None
+            and hashlib.sha256(data).hexdigest() != expected_source_hash
+        ):
+            raise ValueError("registered source hash mismatch")
+        text = data.decode("utf-8")
+        if evaluation_unit is not None and not reserved_started:
             if self._evaluation_schedule_verifier is None:
                 raise ValueError("evaluation unit requires signed schedule authority")
             run = self.store.validate_and_create_evaluation_child(
                 self._evaluation_schedule_verifier, evaluation_unit
             )
-        else:
+        elif evaluation_unit is None:
             run = self.store.create_run("diagnosis", binding=self._binding)
+        if run is None:
+            raise ValueError("diagnosis run authorization is missing")
         if not reserved_started:
             self.store.transition(run.id, "RUNNING", "PREPARING")
         self.store.put(
