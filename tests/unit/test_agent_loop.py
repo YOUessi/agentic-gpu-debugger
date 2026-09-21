@@ -34,6 +34,8 @@ def test_memcheck_retrieve_finish_flow(oob_service):
     audit = next(r for r in run.artifact_refs if r.name == "agent/budget-audit.json")
     states = {event["state"] for event in json.loads(service.store.read(audit))}
     assert {"ATTEMPTED", "STARTED", "COMPLETED"} <= states
+    source_ref = next(ref for ref in run.artifact_refs if ref.name == "sources/kernel.cu")
+    assert source_ref.visibility == "public"
 
 
 def test_provider_public_projection_excludes_private_and_controller_data(oob_service):

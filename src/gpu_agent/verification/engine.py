@@ -21,7 +21,7 @@ from pydantic import Field, StrictFloat, model_validator
 from gpu_agent._resources import runtime_resource
 from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, ToolResult
 from gpu_agent.evidence.models import EvidenceBundle
-from gpu_agent.evidence.repository import EvidenceRepository
+from gpu_agent.evidence.repository import _evidence
 from gpu_agent.execution.isolated import IsolatedGPUBackend
 from gpu_agent.execution.models import (
     BuildRequest,
@@ -88,21 +88,21 @@ def register_candidate(store: RunStore, candidate: PatchCandidate) -> str:
     A separate registration lock makes the one-candidate rule atomic across controllers;
     the run/artifact itself is still persisted exclusively through RunStore.
     """
-    if store.visibility != "public":
-        raise ValueError("candidate registration requires public store")
     store.load(candidate.parent_run_id)
     lock_path = store.root / candidate.parent_run_id / ".candidate-lock"
     reject_symlinks(lock_path)
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        for path in store.root.iterdir():
-            if path.is_dir() and len(path.name) == 32:
-                run = store.load(path.name)
-                if run.kind == "candidate" and run.parent_run_id == candidate.parent_run_id:
-                    raise ValueError("only one candidate is allowed per diagnosis")
+        if any(run.kind == "candidate" for run in store.children(candidate.parent_run_id)):
+            raise ValueError("only one candidate is allowed per diagnosis")
         run = store.create_run("candidate", candidate.parent_run_id)
-        store.put(run.id, "candidate.json", candidate.model_dump_json().encode(), "public")
+        store.put(
+            run.id,
+            "candidate.json",
+            candidate.model_dump_json().encode(),
+            store.visibility,
+        )
         store.transition(run.id, "RUNNING", "FINALIZING")
         store.transition(run.id, "COMPLETED", None)
         return run.id
@@ -115,19 +115,23 @@ def _infrastructure_failure(result: ToolResult[Payload]) -> bool:
 
 
 class VerificationEngine:
-    def __init__(self, store: RunStore, evaluator_root: Path) -> None:
-        if store.visibility != "public":
-            raise ValueError("public verification requires public RunStore")
+    def __init__(self, store: RunStore, evaluator_store: RunStore) -> None:
+        if evaluator_store.visibility != "evaluator":
+            raise ValueError("verification requires an evaluator RunStore")
         self._store = store
-        self._root = evaluator_root.absolute()
+        self._root = evaluator_store.root
         reject_symlinks(self._root)
-        public = store.root.resolve()
-        private = self._root.resolve()
-        if private.is_relative_to(public) or public.is_relative_to(private):
-            raise ValueError("evaluator root must be independent from public RunStore")
-        self._root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self._root.chmod(0o700)
-        self._private = RunStore(self._root / "runs", visibility="evaluator")
+        if store.visibility == "public":
+            public = store.root.resolve()
+            private = evaluator_store.root.resolve()
+            if private.is_relative_to(public) or public.is_relative_to(private):
+                raise ValueError("evaluator store must be independent from public RunStore")
+        elif store.visibility == "evaluator":
+            if store.identity != evaluator_store.identity:
+                raise ValueError("evaluator verification must use the diagnosis RunStore")
+        else:
+            raise ValueError("verification store has invalid visibility")
+        self._private = evaluator_store
 
     def _candidate(
         self, original_run_id: str, candidate_id: str, binding: RunBinding | None
@@ -245,9 +249,14 @@ class VerificationEngine:
         original_manifest = self._store.load(original_run_id)
         binding = original_manifest.binding
         candidate = self._candidate(original_run_id, candidate_id, binding)
-        origin = ExternalRunOrigin(run_id=original_run_id, visibility="public")
+        origin = (
+            ExternalRunOrigin(run_id=original_run_id, visibility="public")
+            if self._store.visibility == "public"
+            else None
+        )
         audit = self._private.create_run(
             "verification_audit",
+            original_run_id if self._store.visibility == "evaluator" else None,
             binding=binding,
             external_origin=origin,
             _run_id=hashlib.sha256(
@@ -258,7 +267,7 @@ class VerificationEngine:
             ).hexdigest()[:32],
         )
         self._private.transition(audit.id, "RUNNING", "PREPARING")
-        bundle = EvidenceRepository(self._store).public_view(original_run_id)
+        bundle = _evidence(self._store).view(original_run_id)
         baseline_hashes = {Path(ref.name).name: ref.sha256 for ref in bundle.source_snapshot}
         _, input_ref = self._baseline(original_run_id, bundle, baseline_hashes)
         if input_ref is None:
@@ -587,7 +596,10 @@ class VerificationEngine:
     ) -> VerificationResult:
         run = self._store.create_run("verification", original_run_id)
         self._store.put(
-            run.id, "verification/result.json", result.model_dump_json().encode(), "public"
+            run.id,
+            "verification/result.json",
+            result.model_dump_json().encode(),
+            self._store.visibility,
         )
         self._store.transition(run.id, "RUNNING", "FINALIZING")
         self._store.transition(run.id, "COMPLETED", None)

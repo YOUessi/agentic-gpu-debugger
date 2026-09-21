@@ -33,6 +33,7 @@ def oob_service(store, tmp_path):
     from gpu_agent.knowledge.models import make_chunk
     from gpu_agent.knowledge.retrieve import KnowledgeIndex
     from gpu_agent.service import ApplicationService
+    from gpu_agent.store import RunStore
 
     class FakeBackend(IsolatedGPUBackend):
         """Replace only the container subprocess; keep artifact/provenance plumbing."""
@@ -140,13 +141,33 @@ def oob_service(store, tmp_path):
     )
     service = ApplicationService(
         store,
-        tmp_path / "evaluator",
+        RunStore(tmp_path / "evaluator/runs", visibility="evaluator"),
         provider=provider,
         backend_factory=FakeBackend,
         knowledge=KnowledgeIndex([chunk]),
         knowledge_version="cuda=13.0;compute-sanitizer=13.0",
     )
     return service, provider, source
+
+
+@pytest.fixture
+def evaluator_oob_service(oob_service, tmp_path):
+    from gpu_agent.service import ApplicationService
+    from gpu_agent.store import RunStore
+
+    public_service, provider, source = oob_service
+    kernel = source / "kernel.cu"
+    kernel.write_text(kernel.read_text() + "\n// PRIVATE-SOURCE-CANARY\n")
+    evaluator = RunStore(tmp_path / "evaluator/runs", visibility="evaluator")
+    service = ApplicationService(
+        evaluator,
+        evaluator,
+        provider=provider,
+        backend_factory=public_service._backend_factory,
+        knowledge=public_service.knowledge,
+        knowledge_version=public_service.knowledge_version,
+    )
+    return service, provider, source, public_service.store
 
 
 @pytest.fixture

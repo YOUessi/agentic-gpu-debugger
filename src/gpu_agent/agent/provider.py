@@ -371,7 +371,7 @@ class OpenAIResponsesProvider:
             self.run_id,
             f"provider/{invocation.invocation_id}/{invocation.state}.json",
             invocation.model_dump_json().encode(),
-            "public",
+            self.store.visibility,
         )
 
     def invocations(self) -> list[Invocation]:

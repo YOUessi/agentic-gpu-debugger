@@ -8,6 +8,18 @@ from pathlib import Path
 import pytest
 
 
+def _evaluator_store(tmp_path, name="evaluator"):
+    from gpu_agent.store import RunStore
+
+    return RunStore(tmp_path / name / "runs", visibility="evaluator")
+
+
+def _engine(store, tmp_path, name="evaluator"):
+    from gpu_agent.verification.engine import VerificationEngine
+
+    return VerificationEngine(store, _evaluator_store(tmp_path, name))
+
+
 def _audit_result(tmp_path, result):
     from gpu_agent.store import RunStore
     from gpu_agent.verification.models import VerificationAuditResult
@@ -178,7 +190,6 @@ def test_invalid_original_provenance_is_inconclusive(
     store, tmp_path, original, container_boundary, fault
 ):
     from gpu_agent.evidence.repository import EvidenceRepository
-    from gpu_agent.verification.engine import VerificationEngine
 
     run_id, _ = original
     repo = EvidenceRepository(store)
@@ -264,7 +275,7 @@ def test_invalid_original_provenance_is_inconclusive(
         run_id, bundle.model_copy(update={"build_result": build, "sanitizer_results": [baseline]})
     )
     candidate_id, _ = register_variant(store, original, "human")
-    result = VerificationEngine(store, tmp_path / "evaluator").verify(run_id, candidate_id)
+    result = _engine(store, tmp_path).verify(run_id, candidate_id)
     assert result.verdict.value == "INCONCLUSIVE"
     assert result.original_finding_present is None
     assert not container_boundary
@@ -374,10 +385,8 @@ def container_boundary(monkeypatch):
 def test_evaluator_rejects_semantic_failures(
     store, tmp_path, original, container_boundary, variant, want
 ):
-    from gpu_agent.verification.engine import VerificationEngine
-
     candidate_id, candidate = register_variant(store, original, variant)
-    engine = VerificationEngine(store, tmp_path / "evaluator")
+    engine = _engine(store, tmp_path)
     result = engine.verify(original[0], candidate_id, "full")
     assert result.verdict.value == want
     assert result.candidate_hash == candidate.patched_source_hash
@@ -465,12 +474,15 @@ def test_private_backend_rejects_public_refs_and_public_view(store, tmp_path):
 
 
 def test_evaluator_root_must_be_independent(store):
+    from gpu_agent.store import RunStore
     from gpu_agent.verification.engine import VerificationEngine
 
     with pytest.raises(ValueError):
-        VerificationEngine(store, store.root / "private")
+        VerificationEngine(
+            store, RunStore(store.root / "private/runs", visibility="evaluator")
+        )
     with pytest.raises(ValueError):
-        VerificationEngine(store, store.root.parent)
+        VerificationEngine(store, RunStore(store.root.parent, visibility="evaluator"))
 
 
 def test_original_signature_survives_patch_line_drift(store, original):
@@ -514,7 +526,6 @@ def test_holdout_only_memcheck_finding_blocks_success(
 ):
     from gpu_agent.execution.isolated import IsolatedGPUBackend
     from gpu_agent.execution.process import ProcessCapture
-    from gpu_agent.verification.engine import VerificationEngine
 
     normal = IsolatedGPUBackend._container
 
@@ -531,7 +542,7 @@ def test_holdout_only_memcheck_finding_blocks_success(
 
     monkeypatch.setattr(IsolatedGPUBackend, "_container", holdout_finding)
     candidate_id, _ = register_variant(store, original, "human")
-    result = VerificationEngine(store, tmp_path / "evaluator").verify(original[0], candidate_id)
+    result = _engine(store, tmp_path).verify(original[0], candidate_id)
     assert result.verdict.value == "VERIFIED_FIXED"
     assert result.new_findings == 0
     audit = _audit_result(tmp_path, result)
@@ -555,10 +566,9 @@ def test_private_outcomes_cannot_change_public_projection(
     from gpu_agent.execution.isolated import IsolatedGPUBackend
     from gpu_agent.execution.process import ProcessCapture
     from gpu_agent.store import RunStore
-    from gpu_agent.verification.engine import VerificationEngine
 
     candidate_id, _ = register_variant(store, original, "human")
-    passing = VerificationEngine(store, tmp_path / "passing-evaluator").verify(
+    passing = _engine(store, tmp_path, "passing-evaluator").verify(
         original[0], candidate_id, "standard"
     )
     native = IsolatedGPUBackend._container
@@ -590,7 +600,7 @@ def test_private_outcomes_cannot_change_public_projection(
         return native(self, path, operation, timeout, stdin=stdin, cancel=cancel)
 
     monkeypatch.setattr(IsolatedGPUBackend, "_container", private_failure)
-    failing = VerificationEngine(store, tmp_path / "failing-evaluator").verify(
+    failing = _engine(store, tmp_path, "failing-evaluator").verify(
         original[0], candidate_id, "standard"
     )
     assert passing == failing
@@ -623,7 +633,6 @@ def test_unregistered_program_never_acquires_benchmark_oracle(
     store, tmp_path, original, container_boundary
 ):
     from gpu_agent.evidence.repository import EvidenceRepository
-    from gpu_agent.verification.engine import VerificationEngine
 
     run_id, snapshot = original
     source = (snapshot.root / "kernel.cu").read_bytes() + b"// ordinary user source\n"
@@ -635,7 +644,7 @@ def test_unregistered_program_never_acquires_benchmark_oracle(
     refs = [ref if Path(r.name).name == "kernel.cu" else r for r in bundle.source_snapshot]
     repository.save(run_id, bundle.model_copy(update={"source_snapshot": refs}))
     candidate_id, _ = register_variant(store, original, "human")
-    result = VerificationEngine(store, tmp_path / "evaluator").verify(run_id, candidate_id)
+    result = _engine(store, tmp_path).verify(run_id, candidate_id)
     assert result.verdict.value == "INCONCLUSIVE"
     assert result.reason_code == "ORACLE_OR_BASELINE_UNAVAILABLE"
     assert not container_boundary
@@ -647,7 +656,6 @@ def test_required_tool_failure_is_inconclusive(
 ):
     from gpu_agent.execution.isolated import IsolatedGPUBackend
     from gpu_agent.execution.process import ProcessCapture
-    from gpu_agent.verification.engine import VerificationEngine
 
     normal = IsolatedGPUBackend._container
 
@@ -658,7 +666,7 @@ def test_required_tool_failure_is_inconclusive(
 
     monkeypatch.setattr(IsolatedGPUBackend, "_container", failing)
     candidate_id, _ = register_variant(store, original, "human")
-    result = VerificationEngine(store, tmp_path / "evaluator").verify(original[0], candidate_id)
+    result = _engine(store, tmp_path).verify(original[0], candidate_id)
     assert result.verdict.value == "INCONCLUSIVE"
     audit = _audit_result(tmp_path, result)
     assert audit.not_run_count > 0
@@ -679,8 +687,6 @@ def test_required_tool_failure_is_inconclusive(
 
 
 def test_revalidation_rejects_forged_candidate_hash(store, tmp_path, original, container_boundary):
-    from gpu_agent.verification.engine import VerificationEngine
-
     candidate_id, _ = register_variant(store, original, "human")
     ref = store.load(candidate_id).artifact_refs[0]
     path = store.root / ref.relative_path
@@ -689,15 +695,13 @@ def test_revalidation_rejects_forged_candidate_hash(store, tmp_path, original, c
         path.read_bytes().replace(b'"scope_validation":"VALID"', b'"scope_validation":"OTHER"')
     )
     with pytest.raises(ValueError, match="hash mismatch"):
-        VerificationEngine(store, tmp_path / "evaluator").verify(original[0], candidate_id)
+        _engine(store, tmp_path).verify(original[0], candidate_id)
     assert not container_boundary
 
 
 def test_standard_mode_runs_all_holdouts(store, tmp_path, original, container_boundary):
-    from gpu_agent.verification.engine import VerificationEngine
-
     candidate_id, _ = register_variant(store, original, "human")
-    engine = VerificationEngine(store, tmp_path / "evaluator")
+    engine = _engine(store, tmp_path)
     result = engine.verify(original[0], candidate_id, "standard")
     assert _audit_result(tmp_path, result).private_passed_count == 13
     strict = engine.verify(original[0], candidate_id, "full")
@@ -721,7 +725,6 @@ def test_changed_binary_is_rejected_before_execution(
     store, tmp_path, original, container_boundary, monkeypatch
 ):
     from gpu_agent.execution.isolated import IsolatedGPUBackend
-    from gpu_agent.verification.engine import VerificationEngine
 
     normal_build = IsolatedGPUBackend.build
 
@@ -735,7 +738,7 @@ def test_changed_binary_is_rejected_before_execution(
     monkeypatch.setattr(IsolatedGPUBackend, "build", tamper)
     candidate_id, _ = register_variant(store, original, "human")
     with pytest.raises(ValueError, match="binary hash mismatch"):
-        VerificationEngine(store, tmp_path / "evaluator").verify(original[0], candidate_id)
+        _engine(store, tmp_path).verify(original[0], candidate_id)
     assert not container_boundary
 
 
@@ -744,7 +747,6 @@ def test_original_provenance_from_isolated_backend_is_accepted(
 ):
     from gpu_agent.execution.isolated import IsolatedGPUBackend
     from gpu_agent.execution.models import BuildRequest, SanitizerRequest, WorkspaceRequest
-    from gpu_agent.verification.engine import VerificationEngine
 
     _, snapshot = original
     backend = IsolatedGPUBackend(store, snapshot.root, tmp_path / "baseline-tasks")
@@ -765,5 +767,5 @@ def test_original_provenance_from_isolated_backend_is_accepted(
         backend.cleanup(handle)
     registered = (run.id, snapshot.model_copy(update={"parent_run_id": run.id}))
     candidate_id, _ = register_variant(store, registered, "human")
-    result = VerificationEngine(store, tmp_path / "evaluator").verify(run.id, candidate_id)
+    result = _engine(store, tmp_path).verify(run.id, candidate_id)
     assert result.verdict.value == "VERIFIED_FIXED"

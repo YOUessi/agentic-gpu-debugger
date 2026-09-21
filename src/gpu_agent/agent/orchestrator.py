@@ -31,7 +31,7 @@ from gpu_agent.agent.rule_router import RuleRouter
 from gpu_agent.benchmark.evaluation import EvaluationMode
 from gpu_agent.contracts import ArtifactRef, CurrentPhase
 from gpu_agent.evidence.models import EvidenceBundle
-from gpu_agent.evidence.repository import EvidenceRepository
+from gpu_agent.evidence.repository import _evidence
 from gpu_agent.execution.backend import ExecutionBackend
 from gpu_agent.execution.models import (
     CheckOutcome,
@@ -110,7 +110,7 @@ def public_evidence_from_bundle(store: RunStore, bundle: EvidenceBundle) -> Publ
 
 
 def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
-    return public_evidence_from_bundle(store, EvidenceRepository(store).public_view(run_id))
+    return public_evidence_from_bundle(store, _evidence(store).view(run_id))
 
 
 class AgentOrchestrator:
@@ -211,8 +211,8 @@ class AgentOrchestrator:
         if not result.chunks:
             self.ledger.settle(reservation, "FAILED")
             raise ProviderError("NO_INFORMATION_GAIN")
-        repo = EvidenceRepository(self.store)
-        bundle = repo.public_view(self.handle.run_id)
+        repo = _evidence(self.store)
+        bundle = repo.view(self.handle.run_id)
         known = {
             DocumentChunk.model_validate_json(self.store.read(r)).chunk_id
             for r in bundle.retrieved_chunks
@@ -226,7 +226,7 @@ class AgentOrchestrator:
                 self.handle.run_id,
                 f"docs/{c.chunk_id}.json",
                 c.model_dump_json().encode(),
-                "public",
+                self.store.visibility,
             )
             for c in new
         ]
@@ -257,7 +257,7 @@ class AgentOrchestrator:
             self.handle.run_id,
             f"source-reads/{action.action_id}.json",
             args.model_dump_json().encode(),
-            "public",
+            self.store.visibility,
         )
         self.ledger.settle(reservation)
 
@@ -319,7 +319,7 @@ class AgentOrchestrator:
             run_id,
             "agent/initial-budget.json",
             self.budget.model_dump_json().encode(),
-            "public",
+            self.store.visibility,
         )
         self.store.transition(run_id, "RUNNING", CurrentPhase.DIAGNOSING)
         try:
@@ -407,7 +407,7 @@ class AgentOrchestrator:
                         sort_keys=True,
                         separators=(",", ":"),
                     ).encode(),
-                    "public",
+                    self.store.visibility,
                 )
                 decision = decide_action(
                     action, evidence, self.budget, CurrentPhase.DIAGNOSING, self.seen
@@ -416,7 +416,7 @@ class AgentOrchestrator:
                     run_id,
                     f"actions/{self.budget.agent_steps}/decision.json",
                     decision.model_dump_json().encode(),
-                    "public",
+                    self.store.visibility,
                 )
                 # Do not persist model budget snapshots or arbitrary rationale as controller state.
                 if not decision.allowed:
@@ -441,7 +441,7 @@ class AgentOrchestrator:
                 run_id,
                 "agent/acquisition-usage.json",
                 self.acquisition_usage.model_dump_json().encode(),
-                "public",
+                self.store.visibility,
             )
             snapshot = self.budget.model_copy(
                 update={
@@ -450,13 +450,16 @@ class AgentOrchestrator:
                 }
             )
             self.store.put(
-                run_id, "agent/budget.json", snapshot.model_dump_json().encode(), "public"
+                run_id,
+                "agent/budget.json",
+                snapshot.model_dump_json().encode(),
+                self.store.visibility,
             )
             self.store.put(
                 run_id,
                 "agent/budget-audit.json",
                 json.dumps(self.ledger.audit).encode(),
-                "public",
+                self.store.visibility,
             )
             manifest = self.store.load(run_id)
             policies = [
@@ -506,5 +509,5 @@ class AgentOrchestrator:
                     sort_keys=True,
                     separators=(",", ":"),
                 ).encode(),
-                "public",
+                self.store.visibility,
             )

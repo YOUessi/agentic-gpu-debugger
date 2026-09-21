@@ -31,7 +31,7 @@ from gpu_agent.benchmark.ledger import CorpusFamily
 from gpu_agent.contracts import RunBinding, RunManifest
 from gpu_agent.environment import load_toolchain_lock
 from gpu_agent.evidence.models import EvidenceBundle
-from gpu_agent.evidence.repository import EvidenceRepository
+from gpu_agent.evidence.repository import _evidence
 from gpu_agent.execution.backend import ExecutionBackend
 from gpu_agent.execution.isolated import IsolatedGPUBackend
 from gpu_agent.execution.models import (
@@ -87,7 +87,7 @@ class ApplicationService:
     def __init__(
         self,
         store: RunStore,
-        evaluator_root: Path,
+        evaluator_store: RunStore,
         *,
         provider: LLMProvider | None = None,
         backend_factory: BackendFactory = IsolatedGPUBackend,
@@ -96,12 +96,19 @@ class ApplicationService:
         _binding: RunBinding | None = None,
         _evaluation_schedule_verifier: "EvaluationScheduleVerifier | None" = None,
     ) -> None:
-        self.store, self.evaluator_root = store, evaluator_root
+        if evaluator_store.visibility != "evaluator":
+            raise ValueError("verification requires an evaluator RunStore")
+        self.store, self.evaluator_store = store, evaluator_store
         self._provider, self._backend_factory = provider, backend_factory
         self.knowledge, self.knowledge_version = knowledge, knowledge_version
         self._binding = _binding
         self._evaluation_schedule_verifier = _evaluation_schedule_verifier
         self._pricing_attestation: PricingAttestation | None = None
+
+    @property
+    def evaluator_root(self) -> Path:
+        """Compatibility path for callers not yet migrated to the exact store capability."""
+        return self.evaluator_store.root.parent
 
     def _bind_evaluation_schedule_verifier(self, verifier: "EvaluationScheduleVerifier") -> None:
         from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
@@ -143,7 +150,7 @@ class ApplicationService:
                 pass  # The typed knowledge limitation is emitted if retrieval is requested.
         return cls(
             RunStore(root),
-            evaluator.absolute(),
+            RunStore(evaluator.absolute() / "runs", visibility="evaluator"),
             knowledge=knowledge,
             knowledge_version=os.environ.get("GPU_AGENT_KNOWLEDGE_VERSION", ""),
         )
@@ -194,12 +201,10 @@ class ApplicationService:
         if family is not None:
             family.require_store(ordinary.store)
             if purpose == "evaluation":
-                family.require_store(
-                    RunStore(ordinary.evaluator_root / "runs", visibility="evaluator")
-                )
+                family.require_store(ordinary.evaluator_store)
         return cls(
             ordinary.store,
-            ordinary.evaluator_root,
+            ordinary.evaluator_store,
             provider=ordinary._provider,
             backend_factory=ordinary._backend_factory,
             knowledge=ordinary.knowledge,
@@ -208,7 +213,12 @@ class ApplicationService:
         )
 
     def _save_diagnosis(self, run_id: str, result: DiagnosisResult) -> None:
-        self.store.put(run_id, "diagnosis.json", result.model_dump_json().encode(), "public")
+        self.store.put(
+            run_id,
+            "diagnosis.json",
+            result.model_dump_json().encode(),
+            self.store.visibility,
+        )
 
     def diagnosis(self, run_id: str) -> DiagnosisResult:
         refs = [r for r in self.store.load(run_id).artifact_refs if r.name == "diagnosis.json"]
@@ -217,17 +227,10 @@ class ApplicationService:
         return DiagnosisResult.model_validate_json(self.store.read(refs[-1]))
 
     def candidates(self, run_id: str) -> list[str]:
-        self.store.load(run_id)
-        found = []
-        for path in sorted(self.store.root.iterdir()):
-            if path.is_dir() and len(path.name) == 32:
-                manifest = self.store.load(path.name)
-                if manifest.kind == "candidate" and manifest.parent_run_id == run_id:
-                    found.append(manifest.id)
-        return found
+        return [run.id for run in self.store.children(run_id) if run.kind == "candidate"]
 
     def _snapshot(self, run_id: str, root: Path) -> SourceSnapshot:
-        bundle = EvidenceRepository(self.store).public_view(run_id)
+        bundle = _evidence(self.store).view(run_id)
         hashes = {}
         for ref in bundle.source_snapshot:
             name = Path(ref.name).name
@@ -285,10 +288,10 @@ class ApplicationService:
                 sort_keys=True,
                 separators=(",", ":"),
             ).encode(),
-            "public",
+            self.store.visibility,
         )
-        ref = self.store.put(run.id, "sources/kernel.cu", data, "public")
-        EvidenceRepository(self.store).save(run.id, EvidenceBundle(source_snapshot=[ref]))
+        ref = self.store.put(run.id, "sources/kernel.cu", data, self.store.visibility)
+        _evidence(self.store).save(run.id, EvidenceBundle(source_snapshot=[ref]))
         gate = LLMCallGate()
         handle: WorkspaceHandle | None = None
         backend: ExecutionBackend | None = None
@@ -364,13 +367,13 @@ class ApplicationService:
                         run.id,
                         "agent/provider-policy.json",
                         policy.content(),
-                        "public",
+                        self.store.visibility,
                     )
                     self.store.put(
                         run.id,
                         "agent/pricing-attestation.json",
                         pricing.model_dump_json().encode(),
-                        "public",
+                        self.store.visibility,
                     )
                 gate = provider.gate
                 vector = '#include "vector_api.h"' in text
@@ -384,10 +387,12 @@ class ApplicationService:
                     }.items():
                         content = read_regular(path, 4 * 1024 * 1024)
                         IsolatedGPUBackend._write_snapshot(root / name, content)
-                        source_ref = self.store.put(run.id, f"sources/{name}", content, "public")
+                        source_ref = self.store.put(
+                            run.id, f"sources/{name}", content, self.store.visibility
+                        )
                         source_refs.append(source_ref)
                         hashes[name] = source_ref.sha256
-                EvidenceRepository(self.store).save(
+                _evidence(self.store).save(
                     run.id, EvidenceBundle(source_snapshot=source_refs)
                 )
                 snapshot = snapshot.model_copy(update={"hashes": hashes})
@@ -406,7 +411,9 @@ class ApplicationService:
                     if vector
                     else b""
                 )
-                stdin_ref = self.store.put(run.id, "public-input.json", stdin, "public")
+                stdin_ref = self.store.put(
+                    run.id, "public-input.json", stdin, self.store.visibility
+                )
                 self.store.transition(run.id, "RUNNING", "EXECUTING")
                 execution = backend.run(
                     ExecutionRequest(
@@ -463,7 +470,7 @@ class ApplicationService:
                 run.id,
                 "agent/acquisition-usage.json",
                 AcquisitionUsage(sanitizer_calls=0, retrieval_calls=0).model_dump_json().encode(),
-                "public",
+                self.store.visibility,
             )
         budget_refs = [
             r for r in self.store.load(run.id).artifact_refs if r.name == "agent/budget.json"
@@ -477,7 +484,10 @@ class ApplicationService:
             update={"llm_calls": gate.snapshot().llm_calls, "remaining_seconds": gate.remaining()}
         )
         self.store.put(
-            run.id, "agent/final-budget.json", final_budget.model_dump_json().encode(), "public"
+            run.id,
+            "agent/final-budget.json",
+            final_budget.model_dump_json().encode(),
+            self.store.visibility,
         )
         self.store.put(
             run.id,
@@ -488,7 +498,7 @@ class ApplicationService:
                     "synthetic": isinstance(self._provider, FakeProvider),
                 }
             ).encode(),
-            "public",
+            self.store.visibility,
         )
         self.store.transition(run.id, "RUNNING", "FINALIZING")
         return self.store.transition(run.id, "COMPLETED", None)
@@ -518,10 +528,10 @@ class ApplicationService:
         registration = self.store.load(candidate_id)
         if registration.kind != "candidate" or registration.parent_run_id != run_id:
             raise ValueError("candidate does not belong to original run")
-        bundle = EvidenceRepository(self.store).public_view(run_id)
+        bundle = _evidence(self.store).view(run_id)
         if len(bundle.source_snapshot) != 4:
             return self._inconclusive_verification(run_id, "ORACLE_UNAVAILABLE", candidate_id)
-        return VerificationEngine(self.store, self.evaluator_root).verify(
+        return VerificationEngine(self.store, self.evaluator_store).verify(
             run_id, candidate_id, "full" if strict else "standard"
         )
 
@@ -548,7 +558,10 @@ class ApplicationService:
         )
         verification = self.store.create_run("verification", run_id)
         self.store.put(
-            verification.id, "verification/result.json", result.model_dump_json().encode(), "public"
+            verification.id,
+            "verification/result.json",
+            result.model_dump_json().encode(),
+            self.store.visibility,
         )
         self.store.transition(verification.id, "RUNNING", "FINALIZING")
         self.store.transition(verification.id, "COMPLETED", None)
@@ -557,8 +570,9 @@ class ApplicationService:
     def report(self, run_id: str) -> str:
         from gpu_agent.reporting import render_report
 
+        _evidence(self.store).public_view(run_id)
         return render_report(
             self.store,
             run_id,
-            RunStore(self.evaluator_root / "runs", visibility="evaluator"),
+            self.evaluator_store,
         )

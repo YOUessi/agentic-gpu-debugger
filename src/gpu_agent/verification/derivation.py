@@ -22,7 +22,7 @@ from gpu_agent.contracts import (
     RunStatus,
     ToolResult,
 )
-from gpu_agent.evidence.repository import EvidenceRepository
+from gpu_agent.evidence.repository import _evidence
 from gpu_agent.evidence.sanitizer import parse_sanitizer
 from gpu_agent.execution.models import (
     BuildPayload,
@@ -252,15 +252,31 @@ def derive_verification(
     binding: RunBinding | None,
 ) -> VerificationDerivation:
     """Derive both views afresh from immutable native child artifacts."""
-    if public.visibility != "public" or evaluator.visibility != "evaluator":
+    if evaluator.visibility != "evaluator":
+        raise ValueError("verification stores have invalid visibility")
+    if public.visibility == "public":
+        public_root = public.root.resolve()
+        evaluator_root = evaluator.root.resolve()
+        if evaluator_root.is_relative_to(public_root) or public_root.is_relative_to(
+            evaluator_root
+        ):
+            raise ValueError("verification stores have invalid topology")
+        audit_parent = None
+        origin = ExternalRunOrigin(run_id=diagnosis_run_id, visibility="public")
+    elif public.visibility == "evaluator":
+        if public.identity != evaluator.identity:
+            raise ValueError("verification stores have invalid topology")
+        audit_parent = diagnosis_run_id
+        origin = None
+    else:
         raise ValueError("verification stores have invalid visibility")
     audit_run = evaluator.load(audit_run_id)
     if (
         audit_run.kind != "verification_audit"
         or audit_run.status not in {RunStatus.RUNNING, RunStatus.COMPLETED}
+        or audit_run.parent_run_id != audit_parent
         or audit_run.binding != binding
-        or audit_run.external_origin
-        != ExternalRunOrigin(run_id=diagnosis_run_id, visibility="public")
+        or audit_run.external_origin != origin
     ):
         raise ValueError("evaluation verification audit is invalid")
     spec = VerificationSuiteSpec.model_validate_json(
@@ -305,15 +321,14 @@ def derive_verification(
             or index in children
             or child.status != RunStatus.COMPLETED
             or child.binding != binding
-            or child.external_origin
-            != ExternalRunOrigin(run_id=diagnosis_run_id, visibility="public")
+            or child.external_origin != origin
         ):
             raise ValueError("evaluation verification input lineage is invalid")
         children[index] = child
     if not children or sorted(children) != list(range(len(children))):
         raise ValueError("evaluation verification input sequence is invalid")
 
-    baseline_bundle = EvidenceRepository(public).public_view(diagnosis_run_id)
+    baseline_bundle = _evidence(public).view(diagnosis_run_id)
     baseline_items = [
         item
         for item in baseline_bundle.sanitizer_results

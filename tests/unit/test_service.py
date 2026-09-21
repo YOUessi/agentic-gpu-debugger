@@ -137,7 +137,7 @@ def test_diagnosis_and_registered_children_inherit_service_binding(oob_service):
     )
     service = ApplicationService(
         original.store,
-        original.evaluator_root,
+        original.evaluator_store,
         provider=provider,
         backend_factory=original._backend_factory,
         knowledge=original.knowledge,
@@ -148,3 +148,38 @@ def test_diagnosis_and_registered_children_inherit_service_binding(oob_service):
     assert run.binding == binding
     candidate_id = service.candidates(run.id)[0]
     assert service.store.load(candidate_id).binding == binding
+
+
+def test_evaluator_diagnosis_keeps_all_artifacts_in_evaluator_store(
+    evaluator_oob_service, tmp_path
+):
+    from gpu_agent.contracts import RunStatus
+
+    service, _, source, public = evaluator_oob_service
+    run = service.diagnose(source, mode="E")
+    assert run.status == RunStatus.COMPLETED
+    assert service.store.visibility == "evaluator"
+    for path in service.store.root.rglob("manifest.json"):
+        manifest = service.store.load(path.parent.name)
+        assert all(ref.visibility == "evaluator" for ref in manifest.artifact_refs)
+    assert not any(
+        b"PRIVATE-SOURCE-CANARY" in path.read_bytes()
+        for path in public.root.rglob("*")
+        if path.is_file()
+    )
+
+
+def test_evaluator_candidate_and_verification_remain_parent_scoped(evaluator_oob_service):
+    from gpu_agent.verification.models import VerificationVerdict
+
+    service, _, source, _ = evaluator_oob_service
+    diagnosis = service.diagnose(source, mode="E")
+    candidate = service.candidates(diagnosis.id)
+    assert len(candidate) == 1
+    result = service.verify(diagnosis.id, candidate[0])
+    assert isinstance(result.verdict, VerificationVerdict)
+    assert all(
+        ref.visibility == "evaluator"
+        for run in (service.store.load(diagnosis.id), service.store.load(candidate[0]))
+        for ref in run.artifact_refs
+    )

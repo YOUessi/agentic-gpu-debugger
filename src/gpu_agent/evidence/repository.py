@@ -53,3 +53,8 @@ class EvidenceRepository:
         )
         self._validate(run_id, bundle)
         return bundle
+
+
+def _evidence(store: RunStore) -> EvidenceRepository:
+    """Open controller evidence in the store's own visibility domain."""
+    return EvidenceRepository(store, evaluator=store.visibility == "evaluator")
