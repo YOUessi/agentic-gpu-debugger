@@ -239,7 +239,10 @@ class HoldoutScoringController:
                 external_origin=origin,
                 _run_id=run_id,
             )
-        run = self.evaluator.load(run_id)
+        try:
+            run = self.evaluator.load(run_id)
+        except ValueError:
+            raise ValueError("holdout scoring session conflicts") from None
         names = tuple(ref.name for ref in run.artifact_refs)
         events = tuple((event.status, event.phase) for event in run.events)
         queued_events = ((RunStatus.QUEUED, None),)
