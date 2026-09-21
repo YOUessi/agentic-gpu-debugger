@@ -251,6 +251,7 @@ class ApplicationService:
         required_tools: tuple[SanitizerTool, ...] = (SanitizerTool.MEMCHECK,),
         expected_source_hash: str | None = None,
         evaluation_unit: EvaluationUnitBinding | None = None,
+        _reserved_run_id: str | None = None,
     ) -> RunManifest:
         if mode not in {"A", "B", "C", "D", "E"}:
             raise ValueError("invalid acquisition mode")
@@ -268,7 +269,36 @@ class ApplicationService:
             or evaluation_unit.mode != mode
         ):
             raise ValueError("evaluation unit requires an evaluation-bound service")
-        if evaluation_unit is not None:
+        if _reserved_run_id is not None:
+            if evaluation_unit is None or self.store.visibility != "evaluator":
+                raise ValueError("reserved diagnosis requires an evaluator unit")
+            run = self.store.load(_reserved_run_id)
+            parent = (
+                self.store.load(run.parent_run_id)
+                if run.parent_run_id is not None
+                else None
+            )
+            unit_refs = [
+                ref for ref in run.artifact_refs if ref.name == "evaluation/unit.json"
+            ]
+            if (
+                run.kind != "diagnosis"
+                or run.status != "QUEUED"
+                or run.binding != self._binding
+                or parent is None
+                or parent.kind != "holdout_execution"
+                or parent.status != "RUNNING"
+                or parent.binding != self._binding
+                or parent.external_origin is None
+                or parent.external_origin.visibility != "public"
+                or parent.external_origin.run_id != evaluation_unit.evaluation_run_id
+                or len(unit_refs) != 1
+                or unit_refs[0].visibility != "evaluator"
+                or EvaluationUnitBinding.model_validate_json(self.store.read(unit_refs[0]))
+                != evaluation_unit
+            ):
+                raise ValueError("reserved evaluator diagnosis is invalid")
+        elif evaluation_unit is not None:
             if self._evaluation_schedule_verifier is None:
                 raise ValueError("evaluation unit requires signed schedule authority")
             run = self.store.validate_and_create_evaluation_child(

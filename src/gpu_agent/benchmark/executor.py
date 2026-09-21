@@ -954,6 +954,7 @@ class EvaluationExecutor:
         corpus: RunStore,
         sources: Mapping[str, Path],
         *,
+        holdout_service: ApplicationService | None = None,
         holdout_controller: "HoldoutController | None" = None,
         holdout_batch: "HoldoutBatch | None" = None,
         _corpus_family: "CorpusFamily | None" = None,
@@ -963,15 +964,35 @@ class EvaluationExecutor:
             raise ValueError("evaluation requires a public service store")
         self.service, self.corpus = service, corpus
         self.sources = {case_id: path.absolute() for case_id, path in sources.items()}
-        if (holdout_controller is None) != (holdout_batch is None):
-            raise ValueError("holdout controller and batch must be configured together")
+        holdout_parts = (holdout_service, holdout_controller, holdout_batch)
+        if any(part is None for part in holdout_parts) and any(
+            part is not None for part in holdout_parts
+        ):
+            raise ValueError("holdout service, controller, and batch must be configured together")
+        self.holdout_service = holdout_service
         self.holdout_controller, self.holdout_batch = holdout_controller, holdout_batch
         if _corpus_family is None:
             from gpu_agent.benchmark.ledger import CorpusFamily
 
             _corpus_family = CorpusFamily.configured(corpus)
+        _corpus_family.require_store(service.store)
         _corpus_family.require_store(corpus)
         self._corpus_family = _corpus_family
+        if holdout_service is None:
+            if corpus.visibility != "public" or corpus.root != service.store.root:
+                raise ValueError("development evaluation requires the exact public family store")
+        else:
+            if (
+                corpus.visibility != "evaluator"
+                or holdout_service.store.visibility != "evaluator"
+                or corpus.root != holdout_service.store.root
+                or holdout_service.binding != service.binding
+                or holdout_controller is None
+                or holdout_batch is None
+                or holdout_controller.public.root != service.store.root
+                or holdout_controller.evaluator.root != corpus.root
+            ):
+                raise ValueError("holdout evaluation requires exact paired family services")
         if _schedule_verifier is None:
             from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
@@ -988,6 +1009,43 @@ class EvaluationExecutor:
             raise ValueError("evaluation artifact is missing or ambiguous")
         return refs[0]
 
+    def _artifact_derived_native_record(
+        self,
+        service: ApplicationService,
+        record: EvaluationRecord,
+        item: EvaluationScheduleItem,
+        attempt: EvaluationAttempt,
+        registered_case_id: str,
+        registered_template_id: str,
+        *,
+        diagnosis_parent_run_id: str | None = None,
+    ) -> EvaluationRecord:
+        """Apply the one native artifact parser to either selected execution store."""
+        if service.binding is None:
+            raise ValueError("evaluation service is unbound")
+        native_item = item.model_copy(
+            update={
+                "case_id": registered_case_id,
+                "template_id": registered_template_id,
+            }
+        )
+        validated = validate_evaluation_record(
+            service.store,
+            record,
+            native_item,
+            attempt,
+            service.binding,
+            service.evaluator_store,
+            self.corpus,
+            self._corpus_family,
+            registered_case_id,
+            diagnosis_parent_run_id=diagnosis_parent_run_id,
+            expected_visibility=service.store.visibility,
+        )
+        if validated != record.public():
+            raise ValueError("native evaluation adapter is inconsistent")
+        return record
+
     def validate_scheduled_record(
         self,
         record: PublicEvaluationRecord | EvaluationRecord,
@@ -1000,22 +1058,27 @@ class EvaluationExecutor:
         if item.split == "holdout":
             if self.holdout_controller is None or self.holdout_batch is None:
                 raise ValueError("private evaluation requires validated holdout authority")
-            registered_case_id, _ = self.holdout_controller.resolve_private(
-                self.holdout_batch, item.case_id
+            recovered = self.holdout_controller.recover_execution(
+                self.holdout_batch, item, attempt
             )
+            if recovered is None or recovered.model_dump_json() != record.model_dump_json():
+                raise ValueError("holdout public record differs from evaluator transaction")
+            return
         validate_evaluation_record(
             self.service.store,
             record,
             item,
             attempt,
             self.service.binding,
-            RunStore(self.service.evaluator_root / "runs", visibility="evaluator"),
+            self.service.evaluator_store,
             self.corpus,
             self._corpus_family,
             registered_case_id,
         )
 
-    def execute_scheduled(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
+    def execute_scheduled(
+        self, evaluation_run_id: str, ordinal: int
+    ) -> PublicEvaluationRecord | EvaluationRecord:
         if not re.fullmatch(r"[a-f0-9]{32}", evaluation_run_id) or ordinal < 0:
             raise ValueError("evaluation run locator is invalid")
         expected = (
@@ -1115,20 +1178,6 @@ class EvaluationExecutor:
                     raise ValueError("holdout authority differs from scheduled proof")
             elif item.holdout_proof is not None:
                 raise ValueError("development evaluation cannot carry holdout authority")
-            unit = EvaluationUnitBinding(
-                evaluation_run_id=attempt.run_id,
-                ordinal=item.ordinal,
-                schedule_hash=attempt.schedule_hash,
-                corpus_cutoff=attempt.corpus_cutoff,
-                idempotency_key=attempt.idempotency_key,
-                reserved_cost_usd=attempt.reserved_cost_usd,
-                case_id=item.case_id,
-                template_id=item.template_id,
-                mode=item.mode,
-                repeat=item.repeat,
-                split=item.split,
-                holdout_proof=item.holdout_proof,
-            )
             attempt_content = attempt.model_dump_json().encode()
             claim = EvaluationExecutionClaim(
                 run_id=evaluation_run_id,
@@ -1150,17 +1199,47 @@ class EvaluationExecutor:
                 item.repeat,
             )
             registered_case_id, registered_template_id = case_id, template_id
-            if self.holdout_controller is not None and self.holdout_batch is not None:
+            prepared = None
+            execution_service = self.service
+            if item.split == "holdout":
+                if (
+                    self.holdout_controller is None
+                    or self.holdout_batch is None
+                    or self.holdout_service is None
+                ):
+                    raise ValueError("private evaluation requires paired evaluator authority")
                 if case_id != template_id:
                     raise ValueError("holdout evaluation alias is invalid")
-                registered_case_id, registered_template_id = (
-                    self.holdout_controller.resolve_private(self.holdout_batch, case_id)
+                prepared = self.holdout_controller.reserve_execution(
+                    self.holdout_batch,
+                    evaluation_run_id=evaluation_run_id,
+                    item=item,
+                    attempt=attempt,
                 )
-            if self.service.binding is None:
+                registered_case_id = prepared.binding.private_case_id
+                registered_template_id = prepared.binding.private_template_id
+                unit = prepared.evaluation_unit
+                execution_service = self.holdout_service
+            else:
+                unit = EvaluationUnitBinding(
+                    evaluation_run_id=attempt.run_id,
+                    ordinal=item.ordinal,
+                    schedule_hash=attempt.schedule_hash,
+                    corpus_cutoff=attempt.corpus_cutoff,
+                    idempotency_key=attempt.idempotency_key,
+                    reserved_cost_usd=attempt.reserved_cost_usd,
+                    case_id=item.case_id,
+                    template_id=item.template_id,
+                    mode=item.mode,
+                    repeat=item.repeat,
+                    split=item.split,
+                    holdout_proof=item.holdout_proof,
+                )
+            if execution_service.binding is None:
                 raise ValueError("evaluation service is unbound")
             case = registered_cases(
                 self.corpus,
-                self.service.binding,
+                execution_service.binding,
                 self._corpus_family,
                 cutoff=schedule.corpus_cutoff,
             ).get(registered_case_id)
@@ -1183,22 +1262,25 @@ class EvaluationExecutor:
                 != case.source_hash
             ):
                 raise ValueError("registered source hash mismatch")
-            run = self.service.diagnose(
+            run = execution_service.diagnose(
                 source,
                 mode=mode,
                 required_tools=(case.target_tool,),
                 expected_source_hash=case.source_hash,
                 evaluation_unit=unit,
+                _reserved_run_id=(prepared.diagnosis_run_id if prepared else None),
             )
-            run = self.service.store.load(run.id)
+            run = execution_service.store.load(run.id)
             if run.status != RunStatus.COMPLETED:
                 raise ValueError("diagnosis artifacts are not terminal")
-            store = self.service.store
-            result = self.service.diagnosis(run.id)
+            store = execution_service.store
+            result = execution_service.diagnosis(run.id)
             # Reading the required ref prevents diagnosis()'s missing-result convenience fallback.
             diagnosis_ref = EvaluationExecutor._ref(self, run, "diagnosis.json")
             store.read(diagnosis_ref)
-            bundle = EvidenceRepository(store).public_view(run.id)
+            bundle = EvidenceRepository(
+                store, evaluator=store.visibility == "evaluator"
+            ).view(run.id)
             source_refs = [ref for ref in bundle.source_snapshot if ref.name.endswith("/kernel.cu")]
             if len(source_refs) != 1 or source_refs[0].sha256 != case.source_hash:
                 raise ValueError("diagnosis input differs from registered case")
@@ -1281,7 +1363,7 @@ class EvaluationExecutor:
             verification: VerificationResult | None = None
             verification_audit: VerificationAuditResult | None = None
             finished = run.events[-1].at
-            candidates = self.service.candidates(run.id)
+            candidates = execution_service.candidates(run.id)
             if len(candidates) > 1:
                 raise ValueError("evaluation candidate is ambiguous")
             if candidates:
@@ -1295,7 +1377,7 @@ class EvaluationExecutor:
                 if candidate.generated_by != "agent" or candidate.parent_run_id != run.id:
                     raise ValueError("evaluation candidate is not agent generated")
                 candidate_hash = candidate.patched_source_hash
-                self.service.verify(run.id, candidates[0])
+                execution_service.verify(run.id, candidates[0])
                 verification_runs = [
                     store.load(path.name)
                     for path in store.root.iterdir()
@@ -1321,11 +1403,11 @@ class EvaluationExecutor:
                 if verification.candidate_hash != candidate_hash:
                     raise ValueError("verification candidate hash mismatch")
                 verification_audit = _validate_verification_audit(
-                    self.service.store,
-                    RunStore(self.service.evaluator_root / "runs", visibility="evaluator"),
+                    execution_service.store,
+                    execution_service.evaluator_store,
                     run.id,
                     verification,
-                    self.service.binding,
+                    execution_service.binding,
                 )
                 checks.update(
                     {
@@ -1369,13 +1451,13 @@ class EvaluationExecutor:
                 verification_run_id=verification_run_id,
                 public_verification_hash=public_verification_hash,
             )
-            return EvaluationRecord.model_validate(
+            native = EvaluationRecord.model_validate(
                 {
                     "record_id": run.id,
                     "corpus_cutoff": unit.corpus_cutoff,
                     "lineage": lineage,
-                    "case_id": case_id,
-                    "template_id": template_id,
+                    "case_id": registered_case_id,
+                    "template_id": registered_template_id,
                     "mode": mode,
                     "repeat": repeat,
                     "input_hash": case.source_hash,
@@ -1408,8 +1490,96 @@ class EvaluationExecutor:
                     "failure_reason": reason,
                 }
             )
+            native = EvaluationExecutor._artifact_derived_native_record(
+                self,
+                execution_service,
+                native,
+                item,
+                attempt,
+                registered_case_id,
+                registered_template_id,
+                diagnosis_parent_run_id=(prepared.execution_run_id if prepared else None),
+            )
+            if prepared is not None:
+                assert self.holdout_controller is not None
+                return self.holdout_controller.complete_execution(prepared, native)
+            return native
         finally:
             os.close(fd)
 
-    def _execute(self, evaluation_run_id: str, ordinal: int) -> EvaluationRecord:
+    def recover_scheduled(
+        self, evaluation_run_id: str, ordinal: int
+    ) -> PublicEvaluationRecord | None:
+        """Recover only an exact terminal evaluator projection for one public attempt."""
+        if not re.fullmatch(r"[a-f0-9]{32}", evaluation_run_id) or ordinal < 0:
+            raise ValueError("evaluation run locator is invalid")
+        if self.holdout_controller is None or self.holdout_batch is None:
+            return None
+        parent = self.service.store.load(evaluation_run_id)
+        if (
+            parent.kind != "evaluation"
+            or parent.status != RunStatus.RUNNING
+            or self.service.binding is None
+            or parent.binding != self.service.binding
+        ):
+            raise ValueError("evaluation run is not active and bound")
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        EvaluationScheduleVerifier.verify(self._schedule_verifier, evaluation_run_id)
+        schedule = EvaluationSchedule.model_validate_json(
+            self.service.store.read(
+                EvaluationExecutor._ref(self, parent, "evaluation/schedule.json")
+            )
+        )
+        if ordinal >= len(schedule.items) or schedule.bindings.max_unit_cost_usd is None:
+            raise ValueError("evaluation ordinal is outside the frozen schedule")
+        schedule_hash = hashlib.sha256(
+            json.dumps(
+                schedule.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+            ).encode()
+        ).hexdigest()
+        attempt_ref = EvaluationExecutor._ref(
+            self, parent, f"evaluation/attempts/{ordinal}.json"
+        )
+        attempt_content = self.service.store.read(attempt_ref)
+        attempt = EvaluationAttempt.model_validate_json(attempt_content)
+        expected_attempt = EvaluationAttempt(
+            run_id=evaluation_run_id,
+            ordinal=ordinal,
+            schedule_hash=schedule_hash,
+            corpus_cutoff=schedule.corpus_cutoff,
+            idempotency_key=hashlib.sha256(
+                f"{evaluation_run_id}:{schedule_hash}:{ordinal}".encode()
+            ).hexdigest(),
+            reserved_cost_usd=schedule.bindings.max_unit_cost_usd,
+        )
+        item = schedule.items[ordinal]
+        claim = EvaluationExecutionClaim.model_validate_json(
+            self.service.store.read(
+                EvaluationExecutor._ref(
+                    self, parent, f"evaluation/claims/{ordinal}.json"
+                )
+            )
+        )
+        expected_claim = EvaluationExecutionClaim(
+            run_id=evaluation_run_id,
+            ordinal=ordinal,
+            schedule_hash=schedule_hash,
+            corpus_cutoff=schedule.corpus_cutoff,
+            attempt_hash=hashlib.sha256(attempt_content).hexdigest(),
+        )
+        if (
+            item.ordinal != ordinal
+            or item.split != "holdout"
+            or attempt != expected_attempt
+            or claim != expected_claim
+        ):
+            return None
+        return self.holdout_controller.recover_execution(
+            self.holdout_batch, item, attempt
+        )
+
+    def _execute(
+        self, evaluation_run_id: str, ordinal: int
+    ) -> PublicEvaluationRecord | EvaluationRecord:
         return EvaluationExecutor.execute_scheduled(self, evaluation_run_id, ordinal)

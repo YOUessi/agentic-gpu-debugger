@@ -31,9 +31,116 @@ def _runner(executor, execute_owner=None, **overrides) -> EvaluationRunner:
         "max_cost_usd": 0.0,
         "max_unit_cost_usd": 0.0,
         "random_seed": 7,
+        "holdout_controller": executor.holdout_controller,
+        "holdout_batch": executor.holdout_batch,
     }
     options.update(overrides)
     return EvaluationRunner(**options)
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
+def test_resume_persists_completed_evaluator_projection_without_reexecution(
+    private_split_executor, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+    from gpu_agent.service import ApplicationService
+
+    executor = private_split_executor
+    native_diagnose = ApplicationService.diagnose
+    native_put = EvaluationRunner._put
+    calls = {"diagnose": 0, "backend": 0}
+    backend_type = executor.holdout_service._backend_factory
+    native_container = backend_type._container
+
+    def counted_diagnose(self, *args, **kwargs):
+        if self is executor.holdout_service:
+            calls["diagnose"] += 1
+        return native_diagnose(self, *args, **kwargs)
+
+    def counted_container(self, *args, **kwargs):
+        calls["backend"] += 1
+        return native_container(self, *args, **kwargs)
+
+    def interrupt_before_public_record(self, run_id, name, content):
+        if name == "evaluation/records/2.json":
+            raise KeyboardInterrupt
+        return native_put(self, run_id, name, content)
+
+    monkeypatch.setattr(ApplicationService, "diagnose", counted_diagnose)
+    monkeypatch.setattr(backend_type, "_container", counted_container)
+    monkeypatch.setattr(EvaluationRunner, "_put", interrupt_before_public_record)
+    with pytest.raises(KeyboardInterrupt):
+        _runner(executor).run("D", "holdout", 3)
+    run_id = executor.service.store.recoverable_runs()[0].id
+    before = calls.copy()
+    provider_before = list(executor.holdout_service._provider.kinds)
+    assert before == {"diagnose": 3, "backend": 9}
+    monkeypatch.setattr(EvaluationRunner, "_put", native_put)
+    recovered = _runner(executor).resume(run_id, "D", "holdout", 3)
+    assert recovered.executed_units == 3
+    assert recovered.stopped_reason is None
+    assert calls == before
+    assert executor.holdout_service._provider.kinds == provider_before == []
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
+@pytest.mark.parametrize("fault", ["partial", "started"])
+def test_resume_keeps_incomplete_evaluator_attempt_ambiguous_without_reexecution(
+    private_split_executor, monkeypatch, native_evaluation_executor, fault
+):
+    from gpu_agent.agent.provider import Invocation
+    from gpu_agent.contracts import RunStatus
+    from gpu_agent.service import ApplicationService
+
+    executor = private_split_executor
+    calls = 0
+
+    def interrupt_evaluator_diagnosis(self, *args, **kwargs):
+        nonlocal calls
+        assert self is executor.holdout_service
+        calls += 1
+        if fault == "started":
+            execution = next(
+                run
+                for run in executor.holdout_service.store.recoverable_runs()
+                if run.kind == "holdout_execution"
+            )
+            diagnosis = next(
+                run
+                for run in executor.holdout_service.store.children(execution.id)
+                if run.kind == "diagnosis"
+            )
+            executor.holdout_service.store.transition(
+                diagnosis.id, RunStatus.RUNNING, "PREPARING"
+            )
+            invocation = Invocation(
+                invocation_id="f" * 32,
+                run_id=diagnosis.id,
+                kind="plan",
+                attempt=0,
+                state="STARTED",
+                started_at=diagnosis.events[0].at,
+                configured_model="private-test-model",
+                endpoint_host="provider.invalid",
+                client_request_id="e" * 32,
+            )
+            executor.holdout_service.store.put(
+                diagnosis.id,
+                f"provider/{invocation.invocation_id}/STARTED.json",
+                invocation.model_dump_json().encode(),
+                "evaluator",
+            )
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(ApplicationService, "diagnose", interrupt_evaluator_diagnosis)
+    with pytest.raises(KeyboardInterrupt):
+        _runner(executor).run("D", "holdout", 3)
+    run_id = executor.service.store.recoverable_runs()[0].id
+    before = calls
+    result = _runner(executor).resume(run_id, "D", "holdout", 3)
+    assert result.stopped_reason == "AMBIGUOUS_STARTED_ATTEMPT"
+    assert result.executed_units == 0
+    assert calls == before
 
 
 def _artifact(store, run_id: str, name: str) -> bytes:

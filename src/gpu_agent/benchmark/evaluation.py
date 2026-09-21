@@ -729,10 +729,54 @@ class EvaluationRunner:
             attempt for ordinal, attempt in attempts.items() if ordinal >= len(records)
         ]
         if incomplete_attempts:
-            spent += sum(attempt.reserved_cost_usd for attempt in incomplete_attempts)
-            return EvaluationRunner._terminal(
-                self, run_id, schedule, records, "AMBIGUOUS_STARTED_ATTEMPT", RunStatus.FAILED
-            )
+            recovered_records: list[PublicEvaluationRecord] = []
+            for attempt in sorted(incomplete_attempts, key=lambda value: value.ordinal):
+                try:
+                    from gpu_agent.benchmark.executor import EvaluationExecutor
+
+                    recovered = EvaluationExecutor.recover_scheduled(
+                        self.executor, run_id, attempt.ordinal
+                    )
+                    if recovered is None:
+                        raise ValueError("evaluator completion is unavailable")
+                    item = schedule.items[attempt.ordinal]
+                    EvaluationRunner._validate_record(self, recovered, item, attempt)
+                    recovered_records.append(recovered)
+                except (OSError, ValueError):
+                    spent += sum(
+                        value.reserved_cost_usd for value in incomplete_attempts
+                    )
+                    return EvaluationRunner._terminal(
+                        self,
+                        run_id,
+                        schedule,
+                        records,
+                        "AMBIGUOUS_STARTED_ATTEMPT",
+                        RunStatus.FAILED,
+                    )
+            for recovered in recovered_records:
+                EvaluationRunner._put(
+                    self,
+                    run_id,
+                    f"evaluation/records/{len(records)}.json",
+                    recovered.model_dump_json().encode(),
+                )
+                attempts = EvaluationRunner._attempts(self, run_id, schedule)
+                records = EvaluationRunner._records(self, run_id, schedule, attempts)
+                if recovered.cost_usd is None:
+                    return EvaluationRunner._terminal(
+                        self, run_id, schedule, records, "COST_UNKNOWN", RunStatus.COMPLETED
+                    )
+                if recovered.cost_usd > schedule.bindings.max_unit_cost_usd:
+                    return EvaluationRunner._terminal(
+                        self,
+                        run_id,
+                        schedule,
+                        records,
+                        "UNIT_COST_CEILING_EXCEEDED",
+                        RunStatus.FAILED,
+                    )
+                spent += recovered.cost_usd
 
         for item in schedule.items[len(records) :]:
             if spent + schedule.bindings.max_unit_cost_usd > schedule.bindings.max_cost_usd:
@@ -766,7 +810,7 @@ class EvaluationRunner:
                     self,
                     run_id,
                     f"evaluation/records/{item.ordinal}.json",
-                    record.public().model_dump_json().encode(),
+                    EvaluationRunner._public(record).model_dump_json().encode(),
                 )
             except Exception:
                 return EvaluationRunner._terminal(

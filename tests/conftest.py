@@ -72,10 +72,14 @@ def oob_service(store, tmp_path):
         forge_citations = False
 
         def diagnose(self, evidence):
+            response_canary = getattr(self, "response_canary", "")
             self.result = DiagnosisResult(
                 diagnostic_outcome="DIAGNOSED",
                 failure_family="out_of_bounds",
-                root_cause="The thread index can exceed the input length.",
+                root_cause=(
+                    "The thread index can exceed the input length."
+                    f"{response_canary}"
+                ),
                 source_locations=[SourceLocation(path="kernel.cu", line=9)],
                 observed_facts=evidence.observed_facts,
                 tool_findings=[
@@ -256,7 +260,7 @@ def native_evaluation_executor(
     exact_verification_source = requested_split in {"public_exact", "private_exact"}
     split = (
         "private"
-        if eight_private or requested_split == "private_exact"
+        if eight_private or requested_split in {"private_exact", "private_split"}
         else ("public" if exact_verification_source else requested_split)
     )
     if split not in {"public", "private"}:
@@ -281,17 +285,17 @@ def native_evaluation_executor(
             )
         )
     visibility = "public" if split == "public" else "evaluator"
-    corpus = RunStore(tmp_path / "corpus", visibility=visibility)
+    corpus = (
+        service.store
+        if visibility == "public"
+        else RunStore(tmp_path / "corpus", visibility=visibility)
+    )
     family = CorpusFamily._provision_for_test(
         tmp_path / "corpus-controller",
-        public_store=(
-            service.store.root
-            if eight_private
-            else corpus.root
-            if visibility == "public"
-            else tmp_path / "public-corpus"
+        public_store=service.store.root,
+        evaluator_store=(
+            corpus.root if visibility == "evaluator" else service.evaluator_store.root
         ),
-        evaluator_store=corpus.root if visibility == "evaluator" else tmp_path / "evaluator-corpus",
         repository=tmp_path / "repository",
         schedule_public_key=test_schedule_commit_client.public_key,
     )
@@ -304,6 +308,12 @@ def native_evaluation_executor(
     clean_root, mutant_root = source_root / "clean", source_root / "mutant"
     clean_root.mkdir(parents=True)
     mutant_root.mkdir(parents=True)
+    if requested_split == "private_split":
+        (source / "kernel.cu").write_bytes(
+            (source / "kernel.cu").read_bytes()
+            + b"\n// PRIVATE-SOURCE-CANARY-task3-a91e\n"
+        )
+        provider.response_canary = " PROVIDER-RESPONSE-CANARY-task3-b82f"
     mutant_bytes = (source / "kernel.cu").read_bytes()
     clean_bytes = mutant_bytes.replace(
         b"out[i] = a[i] + b[i];", b"if (i < n) out[i] = a[i] + b[i];"
@@ -490,13 +500,45 @@ def native_evaluation_executor(
         sources[case_spec.case_id] = case_root / "mutant"
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
-    executor = EvaluationExecutor(
-        service,
-        corpus,
-        sources,
-        _corpus_family=family,
-        _schedule_verifier=EvaluationScheduleVerifier._for_test(family, service.store),
-    )
+    verifier = EvaluationScheduleVerifier._for_test(family, service.store)
+    if split == "private":
+        from gpu_agent.benchmark.holdout import HoldoutController
+        from gpu_agent.service import ApplicationService
+
+        controller = HoldoutController(
+            service.store,
+            corpus,
+            binding=service.binding,
+            _schedule_verifier=verifier,
+        )
+        batch = controller.prepare()
+        holdout_service = ApplicationService(
+            corpus,
+            corpus,
+            provider=service._provider,
+            backend_factory=service._backend_factory,
+            knowledge=service.knowledge,
+            knowledge_version=service.knowledge_version,
+            _binding=service.binding,
+        )
+        executor = EvaluationExecutor(
+            service,
+            corpus,
+            sources,
+            holdout_service=holdout_service,
+            holdout_controller=controller,
+            holdout_batch=batch,
+            _corpus_family=family,
+            _schedule_verifier=verifier,
+        )
+    else:
+        executor = EvaluationExecutor(
+            service,
+            corpus,
+            sources,
+            _corpus_family=family,
+            _schedule_verifier=verifier,
+        )
 
     def register_future_case_for_test():
         future_backend = CorpusBackend(corpus, future_source_root, tmp_path / "future-corpus-tasks")
@@ -512,6 +554,13 @@ def native_evaluation_executor(
 
     executor._register_future_case_for_test = register_future_case_for_test  # type: ignore[attr-defined]
     return executor
+
+
+@pytest.fixture
+def private_split_executor(native_evaluation_executor):
+    """Real public/evaluator services around one private family and alias batch."""
+    assert native_evaluation_executor.holdout_service is not None
+    return native_evaluation_executor
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

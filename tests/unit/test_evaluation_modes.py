@@ -142,6 +142,36 @@ def test_mode_d_uses_rule_router_and_never_planner(oob_service):
     ]
 
 
+def test_development_lineage_and_source_remain_public(native_evaluation_executor):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner, NativeEvaluationLineage
+
+    executor = native_evaluation_executor
+    binding = executor.service.binding
+    assert binding is not None
+    result = EvaluationRunner(
+        executor.service.store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash,
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=0,
+        max_unit_cost_usd=0,
+        random_seed=7,
+    ).run("D", "development", 3)
+    assert result.executed_units == 3
+    assert all(isinstance(record.lineage, NativeEvaluationLineage) for record in result.records)
+    for record in result.records:
+        run = executor.service.store.load(record.lineage.diagnosis_run_id)
+        source_ref = next(ref for ref in run.artifact_refs if ref.name == "sources/kernel.cu")
+        assert source_ref.visibility == "public"
+        assert executor.service.store.read(source_ref) == (
+            executor.sources[record.case_id] / "kernel.cu"
+        ).read_bytes()
+
+
 def test_mode_e_uses_planner_and_never_rule_substitution(oob_service):
     service, provider, source = oob_service
     provider.actions = []
@@ -975,6 +1005,7 @@ def test_holdout_alias_and_score_binding_never_publish_private_identity(
         executor.service,
         executor.corpus,
         executor.sources,
+        holdout_service=executor.holdout_service,
         holdout_controller=controller,
         holdout_batch=batch,
         _corpus_family=executor._corpus_family,
