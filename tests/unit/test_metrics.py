@@ -34,6 +34,7 @@ def test_public_metric_entry_points_reject_raw_records():
         record_id="raw",
         corpus_cutoff=1,
         lineage={
+            "kind": "native",
             "corpus_cutoff": 1,
             "diagnosis_run_id": "a" * 32,
             "diagnosis_hash": "b" * 64,
