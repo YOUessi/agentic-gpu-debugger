@@ -25,9 +25,10 @@
 
 - Task 1 — APPROVED at `f2c5ad0a7abff538824df63798d60bf9c6704763` (three commits); focused `73 passed`; Ruff/mypy/diff-check passed
 - Task 2 — APPROVED at `12e6150` (four commits); focused Task 2, store, integration, validator, and Mode E adversarial checks passed; Ruff/mypy/diff-check passed
-- Task 3 — wave 3 remediation complete at `eb7adbb`; focused Mode E privacy/authorization,
-  persistence, and static evidence are recorded in `task-3-report.md`; independent rereview pending
-- Task 4 — implementation complete; focused `29 passed`; Ruff/mypy/diff-check passed; independent review pending
+- Task 3 — APPROVED at `eb7adbb`; focused Mode E privacy/authorization and persistence checks
+  passed; independent review found 0 Blocker, 0 Major, 0 Minor
+- Task 4 — APPROVED at `0047567`; remediation and broader Task 4 checks passed; independent
+  rereview found 0 Blocker, 0 Major, 0 Minor
 - Task 5 — pending
 
 ## Review/fix ledger
@@ -77,3 +78,14 @@
     signed public and deterministic evaluator authority.
   - Verification: forged/replay `2 passed in 2.52s`; reviewer set `4 passed in 59.19s`;
     persistence `25 passed in 32.03s`; Ruff, mypy, and diff-check passed.
+- Task 3 review wave 4: APPROVED; 0 Blocker, 0 Major, 0 Minor.
+- Task 4 review wave 1: CHANGES REQUIRED; 0 Blocker, 2 Major, 1 Minor.
+  - Closed Major: production provisioning now validates pre-existing store safety, resolved
+    non-overlap, and physical identity before any family mutation.
+  - Closed Major: all controller authority and marker files now enforce owner, exact mode,
+    single link, no-follow fd/path identity, and bounded stable reads.
+  - Closed Minor: successful development/holdout factory tests verify the complete service,
+    controller, batch, and verifier graph.
+- Task 4 review wave 2: APPROVED at `0047567`; 0 Blocker, 0 Major, 0 Minor. Verification:
+  remediation `27 passed, 46 deselected`; broader Task 4 `44 passed, 77 deselected`; Ruff,
+  mypy, and diff-check passed.
