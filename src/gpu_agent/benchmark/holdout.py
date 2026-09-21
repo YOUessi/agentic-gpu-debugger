@@ -1377,7 +1377,166 @@ class HoldoutController:
             or any(getattr(manifest, key) != value for key, value in expected_bindings.items())
         ):
             raise ValueError("public evaluation record is invalid")
-        identities = {alias: self._identity(batch, alias) for alias in batch.aliases}
+        mapping_run = self.evaluator.load(batch.evaluator_run_id)
+        mapping_ref = self._one_named_ref(mapping_run, "holdout/private-alias-map.json")
+        mapping = _PrivateAliasMap.model_validate_json(self.evaluator.read(mapping_ref))
+        identities = {identity.alias: identity for identity in mapping.identities}
+        from gpu_agent.benchmark.executor import (
+            _validate_evaluation_record_against_case,
+            registered_cases,
+        )
+
+        trusted_cases = registered_cases(
+            self.evaluator,
+            self.binding,
+            self._schedule_family,
+            cutoff=batch.corpus_cutoff,
+        )
+        if (
+            mapping_run.kind != "holdout_alias_mapping"
+            or mapping_run.status != RunStatus.COMPLETED
+            or mapping_run.binding != self.binding
+            or mapping_run.external_origin
+            != ExternalRunOrigin(run_id=batch.public_run_id, visibility="public")
+            or mapping.corpus_cutoff != batch.corpus_cutoff
+            or list(identities) != batch.aliases
+            or len(identities) != len(mapping.identities)
+            or any(
+                identity.private_case_id not in trusted_cases
+                or trusted_cases[identity.private_case_id].template_id
+                != identity.private_template_id
+                for identity in mapping.identities
+            )
+        ):
+            raise ValueError("public evaluation record is invalid")
+
+        def resolve_record(
+            scheduled_item: EvaluationScheduleItem,
+            attempt: EvaluationAttempt,
+            observed_record: PublicEvaluationRecord,
+        ) -> ResolvedHoldoutEvaluationRecord:
+            identity = identities.get(scheduled_item.case_id)
+            if (
+                identity is None
+                or attempt.run_id != evaluation_run_id
+                or scheduled_item.ordinal != attempt.ordinal
+                or scheduled_item.split != "holdout"
+                or scheduled_item.case_id != scheduled_item.template_id
+                or scheduled_item.holdout_proof != proof
+                or attempt.corpus_cutoff != batch.corpus_cutoff
+            ):
+                raise ValueError("public evaluation record is invalid")
+            attempt_hash = self._content_hash(attempt)
+            execution_run_id = hashlib.sha256(
+                (
+                    "holdout-execution-v1:"
+                    f"{batch.evaluator_run_id}:{evaluation_run_id}:{attempt.schedule_hash}:"
+                    f"{scheduled_item.ordinal}:{attempt_hash}"
+                ).encode()
+            ).hexdigest()[:32]
+            diagnosis_run_id = hashlib.sha256(
+                f"holdout-diagnosis-v1:{execution_run_id}".encode()
+            ).hexdigest()[:32]
+            prepared = PreparedHoldoutExecution(
+                execution_run_id=execution_run_id,
+                diagnosis_run_id=diagnosis_run_id,
+                binding=HoldoutExecutionBinding(
+                    public_evaluation_run_id=evaluation_run_id,
+                    alias_mapping_run_id=batch.evaluator_run_id,
+                    ordinal=scheduled_item.ordinal,
+                    schedule_hash=attempt.schedule_hash,
+                    attempt_hash=attempt_hash,
+                    corpus_cutoff=batch.corpus_cutoff,
+                    alias=scheduled_item.case_id,
+                    private_case_id=identity.private_case_id,
+                    private_template_id=identity.private_template_id,
+                    diagnosis_run_id=diagnosis_run_id,
+                ),
+                evaluation_unit=EvaluationUnitBinding(
+                    evaluation_run_id=evaluation_run_id,
+                    ordinal=scheduled_item.ordinal,
+                    schedule_hash=attempt.schedule_hash,
+                    corpus_cutoff=attempt.corpus_cutoff,
+                    idempotency_key=attempt.idempotency_key,
+                    reserved_cost_usd=attempt.reserved_cost_usd,
+                    case_id=identity.private_case_id,
+                    template_id=identity.private_template_id,
+                    mode=scheduled_item.mode,
+                    repeat=scheduled_item.repeat,
+                    split="holdout",
+                    holdout_proof=proof,
+                ),
+            )
+            execution, diagnosis = self._validate_execution_reservation(prepared)
+            expected_names = {
+                "holdout/native-record.json",
+                "holdout/public-record.json",
+                "holdout/execution-binding.json",
+            }
+            if (
+                execution.status != RunStatus.COMPLETED
+                or diagnosis.status != RunStatus.COMPLETED
+                or {ref.name for ref in execution.artifact_refs} != expected_names
+            ):
+                raise ValueError("holdout execution transaction is incomplete")
+            native_ref = self._one_named_ref(execution, "holdout/native-record.json")
+            public_ref = self._one_named_ref(execution, "holdout/public-record.json")
+            binding_ref = self._one_named_ref(execution, "holdout/execution-binding.json")
+            native_content = self.evaluator.read(native_ref)
+            public_content = self.evaluator.read(public_ref)
+            binding_content = self.evaluator.read(binding_ref)
+            native = EvaluationRecord.model_validate_json(native_content)
+            public = PublicEvaluationRecord.model_validate_json(public_content)
+            final_binding = HoldoutExecutionBinding.model_validate_json(binding_content)
+            expected_binding = prepared.binding.model_copy(
+                update={
+                    "native_record_hash": hashlib.sha256(native_content).hexdigest(),
+                    "public_record_hash": hashlib.sha256(public_content).hexdigest(),
+                }
+            )
+            trusted_case = trusted_cases.get(identity.private_case_id)
+            if trusted_case is None:
+                raise ValueError("public evaluation record is invalid")
+            native_item = scheduled_item.model_copy(
+                update={
+                    "case_id": identity.private_case_id,
+                    "template_id": identity.private_template_id,
+                }
+            )
+            validated_native = _validate_evaluation_record_against_case(
+                self.evaluator,
+                native,
+                native_item,
+                attempt,
+                self.binding,
+                trusted_case,
+                identity.private_case_id,
+                evaluator=self.evaluator,
+                diagnosis_parent_run_id=execution_run_id,
+                expected_visibility="evaluator",
+            )
+            expected_public = self._public_projection(
+                batch,
+                prepared,
+                validated_native,
+                expected_binding.native_record_hash or "",
+            )
+            if (
+                final_binding != expected_binding
+                or native_ref.sha256 != expected_binding.native_record_hash
+                or public_ref.sha256 != expected_binding.public_record_hash
+                or native.model_dump_json().encode() != native_content
+                or public.model_dump_json().encode() != public_content
+                or expected_public.model_dump_json().encode() != public_content
+                or public.model_dump_json() != observed_record.model_dump_json()
+            ):
+                raise ValueError("public evaluation record is invalid")
+            return ResolvedHoldoutEvaluationRecord(
+                public_record=public,
+                native_record=native,
+                execution_binding=final_binding,
+            )
+
         resolved_records: dict[int, ResolvedHoldoutEvaluationRecord] = {}
         for record_ordinal, observed_record in records.items():
             scheduled_item = schedule.items[record_ordinal]
@@ -1389,19 +1548,11 @@ class HoldoutController:
                 or scheduled_item.case_id != scheduled_item.template_id
             ):
                 raise ValueError("public evaluation record is invalid")
-            identity = identities.get(scheduled_item.case_id)
-            if identity is None:
-                raise ValueError("public evaluation record is invalid")
-            prepared = self._prepared_execution(
-                batch,
-                attempts[record_ordinal].run_id,
+            resolved_records[record_ordinal] = resolve_record(
                 scheduled_item,
                 attempts[record_ordinal],
+                observed_record,
             )
-            resolved = self._resolve_prepared_execution(prepared)
-            if resolved.public_record.model_dump_json() != observed_record.model_dump_json():
-                raise ValueError("public evaluation record is invalid")
-            resolved_records[record_ordinal] = resolved
         return ValidatedHoldoutEvaluation(
             evaluation_run_id=run.id,
             schedule=schedule,

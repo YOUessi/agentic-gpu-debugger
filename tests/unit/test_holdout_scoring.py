@@ -74,6 +74,60 @@ def test_validated_holdout_aggregate_is_not_a_serializable_execution_model():
         json.dumps(evaluation)
 
 
+@pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
+def test_validated_holdout_batch_derives_authority_once_but_single_resolve_revalidates(
+    private_split_executor, native_evaluation_executor, monkeypatch
+):
+    import gpu_agent.benchmark.executor as executor_module
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = private_split_executor
+    controller = executor.holdout_controller
+    batch = executor.holdout_batch
+    binding = executor.service.binding
+    assert controller is not None and batch is not None and binding is not None
+    manifest = EvaluationRunner(
+        executor.service.store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash,
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=0,
+        max_unit_cost_usd=0,
+        random_seed=7,
+        holdout_controller=controller,
+        holdout_batch=batch,
+    ).run("A", "holdout", 3)
+
+    calls = {"batch": 0, "cases": 0}
+    validate_batch = controller.validate_batch
+    registered_cases = executor_module.registered_cases
+
+    def counted_batch(*args, **kwargs):
+        calls["batch"] += 1
+        return validate_batch(*args, **kwargs)
+
+    def counted_cases(*args, **kwargs):
+        calls["cases"] += 1
+        return registered_cases(*args, **kwargs)
+
+    monkeypatch.setattr(controller, "validate_batch", counted_batch)
+    monkeypatch.setattr(executor_module, "registered_cases", counted_cases)
+
+    validated = controller.validated_evaluation(batch, manifest.run_id)
+    assert len(validated.resolved_records) == 3
+    # One batch check, plus constant corpus loads for the batch, the signed
+    # public/private schedule universes, and the evaluator record validator.
+    assert calls == {"batch": 1, "cases": 4}
+
+    controller.resolve_evaluation_record(batch, manifest.run_id, 0)
+    controller.resolve_evaluation_record(batch, manifest.run_id, 1)
+    assert calls == {"batch": 3, "cases": 12}
+
+
 def test_holdout_lineage_discriminator_rejects_native_shape_with_holdout_kind():
     from pydantic import ValidationError
 

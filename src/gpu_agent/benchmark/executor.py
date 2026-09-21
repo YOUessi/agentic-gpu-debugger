@@ -104,6 +104,42 @@ def validate_evaluation_record(
     diagnosis_parent_run_id: str | None = None,
     expected_visibility: Literal["public", "evaluator"] = "public",
 ) -> PublicEvaluationRecord:
+    """Resolve one record after loading its case from authoritative corpus state."""
+    if corpus is None or corpus_family is None:
+        raise ValueError("native corpus authority is required for evaluation validation")
+    selected_case_id = registered_case_id or item.case_id
+    trusted_case = registered_cases(
+        corpus, binding, corpus_family, cutoff=attempt.corpus_cutoff
+    ).get(selected_case_id)
+    if trusted_case is None or trusted_case.id != selected_case_id:
+        raise ValueError("scheduled case is absent from the trusted corpus")
+    return _validate_evaluation_record_against_case(
+        store,
+        record,
+        item,
+        attempt,
+        binding,
+        trusted_case,
+        selected_case_id,
+        evaluator=evaluator,
+        diagnosis_parent_run_id=diagnosis_parent_run_id,
+        expected_visibility=expected_visibility,
+    )
+
+
+def _validate_evaluation_record_against_case(
+    store: RunStore,
+    record: PublicEvaluationRecord | EvaluationRecord,
+    item: EvaluationScheduleItem,
+    attempt: EvaluationAttempt,
+    binding: RunBinding,
+    trusted_case: CaseManifest,
+    registered_case_id: str,
+    *,
+    evaluator: RunStore | None = None,
+    diagnosis_parent_run_id: str | None = None,
+    expected_visibility: Literal["public", "evaluator"] = "public",
+) -> PublicEvaluationRecord:
     """Resolve one public record back to immutable native execution artifacts."""
     public = record.public() if isinstance(record, EvaluationRecord) else record
     lineage = public.lineage
@@ -300,13 +336,7 @@ def validate_evaluation_record(
         or bool(observed_retrievals) != bool(acquisition.retrieval_calls)
     ):
         raise ValueError("fixed controller evidence differs from scheduled mode")
-    if corpus is None or corpus_family is None:
-        raise ValueError("native corpus authority is required for evaluation validation")
-    selected_case_id = registered_case_id or item.case_id
-    trusted_case = registered_cases(
-        corpus, binding, corpus_family, cutoff=attempt.corpus_cutoff
-    ).get(selected_case_id)
-    if trusted_case is None or trusted_case.id != selected_case_id:
+    if trusted_case.id != registered_case_id:
         raise ValueError("scheduled case is absent from the trusted corpus")
     if acquisition_policy["required_tools"] != [trusted_case.target_tool]:
         raise ValueError("acquisition policy differs from the trusted case manifest")
