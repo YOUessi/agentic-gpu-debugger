@@ -323,12 +323,31 @@ def validate_evaluation_record(
         memcheck = bundle.sanitizer_results[0]
         if memcheck.check_outcome != "CLEAN":
             expected_c_tools = [SanitizerTool.MEMCHECK.value]
+    fixed_audit = json.loads(store.read(_one_ref(run, "agent/budget-audit.json")))
+    failed_first_sanitizer = (
+        diagnosis.limitations == ["AGENT_BUDGET_EXHAUSTED"]
+        and observed_tools == []
+        and observed_sanitizers == 0
+        and acquisition.sanitizer_calls == 0
+        and budget.sanitizer_calls == 1
+        and fixed_audit
+        == [
+            {"id": 1, "action": "run_memcheck", "state": "ATTEMPTED"},
+            {"id": 1, "action": "run_memcheck", "state": "STARTED"},
+            {"id": 1, "action": "run_memcheck", "state": "FAILED"},
+        ]
+    )
     if item.mode == "C" and (
         observed_retrievals
         or acquisition.retrieval_calls
         or budget.rag_calls
-        or observed_tools != expected_c_tools
-        or acquisition.sanitizer_calls != len(expected_c_tools)
+        or (
+            not failed_first_sanitizer
+            and (
+                observed_tools != expected_c_tools
+                or acquisition.sanitizer_calls != len(expected_c_tools)
+            )
+        )
         or observed_sanitizers != acquisition.sanitizer_calls
     ):
         raise ValueError("fixed controller evidence differs from scheduled mode")

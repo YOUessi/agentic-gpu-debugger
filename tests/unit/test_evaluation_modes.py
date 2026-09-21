@@ -372,13 +372,14 @@ def test_evaluation_rejects_corpus_from_another_repository(native_evaluation_exe
         _execute_claimed_test_unit(executor, "D")
 
 
-def test_executor_preserves_mode_failure(oob_service, tmp_path, native_evaluation_executor):
+def test_executor_rejects_synthetic_mode_failure_without_native_provider_lineage(
+    oob_service, tmp_path, native_evaluation_executor
+):
     executor = native_evaluation_executor
     oob_service[1].actions = []
-    record = _execute_claimed_test_unit(executor, "E")
-    assert record.mode == "E" and record.status == "FAILED"
-    assert record.failure_reason == "FAKE_SCRIPT_EXHAUSTED"
-    assert record.patch_hash is None and record.usage["physical_calls"] == 1
+    with pytest.raises(ValueError, match="lineage artifact"):
+        _execute_claimed_test_unit(executor, "E")
+    assert oob_service[1].kinds == ["plan"]
 
 
 def test_runner_persists_only_schedule_bound_native_lineage(
@@ -1564,7 +1565,7 @@ def test_executor_rejects_self_authored_verification_summary(
         return result
 
     monkeypatch.setattr(service, "verify", persist_verification)
-    with pytest.raises(ValueError, match="audit lineage"):
+    with pytest.raises(ValueError, match="verification lineage"):
         _execute_claimed_test_unit(executor, "E")
 
 
