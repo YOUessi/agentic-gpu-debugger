@@ -826,8 +826,8 @@ def _validate_evaluation_record_against_case(
                     if index + 1 < len(step_refs):
                         if terminal["state"] != "COMPLETED":
                             raise ValueError("agent controller continued after failed acquisition")
-                        if action.action_type != "inspect_source":
-                            expected_evidence_index += 1
+                    if terminal["state"] == "COMPLETED" and action.action_type != "inspect_source":
+                        expected_evidence_index += 1
                     if action.action_type in sanitizer_actions:
                         agent_updates["sanitizer_calls"] = step_budget.sanitizer_calls + 1
                     elif action.action_type == "retrieve_official_docs":
@@ -868,11 +868,13 @@ def _validate_evaluation_record_against_case(
             budget != expected_final_budget
             or budget.remaining_seconds > expected_budget.remaining_seconds
             or budget_audit != agent_expected_audit
+            or expected_evidence_index != len(evidence_refs) - 1
         ):
             raise ValueError("agent controller final budget or audit is invalid")
         if rejected_decision is not None and (
             acquisition.sanitizer_calls != expected_budget.sanitizer_calls
             or acquisition.retrieval_calls != expected_budget.rag_calls
+            or len(bundles[-1].sanitizer_results) != acquisition.sanitizer_calls
         ):
             raise ValueError("agent controller denied after inconsistent acquisition usage")
         diagnosis_hashes = [

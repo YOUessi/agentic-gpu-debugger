@@ -915,6 +915,66 @@ def test_mode_e_rejects_provider_diagnosis_after_forged_terminal_denial(
     assert result.records == []
 
 
+def test_mode_e_rejects_evidence_appended_after_terminal_denial(
+    oob_service, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.agent.models import MemcheckAction
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+    from gpu_agent.evidence.models import EvidenceBundle
+
+    executor = native_evaluation_executor
+    oob_service[1].actions = [MemcheckAction(), MemcheckAction()]
+    binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
+    store = executor.service.store
+    original_put = store.put
+    appended = False
+
+    def append_post_denial_evidence(run_id, name, content, visibility):
+        nonlocal appended
+        if name == "agent/controller-lineage.json" and not appended:
+            appended = True
+            run = store.load(run_id)
+            evidence_refs = [ref for ref in run.artifact_refs if ref.name == "evidence/bundle.json"]
+            bundle = EvidenceBundle.model_validate_json(store.read(evidence_refs[-1]))
+            assert bundle.sanitizer_results
+            forged = bundle.model_copy(
+                update={
+                    "sanitizer_results": [
+                        *bundle.sanitizer_results,
+                        bundle.sanitizer_results[-1],
+                    ]
+                }
+            )
+            forged_ref = original_put(
+                run_id,
+                "evidence/bundle.json",
+                forged.model_dump_json().encode(),
+                visibility,
+            )
+            lineage = json.loads(content)
+            lineage["evidence_ref"] = {"id": forged_ref.id, "sha256": forged_ref.sha256}
+            content = json.dumps(lineage, sort_keys=True, separators=(",", ":")).encode()
+        return original_put(run_id, name, content, visibility)
+
+    monkeypatch.setattr(store, "put", append_post_denial_evidence)
+    result = EvaluationRunner(
+        store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+
+    assert result.stopped_reason == "EXECUTION_ERROR"
+    assert result.records == []
+
+
 @pytest.mark.parametrize("native_evaluation_executor", ["public_exact"], indirect=True)
 def test_scheduled_repair_resolves_native_private_verification(
     monkeypatch, native_evaluation_executor
