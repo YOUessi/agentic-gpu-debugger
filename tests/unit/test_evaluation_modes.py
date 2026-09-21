@@ -1913,12 +1913,12 @@ def test_holdout_public_projection_drops_provider_diagnosis(
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
 def test_forged_reserved_diagnosis_capability_has_zero_side_effects(
-    private_split_executor, native_evaluation_executor
+    private_split_executor, native_evaluation_executor, monkeypatch
 ):
     from gpu_agent.benchmark.evaluation import EvaluationUnitBinding
     from gpu_agent.benchmark.holdout import (
-        _CAPABILITY_SEAL,
-        _ReservedDiagnosisCapability,
+        HoldoutExecutionBinding,
+        PreparedHoldoutExecution,
     )
     from gpu_agent.contracts import ExternalRunOrigin, RunStatus
     from gpu_agent.execution.models import SanitizerTool
@@ -1946,6 +1946,15 @@ def test_forged_reserved_diagnosis_capability_has_zero_side_effects(
         holdout_proof=controller.validate_batch(batch),
     )
     store = service.store
+    backend_calls = []
+    backend_type = service._backend_factory
+    native_container = backend_type._container
+
+    def counted_container(*args, **kwargs):
+        backend_calls.append(args[2])
+        return native_container(*args, **kwargs)
+
+    monkeypatch.setattr(backend_type, "_container", counted_container)
     parent = store.create_run(
         "holdout_execution",
         binding=service.binding,
@@ -1970,21 +1979,38 @@ def test_forged_reserved_diagnosis_capability_has_zero_side_effects(
             evaluation_unit=unit,
             _reserved_run_id=diagnosis.id,
         )
-    started = store.transition(diagnosis.id, RunStatus.RUNNING, "PREPARING")
-    forged = _ReservedDiagnosisCapability(
-        _CAPABILITY_SEAL, controller, service, started, unit
+    store.transition(diagnosis.id, RunStatus.RUNNING, "PREPARING")
+    prepared = PreparedHoldoutExecution(
+        execution_run_id=parent.id,
+        diagnosis_run_id=diagnosis.id,
+        binding=HoldoutExecutionBinding(
+            public_evaluation_run_id=unit.evaluation_run_id,
+            alias_mapping_run_id=batch.evaluator_run_id,
+            ordinal=unit.ordinal,
+            schedule_hash=unit.schedule_hash,
+            attempt_hash="c" * 64,
+            corpus_cutoff=unit.corpus_cutoff,
+            alias=batch.aliases[0],
+            private_case_id=unit.case_id,
+            private_template_id=unit.template_id,
+            diagnosis_run_id=diagnosis.id,
+        ),
+        evaluation_unit=unit,
     )
-    with pytest.raises(ValueError, match="capability"):
+    assert not hasattr(controller, "_HoldoutController__register_reserved_capability")
+    with pytest.raises(ValueError, match="holdout execution|authority"):
         service._diagnose_reserved(
             executor.sources[private_case_id],
-            capability=forged,
+            controller=controller,
+            batch=batch,
+            prepared=prepared,
             mode="E",
             required_tools=(SanitizerTool.MEMCHECK,),
             expected_source_hash=hashlib.sha256(selected.read_bytes()).hexdigest(),
-            evaluation_unit=unit,
         )
     assert store.load(diagnosis.id).status == RunStatus.RUNNING
     assert service._provider.kinds == before_provider
+    assert backend_calls == []
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
@@ -2369,7 +2395,7 @@ def test_holdout_mode_e_started_provider_call_is_not_reexecuted_on_resume(
     assert len(reserved_calls) == 1
     called_service, replay_args, replay_kwargs = reserved_calls[0]
     before_replay = list(physical_calls)
-    with pytest.raises(ValueError, match="capability"):
+    with pytest.raises(ValueError, match="startable"):
         diagnose_reserved(called_service, *replay_args, **replay_kwargs)
     assert physical_calls == before_replay
     run_id = executor.service.store.recoverable_runs()[0].id

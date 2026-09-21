@@ -63,6 +63,11 @@ BackendFactory = Callable[[RunStore, Path, Path], ExecutionBackend]
 BENCHMARK_ROOT = Path(__file__).resolve().parents[2] / "benchmarks"
 
 if TYPE_CHECKING:
+    from gpu_agent.benchmark.holdout import (
+        HoldoutBatch,
+        HoldoutController,
+        PreparedHoldoutExecution,
+    )
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
 
@@ -276,19 +281,34 @@ class ApplicationService:
         self,
         source: Path,
         *,
-        capability: object,
+        controller: "HoldoutController",
+        batch: "HoldoutBatch",
+        prepared: "PreparedHoldoutExecution",
         mode: EvaluationMode,
         required_tools: tuple[SanitizerTool, ...],
         expected_source_hash: str,
-        evaluation_unit: EvaluationUnitBinding,
     ) -> RunManifest:
+        from gpu_agent.benchmark.holdout import (
+            HoldoutBatch,
+            HoldoutController,
+            PreparedHoldoutExecution,
+        )
+
+        if (
+            type(controller) is not HoldoutController
+            or type(batch) is not HoldoutBatch
+            or type(prepared) is not PreparedHoldoutExecution
+        ):
+            raise ValueError("reserved diagnosis authority is invalid")
         return self._diagnose(
             source,
             mode=mode,
             required_tools=required_tools,
             expected_source_hash=expected_source_hash,
-            evaluation_unit=evaluation_unit,
-            _reserved_capability=capability,
+            evaluation_unit=prepared.evaluation_unit,
+            _reserved_controller=controller,
+            _reserved_batch=batch,
+            _reserved_prepared=prepared,
         )
 
     def _diagnose(
@@ -299,7 +319,9 @@ class ApplicationService:
         required_tools: tuple[SanitizerTool, ...],
         expected_source_hash: str | None,
         evaluation_unit: EvaluationUnitBinding | None,
-        _reserved_capability: object | None = None,
+        _reserved_controller: object | None = None,
+        _reserved_batch: object | None = None,
+        _reserved_prepared: object | None = None,
     ) -> RunManifest:
         if mode not in {"A", "B", "C", "D", "E"}:
             raise ValueError("invalid acquisition mode")
@@ -309,16 +331,29 @@ class ApplicationService:
             or evaluation_unit.mode != mode
         ):
             raise ValueError("evaluation unit requires an evaluation-bound service")
-        reserved_started = _reserved_capability is not None
-        if _reserved_capability is not None:
-            from gpu_agent.benchmark.holdout import _ReservedDiagnosisCapability
+        reserved_values = (
+            _reserved_controller,
+            _reserved_batch,
+            _reserved_prepared,
+        )
+        reserved_started = any(value is not None for value in reserved_values)
+        if reserved_started:
+            from gpu_agent.benchmark.holdout import (
+                HoldoutBatch,
+                HoldoutController,
+                PreparedHoldoutExecution,
+            )
 
             if (
-                type(_reserved_capability) is not _ReservedDiagnosisCapability
-                or evaluation_unit is None
+                type(_reserved_controller) is not HoldoutController
+                or type(_reserved_batch) is not HoldoutBatch
+                or type(_reserved_prepared) is not PreparedHoldoutExecution
+                or evaluation_unit != _reserved_prepared.evaluation_unit
             ):
-                raise ValueError("reserved diagnosis capability is invalid")
-            run = _reserved_capability.consume(self, evaluation_unit)
+                raise ValueError("reserved diagnosis authority is invalid")
+            run = _reserved_controller.authorize_and_start_reserved(
+                _reserved_batch, _reserved_prepared, self
+            )
         else:
             run = None
         selected = source / "kernel.cu" if source.is_dir() else source

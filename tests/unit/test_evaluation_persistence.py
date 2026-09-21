@@ -100,6 +100,9 @@ def test_resume_keeps_incomplete_evaluator_attempt_ambiguous_without_reexecution
         assert self is executor.holdout_service
         calls += 1
         if fault == "started":
+            kwargs["controller"].authorize_and_start_reserved(
+                kwargs["batch"], kwargs["prepared"], self
+            )
             execution = next(
                 run
                 for run in executor.holdout_service.store.recoverable_runs()
