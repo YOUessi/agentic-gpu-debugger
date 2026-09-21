@@ -58,6 +58,18 @@ TRUTH_ROOT = runtime_resource("benchmarks/development_truth/case_0001")
 Payload = TypeVar("Payload")
 
 
+def candidate_run_id(parent_run_id: str) -> str:
+    """Return the single parent-owned candidate slot without enumerating a store."""
+    return hashlib.sha256(f"candidate-v1:{parent_run_id}".encode()).hexdigest()[:32]
+
+
+def verification_run_id(original_run_id: str, candidate_hash: str) -> str:
+    """Return the exact public verification slot for one candidate."""
+    return hashlib.sha256(
+        f"verification-v1:{original_run_id}:{candidate_hash}".encode()
+    ).hexdigest()[:32]
+
+
 class _Case(ExecutionModel):
     oracle: Literal["vector-add-cpu-v1"]
     atol: float = Field(ge=0)
@@ -94,9 +106,10 @@ def register_candidate(store: RunStore, candidate: PatchCandidate) -> str:
     fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        if any(run.kind == "candidate" for run in store.children(candidate.parent_run_id)):
+        run_id = candidate_run_id(candidate.parent_run_id)
+        if (store.root / run_id).exists():
             raise ValueError("only one candidate is allowed per diagnosis")
-        run = store.create_run("candidate", candidate.parent_run_id)
+        run = store.create_run("candidate", candidate.parent_run_id, _run_id=run_id)
         store.put(
             run.id,
             "candidate.json",
@@ -605,7 +618,11 @@ class VerificationEngine:
     def _persist_public(
         self, original_run_id: str, result: VerificationResult
     ) -> VerificationResult:
-        run = self._store.create_run("verification", original_run_id)
+        run = self._store.create_run(
+            "verification",
+            original_run_id,
+            _run_id=verification_run_id(original_run_id, result.candidate_hash),
+        )
         self._store.put(
             run.id,
             "verification/result.json",

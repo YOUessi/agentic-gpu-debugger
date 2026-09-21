@@ -257,10 +257,15 @@ def native_evaluation_executor(
         service._binding = service.binding.model_copy(
             update={"repository": capture_repository_snapshot(test_repository)}
         )
-    exact_verification_source = requested_split in {"public_exact", "private_exact"}
+    exact_verification_source = requested_split in {
+        "public_exact",
+        "private_exact",
+        "private_exact_canary",
+    }
     split = (
         "private"
-        if eight_private or requested_split in {"private_exact", "private_split"}
+        if eight_private
+        or requested_split in {"private_exact", "private_exact_canary", "private_split"}
         else ("public" if exact_verification_source else requested_split)
     )
     if split not in {"public", "private"}:
@@ -284,6 +289,11 @@ def native_evaluation_executor(
                 tofile="b/kernel.cu",
             )
         )
+        if requested_split == "private_exact_canary":
+            (source / "kernel.cu").write_bytes(
+                (source / "kernel.cu").read_bytes()
+                + b"\n// PRIVATE-SOURCE-CANARY-task3-a91e\n"
+            )
     visibility = "public" if split == "public" else "evaluator"
     corpus = (
         service.store
@@ -505,6 +515,7 @@ def native_evaluation_executor(
         from gpu_agent.benchmark.holdout import HoldoutController
         from gpu_agent.service import ApplicationService
 
+        service.evaluator_store = corpus
         controller = HoldoutController(
             service.store,
             corpus,

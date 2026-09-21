@@ -571,7 +571,10 @@ def _configure_responses_provider(
                 value = DiagnosisResult(
                     diagnostic_outcome="DIAGNOSED",
                     failure_family="out_of_bounds",
-                    root_cause="The thread index can exceed the input length.",
+                    root_cause=(
+                        "The thread index can exceed the input length."
+                        + getattr(scripted, "response_canary", "")
+                    ),
                     source_locations=[SourceLocation(path="kernel.cu", line=9)],
                     observed_facts=[
                         EvidenceClaim.model_validate(item) for item in evidence["observed_facts"]
@@ -584,7 +587,10 @@ def _configure_responses_provider(
                         EvidenceClaim(text=item["text"], citation_ids=[item["chunk_id"]])
                         for item in evidence["documentation"]
                     ],
-                    model_inferences=["An index guard may prevent the reported write."],
+                    model_inferences=[
+                        "An index guard may prevent the reported write."
+                        + getattr(scripted, "path_canary", "")
+                    ],
                     recommended_change="Guard the write with i < n.",
                     confidence_label="high",
                 ).model_dump(mode="json")
@@ -1876,6 +1882,407 @@ def test_task2_holdout_repair_transaction_completes_and_recovers_exactly(
         case.controller.recover_execution(case.batch, case.item, case.attempt)
         == public
     )
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private_exact"], indirect=True)
+def test_holdout_public_projection_drops_provider_diagnosis(
+    prepared_holdout_repair_execution, native_evaluation_executor
+):
+    case = prepared_holdout_repair_execution
+    assert case.native.diagnosis
+    public = case.controller.complete_execution(case.prepared, case.native)
+    assert public.diagnosis == {}
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
+def test_forged_reserved_diagnosis_capability_has_zero_side_effects(
+    private_split_executor, native_evaluation_executor
+):
+    from gpu_agent.benchmark.evaluation import EvaluationUnitBinding
+    from gpu_agent.contracts import ExternalRunOrigin, RunStatus
+    from gpu_agent.execution.models import SanitizerTool
+
+    executor = private_split_executor
+    service = executor.holdout_service
+    controller = executor.holdout_controller
+    batch = executor.holdout_batch
+    assert service is not None and controller is not None and batch is not None
+    private_case_id, private_template_id = controller.resolve_private(
+        batch, batch.aliases[0]
+    )
+    unit = EvaluationUnitBinding(
+        evaluation_run_id="f" * 32,
+        ordinal=0,
+        schedule_hash="e" * 64,
+        corpus_cutoff=batch.corpus_cutoff,
+        idempotency_key="d" * 64,
+        reserved_cost_usd=1,
+        case_id=private_case_id,
+        template_id=private_template_id,
+        mode="E",
+        repeat=0,
+        split="holdout",
+        holdout_proof=controller.validate_batch(batch),
+    )
+    store = service.store
+    parent = store.create_run(
+        "holdout_execution",
+        binding=service.binding,
+        external_origin=ExternalRunOrigin(run_id=unit.evaluation_run_id, visibility="public"),
+    )
+    store.transition(parent.id, RunStatus.RUNNING, "PREPARING")
+    diagnosis = store.create_run("diagnosis", parent_run_id=parent.id)
+    store.put(
+        diagnosis.id,
+        "evaluation/unit.json",
+        unit.model_dump_json().encode(),
+        "evaluator",
+    )
+    before_provider = list(service._provider.kinds)
+    selected = executor.sources[private_case_id] / "kernel.cu"
+    with pytest.raises(TypeError):
+        service.diagnose(
+            executor.sources[private_case_id],
+            mode="E",
+            required_tools=(SanitizerTool.MEMCHECK,),
+            expected_source_hash=hashlib.sha256(selected.read_bytes()).hexdigest(),
+            evaluation_unit=unit,
+            _reserved_run_id=diagnosis.id,
+        )
+    with pytest.raises(ValueError, match="capability"):
+        service._diagnose_reserved(
+            executor.sources[private_case_id],
+            capability=object(),
+            mode="E",
+            required_tools=(SanitizerTool.MEMCHECK,),
+            expected_source_hash=hashlib.sha256(selected.read_bytes()).hexdigest(),
+            evaluation_unit=unit,
+        )
+    assert store.load(diagnosis.id).status == RunStatus.QUEUED
+    assert service._provider.kinds == before_provider
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
+@pytest.mark.parametrize(
+    "mismatch",
+    ["controller_binding", "controller_verifier", "service_evaluator", "holdout_evaluator"],
+)
+def test_holdout_constructor_rejects_identity_mismatch_before_mutation(
+    private_split_executor, native_evaluation_executor, tmp_path, monkeypatch, mismatch
+):
+    from gpu_agent.benchmark.executor import EvaluationExecutor
+    from gpu_agent.service import ApplicationService
+    from gpu_agent.store import RunStore
+
+    executor = private_split_executor
+    service = executor.service
+    holdout_service = executor.holdout_service
+    assert holdout_service is not None
+    before_public = sorted(
+        path.relative_to(service.store.root) for path in service.store.root.rglob("*")
+    )
+    before_evaluator = sorted(
+        path.relative_to(executor.corpus.root)
+        for path in executor.corpus.root.rglob("*")
+    )
+    wrong_store = RunStore(tmp_path / "wrong-evaluator", visibility="evaluator")
+    mismatched = holdout_service
+    if mismatch == "holdout_evaluator":
+        mismatched = ApplicationService(
+            holdout_service.store,
+            wrong_store,
+            provider=holdout_service._provider,
+            backend_factory=holdout_service._backend_factory,
+            _binding=holdout_service.binding,
+        )
+    elif mismatch == "service_evaluator":
+        monkeypatch.setattr(service, "evaluator_store", wrong_store)
+    elif mismatch == "controller_binding":
+        monkeypatch.setattr(
+            executor.holdout_controller,
+            "binding",
+            service.binding.model_copy(update={"prompt_version": "mismatched"}),
+        )
+    else:
+        monkeypatch.setattr(executor.holdout_controller, "_schedule_verifier", object())
+    with pytest.raises(ValueError, match="configured corpus family|paired family"):
+        EvaluationExecutor(
+            service,
+            executor.corpus,
+            executor.sources,
+            holdout_service=mismatched,
+            holdout_controller=executor.holdout_controller,
+            holdout_batch=executor.holdout_batch,
+            _corpus_family=executor._corpus_family,
+            _schedule_verifier=executor._schedule_verifier,
+        )
+    assert sorted(
+        path.relative_to(service.store.root) for path in service.store.root.rglob("*")
+    ) == before_public
+    assert sorted(
+        path.relative_to(executor.corpus.root)
+        for path in executor.corpus.root.rglob("*")
+    ) == before_evaluator
+
+
+@pytest.mark.parametrize(
+    "native_evaluation_executor", ["private_exact_canary"], indirect=True
+)
+def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_scan(
+    native_evaluation_executor, monkeypatch, tmp_path
+):
+    import difflib
+    import shutil
+
+    import gpu_agent.verification.derivation as verification_derivation
+    import gpu_agent.verification.engine as verification_engine
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+    from gpu_agent.benchmark.executor import EvaluationExecutor
+    from gpu_agent.benchmark.holdout import HoldoutController
+    from gpu_agent.benchmark.metrics import EvaluationLabels
+    from gpu_agent.service import ApplicationService
+
+    original = native_evaluation_executor
+    source_canary = b"PRIVATE-SOURCE-CANARY-task3-a91e"
+    provider_canary = b"PROVIDER-RESPONSE-CANARY-task3-b82f"
+    candidate_canary = b"CANDIDATE-CANARY-task3-c73d"
+    verification_canary = b"VERIFICATION-CANARY-task3-d64c"
+    label_canary = b"LABEL-CANARY-task3-e55b"
+    path_canary = b"PATH-CANARY-task3-f46a"
+    scripted = original.service._provider
+    scripted.response_canary = " " + provider_canary.decode()
+    scripted.path_canary = " " + path_canary.decode()
+    source_path = original.sources["case_0100"] / "kernel.cu"
+    source_text = source_path.read_text()
+    fixed_text = source_text.replace(
+        "out[i] = a[i] + b[i];", "if (i < n) out[i] = a[i] + b[i];"
+    ).replace("n != 257", "n == 0") + f"\n// {candidate_canary.decode()}\n"
+    scripted.diff = "".join(
+        difflib.unified_diff(
+            source_text.splitlines(True),
+            fixed_text.splitlines(True),
+            fromfile="a/kernel.cu",
+            tofile="b/kernel.cu",
+        )
+    )
+    truth_root = tmp_path / "canary-truth"
+    shutil.copytree(verification_engine.TRUTH_ROOT, truth_root)
+    truth_case = json.loads((truth_root / "case.json").read_bytes())
+    truth_case["source_hashes"]["kernel.cu"] = hashlib.sha256(
+        source_path.read_bytes()
+    ).hexdigest()
+    (truth_root / "case.json").write_text(json.dumps(truth_case))
+    (truth_root / "reference.cu").write_bytes(
+        (truth_root / "reference.cu").read_bytes()
+        + b"\n// "
+        + verification_canary
+        + b"\n"
+    )
+    monkeypatch.setattr(verification_engine, "TRUTH_ROOT", truth_root)
+    monkeypatch.setattr(
+        verification_derivation, "_TRUTH_CASE", truth_root / "case.json"
+    )
+    binding, _ = _configure_responses_provider(original, monkeypatch, full_script=True)
+    original.service.evaluator_store = original.corpus
+    marker = original.corpus.create_run("holdout_private_canaries", binding=binding)
+    original.corpus.put(
+        marker.id,
+        "labels/private-labels.json",
+        EvaluationLabels(
+            evidence_relevance={label_canary.decode(): True}
+        ).model_dump_json().encode(),
+        "evaluator",
+    )
+    original.corpus.put(
+        marker.id,
+        "private/evaluator-path.txt",
+        path_canary + b"\n" + str(original.corpus.root).encode(),
+        "evaluator",
+    )
+    original.corpus.transition(marker.id, "RUNNING", "FINALIZING")
+    original.corpus.transition(marker.id, "COMPLETED", None)
+    controller = HoldoutController(
+        original.service.store,
+        original.corpus,
+        binding=binding,
+        _schedule_verifier=original._schedule_verifier,
+    )
+    batch = controller.prepare()
+    mapping = original.corpus.load(batch.evaluator_run_id)
+    mapping_ref = next(
+        ref for ref in mapping.artifact_refs if ref.name == "holdout/private-alias-map.json"
+    )
+    nonce_canary = json.loads(original.corpus.read(mapping_ref))["nonce_hex"].encode()
+    holdout_service = ApplicationService(
+        original.corpus,
+        original.corpus,
+        backend_factory=original.service._backend_factory,
+        knowledge=original.service.knowledge,
+        knowledge_version=original.service.knowledge_version,
+        _binding=binding,
+    )
+    holdout_service._pricing_attestation = original.service._pricing_attestation
+    executor = EvaluationExecutor(
+        original.service,
+        original.corpus,
+        original.sources,
+        holdout_service=holdout_service,
+        holdout_controller=controller,
+        holdout_batch=batch,
+        _corpus_family=original._corpus_family,
+        _schedule_verifier=original._schedule_verifier,
+    )
+    unrelated = original.corpus.root / ("f" * 32)
+    unrelated.mkdir(mode=0o700)
+    result = EvaluationRunner(
+        executor.service.store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+        holdout_controller=controller,
+        holdout_batch=batch,
+    ).run("E", "holdout", 3)
+    assert result.executed_units == 1
+    assert result.records[0].usage["physical_calls"] > 0
+    assert result.records[0].lineage.candidate_hash is not None
+    assert result.records[0].lineage.verification_hash is not None
+    assert result.records[0].diagnosis == {}
+    public_bytes = b"\n".join(
+        path.read_bytes()
+        for path in sorted(executor.service.store.root.rglob("*"))
+        if path.is_file()
+    )
+    evaluator_bytes = b"\n".join(
+        path.read_bytes()
+        for path in sorted(executor.corpus.root.rglob("*"))
+        if path.is_file()
+    )
+
+    def assert_evaluator_only(label, secret):
+        if secret not in evaluator_bytes:
+            pytest.fail(f"{label} canary missing from evaluator storage", pytrace=False)
+        if secret in public_bytes:
+            pytest.fail(f"{label} canary crossed the public boundary", pytrace=False)
+
+    for label, secret in (
+        ("source", source_canary),
+        ("provider", provider_canary),
+        ("candidate", candidate_canary),
+        ("verification", verification_canary),
+        ("label", label_canary),
+        ("nonce", nonce_canary),
+        ("path", path_canary),
+        ("evaluator path", str(executor.corpus.root).encode()),
+    ):
+        assert_evaluator_only(label, secret)
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
+def test_holdout_mode_e_started_provider_call_is_not_reexecuted_on_resume(
+    native_evaluation_executor, monkeypatch
+):
+    import gpu_agent.service as service_module
+    from gpu_agent.agent.provider import Invocation
+    from gpu_agent.benchmark.evaluation import EvaluationAttempt, EvaluationRunner
+    from gpu_agent.benchmark.executor import EvaluationExecutor
+    from gpu_agent.benchmark.holdout import HoldoutController
+    from gpu_agent.service import ApplicationService
+
+    original = native_evaluation_executor
+    binding, _ = _configure_responses_provider(original, monkeypatch, full_script=True)
+    original.service.evaluator_store = original.corpus
+    controller = HoldoutController(
+        original.service.store,
+        original.corpus,
+        binding=binding,
+        _schedule_verifier=original._schedule_verifier,
+    )
+    batch = controller.prepare()
+    holdout_service = ApplicationService(
+        original.corpus,
+        original.corpus,
+        backend_factory=original.service._backend_factory,
+        knowledge=original.service.knowledge,
+        knowledge_version=original.service.knowledge_version,
+        _binding=binding,
+    )
+    holdout_service._pricing_attestation = original.service._pricing_attestation
+    executor = EvaluationExecutor(
+        original.service,
+        original.corpus,
+        original.sources,
+        holdout_service=holdout_service,
+        holdout_controller=controller,
+        holdout_batch=batch,
+        _corpus_family=original._corpus_family,
+        _schedule_verifier=original._schedule_verifier,
+    )
+    provider_factory = service_module.OpenAIResponsesProvider
+    physical_calls = []
+
+    def interrupting_factory(*args, **kwargs):
+        provider = provider_factory(*args, **kwargs)
+
+        def interrupt(request):
+            physical_calls.append(request.client_request_id)
+            raise KeyboardInterrupt
+
+        provider._port.call = interrupt
+        return provider
+
+    monkeypatch.setattr(service_module, "OpenAIResponsesProvider", interrupting_factory)
+
+    def runner():
+        return EvaluationRunner(
+            executor.service.store,
+            executor,
+            schedule_client=schedule_client_for_test(executor),
+            commit=binding.repository.commit,
+            prompt_version=binding.prompt_version or "",
+            toolchain_hash=binding.toolchain_lock_hash or "",
+            model_config_hash=binding.model_config_hash or "",
+            binding=binding,
+            max_cost_usd=1,
+            max_unit_cost_usd=1,
+            random_seed=7,
+            holdout_controller=controller,
+            holdout_batch=batch,
+        )
+
+    with pytest.raises(KeyboardInterrupt):
+        runner().run("E", "holdout", 3)
+    run_id = executor.service.store.recoverable_runs()[0].id
+    evaluator_started = [
+        Invocation.model_validate_json(holdout_service.store.read(ref))
+        for run in holdout_service.store.recoverable_runs()
+        if run.kind == "diagnosis"
+        for ref in run.artifact_refs
+        if ref.name.endswith("/STARTED.json")
+    ]
+    assert len(evaluator_started) == 1
+    public_run = executor.service.store.load(run_id)
+    attempt_ref = next(
+        ref for ref in public_run.artifact_refs if ref.name == "evaluation/attempts/0.json"
+    )
+    attempt = EvaluationAttempt.model_validate_json(
+        executor.service.store.read(attempt_ref)
+    )
+    expected_request_id = hashlib.sha256(
+        f"{attempt.idempotency_key}:0:plan:0".encode()
+    ).hexdigest()[:32]
+    assert evaluator_started[0].client_request_id == expected_request_id
+    before = list(physical_calls)
+    resumed = runner().resume(run_id, "E", "holdout", 3)
+    assert resumed.stopped_reason == "AMBIGUOUS_STARTED_ATTEMPT"
+    assert resumed.executed_units == 0
+    assert physical_calls == before and len(before) == 1
 
 
 @pytest.mark.parametrize(

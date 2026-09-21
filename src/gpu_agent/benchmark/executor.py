@@ -620,17 +620,14 @@ def validate_evaluation_record(
         if public.usage.get("physical_calls") != len(invocations):
             raise ValueError("provider usage differs from native invocations")
 
-    child_runs = store.children(run.id)
-    candidates = [
-        child for child in child_runs if child.kind == "candidate" and child.parent_run_id == run.id
-    ]
-    verifications = [
-        child
-        for child in child_runs
-        if child.kind == "verification" and child.parent_run_id == run.id
-    ]
-    if len(candidates) > 1 or len(verifications) > 1:
-        raise ValueError("evaluation child lineage is ambiguous")
+    from gpu_agent.verification.engine import candidate_run_id, verification_run_id
+
+    exact_candidate_id = candidate_run_id(run.id)
+    candidates = (
+        [store.load(exact_candidate_id)]
+        if (store.root / exact_candidate_id).exists()
+        else []
+    )
     candidate: PatchCandidate | None = None
     verification: VerificationResult | None = None
     verification_ref: ArtifactRef | None = None
@@ -641,8 +638,18 @@ def validate_evaluation_record(
         candidate = PatchCandidate.model_validate_json(
             store.read(_one_ref(candidate_run, "candidate.json"))
         )
+        exact_verification_id = verification_run_id(
+            run.id, candidate.patched_source_hash
+        )
+        verifications = (
+            [store.load(exact_verification_id)]
+            if (store.root / exact_verification_id).exists()
+            else []
+        )
         if (
-            candidate_run.status != RunStatus.COMPLETED
+            candidate_run.kind != "candidate"
+            or candidate_run.parent_run_id != run.id
+            or candidate_run.status != RunStatus.COMPLETED
             or candidate_run.binding != binding
             or lineage.candidate_run_id != candidate_run.id
             or public.patch_hash != candidate.patched_source_hash
@@ -683,7 +690,11 @@ def validate_evaluation_record(
         if patch_hashes != [expected_patch_hash]:
             raise ValueError("provider patch output differs from candidate")
         verification_run = verifications[0]
-        if verification_run.external_origin != run.external_origin:
+        if (
+            verification_run.kind != "verification"
+            or verification_run.parent_run_id != run.id
+            or verification_run.external_origin != run.external_origin
+        ):
             raise ValueError("evaluation verification topology is invalid")
         verification_ref = _one_ref(verification_run, "verification/result.json")
         verification = VerificationResult.model_validate_json(store.read(verification_ref))
@@ -698,8 +709,7 @@ def validate_evaluation_record(
             raise ValueError("evaluation verification lineage is invalid")
         _validate_verification_audit(store, evaluator, run.id, verification, binding)
     elif (
-        verifications
-        or lineage.candidate_run_id is not None
+        lineage.candidate_run_id is not None
         or lineage.verification_run_id is not None
         or lineage.public_verification_hash is not None
         or public.patch_hash is not None
@@ -977,28 +987,38 @@ class EvaluationExecutor:
             _corpus_family = CorpusFamily.configured(corpus)
         _corpus_family.require_store(service.store)
         _corpus_family.require_store(corpus)
+        _corpus_family.require_store(service.evaluator_store)
         self._corpus_family = _corpus_family
-        if holdout_service is None:
-            if corpus.visibility != "public" or corpus.root != service.store.root:
-                raise ValueError("development evaluation requires the exact public family store")
-        else:
-            if (
-                corpus.visibility != "evaluator"
-                or holdout_service.store.visibility != "evaluator"
-                or corpus.root != holdout_service.store.root
-                or holdout_service.binding != service.binding
-                or holdout_controller is None
-                or holdout_batch is None
-                or holdout_controller.public.root != service.store.root
-                or holdout_controller.evaluator.root != corpus.root
-            ):
-                raise ValueError("holdout evaluation requires exact paired family services")
         if _schedule_verifier is None:
             from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
             _schedule_verifier = EvaluationScheduleVerifier.for_family(
                 _corpus_family, service.store
             )
+        from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
+
+        EvaluationScheduleVerifier.require_store(_schedule_verifier, service.store)
+        if holdout_service is None:
+            if corpus.visibility != "public" or corpus.identity != service.store.identity:
+                raise ValueError("development evaluation requires the exact public family store")
+        else:
+            _corpus_family.require_store(holdout_service.store)
+            _corpus_family.require_store(holdout_service.evaluator_store)
+            if (
+                corpus.visibility != "evaluator"
+                or holdout_service.store.visibility != "evaluator"
+                or corpus.identity != holdout_service.store.identity
+                or corpus.identity != holdout_service.evaluator_store.identity
+                or corpus.identity != service.evaluator_store.identity
+                or holdout_service.binding != service.binding
+                or holdout_controller is None
+                or holdout_batch is None
+                or holdout_controller.binding != service.binding
+                or holdout_controller.public.identity != service.store.identity
+                or holdout_controller.evaluator.identity != corpus.identity
+                or holdout_controller._schedule_verifier is not _schedule_verifier
+            ):
+                raise ValueError("holdout evaluation requires exact paired family services")
         self._schedule_verifier = _schedule_verifier
         service.store.bind_evaluation_verifier(_schedule_verifier)
         service._bind_evaluation_schedule_verifier(_schedule_verifier)
@@ -1262,14 +1282,25 @@ class EvaluationExecutor:
                 != case.source_hash
             ):
                 raise ValueError("registered source hash mismatch")
-            run = execution_service.diagnose(
-                source,
-                mode=mode,
-                required_tools=(case.target_tool,),
-                expected_source_hash=case.source_hash,
-                evaluation_unit=unit,
-                _reserved_run_id=(prepared.diagnosis_run_id if prepared else None),
-            )
+            if prepared is not None:
+                assert self.holdout_controller is not None
+                assert self.holdout_batch is not None
+                run = self.holdout_controller.execute_reserved_diagnosis(
+                    self.holdout_batch,
+                    prepared,
+                    execution_service,
+                    source,
+                    required_tools=(case.target_tool,),
+                    expected_source_hash=case.source_hash,
+                )
+            else:
+                run = execution_service.diagnose(
+                    source,
+                    mode=mode,
+                    required_tools=(case.target_tool,),
+                    expected_source_hash=case.source_hash,
+                    evaluation_unit=unit,
+                )
             run = execution_service.store.load(run.id)
             if run.status != RunStatus.COMPLETED:
                 raise ValueError("diagnosis artifacts are not terminal")
@@ -1377,28 +1408,26 @@ class EvaluationExecutor:
                 if candidate.generated_by != "agent" or candidate.parent_run_id != run.id:
                     raise ValueError("evaluation candidate is not agent generated")
                 candidate_hash = candidate.patched_source_hash
-                execution_service.verify(run.id, candidates[0])
-                verification_runs = [
-                    store.load(path.name)
-                    for path in store.root.iterdir()
-                    if path.is_dir() and re.fullmatch(r"[a-f0-9]{32}", path.name)
-                ]
-                matches = [
-                    item
-                    for item in verification_runs
-                    if item.kind == "verification" and item.parent_run_id == run.id
-                ]
-                if len(matches) != 1 or matches[0].status != RunStatus.COMPLETED:
+                _, verification_run_id = execution_service.verify_exact(
+                    run.id, candidates[0]
+                )
+                verification_run = store.load(verification_run_id)
+                if (
+                    verification_run.kind != "verification"
+                    or verification_run.parent_run_id != run.id
+                    or verification_run.status != RunStatus.COMPLETED
+                ):
                     raise ValueError("verification artifacts are missing or ambiguous")
                 verification = VerificationResult.model_validate_json(
                     store.read(
-                        EvaluationExecutor._ref(self, matches[0], "verification/result.json")
+                        EvaluationExecutor._ref(
+                            self, verification_run, "verification/result.json"
+                        )
                     )
                 )
                 verification_ref = EvaluationExecutor._ref(
-                    self, matches[0], "verification/result.json"
+                    self, verification_run, "verification/result.json"
                 )
-                verification_run_id = matches[0].id
                 public_verification_hash = verification_ref.sha256
                 if verification.candidate_hash != candidate_hash:
                     raise ValueError("verification candidate hash mismatch")
@@ -1415,7 +1444,7 @@ class EvaluationExecutor:
                         for key, value in verification.required_checks.items()
                     }
                 )
-                finished = matches[0].events[-1].at
+                finished = verification_run.events[-1].at
                 # The verification result has outcomes, not physical invocation
                 # counts. Preserve diagnostic components and report totals unknown.
                 usage["tool_calls"] = None

@@ -424,6 +424,45 @@ class RunDirectorySetLease:
         self.validate()
         return data
 
+    def start_queued(self, run_id: str, phase: CurrentPhase) -> RunManifest:
+        """Atomically start one pinned QUEUED run without path re-resolution."""
+        run = self.load_optional(run_id)
+        if (
+            run is None
+            or run.status != RunStatus.QUEUED
+            or run.current_phase is not None
+            or run.last_completed_phase is not None
+        ):
+            raise ValueError("leased run is not startable")
+        descriptor = self._run_fds[run_id]
+        run.status = RunStatus.RUNNING
+        run.current_phase = phase
+        run.events.append(StateEvent(status=RunStatus.RUNNING, phase=phase))
+        fd, temporary = tempfile.mkstemp(prefix=".manifest-", dir=f"/proc/self/fd/{descriptor}")
+        name = Path(temporary).name
+        try:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(run.model_dump_json(indent=2).encode())
+                stream.flush()
+                os.fsync(stream.fileno())
+            self.validate()
+            os.replace(
+                name,
+                "manifest.json",
+                src_dir_fd=descriptor,
+                dst_dir_fd=descriptor,
+            )
+            os.fsync(descriptor)
+            reloaded = self.load_optional(run_id)
+            if reloaded != run:
+                raise ValueError("leased run start did not persist exactly")
+            return run
+        finally:
+            try:
+                os.unlink(name, dir_fd=descriptor)
+            except FileNotFoundError:
+                pass
+
 
 class RunStore:
     def __init__(self, root: Path, *, visibility: Visibility = "public") -> None:

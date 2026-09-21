@@ -46,7 +46,7 @@ def test_resume_persists_completed_evaluator_projection_without_reexecution(
     from gpu_agent.service import ApplicationService
 
     executor = private_split_executor
-    native_diagnose = ApplicationService.diagnose
+    native_diagnose = ApplicationService._diagnose_reserved
     native_put = EvaluationRunner._put
     calls = {"diagnose": 0, "backend": 0}
     backend_type = executor.holdout_service._backend_factory
@@ -66,7 +66,7 @@ def test_resume_persists_completed_evaluator_projection_without_reexecution(
             raise KeyboardInterrupt
         return native_put(self, run_id, name, content)
 
-    monkeypatch.setattr(ApplicationService, "diagnose", counted_diagnose)
+    monkeypatch.setattr(ApplicationService, "_diagnose_reserved", counted_diagnose)
     monkeypatch.setattr(backend_type, "_container", counted_container)
     monkeypatch.setattr(EvaluationRunner, "_put", interrupt_before_public_record)
     with pytest.raises(KeyboardInterrupt):
@@ -107,12 +107,10 @@ def test_resume_keeps_incomplete_evaluator_attempt_ambiguous_without_reexecution
             )
             diagnosis = next(
                 run
-                for run in executor.holdout_service.store.children(execution.id)
-                if run.kind == "diagnosis"
+                for run in executor.holdout_service.store.recoverable_runs()
+                if run.kind == "diagnosis" and run.parent_run_id == execution.id
             )
-            executor.holdout_service.store.transition(
-                diagnosis.id, RunStatus.RUNNING, "PREPARING"
-            )
+            assert diagnosis.status == RunStatus.RUNNING
             invocation = Invocation(
                 invocation_id="f" * 32,
                 run_id=diagnosis.id,
@@ -132,7 +130,9 @@ def test_resume_keeps_incomplete_evaluator_attempt_ambiguous_without_reexecution
             )
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(ApplicationService, "diagnose", interrupt_evaluator_diagnosis)
+    monkeypatch.setattr(
+        ApplicationService, "_diagnose_reserved", interrupt_evaluator_diagnosis
+    )
     with pytest.raises(KeyboardInterrupt):
         _runner(executor).run("D", "holdout", 3)
     run_id = executor.service.store.recoverable_runs()[0].id

@@ -51,7 +51,12 @@ from gpu_agent.patching import (
 )
 from gpu_agent.provenance import capture_repository_snapshot
 from gpu_agent.store import RunStore, read_regular
-from gpu_agent.verification.engine import VerificationEngine, register_candidate
+from gpu_agent.verification.engine import (
+    VerificationEngine,
+    candidate_run_id,
+    register_candidate,
+    verification_run_id,
+)
 from gpu_agent.verification.models import VerificationResult, VerificationVerdict
 
 BackendFactory = Callable[[RunStore, Path, Path], ExecutionBackend]
@@ -227,7 +232,14 @@ class ApplicationService:
         return DiagnosisResult.model_validate_json(self.store.read(refs[-1]))
 
     def candidates(self, run_id: str) -> list[str]:
-        return [run.id for run in self.store.children(run_id) if run.kind == "candidate"]
+        self.store.load(run_id)
+        exact_id = candidate_run_id(run_id)
+        if not (self.store.root / exact_id).exists():
+            return []
+        candidate = self.store.load(exact_id)
+        if candidate.kind != "candidate" or candidate.parent_run_id != run_id:
+            raise ValueError("candidate slot is invalid")
+        return [exact_id]
 
     def _snapshot(self, run_id: str, root: Path) -> SourceSnapshot:
         bundle = _evidence(self.store).view(run_id)
@@ -251,7 +263,43 @@ class ApplicationService:
         required_tools: tuple[SanitizerTool, ...] = (SanitizerTool.MEMCHECK,),
         expected_source_hash: str | None = None,
         evaluation_unit: EvaluationUnitBinding | None = None,
-        _reserved_run_id: str | None = None,
+    ) -> RunManifest:
+        return self._diagnose(
+            source,
+            mode=mode,
+            required_tools=required_tools,
+            expected_source_hash=expected_source_hash,
+            evaluation_unit=evaluation_unit,
+        )
+
+    def _diagnose_reserved(
+        self,
+        source: Path,
+        *,
+        capability: object,
+        mode: EvaluationMode,
+        required_tools: tuple[SanitizerTool, ...],
+        expected_source_hash: str,
+        evaluation_unit: EvaluationUnitBinding,
+    ) -> RunManifest:
+        return self._diagnose(
+            source,
+            mode=mode,
+            required_tools=required_tools,
+            expected_source_hash=expected_source_hash,
+            evaluation_unit=evaluation_unit,
+            _reserved_capability=capability,
+        )
+
+    def _diagnose(
+        self,
+        source: Path,
+        *,
+        mode: EvaluationMode,
+        required_tools: tuple[SanitizerTool, ...],
+        expected_source_hash: str | None,
+        evaluation_unit: EvaluationUnitBinding | None,
+        _reserved_capability: object | None = None,
     ) -> RunManifest:
         if mode not in {"A", "B", "C", "D", "E"}:
             raise ValueError("invalid acquisition mode")
@@ -269,35 +317,16 @@ class ApplicationService:
             or evaluation_unit.mode != mode
         ):
             raise ValueError("evaluation unit requires an evaluation-bound service")
-        if _reserved_run_id is not None:
-            if evaluation_unit is None or self.store.visibility != "evaluator":
-                raise ValueError("reserved diagnosis requires an evaluator unit")
-            run = self.store.load(_reserved_run_id)
-            parent = (
-                self.store.load(run.parent_run_id)
-                if run.parent_run_id is not None
-                else None
-            )
-            unit_refs = [
-                ref for ref in run.artifact_refs if ref.name == "evaluation/unit.json"
-            ]
+        reserved_started = _reserved_capability is not None
+        if _reserved_capability is not None:
+            from gpu_agent.benchmark.holdout import _ReservedDiagnosisCapability
+
             if (
-                run.kind != "diagnosis"
-                or run.status != "QUEUED"
-                or run.binding != self._binding
-                or parent is None
-                or parent.kind != "holdout_execution"
-                or parent.status != "RUNNING"
-                or parent.binding != self._binding
-                or parent.external_origin is None
-                or parent.external_origin.visibility != "public"
-                or parent.external_origin.run_id != evaluation_unit.evaluation_run_id
-                or len(unit_refs) != 1
-                or unit_refs[0].visibility != "evaluator"
-                or EvaluationUnitBinding.model_validate_json(self.store.read(unit_refs[0]))
-                != evaluation_unit
+                type(_reserved_capability) is not _ReservedDiagnosisCapability
+                or evaluation_unit is None
             ):
-                raise ValueError("reserved evaluator diagnosis is invalid")
+                raise ValueError("reserved diagnosis capability is invalid")
+            run = _reserved_capability.consume(self, evaluation_unit)
         elif evaluation_unit is not None:
             if self._evaluation_schedule_verifier is None:
                 raise ValueError("evaluation unit requires signed schedule authority")
@@ -306,7 +335,8 @@ class ApplicationService:
             )
         else:
             run = self.store.create_run("diagnosis", binding=self._binding)
-        self.store.transition(run.id, "RUNNING", "PREPARING")
+        if not reserved_started:
+            self.store.transition(run.id, "RUNNING", "PREPARING")
         self.store.put(
             run.id,
             "agent/acquisition-policy.json",
@@ -543,27 +573,39 @@ class ApplicationService:
     def verify(
         self, run_id: str, candidate_id: str | None = None, strict: bool = False
     ) -> VerificationResult:
+        return self.verify_exact(run_id, candidate_id, strict)[0]
+
+    def verify_exact(
+        self, run_id: str, candidate_id: str | None = None, strict: bool = False
+    ) -> tuple[VerificationResult, str]:
+        """Verify and return the exact persisted verification run without discovery."""
         self.store.load(run_id)
         if candidate_id is None:
             ids = self.candidates(run_id)
             if len(ids) != 1:
-                return self._inconclusive_verification(run_id, "CANDIDATE_UNAVAILABLE")
+                result = self._inconclusive_verification(run_id, "CANDIDATE_UNAVAILABLE")
+                return result, verification_run_id(run_id, result.candidate_hash)
             candidate_id = ids[0]
             candidate_ref = next(
                 r for r in self.store.load(candidate_id).artifact_refs if r.name == "candidate.json"
             )
             generated = PatchCandidate.model_validate_json(self.store.read(candidate_ref))
             if generated.generated_by != "agent":
-                return self._inconclusive_verification(run_id, "CANDIDATE_UNAVAILABLE")
+                result = self._inconclusive_verification(run_id, "CANDIDATE_UNAVAILABLE")
+                return result, verification_run_id(run_id, result.candidate_hash)
         registration = self.store.load(candidate_id)
         if registration.kind != "candidate" or registration.parent_run_id != run_id:
             raise ValueError("candidate does not belong to original run")
         bundle = _evidence(self.store).view(run_id)
         if len(bundle.source_snapshot) != 4:
-            return self._inconclusive_verification(run_id, "ORACLE_UNAVAILABLE", candidate_id)
-        return VerificationEngine(self.store, self.evaluator_store).verify(
+            result = self._inconclusive_verification(
+                run_id, "ORACLE_UNAVAILABLE", candidate_id
+            )
+            return result, verification_run_id(run_id, result.candidate_hash)
+        result = VerificationEngine(self.store, self.evaluator_store).verify(
             run_id, candidate_id, "full" if strict else "standard"
         )
+        return result, verification_run_id(run_id, result.candidate_hash)
 
     def _inconclusive_verification(
         self, run_id: str, code: str, candidate_id: str | None = None
@@ -586,7 +628,11 @@ class ApplicationService:
             candidate_hash=candidate_hash,
             limitations=[code],
         )
-        verification = self.store.create_run("verification", run_id)
+        verification = self.store.create_run(
+            "verification",
+            run_id,
+            _run_id=verification_run_id(run_id, result.candidate_hash),
+        )
         self.store.put(
             verification.id,
             "verification/result.json",
