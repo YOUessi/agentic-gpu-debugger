@@ -13,9 +13,65 @@ from schedule_authority_support import schedule_client_for_test
 
 from gpu_agent.benchmark.evaluation import EvaluationRunner, EvaluationSchedule
 from gpu_agent.benchmark.executor import EvaluationExecutor
-from gpu_agent.benchmark.holdout import HoldoutController, ValidatedHoldoutEvaluation
+from gpu_agent.benchmark.holdout import (
+    HoldoutController,
+    ResolvedHoldoutEvaluationRecord,
+    ValidatedHoldoutEvaluation,
+)
 from gpu_agent.benchmark.holdout_scoring import HoldoutLabelPackage, HoldoutScoringController
 from gpu_agent.contracts import CurrentPhase, ExternalRunOrigin, RunStatus
+
+
+def test_holdout_validation_api_has_no_caller_supplied_trust_bypass():
+    from inspect import signature
+
+    from gpu_agent.benchmark.executor import validate_evaluation_record
+
+    forbidden = {"_proof", "_identity", "_batch_is_validated", "_trusted_case"}
+
+    for entrypoint in (
+        validate_evaluation_record,
+        HoldoutController._prepared_execution,
+        HoldoutController._resolve_prepared_execution,
+        HoldoutController._validate_native_execution,
+    ):
+        assert forbidden.isdisjoint(signature(entrypoint).parameters)
+    assert "resolve_scheduled_record" not in HoldoutController.__dict__
+
+
+def test_validated_holdout_aggregate_is_not_a_serializable_execution_model():
+    from gpu_agent.benchmark.evaluation import EvaluationBindings
+
+    evaluation = ValidatedHoldoutEvaluation(
+        evaluation_run_id="a" * 32,
+        schedule=EvaluationSchedule(
+            selection="all",
+            modes=["A", "B", "C", "D", "E"],
+            split="holdout",
+            repeats=3,
+            random_seed=7,
+            corpus_cutoff=1,
+            bindings=EvaluationBindings(
+                commit="b" * 40,
+                prompt_version="test",
+                toolchain_hash="c" * 64,
+                model_config_hash="d" * 64,
+                max_cost_usd=0,
+                max_unit_cost_usd=0,
+            ),
+            items=[],
+        ),
+        schedule_hash="e" * 64,
+        records=(),
+        record_refs=(),
+    )
+
+    assert not hasattr(evaluation, "model_dump")
+    assert not hasattr(evaluation, "model_dump_json")
+    assert not hasattr(ResolvedHoldoutEvaluationRecord, "model_dump")
+    assert not hasattr(ResolvedHoldoutEvaluationRecord, "model_dump_json")
+    with pytest.raises(TypeError):
+        json.dumps(evaluation)
 
 
 def test_holdout_lineage_discriminator_rejects_native_shape_with_holdout_kind():

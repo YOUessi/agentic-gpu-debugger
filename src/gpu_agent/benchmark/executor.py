@@ -103,7 +103,6 @@ def validate_evaluation_record(
     *,
     diagnosis_parent_run_id: str | None = None,
     expected_visibility: Literal["public", "evaluator"] = "public",
-    _trusted_case: CaseManifest | None = None,
 ) -> PublicEvaluationRecord:
     """Resolve one public record back to immutable native execution artifacts."""
     public = record.public() if isinstance(record, EvaluationRecord) else record
@@ -306,11 +305,9 @@ def validate_evaluation_record(
     if corpus is None or corpus_family is None:
         raise ValueError("native corpus authority is required for evaluation validation")
     selected_case_id = registered_case_id or item.case_id
-    trusted_case = _trusted_case
-    if trusted_case is None:
-        trusted_case = registered_cases(
-            corpus, binding, corpus_family, cutoff=attempt.corpus_cutoff
-        ).get(selected_case_id)
+    trusted_case = registered_cases(
+        corpus, binding, corpus_family, cutoff=attempt.corpus_cutoff
+    ).get(selected_case_id)
     if trusted_case is None or trusted_case.id != selected_case_id:
         raise ValueError("scheduled case is absent from the trusted corpus")
     if acquisition_policy["required_tools"] != [trusted_case.target_tool]:
@@ -1082,12 +1079,11 @@ class EvaluationExecutor:
         if item.split == "holdout":
             if self.holdout_controller is None or self.holdout_batch is None:
                 raise ValueError("private evaluation requires validated holdout authority")
-            self.holdout_controller.resolve_scheduled_record(
-                self.holdout_batch,
-                item,
-                attempt,
-                expected_public=record,
+            recovered = self.holdout_controller.recover_execution(
+                self.holdout_batch, item, attempt
             )
+            if recovered is None or recovered.model_dump_json() != record.model_dump_json():
+                raise ValueError("holdout public record differs from evaluator transaction")
             return
         validate_evaluation_record(
             self.service.store,

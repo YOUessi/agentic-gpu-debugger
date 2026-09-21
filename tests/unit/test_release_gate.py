@@ -8,6 +8,32 @@ import pytest
 from pydantic import ValidationError
 
 
+def _native_release_record(diagnosis_run_id: str):
+    from gpu_agent.benchmark.evaluation import NativeEvaluationLineage, PublicEvaluationRecord
+
+    return PublicEvaluationRecord(
+        record_id=diagnosis_run_id,
+        corpus_cutoff=1,
+        lineage=NativeEvaluationLineage(
+            corpus_cutoff=1,
+            diagnosis_run_id=diagnosis_run_id,
+            diagnosis_hash="a" * 64,
+            evidence_hash="b" * 64,
+            provider_invocation_hashes=[],
+        ),
+        case_id="case",
+        template_id="template",
+        mode="E",
+        repeat=0,
+        input_hash="c" * 64,
+        evidence_hash="b" * 64,
+        executed_checks={},
+        status="INCONCLUSIVE",
+        diagnosis={},
+        latency_ms=0,
+    )
+
+
 @pytest.fixture
 def repository():
     from gpu_agent.contracts import RepositorySnapshot
@@ -428,7 +454,7 @@ def test_freezer_resolves_the_same_selection_checked_by_release_gate(
                 repeats=3,
                 items=[SimpleNamespace(mode="E")],
             ),
-            records=[SimpleNamespace(lineage=SimpleNamespace(diagnosis_run_id=diagnosis_id))],
+            records=[_native_release_record(diagnosis_id)],
         )
 
     public_cases = {
@@ -622,11 +648,11 @@ def test_release_resolver_rejects_noncanonical_acceptance_array_order(tmp_path, 
     )
     development = SimpleNamespace(
         schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
-        records=[SimpleNamespace(lineage=SimpleNamespace(diagnosis_run_id="c" * 32))],
+        records=[_native_release_record("c" * 32)],
     )
     holdout = SimpleNamespace(
         schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
-        records=[SimpleNamespace(lineage=SimpleNamespace(diagnosis_run_id="d" * 32))],
+        records=[_native_release_record("d" * 32)],
     )
     public_cases = {
         "case-a": SimpleNamespace(validation_run_ids=["0" * 32, "a" * 32]),
@@ -1363,7 +1389,7 @@ def test_release_resolver_rejects_duplicate_mode_e_diagnosis_ids(tmp_path, repos
     duplicate = "5" * 32
     evaluation = SimpleNamespace(
         schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
-        records=[SimpleNamespace(lineage=SimpleNamespace(diagnosis_run_id=duplicate))],
+        records=[_native_release_record(duplicate)],
     )
     public_cases = {"case": SimpleNamespace(validation_run_ids=["6" * 32, "7" * 32])}
 
@@ -1378,11 +1404,17 @@ def test_release_resolver_rejects_duplicate_mode_e_diagnosis_ids(tmp_path, repos
     assert getattr(error.value, "code", None) == "RELEASE_ACCEPTANCE_INVALID"
 
 
+def test_native_diagnosis_lineage_rejects_structural_test_double():
+    from gpu_agent.benchmark.release import _native_diagnosis_run_id
+
+    with pytest.raises(ValueError, match="typed native evaluator lineage"):
+        _native_diagnosis_run_id(
+            SimpleNamespace(lineage=SimpleNamespace(diagnosis_run_id="5" * 32))
+        )
+
+
 def test_release_acceptance_uses_private_native_lineage_for_blind_holdout(tmp_path, repository):
-    from gpu_agent.benchmark.evaluation import (
-        HoldoutEvaluationLineage,
-        NativeEvaluationLineage,
-    )
+    from gpu_agent.benchmark.evaluation import HoldoutEvaluationLineage, PublicEvaluationRecord
     from gpu_agent.benchmark.release import ReleaseEvidenceRoots, _ReleaseEvidenceResolver
     from gpu_agent.store import RunStore
 
@@ -1400,45 +1432,38 @@ def test_release_acceptance_uses_private_native_lineage_for_blind_holdout(tmp_pa
         tmp_path / "repository",
         repository,
     )
+    development_record = _native_release_record("5" * 32)
+    holdout_public = PublicEvaluationRecord(
+        record_id="6" * 32,
+        corpus_cutoff=1,
+        lineage=HoldoutEvaluationLineage(
+            corpus_cutoff=1,
+            execution_commitment="6" * 64,
+            diagnosis_hash="b" * 64,
+            evidence_hash="c" * 64,
+            provider_invocation_hashes=[],
+        ),
+        case_id="alias",
+        template_id="alias",
+        mode="E",
+        repeat=0,
+        input_hash="a" * 64,
+        evidence_hash="c" * 64,
+        executed_checks={},
+        status="INCONCLUSIVE",
+        diagnosis={},
+        latency_ms=0,
+    )
+    holdout_native = _native_release_record("7" * 32)
     development = SimpleNamespace(
         schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
-        records=[
-            SimpleNamespace(
-                lineage=NativeEvaluationLineage(
-                    corpus_cutoff=1,
-                    diagnosis_run_id="5" * 32,
-                    diagnosis_hash="b" * 64,
-                    evidence_hash="c" * 64,
-                    provider_invocation_hashes=[],
-                )
-            )
-        ],
+        records=[development_record],
         native_records=[],
     )
     holdout = SimpleNamespace(
         schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
-        records=[
-            SimpleNamespace(
-                lineage=HoldoutEvaluationLineage(
-                    corpus_cutoff=1,
-                    execution_commitment="6" * 64,
-                    diagnosis_hash="b" * 64,
-                    evidence_hash="c" * 64,
-                    provider_invocation_hashes=[],
-                )
-            )
-        ],
-        native_records=[
-            SimpleNamespace(
-                lineage=NativeEvaluationLineage(
-                    corpus_cutoff=1,
-                    diagnosis_run_id="7" * 32,
-                    diagnosis_hash="d" * 64,
-                    evidence_hash="e" * 64,
-                    provider_invocation_hashes=[],
-                )
-            )
-        ],
+        records=[holdout_public],
+        native_records=[holdout_native],
     )
     public_cases = {"case": SimpleNamespace(validation_run_ids=["8" * 32, "9" * 32])}
 

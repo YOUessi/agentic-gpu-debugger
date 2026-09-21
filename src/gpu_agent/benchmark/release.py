@@ -92,18 +92,13 @@ def external_release_artifact_path(
         raise ValueError(f"{variable} must name an external absolute path") from exc
 
 
-def _native_diagnosis_run_id(record: object) -> str:
+def _native_diagnosis_run_id(record: EvaluationRecord | PublicEvaluationRecord) -> str:
     """Return a native diagnosis ID; commitment-only production records fail closed."""
-    lineage = getattr(record, "lineage", None)
-    if isinstance(lineage, NativeEvaluationLineage):
-        return lineage.diagnosis_run_id
-    # A few focused resolver tests use structural test doubles.  Production
-    # records are Pydantic models and may only pass through the typed branch.
-    if not isinstance(record, PublicEvaluationRecord):
-        value = getattr(lineage, "diagnosis_run_id", None)
-        if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{32}", value):
-            return value
-    raise ValueError("acceptance evidence is not native evaluator lineage")
+    if not isinstance(record, PublicEvaluationRecord) or not isinstance(
+        record.lineage, NativeEvaluationLineage
+    ):
+        raise ValueError("acceptance evidence is not typed native evaluator lineage")
+    return record.lineage.diagnosis_run_id
 
 
 class TestCounts(ExecutionModel):
