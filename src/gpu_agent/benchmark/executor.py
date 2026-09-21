@@ -267,16 +267,19 @@ def _validate_evaluation_record_against_case(
     rejected_decisions = [
         (index, decision) for index, decision in enumerate(decisions) if not decision.allowed
     ]
+    rejected_decision: PolicyDecision | None = None
     if rejected_decisions:
         rejected_index, rejected = rejected_decisions[0]
         if (
-            len(rejected_decisions) != 1
+            item.mode != "E"
+            or len(rejected_decisions) != 1
             or rejected_index != len(decisions) - 1
             or diagnosis.diagnostic_outcome != "INCONCLUSIVE"
             or len(rejected.reason_codes) != 1
             or diagnosis.limitations != rejected.reason_codes
         ):
             raise ValueError("controller route contains an invalid rejected decision")
+        rejected_decision = rejected
     acquisition_policy = json.loads(store.read(policy_ref))
     if (
         set(acquisition_policy) != {"mode", "required_tools"}
@@ -670,6 +673,63 @@ def _validate_evaluation_record_against_case(
         plan_hashes = [value.output_hash for value in logical_terminals if value.kind == "plan"]
         if plan_hashes != [decision.action_hash for decision in decisions]:
             raise ValueError("provider plan outputs differ from controller decisions")
+        step_refs = sorted(
+            (
+                ref
+                for ref in run.artifact_refs
+                if ref.name.startswith("actions/") and ref.name.endswith("/step.json")
+            ),
+            key=lambda ref: int(ref.name.split("/")[1]),
+        )
+        if len(step_refs) != len(decision_refs):
+            raise ValueError("agent controller action steps are incomplete")
+        agent_seen: set[str] = set()
+        agent_evidence_by_id = {ref.id: ref for ref in evidence_refs}
+        for index, (step_ref, decision_ref) in enumerate(
+            zip(step_refs, decision_refs, strict=True)
+        ):
+            if (
+                step_ref.name != f"actions/{index}/step.json"
+                or decision_ref.name != f"actions/{index}/decision.json"
+            ):
+                raise ValueError("agent controller action sequence is invalid")
+            step = json.loads(store.read(step_ref))
+            if (
+                set(step)
+                != {
+                    "schema_version",
+                    "action",
+                    "evidence_ref",
+                    "evidence",
+                    "budget",
+                    "seen",
+                }
+                or step["schema_version"] != 1
+            ):
+                raise ValueError("agent controller action step is invalid")
+            action = ACTION_ADAPTER.validate_python(step["action"])
+            evidence = PublicEvidence.model_validate(step["evidence"])
+            step_budget = AgentBudget.model_validate(step["budget"])
+            evidence_ref = ArtifactRef.model_validate(step["evidence_ref"])
+            authoritative_ref = agent_evidence_by_id.get(evidence_ref.id)
+            if authoritative_ref != evidence_ref:
+                raise ValueError("agent controller evidence reference is invalid")
+            observed_bundle = EvidenceBundle.model_validate_json(store.read(evidence_ref))
+            if evidence != public_evidence_from_bundle(store, observed_bundle):
+                raise ValueError("agent controller evidence snapshot is invalid")
+            if step["seen"] != sorted(agent_seen):
+                raise ValueError("agent controller seen state is invalid")
+            expected_decision = decide_action(
+                action,
+                evidence,
+                step_budget,
+                CurrentPhase.DIAGNOSING,
+                agent_seen,
+            )
+            if decisions[index] != expected_decision:
+                raise ValueError("agent controller decision differs from policy replay")
+            if expected_decision.allowed:
+                agent_seen.add(action.action_type + action.typed_arguments.model_dump_json())
         diagnosis_hashes = [
             value.output_hash for value in logical_terminals if value.kind == "diagnose"
         ]
@@ -773,10 +833,11 @@ def _validate_evaluation_record_against_case(
         raise ValueError("evaluation record declares nonexistent child lineage")
     if item.mode == "E":
         expected_kinds = ["plan"] * len(decisions)
-        if any(value.kind == "diagnose" for value in logical_terminals):
-            expected_kinds.append("diagnose")
-        if candidate is not None:
-            expected_kinds.append("patch")
+        if rejected_decision is None:
+            if any(value.kind == "diagnose" for value in logical_terminals):
+                expected_kinds.append("diagnose")
+            if candidate is not None:
+                expected_kinds.append("patch")
         if logical_kinds != expected_kinds:
             raise ValueError("provider call order differs from controller workflow")
 

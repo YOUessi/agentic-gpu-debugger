@@ -765,6 +765,105 @@ def test_mode_e_persists_policy_denied_duplicate_as_bounded_failure(
     assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
 
 
+def test_mode_e_rejects_self_consistent_forged_policy_denial(
+    oob_service, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.agent.models import DiagnosisResult, InconclusiveAction, PolicyDecision
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    oob_service[1].actions = [InconclusiveAction()]
+    binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
+    store = executor.service.store
+    original_put = store.put
+
+    def forge_denial(run_id, name, content, visibility):
+        if name == "actions/0/decision.json":
+            decision = PolicyDecision.model_validate_json(content)
+            content = (
+                decision.model_copy(
+                    update={"allowed": False, "reason_codes": ["DUPLICATE_NO_BENEFIT"]}
+                )
+                .model_dump_json()
+                .encode()
+            )
+        elif name == "diagnosis.json":
+            content = (
+                DiagnosisResult.inconclusive("DUPLICATE_NO_BENEFIT").model_dump_json().encode()
+            )
+        return original_put(run_id, name, content, visibility)
+
+    monkeypatch.setattr(store, "put", forge_denial)
+    result = EvaluationRunner(
+        store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+
+    assert result.stopped_reason == "EXECUTION_ERROR"
+    assert result.records == []
+
+
+def test_mode_e_rejects_provider_diagnosis_after_forged_terminal_denial(
+    oob_service, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.agent.models import PolicyDecision
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    oob_service[1].force_limitation = True
+    oob_service[1].limitation_canary = "DUPLICATE_NO_BENEFIT"
+    binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
+    store = executor.service.store
+    original_put = store.put
+
+    def forge_terminal_denial(run_id, name, content, visibility):
+        if name == "actions/2/step.json":
+            step = json.loads(content)
+            action = step["action"]
+            signature = action["action_type"] + json.dumps(
+                action["typed_arguments"], sort_keys=True, separators=(",", ":")
+            )
+            step["seen"] = sorted([*step["seen"], signature])
+            content = json.dumps(step, sort_keys=True, separators=(",", ":")).encode()
+        elif name == "actions/2/decision.json":
+            decision = PolicyDecision.model_validate_json(content)
+            content = (
+                decision.model_copy(
+                    update={"allowed": False, "reason_codes": ["DUPLICATE_NO_BENEFIT"]}
+                )
+                .model_dump_json()
+                .encode()
+            )
+        return original_put(run_id, name, content, visibility)
+
+    monkeypatch.setattr(store, "put", forge_terminal_denial)
+    result = EvaluationRunner(
+        store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+
+    assert result.stopped_reason == "EXECUTION_ERROR"
+    assert result.records == []
+
+
 @pytest.mark.parametrize("native_evaluation_executor", ["public_exact"], indirect=True)
 def test_scheduled_repair_resolves_native_private_verification(
     monkeypatch, native_evaluation_executor
