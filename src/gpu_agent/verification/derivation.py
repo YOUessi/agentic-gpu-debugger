@@ -268,7 +268,14 @@ def derive_verification(
         if public.identity != evaluator.identity:
             raise ValueError("verification stores have invalid topology")
         diagnosis_run = public.load(diagnosis_run_id)
-        if diagnosis_run.kind != "diagnosis" or diagnosis_run.binding != binding:
+        if (
+            diagnosis_run.kind != "diagnosis"
+            or diagnosis_run.binding != binding
+            or (
+                diagnosis_run.external_origin is not None
+                and diagnosis_run.external_origin.visibility != "public"
+            )
+        ):
             raise ValueError("evaluation diagnosis is invalid")
         audit_parent = diagnosis_run_id
         origin = diagnosis_run.external_origin
@@ -316,6 +323,7 @@ def derive_verification(
     if (
         not isinstance(child_index, dict)
         or set(child_index) != {"schema_version", "child_run_ids"}
+        or type(child_index["schema_version"]) is not int
         or child_index["schema_version"] != 1
         or not isinstance(child_index["child_run_ids"], list)
         or not child_index["child_run_ids"]

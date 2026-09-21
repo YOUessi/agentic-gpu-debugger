@@ -30,7 +30,7 @@ def _audit_result(tmp_path, result):
     return VerificationAuditResult.model_validate_json(private.read(ref))
 
 
-def _rewrite_child_index(evaluator, audit_id, child_run_ids):
+def _rewrite_child_index(evaluator, audit_id, child_run_ids, *, schema_version=1):
     audit = evaluator.load(audit_id)
     ref = next(
         (ref for ref in audit.artifact_refs if ref.name == "verification/child-index.json"),
@@ -38,7 +38,7 @@ def _rewrite_child_index(evaluator, audit_id, child_run_ids):
     )
     assert ref is not None
     content = json.dumps(
-        {"schema_version": 1, "child_run_ids": child_run_ids},
+        {"schema_version": schema_version, "child_run_ids": child_run_ids},
         separators=(",", ":"),
     ).encode()
     artifact_path = evaluator.root / ref.relative_path
@@ -565,6 +565,42 @@ def test_derivation_rejects_invalid_verification_child_inventory(
     assert container_boundary
 
 
+def test_derivation_rejects_boolean_child_inventory_schema_version(
+    store, tmp_path, original, container_boundary
+):
+    from gpu_agent.verification.derivation import validate_persisted_derivation
+    from gpu_agent.verification.engine import VerificationEngine
+
+    evaluator = _evaluator_store(tmp_path)
+    candidate_id, _ = register_variant(store, original, "human")
+    result = VerificationEngine(store, evaluator).verify(original[0], candidate_id)
+    audit_id = result.evaluator_audit_run_id
+    assert audit_id is not None
+    audit = evaluator.load(audit_id)
+    index_ref = next(
+        ref
+        for ref in audit.artifact_refs
+        if ref.name == "verification/child-index.json"
+    )
+    child_run_ids = json.loads(evaluator.read(index_ref))["child_run_ids"]
+    _rewrite_child_index(
+        evaluator,
+        audit_id,
+        child_run_ids,
+        schema_version=True,
+    )
+
+    with pytest.raises(ValueError, match="child inventory is invalid"):
+        validate_persisted_derivation(
+            store,
+            evaluator,
+            original[0],
+            result,
+            store.load(original[0]).binding,
+        )
+    assert container_boundary
+
+
 def test_evaluator_local_verification_inherits_holdout_execution_origin(
     evaluator_original, container_boundary
 ):
@@ -619,6 +655,47 @@ def test_evaluator_local_derivation_rejects_changed_holdout_origin(
     manifest_path.write_text(json.dumps(manifest))
 
     with pytest.raises(ValueError, match="verification (audit|input lineage) is invalid"):
+        validate_persisted_derivation(
+            evaluator,
+            evaluator,
+            diagnosis_id,
+            result,
+            evaluator.load(diagnosis_id).binding,
+        )
+    assert container_boundary
+
+
+def test_evaluator_local_derivation_rejects_consistent_evaluator_origin_tamper(
+    evaluator_original, container_boundary
+):
+    from gpu_agent.contracts import ExternalRunOrigin
+    from gpu_agent.verification.derivation import validate_persisted_derivation
+    from gpu_agent.verification.engine import VerificationEngine
+
+    evaluator, original, _ = evaluator_original
+    diagnosis_id = original[0]
+    candidate_id, _ = register_variant(evaluator, original, "human")
+    result = VerificationEngine(evaluator, evaluator).verify(diagnosis_id, candidate_id)
+    audit_id = result.evaluator_audit_run_id
+    assert audit_id is not None
+    audit = evaluator.load(audit_id)
+    index_ref = next(
+        ref
+        for ref in audit.artifact_refs
+        if ref.name == "verification/child-index.json"
+    )
+    child_run_ids = json.loads(evaluator.read(index_ref))["child_run_ids"]
+    impossible_origin = ExternalRunOrigin(
+        run_id="f" * 32,
+        visibility="evaluator",
+    ).model_dump(mode="json")
+    for run_id in (diagnosis_id, audit_id, *child_run_ids):
+        manifest_path = evaluator.root / run_id / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["external_origin"] = impossible_origin
+        manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(ValueError, match="evaluation diagnosis is invalid"):
         validate_persisted_derivation(
             evaluator,
             evaluator,
