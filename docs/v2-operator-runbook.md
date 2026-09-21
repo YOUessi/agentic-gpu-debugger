@@ -76,15 +76,20 @@ Keep the controller and stores owner-only. Provisioning records only the public 
 gpu-agent benchmark provision-family \
   --controller-root /srv/gpu-agent-controller/family-v2 \
   --public-store /srv/gpu-agent-data/v2-public \
-  --evaluator-store /srv/gpu-agent-private/v2-evaluator \
+  --evaluator-store /srv/gpu-agent-private/v2-evaluator/runs \
   --repository /opt/releases/agentic-gpu-debugger \
   --schedule-public-key /srv/gpu-agent-controller/keys/schedule-authority.pub
 
 export GPU_AGENT_CORPUS_FAMILY_ROOT=/srv/gpu-agent-controller/family-v2
+export GPU_AGENT_RUN_ROOT=/srv/gpu-agent-data/v2-public
+export GPU_AGENT_EVALUATOR_ROOT=/srv/gpu-agent-private/v2-evaluator
 ```
 
 Reopening that family must reproduce its namespace and store identities. Never substitute ad hoc
-store roots on later scoring or release commands.
+store roots on later scoring or release commands. `GPU_AGENT_EVALUATOR_ROOT` names the owner-only
+parent; its `runs` child is the exact evaluator store pinned by the family. The previous layout
+that pinned the parent itself is invalid. Provision a new family; do not edit or migrate an old
+family configuration or reuse evidence registered under it.
 
 ## 4. Validate and register exactly 16+8 cases
 
@@ -103,7 +108,7 @@ eight evaluator-only pairs:
 
 ```bash
 gpu-agent benchmark validate PRIVATE_CLEAN_RUN_ID PRIVATE_MUTANT_RUN_ID \
-  --corpus-root /srv/gpu-agent-private/v2-evaluator \
+  --corpus-root /srv/gpu-agent-private/v2-evaluator/runs \
   --visibility evaluator
 ```
 
@@ -167,7 +172,7 @@ gpu-agent benchmark evaluate \
   --mode all --split holdout --repeats 3 \
   --max-cost-usd APPROVED_HOLDOUT_TOTAL_CAP \
   --max-unit-cost-usd APPROVED_UNIT_CAP \
-  --corpus-root /srv/gpu-agent-private/v2-evaluator \
+  --corpus-root /srv/gpu-agent-private/v2-evaluator/runs \
   --case-root /srv/gpu-agent-private/cases-v2 \
   --repository /opt/releases/agentic-gpu-debugger \
   --commit "$FINAL_COMMIT" \

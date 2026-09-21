@@ -254,6 +254,103 @@ def test_production_evaluation_requires_attested_cost_before_construction(
     assert "Hard maximum" not in result.output
 
 
+@pytest.mark.parametrize(
+    "fault", ["wrong_public", "wrong_evaluator_parent", "symlink", "replaced_inode", "visibility"]
+)
+def test_production_evaluate_rejects_store_fault_before_side_effect(
+    tmp_path, monkeypatch, fault
+):
+    import json
+
+    from schedule_authority_support import TestScheduleCommitClient
+
+    from gpu_agent.agent.provider import OpenAIResponsesProvider
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.cli import app
+
+    repository = tmp_path / "repository"
+    repository.mkdir(mode=0o700)
+    public = tmp_path / "public"
+    evaluator_root = tmp_path / "evaluator-root"
+    evaluator_root.mkdir(mode=0o700)
+    signer = TestScheduleCommitClient.create(tmp_path / "signer")
+    family = CorpusFamily.provision_production(
+        tmp_path / "controller",
+        public_store=public,
+        evaluator_store=evaluator_root / "runs",
+        repository=repository,
+        schedule_public_key=signer.public_key,
+    )
+    run_root = public
+    configured_evaluator = evaluator_root
+    if fault == "wrong_public":
+        run_root = tmp_path / "missing-public"
+    elif fault == "wrong_evaluator_parent":
+        configured_evaluator = tmp_path / "missing-evaluator"
+    elif fault == "symlink":
+        configured_evaluator = tmp_path / "evaluator-link"
+        configured_evaluator.symlink_to(evaluator_root, target_is_directory=True)
+    elif fault == "replaced_inode":
+        displaced = tmp_path / "public-old"
+        public.rename(displaced)
+        public.mkdir(mode=0o700)
+        (public / ".corpus-family.json").write_bytes(
+            (displaced / ".corpus-family.json").read_bytes()
+        )
+    else:
+        config_path = family.root / "family.json"
+        config = json.loads(config_path.read_text())
+        config["public_store_pin"]["visibility"] = "evaluator"
+        config_path.write_text(json.dumps(config))
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
+    monkeypatch.setenv("GPU_AGENT_RUN_ROOT", str(run_root))
+    monkeypatch.setenv("GPU_AGENT_EVALUATOR_ROOT", str(configured_evaluator))
+    monkeypatch.setenv("GPU_AGENT_SCHEDULE_AUTHORITY_COMMAND", str(tmp_path / "authority"))
+    monkeypatch.setenv("GPU_AGENT_PRICING_ATTESTATION", str(tmp_path / "pricing.json"))
+    provider_calls = []
+    monkeypatch.setattr(
+        OpenAIResponsesProvider,
+        "ensure_available",
+        lambda _self: provider_calls.append(True),
+    )
+    before = _tree_bytes(tmp_path)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "benchmark",
+            "evaluate",
+            "--mode",
+            "A",
+            "--split",
+            "development",
+            "--repeats",
+            "3",
+            "--max-cost-usd",
+            "1",
+            "--max-unit-cost-usd",
+            "1",
+            "--corpus-root",
+            str(public),
+            "--case-root",
+            str(tmp_path / "cases"),
+            "--repository",
+            str(repository),
+            "--commit",
+            "a" * 40,
+            "--toolchain-hash",
+            "b" * 64,
+            "--model-config-hash",
+            "c" * 64,
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert "COST_BOUND_UNAVAILABLE" in result.output
+    assert provider_calls == []
+    assert _tree_bytes(tmp_path) == before
+
+
 def test_evaluate_uses_injected_executor_and_prints_reservation(
     tmp_path, monkeypatch, native_evaluation_executor
 ):

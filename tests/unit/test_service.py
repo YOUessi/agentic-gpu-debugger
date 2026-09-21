@@ -7,7 +7,7 @@ def _configure_corpus_family(tmp_path, monkeypatch):
     family = CorpusFamily.provision(
         tmp_path.parent / f"{tmp_path.name}-controller",
         public_store=tmp_path / "runs",
-        evaluator_store=tmp_path / "evaluator",
+        evaluator_store=tmp_path / "evaluator" / "runs",
         repository=tmp_path,
     )
     monkeypatch.setenv("GPU_AGENT_RUN_ROOT", str(tmp_path / "runs"))
@@ -76,6 +76,58 @@ def test_release_service_factory_captures_repository_and_lock_internally(tmp_pat
     assert lock_calls == [tmp_path / "containers/toolchain.lock.json"]
     assert service.binding.repository == captured
     assert service.binding.toolchain_lock_hash == locked.lock_hash
+
+
+def test_release_evaluation_service_selects_exact_family_visibility(tmp_path, monkeypatch):
+    from gpu_agent.contracts import RepositorySnapshot
+    from gpu_agent.environment import load_toolchain_lock
+    from gpu_agent.execution.isolated import LOCK_PATH
+    from gpu_agent.service import ApplicationService
+
+    repository = tmp_path / "repository"
+    repository.mkdir(mode=0o700)
+    evaluator_root = tmp_path / "evaluator-root"
+    evaluator_root.mkdir(mode=0o700)
+    from gpu_agent.benchmark.ledger import CorpusFamily
+
+    family = CorpusFamily.provision(
+        tmp_path / "controller",
+        public_store=tmp_path / "public",
+        evaluator_store=evaluator_root / "runs",
+        repository=repository,
+    )
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
+    monkeypatch.setenv("GPU_AGENT_RUN_ROOT", str(tmp_path / "public"))
+    monkeypatch.setenv("GPU_AGENT_EVALUATOR_ROOT", str(evaluator_root))
+    snapshot = RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True)
+    monkeypatch.setattr("gpu_agent.service.capture_repository_snapshot", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr(
+        "gpu_agent.service.load_toolchain_lock", lambda _path: load_toolchain_lock(LOCK_PATH)
+    )
+
+    public = ApplicationService.for_release(
+        repository,
+        purpose="evaluation",
+        expected_commit=snapshot.commit,
+        prompt_version="diagnosis-v1",
+        model_config_hash="c" * 64,
+        require_corpus_family=True,
+        workflow_visibility="public",
+    )
+    evaluator = ApplicationService.for_release(
+        repository,
+        purpose="evaluation",
+        expected_commit=snapshot.commit,
+        prompt_version="diagnosis-v1",
+        model_config_hash="c" * 64,
+        require_corpus_family=True,
+        workflow_visibility="evaluator",
+    )
+
+    assert public.store.identity == family.corpus_store("public").identity
+    assert public.evaluator_store.identity == family.corpus_store("evaluator").identity
+    assert evaluator.store.identity == evaluator.evaluator_store.identity
+    assert evaluator.store.identity == family.corpus_store("evaluator").identity
 
 
 def test_release_service_rejects_repository_change_while_loading_lock(tmp_path, monkeypatch):

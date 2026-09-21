@@ -449,6 +449,7 @@ def _configured_evaluation_runner(
     from gpu_agent.agent.policy import LLMCallGate
     from gpu_agent.agent.prompts import PROMPT_VERSION
     from gpu_agent.agent.provider import OpenAIProviderSettings, OpenAIResponsesProvider
+    from gpu_agent.benchmark.controller_config import validate_production_store_configuration
     from gpu_agent.benchmark.evaluation import EvaluationProviderPolicy, PricingAttestation
     from gpu_agent.benchmark.executor import EvaluationExecutor, registered_cases
     from gpu_agent.benchmark.holdout import HoldoutController
@@ -468,8 +469,9 @@ def _configured_evaluation_runner(
     family = CorpusFamily.open(Path(family_root))
     if family.schedule_authority_profile != "PRODUCTION":
         raise ValueError("production schedule authority is not configured")
+    public_store, evaluator_store = validate_production_store_configuration(family, repository)
     visibility: Literal["public", "evaluator"] = "public" if split == "development" else "evaluator"
-    corpus = family.corpus_store(visibility)
+    corpus = public_store if visibility == "public" else evaluator_store
     if corpus.root != corpus_root.absolute():
         raise ValueError("requested corpus root differs from trusted family")
     service = ApplicationService.for_release(
@@ -479,6 +481,7 @@ def _configured_evaluation_runner(
         prompt_version=PROMPT_VERSION,
         model_config_hash=model_config_hash,
         require_corpus_family=True,
+        workflow_visibility="public",
     )
     binding = service.binding
     if (
@@ -511,6 +514,20 @@ def _configured_evaluation_runner(
     ):
         raise ValueError("provider, pricing, and model binding differ")
     service._bind_pricing_attestation(pricing)
+    holdout_service = None
+    if split == "holdout":
+        holdout_service = ApplicationService.for_release(
+            repository,
+            purpose="evaluation",
+            expected_commit=commit,
+            prompt_version=PROMPT_VERSION,
+            model_config_hash=model_config_hash,
+            require_corpus_family=True,
+            workflow_visibility="evaluator",
+        )
+        if holdout_service.binding != binding:
+            raise ValueError("paired evaluation bindings differ")
+        holdout_service._bind_pricing_attestation(pricing)
     verifier = EvaluationScheduleVerifier.for_family(family, service.store)
     cases = registered_cases(corpus, binding, family)
     source_root = case_root.absolute()
@@ -531,6 +548,7 @@ def _configured_evaluation_runner(
         service,
         corpus,
         sources,
+        holdout_service=holdout_service,
         holdout_controller=holdout_controller,
         holdout_batch=holdout_batch,
         _corpus_family=family,
@@ -667,6 +685,11 @@ def benchmark_evaluate(
     # This check precedes any configured service, corpus, or provider construction.
     if max_cost_usd is None or max_unit_cost_usd is None:
         raise typer.BadParameter("COST_CAP_REQUIRED: both total and unit caps must be explicit.")
+    if mode not in {"A", "B", "C", "D", "E", "all"} or split not in {
+        "development",
+        "holdout",
+    }:
+        raise typer.BadParameter("EVALUATION_SELECTION_INVALID")
     try:
         if isinstance(ctx.obj, EvaluationRunner):
             runner = ctx.obj
@@ -692,8 +715,6 @@ def benchmark_evaluate(
             "COST_BOUND_UNAVAILABLE: paid evaluation requires reviewed pricing attestation "
             "before provider execution."
         ) from None
-    if mode not in {"A", "B", "C", "D", "E", "all"} or split not in {"development", "holdout"}:
-        raise typer.BadParameter("EVALUATION_SELECTION_INVALID")
     try:
         if (
             runner.bindings.max_cost_usd != max_cost_usd

@@ -5,6 +5,8 @@ import pytest
 
 
 def test_production_family_stores_only_schedule_public_key(tmp_path):
+    import json
+
     from gpu_agent.benchmark.ledger import CorpusFamily
 
     public_key = b"-----BEGIN PUBLIC KEY-----\nreviewed\n-----END PUBLIC KEY-----\n"
@@ -20,6 +22,12 @@ def test_production_family_stores_only_schedule_public_key(tmp_path):
     assert family.schedule_public_key_hash == hashlib.sha256(public_key).hexdigest()
     assert family.schedule_public_key_path.read_bytes() == public_key
     assert not list(family.root.rglob("*private*"))
+    config = json.loads((family.root / "family.json").read_text())
+    assert config["schema_version"] == 3
+    assert config["public_store_pin"]["visibility"] == "public"
+    assert config["evaluator_store_pin"]["visibility"] == "evaluator"
+    assert config["public_store_pin"]["device"] >= 0
+    assert config["public_store_pin"]["inode"] > 0
 
 
 def _signing_request():

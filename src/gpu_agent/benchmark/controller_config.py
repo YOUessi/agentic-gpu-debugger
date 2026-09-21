@@ -16,7 +16,64 @@ from gpu_agent.benchmark.evaluation import (
 )
 from gpu_agent.benchmark.ledger import CorpusFamily
 from gpu_agent.provenance import capture_repository_snapshot
-from gpu_agent.store import read_regular, reject_symlinks, sync_directory
+from gpu_agent.store import RunStore, read_regular, reject_symlinks, sync_directory
+
+
+def _overlap(first: Path, second: Path) -> bool:
+    left, right = first.resolve(strict=True), second.resolve(strict=True)
+    return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+
+def _owner_only_directory(path: Path) -> None:
+    reject_symlinks(path)
+    info = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or info.st_uid != os.geteuid()
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise ValueError("production store directory is unavailable or unsafe")
+
+
+def validate_production_store_configuration(
+    family: CorpusFamily,
+    repository: Path,
+) -> tuple[RunStore, RunStore]:
+    """Open the two exact pinned production stores without creating or repairing paths."""
+    public_value = os.environ.get("GPU_AGENT_RUN_ROOT")
+    evaluator_value = os.environ.get("GPU_AGENT_EVALUATOR_ROOT")
+    if not public_value or not evaluator_value:
+        raise ValueError("production store environment is incomplete")
+    public_path = Path(public_value)
+    evaluator_parent = Path(evaluator_value)
+    if not public_path.is_absolute() or not evaluator_parent.is_absolute():
+        raise ValueError("production store paths must be absolute")
+    evaluator_path = evaluator_parent / "runs"
+    repo = repository.absolute()
+    for path in (public_path, evaluator_parent, evaluator_path, family.root):
+        _owner_only_directory(path)
+    reject_symlinks(repo)
+    if not repo.is_dir():
+        raise ValueError("repository is unavailable")
+    if any(
+        _overlap(left, right)
+        for left, right in (
+            (public_path, evaluator_parent),
+            (public_path, family.root),
+            (public_path, repo),
+            (evaluator_parent, family.root),
+            (evaluator_parent, repo),
+            (family.root, repo),
+        )
+    ):
+        raise ValueError("production controller paths overlap")
+    public = RunStore(public_path, visibility="public")
+    evaluator = RunStore(evaluator_path, visibility="evaluator")
+    family.require_store(public)
+    family.require_store(evaluator)
+    if public.identity == evaluator.identity:
+        raise ValueError("production stores must be distinct")
+    return public, evaluator
 
 
 def provision_production_family(

@@ -175,6 +175,7 @@ class ApplicationService:
         prompt_version: str | None = None,
         model_config_hash: str | None = None,
         require_corpus_family: bool = False,
+        workflow_visibility: Literal["public", "evaluator"] = "public",
     ) -> "ApplicationService":
         """Construct a bound service only from controller-observed repository state."""
         snapshot = capture_repository_snapshot(repository, expected_commit=expected_commit)
@@ -195,6 +196,8 @@ class ApplicationService:
             raise ValueError("trusted corpus family configuration is required")
         if family is not None:
             family.reject_repository_overlap(repository)
+        if workflow_visibility == "evaluator" and purpose != "evaluation":
+            raise ValueError("evaluator workflow is reserved for evaluation")
         confirmed = capture_repository_snapshot(repository, expected_commit=snapshot.commit)
         if confirmed != snapshot:
             raise ValueError("repository changed while release configuration was captured")
@@ -207,11 +210,28 @@ class ApplicationService:
             case_registry_hash=registry_hash,
             corpus_ledger_namespace_hash=(family.namespace_hash if family else None),
         )
-        ordinary = cls.configured()
-        if family is not None:
-            family.require_store(ordinary.store)
-            if purpose == "evaluation":
-                family.require_store(ordinary.evaluator_store)
+        if family is not None and purpose == "evaluation":
+            from gpu_agent.benchmark.controller_config import (
+                validate_production_store_configuration,
+            )
+
+            public, evaluator = validate_production_store_configuration(family, repository)
+            knowledge = None
+            if cache := os.environ.get("GPU_AGENT_KNOWLEDGE_INDEX"):
+                try:
+                    knowledge = KnowledgeIndex.load(Path(cache))
+                except KnowledgeError:
+                    pass
+            ordinary = cls(
+                public if workflow_visibility == "public" else evaluator,
+                evaluator,
+                knowledge=knowledge,
+                knowledge_version=os.environ.get("GPU_AGENT_KNOWLEDGE_VERSION", ""),
+            )
+        else:
+            ordinary = cls.configured()
+            if family is not None:
+                family.require_store(ordinary.store)
         return cls(
             ordinary.store,
             ordinary.evaluator_store,

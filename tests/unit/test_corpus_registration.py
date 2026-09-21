@@ -639,6 +639,63 @@ def test_public_and_evaluator_stores_resolve_one_private_namespace(tmp_path, mon
     assert CorpusFamily.configured(evaluator).namespace_hash == family.namespace_hash
 
 
+def test_family_pin_rejects_replaced_store_identity(tmp_path):
+    from gpu_agent.benchmark.ledger import CorpusFamily
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    public = tmp_path / "public"
+    family = CorpusFamily.provision(
+        tmp_path / "controller",
+        public_store=public,
+        evaluator_store=tmp_path / "evaluator",
+        repository=repository,
+    )
+    displaced = tmp_path / "public-old"
+    public.rename(displaced)
+    public.mkdir(mode=0o700)
+    (public / ".corpus-family.json").write_bytes(
+        (displaced / ".corpus-family.json").read_bytes()
+    )
+
+    with pytest.raises(ValueError, match="identity|pin"):
+        CorpusFamily.open(family.root)
+
+
+def test_family_open_rejects_legacy_schema_without_mutation(tmp_path):
+    import json
+
+    from gpu_agent.benchmark.ledger import CorpusFamily
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    family = CorpusFamily.provision(
+        tmp_path / "controller",
+        public_store=tmp_path / "public",
+        evaluator_store=tmp_path / "evaluator",
+        repository=repository,
+    )
+    config_path = family.root / "family.json"
+    config = json.loads(config_path.read_text())
+    config["schema_version"] = 2
+    config.pop("public_store_pin", None)
+    config.pop("evaluator_store_pin", None)
+    config_path.write_text(json.dumps(config))
+    before = {
+        str(path.relative_to(tmp_path)): path.read_bytes() if path.is_file() else None
+        for path in tmp_path.rglob("*")
+    }
+
+    with pytest.raises(ValueError):
+        CorpusFamily.open(family.root)
+
+    after = {
+        str(path.relative_to(tmp_path)): path.read_bytes() if path.is_file() else None
+        for path in tmp_path.rglob("*")
+    }
+    assert after == before
+
+
 def test_controller_key_root_cannot_overlap_publishable_store_or_repository(tmp_path):
     from gpu_agent.benchmark.ledger import CorpusFamily
 

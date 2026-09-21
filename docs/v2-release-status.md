@@ -25,6 +25,10 @@ work. A passing unit test or a configured command is not counted as a live GPU/m
   content hash.
 - Native A–E evaluation scheduling, cost reservations, holdout aliases, blind views, metrics,
   and evaluator-private score bindings.
+- Split-store execution keeps holdout source/model/candidate/verification evidence in the exact
+  evaluator family store while the public coordinator retains only blind commitments. Production
+  family schema v3 pins resolved path, device, inode, and visibility; older families are rejected
+  without migration and cannot supply final evidence.
 - Evidence-derived release gate that validates ledger membership, 16+8 counts, sanitizer
   coverage, private diversity, 240 development + 120 holdout units, same-commit/config/cutoff
   lineage, live acceptance selections, and release-test evidence.

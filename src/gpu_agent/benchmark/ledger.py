@@ -6,6 +6,7 @@ import hmac
 import json
 import os
 import re
+import stat
 import tempfile
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
@@ -18,17 +19,45 @@ from gpu_agent.contracts import RunBinding, RunManifest, RunStatus, StateEvent, 
 from gpu_agent.store import (
     EvaluationRunLease,
     RunStore,
+    RunStoreIdentity,
     read_regular,
     reject_symlinks,
     sync_directory,
 )
 
 
+class _StorePin(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    resolved_path: str
+    device: int = Field(ge=0)
+    inode: int = Field(ge=1)
+    visibility: Visibility
+
+    @classmethod
+    def from_identity(cls, identity: RunStoreIdentity) -> "_StorePin":
+        return cls(
+            resolved_path=identity.resolved_root,
+            device=identity.device,
+            inode=identity.inode,
+            visibility=identity.visibility,
+        )
+
+    def identity(self) -> RunStoreIdentity:
+        return RunStoreIdentity(
+            resolved_root=self.resolved_path,
+            device=self.device,
+            inode=self.inode,
+            visibility=self.visibility,
+        )
+
+
 class _FamilyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
-    schema_version: Literal[2] = 2
+    schema_version: Literal[3] = 3
     public_store: str
     evaluator_store: str
+    public_store_pin: _StorePin
+    evaluator_store_pin: _StorePin
     schedule_authority_profile: Literal["UNCONFIGURED", "PRODUCTION", "TEST_ONLY"] = "UNCONFIGURED"
     schedule_public_key_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
@@ -179,34 +208,45 @@ class CorpusFamily:
     def namespace_hash(self) -> str:
         return self.ledger.namespace_hash
 
-    def _marker_bytes(self) -> bytes:
+    def _store_pin(self, visibility: Visibility) -> _StorePin:
+        return (
+            self._config.public_store_pin
+            if visibility == "public"
+            else self._config.evaluator_store_pin
+        )
+
+    def _marker_bytes(self, visibility: Visibility) -> bytes:
         return json.dumps(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "ledger_namespace_hash": self.namespace_hash,
                 "schedule_authority_profile": self._config.schedule_authority_profile,
                 "schedule_public_key_hash": self._config.schedule_public_key_hash,
+                "store_pin": self._store_pin(visibility).model_dump(mode="json"),
             },
             sort_keys=True,
             separators=(",", ":"),
         ).encode()
 
-    def _pin_store(self, path: Path) -> None:
+    def _pin_store(self, path: Path, visibility: Visibility) -> None:
         reject_symlinks(path)
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
         marker = path / ".corpus-family.json"
-        expected = self._marker_bytes()
+        expected = self._marker_bytes(visibility)
         _atomic_create(marker, expected, 0o600)
         if read_regular(marker, 64 * 1024) != expected:
             raise ValueError("corpus store is already pinned to another family")
 
     def _verify_store_pins(self) -> None:
-        for path in (
-            Path(self._config.public_store),
-            Path(self._config.evaluator_store),
-        ):
+        stores: tuple[tuple[Path, Visibility], ...] = (
+            (Path(self._config.public_store), "public"),
+            (Path(self._config.evaluator_store), "evaluator"),
+        )
+        for path, visibility in stores:
+            store = RunStore(path, visibility=visibility)
+            if store.identity != self._store_pin(visibility).identity():
+                raise ValueError("corpus store identity pin changed")
             marker = path / ".corpus-family.json"
-            if read_regular(marker, 64 * 1024) != self._marker_bytes():
+            if read_regular(marker, 64 * 1024) != self._marker_bytes(visibility):
                 raise ValueError("corpus store family pin is missing or changed")
 
     @classmethod
@@ -289,9 +329,16 @@ class CorpusFamily:
             for store in (public, evaluator, repo)
         ):
             raise ValueError("corpus controller state must be separate from stores and repository")
+        if schedule_authority_profile == "PRODUCTION" and any(
+            _is_within(left, right) or _is_within(right, left)
+            for left, right in ((public, evaluator), (public, repo), (evaluator, repo))
+        ):
+            raise ValueError("production stores and repository must not overlap")
         reject_symlinks(controller_root)
         controller_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(controller_root, 0o700)
+        public_capability = RunStore(public, visibility="public")
+        evaluator_capability = RunStore(evaluator, visibility="evaluator")
         if (schedule_authority_profile == "UNCONFIGURED") != (schedule_public_key is None):
             raise ValueError("schedule authority profile and public key differ")
         key_hash = (
@@ -302,6 +349,8 @@ class CorpusFamily:
         config = _FamilyConfig(
             public_store=str(public),
             evaluator_store=str(evaluator),
+            public_store_pin=_StorePin.from_identity(public_capability.identity),
+            evaluator_store_pin=_StorePin.from_identity(evaluator_capability.identity),
             schedule_authority_profile=schedule_authority_profile,
             schedule_public_key_hash=key_hash,
         )
@@ -317,8 +366,8 @@ class CorpusFamily:
                 raise ValueError("schedule public key differs from family configuration")
         family = cls(controller_root, observed, CorpusLedger(controller_root / "ledger"))
         family._verify_schedule_key()
-        family._pin_store(public)
-        family._pin_store(evaluator)
+        family._pin_store(public, "public")
+        family._pin_store(evaluator, "evaluator")
         return family
 
     @classmethod
@@ -336,7 +385,32 @@ class CorpusFamily:
             for store in (public, evaluator)
         ):
             raise ValueError("corpus family store boundaries are unsafe")
-        family = cls(controller_root, config, CorpusLedger(controller_root / "ledger"))
+        stores: tuple[tuple[Path, _StorePin, Visibility], ...] = (
+            (public, config.public_store_pin, "public"),
+            (evaluator, config.evaluator_store_pin, "evaluator"),
+        )
+        for path, pin, visibility in stores:
+            reject_symlinks(path)
+            info = path.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISDIR(info.st_mode)
+                or info.st_uid != os.geteuid()
+                or stat.S_IMODE(info.st_mode) != 0o700
+            ):
+                raise ValueError("corpus store is unavailable or unsafe")
+            observed = RunStoreIdentity(
+                resolved_root=str(path.resolve(strict=True)),
+                device=info.st_dev,
+                inode=info.st_ino,
+                visibility=visibility,
+            )
+            if observed != pin.identity():
+                raise ValueError("corpus store identity pin changed")
+        family = cls(
+            controller_root,
+            config,
+            CorpusLedger(controller_root / "ledger", create=False),
+        )
         family._verify_schedule_key()
         family._verify_store_pins()
         return family
@@ -351,12 +425,8 @@ class CorpusFamily:
         return family
 
     def require_store(self, store: RunStore) -> None:
-        expected = (
-            Path(self._config.public_store)
-            if store.visibility == "public"
-            else Path(self._config.evaluator_store)
-        )
-        if store.root != expected:
+        expected = self._store_pin(store.visibility).identity()
+        if store.identity != expected:
             raise ValueError("store does not belong to the configured corpus family")
 
     def _verify_schedule_key(self) -> None:
@@ -385,10 +455,10 @@ class CorpusFamily:
 
     def corpus_store(self, visibility: Visibility) -> RunStore:
         """Open one store fixed by the controller-private family configuration."""
-        path = (
-            Path(self._config.public_store)
+        path = Path(
+            self._config.public_store
             if visibility == "public"
-            else Path(self._config.evaluator_store)
+            else self._config.evaluator_store
         )
         store = RunStore(path, visibility=visibility)
         self.require_store(store)
@@ -401,22 +471,41 @@ class CorpusFamily:
 
 
 class CorpusLedger:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, create: bool = True) -> None:
         self.root = root.absolute()
         reject_symlinks(self.root)
-        self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(self.root, 0o700)
+        if create:
+            self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(self.root, 0o700)
+        elif not self.root.is_dir() or self.root.stat().st_mode & 0o077:
+            raise ValueError("corpus ledger root is unavailable or unsafe")
         self.key_path = self.root / "identity.key"
         init_path = self.root / ".init-lock"
-        init_fd = os.open(init_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+        flags = os.O_RDWR | os.O_NOFOLLOW | (os.O_CREAT if create else 0)
+        init_fd = os.open(init_path, flags, 0o600)
         try:
             fcntl.flock(init_fd, fcntl.LOCK_EX)
-            if not self.key_path.exists():
+            init_info = os.fstat(init_fd)
+            if (
+                not stat.S_ISREG(init_info.st_mode)
+                or init_info.st_uid != os.geteuid()
+                or stat.S_IMODE(init_info.st_mode) != 0o600
+                or init_info.st_nlink != 1
+            ):
+                raise ValueError("corpus ledger lock is unavailable or unsafe")
+            if create and not self.key_path.exists():
                 _atomic_create(self.key_path, os.urandom(32), 0o600)
             self.__key = read_regular(self.key_path, 32)
         finally:
             os.close(init_fd)
-        if len(self.__key) != 32 or self.key_path.stat().st_mode & 0o077:
+        key_info = self.key_path.stat(follow_symlinks=False)
+        if (
+            len(self.__key) != 32
+            or not stat.S_ISREG(key_info.st_mode)
+            or key_info.st_uid != os.geteuid()
+            or stat.S_IMODE(key_info.st_mode) != 0o600
+            or key_info.st_nlink != 1
+        ):
             raise ValueError("corpus ledger key is unavailable or has unsafe permissions")
         self.namespace_hash = hashlib.sha256(
             b"gpu-agent-corpus-ledger-v2\0" + self.__key
