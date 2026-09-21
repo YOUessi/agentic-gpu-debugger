@@ -253,9 +253,11 @@ def native_evaluation_executor(
         service._binding = service.binding.model_copy(
             update={"repository": capture_repository_snapshot(test_repository)}
         )
-    exact_verification_source = requested_split == "public_exact"
+    exact_verification_source = requested_split in {"public_exact", "private_exact"}
     split = (
-        "private" if eight_private else ("public" if exact_verification_source else requested_split)
+        "private"
+        if eight_private or requested_split == "private_exact"
+        else ("public" if exact_verification_source else requested_split)
     )
     if split not in {"public", "private"}:
         raise ValueError("invalid native evaluation fixture split")

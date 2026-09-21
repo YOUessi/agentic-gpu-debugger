@@ -1187,6 +1187,36 @@ class HoldoutController:
             hashlib.sha256,
         ).hexdigest()[:32]
 
+    def _validate_execution_claim(
+        self,
+        root_fd: int,
+        root_identity: os.stat_result,
+        lock_fd: int,
+        lock_name: str,
+    ) -> None:
+        root_descriptor = os.fstat(root_fd)
+        root_path = os.stat(self.evaluator.root, follow_symlinks=False)
+        lock_descriptor = os.fstat(lock_fd)
+        lock_path = os.stat(lock_name, dir_fd=root_fd, follow_symlinks=False)
+        if (
+            not stat.S_ISDIR(root_descriptor.st_mode)
+            or not stat.S_ISDIR(root_path.st_mode)
+            or root_descriptor.st_mode & 0o077
+            or (root_descriptor.st_dev, root_descriptor.st_ino)
+            != (root_identity.st_dev, root_identity.st_ino)
+            or (root_descriptor.st_dev, root_descriptor.st_ino)
+            != (root_path.st_dev, root_path.st_ino)
+            or not stat.S_ISREG(lock_descriptor.st_mode)
+            or not stat.S_ISREG(lock_path.st_mode)
+            or stat.S_IMODE(lock_descriptor.st_mode) != 0o600
+            or stat.S_IMODE(lock_path.st_mode) != 0o600
+            or lock_descriptor.st_nlink != 1
+            or lock_path.st_nlink != 1
+            or (lock_descriptor.st_dev, lock_descriptor.st_ino)
+            != (lock_path.st_dev, lock_path.st_ino)
+        ):
+            raise ValueError("holdout execution claim changed or became unsafe")
+
     @contextmanager
     def _execution_claim(self, execution_run_id: str) -> Iterator[None]:
         """Serialize one deterministic evaluator transaction across threads/processes."""
@@ -1203,48 +1233,20 @@ class HoldoutController:
             fd = -1
             try:
                 root_info = os.fstat(root_fd)
-                root_path_info = os.stat(self.evaluator.root, follow_symlinks=False)
-                if (
-                    not stat.S_ISDIR(root_info.st_mode)
-                    or root_info.st_mode & 0o077
-                    or (root_info.st_dev, root_info.st_ino)
-                    != (root_path_info.st_dev, root_path_info.st_ino)
-                ):
-                    raise ValueError("holdout execution claim root is unsafe")
+                lock_name = f".holdout-execution-{execution_run_id}.lock"
                 fd = os.open(
-                    f".holdout-execution-{execution_run_id}.lock",
+                    lock_name,
                     os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW,
                     0o600,
                     dir_fd=root_fd,
                 )
-                info = os.fstat(fd)
-                if (
-                    not stat.S_ISREG(info.st_mode)
-                    or stat.S_IMODE(info.st_mode) != 0o600
-                    or info.st_nlink != 1
-                ):
-                    raise ValueError("holdout execution claim must be an owner-only regular file")
+                self._validate_execution_claim(root_fd, root_info, fd, lock_name)
                 fcntl.flock(fd, fcntl.LOCK_EX)
-                current_root = os.stat(self.evaluator.root, follow_symlinks=False)
-                if (root_info.st_dev, root_info.st_ino) != (
-                    current_root.st_dev,
-                    current_root.st_ino,
-                ):
-                    raise ValueError("holdout execution claim root changed")
-                yield
-                current_root = os.stat(self.evaluator.root, follow_symlinks=False)
-                current_lock = os.stat(
-                    f".holdout-execution-{execution_run_id}.lock",
-                    dir_fd=root_fd,
-                    follow_symlinks=False,
-                )
-                if (
-                    (root_info.st_dev, root_info.st_ino)
-                    != (current_root.st_dev, current_root.st_ino)
-                    or (info.st_dev, info.st_ino)
-                    != (current_lock.st_dev, current_lock.st_ino)
-                ):
-                    raise ValueError("holdout execution claim changed")
+                self._validate_execution_claim(root_fd, root_info, fd, lock_name)
+                try:
+                    yield
+                finally:
+                    self._validate_execution_claim(root_fd, root_info, fd, lock_name)
             except OSError as exc:
                 raise ValueError("holdout execution claim is unavailable or unsafe") from exc
             finally:

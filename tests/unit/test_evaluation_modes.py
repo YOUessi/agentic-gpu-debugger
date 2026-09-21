@@ -1835,6 +1835,18 @@ def prepared_holdout_repair_execution(native_evaluation_executor, monkeypatch):
     )
 
 
+@pytest.mark.parametrize("native_evaluation_executor", ["private_exact"], indirect=True)
+def test_task2_holdout_repair_transaction_completes_and_recovers_exactly(
+    prepared_holdout_repair_execution, native_evaluation_executor
+):
+    case = prepared_holdout_repair_execution
+    public = case.controller.complete_execution(case.prepared, case.native)
+    assert (
+        case.controller.recover_execution(case.batch, case.item, case.attempt)
+        == public
+    )
+
+
 @pytest.mark.parametrize(
     "field,replacement",
     [
@@ -1901,7 +1913,7 @@ def test_task2_holdout_completion_rejects_dangling_provider_started(
         ("verification_origin", "evaluation verification topology is invalid"),
     ],
 )
-@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+@pytest.mark.parametrize("native_evaluation_executor", ["private_exact"], indirect=True)
 def test_task2_holdout_completion_rejects_untrusted_child_artifacts(
     prepared_holdout_repair_execution, native_evaluation_executor, fault, error
 ):
@@ -2212,6 +2224,81 @@ def test_task2_execution_directory_swap_between_probe_and_use_fails_closed(
             )
         else:
             case.controller.recover_execution(case.batch, case.item, case.attempt)
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_execution_claim_rejects_path_replacement_while_waiting(
+    prepared_holdout_execution, native_evaluation_executor, monkeypatch
+):
+    import fcntl
+    import os
+    import threading
+
+    import gpu_agent.benchmark.holdout as holdout_module
+
+    case = prepared_holdout_execution
+    execution_id = case.prepared.execution_run_id
+    lock_path = case.evaluator.root / f".holdout-execution-{execution_id}.lock"
+    original_flock = holdout_module.fcntl.flock
+    old_fd = os.open(lock_path, os.O_RDWR | os.O_NOFOLLOW)
+    original_flock(old_fd, fcntl.LOCK_EX)
+    waiting = threading.Event()
+    body_entered = threading.Event()
+    replacement_fd = -1
+
+    def observed_flock(fd, operation):
+        waiting.set()
+        return original_flock(fd, operation)
+
+    def claim():
+        with case.controller._execution_claim(execution_id):
+            body_entered.set()
+
+    monkeypatch.setattr(holdout_module.fcntl, "flock", observed_flock)
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(claim)
+            assert waiting.wait(timeout=5)
+            lock_path.unlink()
+            replacement_fd = os.open(
+                lock_path,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW,
+                0o600,
+            )
+            original_flock(replacement_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            original_flock(old_fd, fcntl.LOCK_UN)
+            with pytest.raises(ValueError):
+                future.result(timeout=5)
+        assert not body_entered.is_set()
+    finally:
+        original_flock(old_fd, fcntl.LOCK_UN)
+        os.close(old_fd)
+        if replacement_fd >= 0:
+            original_flock(replacement_fd, fcntl.LOCK_UN)
+            os.close(replacement_fd)
+
+
+@pytest.mark.parametrize("mutation", ["chmod", "hardlink"])
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_execution_claim_rejects_post_acquire_metadata_mutation(
+    prepared_holdout_execution, native_evaluation_executor, mutation
+):
+    import os
+
+    case = prepared_holdout_execution
+    execution_id = case.prepared.execution_run_id
+    lock_path = case.evaluator.root / f".holdout-execution-{execution_id}.lock"
+    linked_path = lock_path.with_suffix(".linked")
+    body_entered = False
+
+    with pytest.raises(ValueError):
+        with case.controller._execution_claim(execution_id):
+            body_entered = True
+            if mutation == "chmod":
+                lock_path.chmod(0o640)
+            else:
+                os.link(lock_path, linked_path)
+    assert body_entered
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
