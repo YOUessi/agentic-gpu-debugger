@@ -107,6 +107,7 @@ def test_holdout_score_uses_alias_cutoff_after_later_commit(native_evaluation_ex
         executor.service,
         executor.corpus,
         executor.sources,
+        holdout_service=executor.holdout_service,
         holdout_controller=controller,
         holdout_batch=batch,
         _corpus_family=executor._corpus_family,

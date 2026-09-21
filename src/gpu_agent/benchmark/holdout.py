@@ -1198,9 +1198,14 @@ class HoldoutController:
     ) -> EvaluationRecord:
         """Reload a scored record for the metric module's persisted-reference API."""
         private_score, public, native = self._load_score(binding, _context=_context)
-        raw = native.model_dump(mode="json")
+        # Metrics are keyed by the immutable public record binding.  Native
+        # evaluator evidence supplies the adjudicated diagnosis and verification
+        # result, but its private diagnosis-run identity must not replace the
+        # public record identity returned by this persisted-reference API.
+        raw = public.model_dump(mode="json")
         build = native.executed_checks.get("verification/build")
         raw.update(
+            diagnosis=native.diagnosis,
             score=private_score.score,
             evaluator_labels=private_score.labels,
             should_be_inconclusive=private_score.should_be_inconclusive,
