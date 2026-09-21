@@ -951,7 +951,7 @@ def test_mode_e_rejects_unattested_response_policy(
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
-def test_holdout_alias_and_score_binding_never_publish_private_values(
+def test_holdout_alias_and_score_binding_never_publish_private_identity(
     oob_service, tmp_path, monkeypatch, native_evaluation_executor
 ):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
@@ -1596,11 +1596,14 @@ def test_executor_rejects_incomplete_or_unbounded_acquisition_usage(
 
 
 @pytest.fixture
-def completed_holdout_execution(native_evaluation_executor):
-    from gpu_agent.agent.models import DiagnosisResult
+def prepared_holdout_execution(native_evaluation_executor, monkeypatch):
+    from gpu_agent.agent.models import AcquisitionUsage, AgentBudget
     from gpu_agent.benchmark import evaluation as evaluation_module
     from gpu_agent.benchmark.evaluation import EvaluationAttempt, EvaluationScheduleItem
+    from gpu_agent.benchmark.executor import registered_cases
     from gpu_agent.benchmark.holdout import HoldoutController
+    from gpu_agent.evidence.repository import EvidenceRepository
+    from gpu_agent.service import ApplicationService
 
     executor = native_evaluation_executor
     controller = HoldoutController(
@@ -1630,21 +1633,71 @@ def completed_holdout_execution(native_evaluation_executor):
     prepared = controller.reserve_execution(
         batch, evaluation_run_id=attempt.run_id, item=item, attempt=attempt
     )
-    diagnosis = DiagnosisResult.inconclusive("TEST_NOT_RUN")
-    diagnosis_ref = executor.corpus.put(
-        prepared.diagnosis_run_id,
-        "diagnosis.json",
-        diagnosis.model_dump_json().encode(),
-        "evaluator",
+    evaluator_service = ApplicationService(
+        executor.corpus,
+        executor.corpus,
+        provider=executor.service._provider,
+        backend_factory=executor.service._backend_factory,
+        knowledge=executor.service.knowledge,
+        knowledge_version=executor.service.knowledge_version,
+        _binding=executor.service.binding,
+        _evaluation_schedule_verifier=executor._schedule_verifier,
     )
-    evidence_ref = executor.corpus.put(
-        prepared.diagnosis_run_id,
-        "evidence/bundle.json",
-        b'{"schema_version":1,"PRIVATE-EVIDENCE-CANARY":true}',
-        "evaluator",
+    monkeypatch.setattr(
+        executor.corpus,
+        "validate_and_create_evaluation_child",
+        lambda verifier, unit: executor.corpus.load(prepared.diagnosis_run_id)
+        if unit == prepared.evaluation_unit
+        else (_ for _ in ()).throw(ValueError("unexpected evaluation unit")),
     )
-    executor.corpus.transition(prepared.diagnosis_run_id, "RUNNING", "FINALIZING")
-    executor.corpus.transition(prepared.diagnosis_run_id, "COMPLETED", None)
+    case = registered_cases(
+        executor.corpus,
+        executor.service.binding,
+        executor._corpus_family,
+        cutoff=batch.corpus_cutoff,
+    )["case_0100"]
+    run = evaluator_service.diagnose(
+        executor.sources["case_0100"],
+        mode=item.mode,
+        required_tools=(case.target_tool,),
+        expected_source_hash=case.source_hash,
+        evaluation_unit=prepared.evaluation_unit,
+    )
+    diagnosis = evaluator_service.diagnosis(run.id)
+    diagnosis_ref = next(ref for ref in run.artifact_refs if ref.name == "diagnosis.json")
+    evidence_refs = [ref for ref in run.artifact_refs if ref.name == "evidence/bundle.json"]
+    bundle = EvidenceRepository(executor.corpus, evaluator=True).view(run.id)
+    budget = AgentBudget.model_validate_json(
+        executor.corpus.read(
+            next(ref for ref in run.artifact_refs if ref.name == "agent/final-budget.json")
+        )
+    )
+    acquisition = AcquisitionUsage.model_validate_json(
+        executor.corpus.read(
+            next(ref for ref in run.artifact_refs if ref.name == "agent/acquisition-usage.json")
+        )
+    )
+    diagnostic_calls = (
+        acquisition.sanitizer_calls
+        + acquisition.retrieval_calls
+        + int(bundle.build_result is not None)
+        + int(bundle.execution_result is not None)
+    )
+    usage = {
+        "physical_calls": budget.llm_calls,
+        "sanitizer_calls": acquisition.sanitizer_calls,
+        "retrieval_calls": acquisition.retrieval_calls,
+        "sanitizer_attempts": budget.sanitizer_calls,
+        "retrieval_attempts": budget.rag_calls,
+        "build_calls": int(bundle.build_result is not None),
+        "runtime_calls": int(bundle.execution_result is not None),
+        "diagnostic_tool_calls": diagnostic_calls,
+        "tool_calls": diagnostic_calls,
+        "total_sanitizer_calls": acquisition.sanitizer_calls,
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+    }
     private_case_id, private_template_id = controller.resolve_private(batch, item.case_id)
     native = evaluation_module.EvaluationRecord(
         record_id=prepared.diagnosis_run_id,
@@ -1653,24 +1706,27 @@ def completed_holdout_execution(native_evaluation_executor):
             corpus_cutoff=batch.corpus_cutoff,
             diagnosis_run_id=prepared.diagnosis_run_id,
             diagnosis_hash=diagnosis_ref.sha256,
-            evidence_hash=evidence_ref.sha256,
+            evidence_hash=evidence_refs[-1].sha256,
             provider_invocation_hashes=[],
         ),
         case_id=private_case_id,
         template_id=private_template_id,
         mode=item.mode,
         repeat=item.repeat,
-        input_hash="1" * 64,
-        evidence_hash=evidence_ref.sha256,
-        executed_checks={},
+        input_hash=case.source_hash,
+        evidence_hash=evidence_refs[-1].sha256,
+        executed_checks={
+            result.tool_result.typed_payload.tool: result.check_outcome
+            for result in bundle.sanitizer_results
+            if result.tool_result is not None
+        },
         status="INCONCLUSIVE",
         diagnosis=diagnosis.model_dump(mode="json"),
-        usage={"physical_calls": 0},
-        latency_ms=0,
+        usage=usage,
+        latency_ms=(run.events[-1].at - run.events[0].at).total_seconds() * 1000,
         cost_usd=0,
-        failure_reason="TEST_NOT_RUN",
+        failure_reason=None,
     )
-    public = controller.complete_execution(prepared, native)
     return SimpleNamespace(
         controller=controller,
         batch=batch,
@@ -1678,9 +1734,253 @@ def completed_holdout_execution(native_evaluation_executor):
         attempt=attempt,
         prepared=prepared,
         native=native,
-        public=public,
         evaluator=executor.corpus,
     )
+
+
+@pytest.fixture
+def completed_holdout_execution(prepared_holdout_execution):
+    case = prepared_holdout_execution
+    case.public = case.controller.complete_execution(case.prepared, case.native)
+    return case
+
+
+@pytest.mark.parametrize(
+    "field,replacement",
+    [
+        ("input_hash", "f" * 64),
+        ("status", "COMPLETED"),
+        ("usage", {"physical_calls": 99}),
+        ("latency_ms", 999.0),
+        ("cost_usd", 99.0),
+        ("failure_reason", "FORGED_FAILURE"),
+        ("verdict", "FORGED_VERDICT"),
+        ("regression_detected", True),
+    ],
+)
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_holdout_completion_rejects_forged_native_summary(
+    prepared_holdout_execution, native_evaluation_executor, field, replacement
+):
+    case = prepared_holdout_execution
+    forged = case.native.model_copy(update={field: replacement})
+    with pytest.raises(ValueError):
+        case.controller.complete_execution(case.prepared, forged)
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_holdout_completion_rejects_dangling_provider_started(
+    prepared_holdout_execution, native_evaluation_executor
+):
+    from gpu_agent.agent.provider import Invocation
+
+    case = prepared_holdout_execution
+    invocation = Invocation(
+        invocation_id="f" * 32,
+        run_id=case.prepared.diagnosis_run_id,
+        kind="plan",
+        attempt=0,
+        state="STARTED",
+        started_at=case.evaluator.load(case.prepared.diagnosis_run_id).events[0].at,
+        configured_model="forged-model",
+        endpoint_host="example.invalid",
+        client_request_id="e" * 32,
+    )
+    _inject_terminal_artifact(
+        case.evaluator,
+        case.prepared.diagnosis_run_id,
+        f"provider/{'f' * 32}/STARTED.json",
+        invocation.model_dump_json().encode(),
+    )
+    with pytest.raises(ValueError):
+        case.controller.complete_execution(case.prepared, case.native)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "candidate_payload",
+        "candidate_status",
+        "candidate_binding",
+        "verification_payload",
+        "verification_status",
+        "verification_binding",
+    ],
+)
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_holdout_completion_rejects_untrusted_child_artifacts(
+    prepared_holdout_execution, native_evaluation_executor, fault
+):
+    case = prepared_holdout_execution
+    candidate = case.evaluator.create_run(
+        "candidate", parent_run_id=case.prepared.diagnosis_run_id
+    )
+    case.evaluator.put(candidate.id, "candidate.json", b"{}", "evaluator")
+    if fault != "candidate_status":
+        case.evaluator.transition(candidate.id, "RUNNING", "FINALIZING")
+        case.evaluator.transition(candidate.id, "COMPLETED", None)
+    if fault == "candidate_binding":
+        _rewrite_manifest(case.evaluator, candidate.id, lambda value: value.update(binding=None))
+    verification = case.evaluator.create_run(
+        "verification", parent_run_id=case.prepared.diagnosis_run_id
+    )
+    case.evaluator.put(verification.id, "verification/result.json", b"{}", "evaluator")
+    if fault != "verification_status":
+        case.evaluator.transition(verification.id, "RUNNING", "FINALIZING")
+        case.evaluator.transition(verification.id, "COMPLETED", None)
+    if fault == "verification_binding":
+        _rewrite_manifest(
+            case.evaluator, verification.id, lambda value: value.update(binding=None)
+        )
+    lineage = case.native.lineage.model_copy(
+        update={
+            "candidate_run_id": candidate.id,
+            "verification_run_id": verification.id,
+            "public_verification_hash": next(
+                ref
+                for ref in case.evaluator.load(verification.id).artifact_refs
+                if ref.name == "verification/result.json"
+            ).sha256,
+        }
+    )
+    forged = case.native.model_copy(
+        update={"lineage": lineage, "patch_hash": "a" * 64, "verdict": "FORGED"}
+    )
+    with pytest.raises(ValueError):
+        case.controller.complete_execution(case.prepared, forged)
+
+
+def _rewrite_manifest(store, run_id, change):
+    path = store.root / run_id / "manifest.json"
+    value = json.loads(path.read_bytes())
+    change(value)
+    path.write_bytes(json.dumps(value, sort_keys=True, separators=(",", ":")).encode())
+
+
+def _inject_terminal_artifact(store, run_id, name, content):
+    artifact_id = "e" * 32
+    artifact_path = store.root / run_id / "artifacts" / artifact_id
+    artifact_path.write_bytes(content)
+    artifact_path.chmod(0o400)
+    manifest_path = store.root / run_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["artifact_refs"].append(
+        {
+            "id": artifact_id,
+            "run_id": run_id,
+            "name": name,
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "visibility": store.visibility,
+            "relative_path": f"{run_id}/artifacts/{artifact_id}",
+            "byte_count": len(content),
+        }
+    )
+    manifest_path.write_bytes(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    )
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_recovery_rejects_orphan_diagnosis(
+    prepared_holdout_execution, native_evaluation_executor
+):
+    case = prepared_holdout_execution
+    import shutil
+
+    shutil.rmtree(case.evaluator.root / case.prepared.execution_run_id)
+    assert (case.evaluator.root / case.prepared.diagnosis_run_id).exists()
+    with pytest.raises(ValueError):
+        case.controller.recover_execution(case.batch, case.item, case.attempt)
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_recovery_rejects_broken_execution_symlink(
+    prepared_holdout_execution, native_evaluation_executor
+):
+    case = prepared_holdout_execution
+    import shutil
+
+    execution_path = case.evaluator.root / case.prepared.execution_run_id
+    shutil.rmtree(execution_path)
+    execution_path.symlink_to(execution_path.with_name("missing-execution"))
+    with pytest.raises(ValueError):
+        case.controller.recover_execution(case.batch, case.item, case.attempt)
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_reservation_does_not_repair_terminal_incomplete_execution(
+    prepared_holdout_execution, native_evaluation_executor
+):
+    case = prepared_holdout_execution
+    import shutil
+
+    shutil.rmtree(case.evaluator.root / case.prepared.diagnosis_run_id)
+    case.evaluator.transition(
+        case.prepared.execution_run_id, "RUNNING", "FINALIZING"
+    )
+    case.evaluator.transition(case.prepared.execution_run_id, "COMPLETED", None)
+    with pytest.raises(ValueError):
+        case.controller.reserve_execution(
+            case.batch,
+            evaluation_run_id=case.attempt.run_id,
+            item=case.item,
+            attempt=case.attempt,
+        )
+    assert not (case.evaluator.root / case.prepared.diagnosis_run_id).exists()
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_reservation_finishes_exact_partial_running_reservation(
+    prepared_holdout_execution, native_evaluation_executor
+):
+    case = prepared_holdout_execution
+    import shutil
+
+    shutil.rmtree(case.evaluator.root / case.prepared.diagnosis_run_id)
+    assert case.evaluator.load(case.prepared.execution_run_id).status == "RUNNING"
+    repeated = case.controller.reserve_execution(
+        case.batch,
+        evaluation_run_id=case.attempt.run_id,
+        item=case.item,
+        attempt=case.attempt,
+    )
+    assert repeated == case.prepared
+    diagnosis = case.evaluator.load(case.prepared.diagnosis_run_id)
+    assert diagnosis.parent_run_id == case.prepared.execution_run_id
+
+
+@pytest.mark.parametrize("terminal", ["FAILED", "CANCELLED"])
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_reservation_rejects_failed_or_cancelled_parent_without_mutation(
+    prepared_holdout_execution, native_evaluation_executor, terminal
+):
+    case = prepared_holdout_execution
+    import shutil
+
+    shutil.rmtree(case.evaluator.root / case.prepared.diagnosis_run_id)
+    case.evaluator.transition(case.prepared.execution_run_id, terminal, None)
+    with pytest.raises(ValueError):
+        case.controller.reserve_execution(
+            case.batch,
+            evaluation_run_id=case.attempt.run_id,
+            item=case.item,
+            attempt=case.attempt,
+        )
+    assert not (case.evaluator.root / case.prepared.diagnosis_run_id).exists()
+
+
+@pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)
+def test_task2_recovery_rejects_non_directory_execution_path(
+    prepared_holdout_execution, native_evaluation_executor
+):
+    case = prepared_holdout_execution
+    import shutil
+
+    execution_path = case.evaluator.root / case.prepared.execution_run_id
+    shutil.rmtree(execution_path)
+    execution_path.write_bytes(b"unsafe")
+    with pytest.raises(ValueError):
+        case.controller.recover_execution(case.batch, case.item, case.attempt)
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private"], indirect=True)

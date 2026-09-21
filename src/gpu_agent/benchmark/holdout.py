@@ -402,6 +402,38 @@ class HoldoutController:
             raise ValueError("holdout execution transaction is invalid")
         return execution, diagnosis
 
+    def _run_path_state(self, run_id: str) -> Literal["absent", "directory"]:
+        path = self.evaluator.root / run_id
+        try:
+            info = os.stat(path, follow_symlinks=False)
+        except FileNotFoundError:
+            return "absent"
+        except OSError as exc:
+            raise ValueError("holdout execution path is unavailable") from exc
+        if not stat.S_ISDIR(info.st_mode):
+            raise ValueError("holdout execution path is unsafe")
+        reject_symlinks(path)
+        return "directory"
+
+    def _validate_execution_parent(
+        self, prepared: PreparedHoldoutExecution, execution: RunManifest
+    ) -> None:
+        expected_origin = ExternalRunOrigin(
+            run_id=prepared.binding.public_evaluation_run_id, visibility="public"
+        )
+        if (
+            execution.kind != "holdout_execution"
+            or execution.parent_run_id is not None
+            or execution.binding != self.binding
+            or execution.external_origin != expected_origin
+            or execution.status not in {RunStatus.RUNNING, RunStatus.COMPLETED}
+        ):
+            raise ValueError("holdout execution transaction is invalid")
+        if execution.status == RunStatus.RUNNING and (
+            execution.current_phase != "PREPARING" or execution.artifact_refs
+        ):
+            raise ValueError("holdout execution transaction is incomplete")
+
     def reserve_execution(
         self,
         batch: HoldoutBatch,
@@ -411,8 +443,11 @@ class HoldoutController:
         attempt: EvaluationAttempt,
     ) -> PreparedHoldoutExecution:
         prepared = self._prepared_execution(batch, evaluation_run_id, item, attempt)
-        execution_path = self.evaluator.root / prepared.execution_run_id
-        if not execution_path.exists():
+        execution_state = self._run_path_state(prepared.execution_run_id)
+        diagnosis_state = self._run_path_state(prepared.diagnosis_run_id)
+        if execution_state == "absent" and diagnosis_state != "absent":
+            raise ValueError("holdout execution transaction is invalid")
+        if execution_state == "absent":
             self.evaluator.create_run(
                 "holdout_execution",
                 binding=self.binding,
@@ -424,8 +459,16 @@ class HoldoutController:
             self.evaluator.transition(
                 prepared.execution_run_id, RunStatus.RUNNING, "PREPARING"
             )
-        diagnosis_path = self.evaluator.root / prepared.diagnosis_run_id
-        if not diagnosis_path.exists():
+            execution = self.evaluator.load(prepared.execution_run_id)
+        else:
+            execution = self.evaluator.load(prepared.execution_run_id)
+            self._validate_execution_parent(prepared, execution)
+            if execution.status == RunStatus.COMPLETED:
+                if diagnosis_state == "absent":
+                    raise ValueError("holdout execution transaction is incomplete")
+                self._recover_prepared_execution(prepared)
+                return prepared
+        if diagnosis_state == "absent":
             self.evaluator.create_run(
                 "diagnosis",
                 parent_run_id=prepared.execution_run_id,
@@ -449,72 +492,42 @@ class HoldoutController:
 
     def _validate_native_execution(
         self, prepared: PreparedHoldoutExecution, native: EvaluationRecord
-    ) -> None:
+    ) -> PublicEvaluationRecord:
         _, diagnosis = self._validate_execution_reservation(prepared)
-        lineage = native.lineage
-        if not isinstance(lineage, NativeEvaluationLineage):
+        if diagnosis.status != RunStatus.COMPLETED:
             raise ValueError("holdout native record is invalid")
-        if (
-            diagnosis.status != RunStatus.COMPLETED
-            or native.record_id != diagnosis.id
-            or lineage.diagnosis_run_id != diagnosis.id
-            or native.corpus_cutoff != prepared.binding.corpus_cutoff
-            or lineage.corpus_cutoff != prepared.binding.corpus_cutoff
-            or native.case_id != prepared.binding.private_case_id
-            or native.template_id != prepared.binding.private_template_id
-            or native.mode != prepared.evaluation_unit.mode
-            or native.repeat != prepared.evaluation_unit.repeat
-        ):
-            raise ValueError("holdout native record is invalid")
-        diagnosis_ref = self._one_named_ref(diagnosis, "diagnosis.json")
-        evidence_refs = [
-            ref for ref in diagnosis.artifact_refs if ref.name == "evidence/bundle.json"
-        ]
-        if not evidence_refs:
-            raise ValueError("holdout native record is invalid")
-        diagnosis_payload = json.loads(self.evaluator.read(diagnosis_ref))
-        self.evaluator.read(evidence_refs[-1])
-        terminal_provider_hashes = [
-            ref.sha256
-            for ref in diagnosis.artifact_refs
-            if ref.name.startswith("provider/")
-            and not ref.name.endswith("/STARTED.json")
-        ]
-        if (
-            diagnosis_ref.sha256 != lineage.diagnosis_hash
-            or diagnosis_payload != native.diagnosis
-            or evidence_refs[-1].sha256 != lineage.evidence_hash
-            or native.evidence_hash != lineage.evidence_hash
-            or terminal_provider_hashes != lineage.provider_invocation_hashes
-        ):
-            raise ValueError("holdout native record is invalid")
-        children = self.evaluator.children(diagnosis.id)
-        candidates = [run for run in children if run.kind == "candidate"]
-        verifications = [run for run in children if run.kind == "verification"]
-        if len(candidates) > 1 or len(verifications) > 1:
-            raise ValueError("holdout native record is invalid")
-        if lineage.candidate_run_id is None:
-            if candidates or native.patch_hash is not None:
-                raise ValueError("holdout native record is invalid")
-        else:
-            if len(candidates) != 1 or candidates[0].id != lineage.candidate_run_id:
-                raise ValueError("holdout native record is invalid")
-            candidate_ref = self._one_named_ref(candidates[0], "candidate.json")
-            self.evaluator.read(candidate_ref)
-            if native.patch_hash is None:
-                raise ValueError("holdout native record is invalid")
-        if lineage.verification_run_id is None:
-            if verifications or lineage.public_verification_hash is not None:
-                raise ValueError("holdout native record is invalid")
-        else:
-            if len(verifications) != 1 or verifications[0].id != lineage.verification_run_id:
-                raise ValueError("holdout native record is invalid")
-            verification_ref = self._one_named_ref(
-                verifications[0], "verification/result.json"
-            )
-            self.evaluator.read(verification_ref)
-            if verification_ref.sha256 != lineage.public_verification_hash:
-                raise ValueError("holdout native record is invalid")
+        item = EvaluationScheduleItem(
+            ordinal=prepared.binding.ordinal,
+            case_id=prepared.binding.private_case_id,
+            template_id=prepared.binding.private_template_id,
+            mode=prepared.evaluation_unit.mode,
+            repeat=prepared.evaluation_unit.repeat,
+            split="holdout",
+            holdout_proof=prepared.evaluation_unit.holdout_proof,
+        )
+        attempt = EvaluationAttempt(
+            run_id=prepared.binding.public_evaluation_run_id,
+            ordinal=prepared.binding.ordinal,
+            schedule_hash=prepared.binding.schedule_hash,
+            corpus_cutoff=prepared.binding.corpus_cutoff,
+            idempotency_key=prepared.evaluation_unit.idempotency_key,
+            reserved_cost_usd=prepared.evaluation_unit.reserved_cost_usd,
+        )
+        from gpu_agent.benchmark.executor import validate_evaluation_record
+
+        return validate_evaluation_record(
+            self.evaluator,
+            native,
+            item,
+            attempt,
+            self.binding,
+            self.evaluator,
+            self.evaluator,
+            self._schedule_family,
+            prepared.binding.private_case_id,
+            diagnosis_parent_run_id=prepared.execution_run_id,
+            expected_visibility="evaluator",
+        )
 
     def _execution_commitment(
         self, batch: HoldoutBatch, prepared: PreparedHoldoutExecution, native_hash: str
@@ -532,15 +545,14 @@ class HoldoutController:
         self,
         batch: HoldoutBatch,
         prepared: PreparedHoldoutExecution,
-        native: EvaluationRecord,
+        native: PublicEvaluationRecord,
         native_hash: str,
     ) -> PublicEvaluationRecord:
         lineage = native.lineage
         if not isinstance(lineage, NativeEvaluationLineage):
             raise ValueError("holdout native record is invalid")
-        native_public = native.public()
         fields = {
-            name: getattr(native_public, name) for name in PublicEvaluationRecord.model_fields
+            name: getattr(native, name) for name in PublicEvaluationRecord.model_fields
         }
         fields.update(
             record_id=hashlib.sha256(
@@ -604,9 +616,9 @@ class HoldoutController:
             if self.evaluator.read(native_ref) != native_content:
                 raise ValueError("completed holdout execution differs")
             return recovered
-        self._validate_native_execution(prepared, native_record)
+        validated_native = self._validate_native_execution(prepared, native_record)
         native_hash = hashlib.sha256(native_content).hexdigest()
-        public = self._public_projection(batch, prepared, native_record, native_hash)
+        public = self._public_projection(batch, prepared, validated_native, native_hash)
         public_content = public.model_dump_json().encode()
         final_binding = prepared.binding.model_copy(
             update={
@@ -678,9 +690,9 @@ class HoldoutController:
                 "public_record_hash": hashlib.sha256(public_content).hexdigest(),
             }
         )
-        self._validate_native_execution(prepared, native)
+        validated_native = self._validate_native_execution(prepared, native)
         expected_public = self._public_projection(
-            batch, prepared, native, expected_binding.native_record_hash or ""
+            batch, prepared, validated_native, expected_binding.native_record_hash or ""
         )
         if (
             final_binding != expected_binding
@@ -700,8 +712,12 @@ class HoldoutController:
         attempt: EvaluationAttempt,
     ) -> PublicEvaluationRecord | None:
         prepared = self._prepared_execution(batch, attempt.run_id, item, attempt)
-        if not (self.evaluator.root / prepared.execution_run_id).exists():
+        execution_state = self._run_path_state(prepared.execution_run_id)
+        diagnosis_state = self._run_path_state(prepared.diagnosis_run_id)
+        if execution_state == "absent" and diagnosis_state == "absent":
             return None
+        if execution_state == "absent" or diagnosis_state == "absent":
+            raise ValueError("holdout execution transaction is incomplete")
         return self._recover_prepared_execution(prepared)
 
     def prepare_score(

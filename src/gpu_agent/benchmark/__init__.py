@@ -10,6 +10,8 @@ from gpu_agent.benchmark.evaluation import (
     EvaluationRunner,
     EvaluationScheduleItem,
     EvaluationUnitBinding,
+    HoldoutEvaluationLineage,
+    NativeEvaluationLineage,
     PublicEvaluationRecord,
 )
 from gpu_agent.benchmark.holdout import EvaluatorRecordBinding, HoldoutBatch, HoldoutController
@@ -44,8 +46,10 @@ __all__ = [
     "EvaluatorRecordBinding",
     "HoldoutBatch",
     "HoldoutController",
+    "HoldoutEvaluationLineage",
     "HoldoutScoringController",
     "HoldoutScoringResult",
+    "NativeEvaluationLineage",
     "PublicEvaluationRecord",
     "UnvalidatedCaseError",
 ]

@@ -2,15 +2,47 @@ from schedule_authority_support import schedule_client_for_test
 
 
 def _lineage():
-    from gpu_agent.benchmark.evaluation import EvaluationLineage
+    from gpu_agent.benchmark.evaluation import NativeEvaluationLineage
 
-    return EvaluationLineage(
+    return NativeEvaluationLineage(
         corpus_cutoff=1,
         diagnosis_run_id="a" * 32,
         diagnosis_hash="b" * 64,
         evidence_hash="c" * 64,
         provider_invocation_hashes=[],
     )
+
+
+def test_task2_development_native_lineage_round_trip():
+    from gpu_agent.benchmark import HoldoutEvaluationLineage, NativeEvaluationLineage
+    from gpu_agent.benchmark.evaluation import PublicEvaluationRecord
+
+    native = NativeEvaluationLineage(
+        corpus_cutoff=1,
+        diagnosis_run_id="a" * 32,
+        diagnosis_hash="b" * 64,
+        evidence_hash="c" * 64,
+        provider_invocation_hashes=[],
+    )
+    record = PublicEvaluationRecord(
+        record_id="a" * 32,
+        corpus_cutoff=1,
+        lineage=native,
+        case_id="case_0001",
+        template_id="vector-add",
+        mode="A",
+        repeat=0,
+        input_hash="d" * 64,
+        evidence_hash="c" * 64,
+        executed_checks={},
+        status="INCONCLUSIVE",
+        diagnosis={},
+        latency_ms=0,
+    )
+    restored = PublicEvaluationRecord.model_validate_json(record.model_dump_json())
+    assert restored == record
+    assert isinstance(restored.lineage, NativeEvaluationLineage)
+    assert not isinstance(restored.lineage, HoldoutEvaluationLineage)
 
 
 def test_blind_view_excludes_mode_model_usage_and_trace():

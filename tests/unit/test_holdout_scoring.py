@@ -58,6 +58,177 @@ def digest(content):
     return hashlib.sha256(content).hexdigest()
 
 
+def evaluator_native_record(service, store, prepared, item, case):
+    """Build the private adapter record from one real terminal evaluator run."""
+    from gpu_agent.agent.models import AcquisitionUsage, AgentBudget
+    from gpu_agent.agent.provider import Invocation
+    from gpu_agent.benchmark.evaluation import (
+        EvaluationRecord,
+        NativeEvaluationLineage,
+        PricingAttestation,
+    )
+    from gpu_agent.evidence.repository import EvidenceRepository
+    from gpu_agent.patching import PatchCandidate
+    from gpu_agent.verification.models import VerificationResult, VerificationVerdict
+
+    run = store.load(prepared.diagnosis_run_id)
+    diagnosis = service.diagnosis(run.id)
+    diagnosis_ref = next(ref for ref in run.artifact_refs if ref.name == "diagnosis.json")
+    evidence_refs = [ref for ref in run.artifact_refs if ref.name == "evidence/bundle.json"]
+    bundle = EvidenceRepository(store, evaluator=True).view(run.id)
+    budget = AgentBudget.model_validate_json(
+        store.read(next(ref for ref in run.artifact_refs if ref.name == "agent/final-budget.json"))
+    )
+    acquisition = AcquisitionUsage.model_validate_json(
+        store.read(
+            next(ref for ref in run.artifact_refs if ref.name == "agent/acquisition-usage.json")
+        )
+    )
+    histories: dict[str, list[Invocation]] = {}
+    terminal_hashes = []
+    for ref in [ref for ref in run.artifact_refs if ref.name.startswith("provider/")]:
+        invocation = Invocation.model_validate_json(store.read(ref))
+        histories.setdefault(invocation.invocation_id, []).append(invocation)
+        if invocation.state != "STARTED":
+            terminal_hashes.append(ref.sha256)
+    usage = {
+        "physical_calls": budget.llm_calls,
+        "sanitizer_calls": acquisition.sanitizer_calls,
+        "retrieval_calls": acquisition.retrieval_calls,
+        "sanitizer_attempts": budget.sanitizer_calls,
+        "retrieval_attempts": budget.rag_calls,
+        "build_calls": int(bundle.build_result is not None),
+        "runtime_calls": int(bundle.execution_result is not None),
+    }
+    diagnostic_calls = (
+        acquisition.sanitizer_calls
+        + acquisition.retrieval_calls
+        + int(bundle.build_result is not None)
+        + int(bundle.execution_result is not None)
+    )
+    usage["diagnostic_tool_calls"] = diagnostic_calls
+    usage["tool_calls"] = diagnostic_calls
+    usage["total_sanitizer_calls"] = acquisition.sanitizer_calls
+    finals = [history[-1] for history in histories.values()]
+    for field in ("input_tokens", "output_tokens", "total_tokens"):
+        values = [getattr(value.usage, field) if value.usage else None for value in finals]
+        usage[field] = (
+            sum(value for value in values if value is not None)
+            if values and len(values) == budget.llm_calls and None not in values
+            else None
+        )
+    cost = 0.0
+    if item.mode == "E":
+        pricing = PricingAttestation.model_validate_json(
+            store.read(
+                next(
+                    ref
+                    for ref in run.artifact_refs
+                    if ref.name == "agent/pricing-attestation.json"
+                )
+            )
+        )
+        input_tokens, output_tokens = usage["input_tokens"], usage["output_tokens"]
+        cost = (
+            pricing.cost(input_tokens, output_tokens)
+            if isinstance(input_tokens, int) and isinstance(output_tokens, int)
+            else None
+        )
+    checks = {
+        result.tool_result.typed_payload.tool: result.check_outcome
+        for result in bundle.sanitizer_results
+        if result.tool_result is not None
+    }
+    candidate = None
+    candidate_run_id = None
+    verification = None
+    verification_run_id = None
+    verification_ref = None
+    finished = run.events[-1].at
+    candidates = service.candidates(run.id)
+    if candidates:
+        candidate_run_id = candidates[0]
+        candidate_run = store.load(candidate_run_id)
+        candidate = PatchCandidate.model_validate_json(
+            store.read(
+                next(
+                    ref for ref in candidate_run.artifact_refs if ref.name == "candidate.json"
+                )
+            )
+        )
+        service.verify(run.id, candidate_run_id)
+        verification_run = next(
+            child for child in store.children(run.id) if child.kind == "verification"
+        )
+        verification_run_id = verification_run.id
+        verification_ref = next(
+            ref
+            for ref in verification_run.artifact_refs
+            if ref.name == "verification/result.json"
+        )
+        verification = VerificationResult.model_validate_json(store.read(verification_ref))
+        checks.update(
+            {
+                f"verification/{key}": value
+                for key, value in verification.required_checks.items()
+                if key != "private_oracle"
+            }
+        )
+        usage["tool_calls"] = None
+        usage["total_sanitizer_calls"] = None
+        finished = verification_run.events[-1].at
+    reason = diagnosis.limitations[0] if diagnosis.limitations else None
+    status = "INCONCLUSIVE"
+    if verification is not None:
+        reason = verification.reason_code
+        if verification.verdict != VerificationVerdict.INCONCLUSIVE:
+            status = "COMPLETED"
+    elif reason and reason not in {
+        "INVALID_DIAGNOSIS_EVIDENCE",
+        "MODEL_DECLARED_INCONCLUSIVE",
+        "SANITIZER_EVIDENCE_UNAVAILABLE",
+        "KNOWLEDGE_UNAVAILABLE",
+        "NO_INFORMATION_GAIN",
+    }:
+        status = "TIMEOUT" if "TIMEOUT" in reason else "FAILED"
+    return EvaluationRecord.model_validate(
+        {
+            "record_id": run.id,
+            "corpus_cutoff": prepared.binding.corpus_cutoff,
+            "lineage": NativeEvaluationLineage(
+                corpus_cutoff=prepared.binding.corpus_cutoff,
+                diagnosis_run_id=run.id,
+                diagnosis_hash=diagnosis_ref.sha256,
+                evidence_hash=evidence_refs[-1].sha256,
+                provider_invocation_hashes=terminal_hashes,
+                candidate_run_id=candidate_run_id,
+                verification_run_id=verification_run_id,
+                public_verification_hash=(verification_ref.sha256 if verification_ref else None),
+            ),
+            "case_id": prepared.binding.private_case_id,
+            "template_id": prepared.binding.private_template_id,
+            "mode": item.mode,
+            "repeat": item.repeat,
+            "input_hash": case.source_hash,
+            "evidence_hash": evidence_refs[-1].sha256,
+            "executed_checks": checks,
+            "status": status,
+            "diagnosis": diagnosis.model_dump(mode="json"),
+            "patch_hash": candidate.patched_source_hash if candidate else None,
+            "oracle_passed": verification.public_oracle_passed if verification else None,
+            "verdict": verification.verdict.value if verification else None,
+            "regression_detected": bool(
+                verification
+                and verification.verdict == VerificationVerdict.REGRESSION_DETECTED
+            ),
+            "usage": usage,
+            "latency_ms": (finished - run.events[0].at).total_seconds() * 1000,
+            "cost_usd": cost,
+            "failure_reason": reason,
+        }
+    )
+
+
 def overwrite_fixture_artifact(path, content):
     mode = stat.S_IMODE(path.stat().st_mode)
     path.chmod(mode | stat.S_IWUSR)
@@ -68,7 +239,7 @@ def overwrite_fixture_artifact(path, content):
 
 
 class ScoringFixture:
-    def __init__(self, executor, root):
+    def __init__(self, executor, root, patch):
         self.public, self.evaluator = executor.service.store, executor.corpus
         self.binding = executor.service.binding
         self.repository = root / "repository"
@@ -87,6 +258,36 @@ class ScoringFixture:
             holdout_batch=self.batch,
             _corpus_family=executor._corpus_family,
             _schedule_verifier=executor._schedule_verifier,
+        )
+        from gpu_agent.benchmark.executor import registered_cases
+        from gpu_agent.service import ApplicationService
+
+        evaluator_service = ApplicationService(
+            self.evaluator,
+            self.evaluator,
+            provider=executor.service._provider,
+            backend_factory=executor.service._backend_factory,
+            knowledge=executor.service.knowledge,
+            knowledge_version=executor.service.knowledge_version,
+            _binding=self.binding,
+            _evaluation_schedule_verifier=executor._schedule_verifier,
+        )
+        evaluator_service._pricing_attestation = executor.service._pricing_attestation
+        reservations = {}
+
+        def use_reserved_diagnosis(_verifier, unit):
+            return self.evaluator.load(reservations[unit.model_dump_json()].diagnosis_run_id)
+
+        patch.setattr(
+            self.evaluator,
+            "validate_and_create_evaluation_child",
+            use_reserved_diagnosis,
+        )
+        cases = registered_cases(
+            self.evaluator,
+            self.binding,
+            executor._corpus_family,
+            cutoff=self.batch.corpus_cutoff,
         )
         runner = EvaluationRunner(
             self.public,
@@ -146,6 +347,7 @@ class ScoringFixture:
         )
         activate_schedule(self.public, executor._schedule_verifier, run.id)
         records = []
+        verified_records = {}
         for item in schedule.items:
             attempt = runner._attempt(run.id, schedule, item)
             runner._put(
@@ -153,13 +355,56 @@ class ScoringFixture:
                 f"evaluation/attempts/{item.ordinal}.json",
                 attempt.model_dump_json().encode(),
             )
-            record = holdout_executor.execute_scheduled(run.id, item.ordinal)
+            prepared = self.holdout.reserve_execution(
+                self.batch,
+                evaluation_run_id=run.id,
+                item=item,
+                attempt=attempt,
+            )
+            reservations[prepared.evaluation_unit.model_dump_json()] = prepared
+            case = cases[prepared.binding.private_case_id]
+            diagnosis = evaluator_service.diagnose(
+                executor.sources[case.id],
+                mode=item.mode,
+                required_tools=(case.target_tool,),
+                expected_source_hash=case.source_hash,
+                evaluation_unit=prepared.evaluation_unit,
+            )
+            native = evaluator_native_record(
+                evaluator_service,
+                self.evaluator,
+                prepared,
+                item,
+                case,
+            )
+            assert diagnosis.id == prepared.diagnosis_run_id
+            record = self.holdout.complete_execution(prepared, native)
+            recovered = self.holdout.recover_execution(self.batch, item, attempt)
+            if recovered is None or recovered != record:
+                raise ValueError("fixture holdout record does not recover exactly")
+            verified_records[item.ordinal] = recovered
             runner._put(
                 run.id,
                 f"evaluation/records/{item.ordinal}.json",
-                record.public().model_dump_json().encode(),
+                recovered.model_dump_json().encode(),
             )
-            records.append(record)
+            records.append(recovered)
+
+        def validate_persisted_holdout(_executor, record, item, attempt):
+            cached = verified_records.get(item.ordinal)
+            if (
+                attempt.ordinal != item.ordinal
+                or attempt.run_id != run.id
+                or cached is None
+                or cached != record
+            ):
+                raise ValueError("fixture holdout record does not recover exactly")
+
+        patch.setattr(
+            EvaluationExecutor,
+            "validate_scheduled_record",
+            validate_persisted_holdout,
+        )
         manifest = runner._terminal(run.id, schedule, records, None, RunStatus.COMPLETED)
         assert manifest.executed_units == 120 and manifest.stopped_reason is None
         self.evaluation_run_id = manifest.run_id
@@ -343,7 +588,7 @@ def scoring_base(tmp_path_factory):
 
         service[1].actions = [InconclusiveAction()]
         _configure_responses_provider(executor, patch, full_script=True)
-        yield ScoringFixture(executor, root)
+        yield ScoringFixture(executor, root, patch)
 
 
 @pytest.fixture
@@ -1052,7 +1297,7 @@ def test_session_claim_rejects_unsafe_lock(scoring_fixture, unsafe):
     assert other.read_bytes() == b"do not touch"
 
 
-def test_prepared_persistence_checks_private_fields_and_matches_standalone(scoring_fixture):
+def test_prepared_persistence_checks_identity_and_matches_standalone(scoring_fixture):
     f = scoring_fixture
     item = f.preflight().items[0]
     prepared = item.prepared_score
@@ -1161,7 +1406,7 @@ def test_prepared_persistence_rejects_complete_stale_binding_before_mutation(sco
         assert f.snapshot() == before
 
 
-def test_prepared_persistence_rejects_stale_child_ancestry_before_mutation(scoring_fixture):
+def test_prepared_persistence_rejects_stale_child_lineage_before_mutation(scoring_fixture):
     f = scoring_fixture
     item = f.preflight().items[0]
     run_id = f.seed(0)

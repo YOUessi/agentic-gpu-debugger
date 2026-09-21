@@ -8,7 +8,7 @@ import re
 import stat
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from gpu_agent._resources import runtime_resource
 from gpu_agent.agent.models import (
@@ -99,7 +99,10 @@ def validate_evaluation_record(
     corpus: RunStore | None = None,
     corpus_family: "CorpusFamily | None" = None,
     registered_case_id: str | None = None,
-) -> None:
+    *,
+    diagnosis_parent_run_id: str | None = None,
+    expected_visibility: Literal["public", "evaluator"] = "public",
+) -> PublicEvaluationRecord:
     """Resolve one public record back to immutable native execution artifacts."""
     public = record.public() if isinstance(record, EvaluationRecord) else record
     lineage = public.lineage
@@ -111,11 +114,12 @@ def validate_evaluation_record(
     ):
         raise ValueError("evaluation record corpus cutoff differs from its attempt")
     run = store.load(lineage.diagnosis_run_id)
+    expected_parent = diagnosis_parent_run_id or attempt.run_id
     if (
-        store.visibility != "public"
+        store.visibility != expected_visibility
         or run.kind != "diagnosis"
         or run.status != RunStatus.COMPLETED
-        or run.parent_run_id != attempt.run_id
+        or run.parent_run_id != expected_parent
         or run.binding != binding
         or public.record_id != run.id
     ):
@@ -197,7 +201,9 @@ def validate_evaluation_record(
         )
         if changed > 1:
             raise ValueError("evaluation evidence progression combines acquisitions")
-    bundle = EvidenceRepository(store).public_view(run.id)
+    bundle = EvidenceRepository(
+        store, evaluator=store.visibility == "evaluator"
+    ).view(run.id)
     if bundle != bundles[-1]:
         raise ValueError("evaluation final evidence projection is invalid")
     source_refs = [ref for ref in bundle.source_snapshot if ref.name.endswith("/kernel.cu")]
@@ -613,11 +619,7 @@ def validate_evaluation_record(
         if public.usage.get("physical_calls") != len(invocations):
             raise ValueError("provider usage differs from native invocations")
 
-    child_runs = [
-        store.load(path.name)
-        for path in store.root.iterdir()
-        if path.is_dir() and re.fullmatch(r"[a-f0-9]{32}", path.name)
-    ]
+    child_runs = store.children(run.id)
     candidates = [
         child for child in child_runs if child.kind == "candidate" and child.parent_run_id == run.id
     ]
@@ -729,7 +731,9 @@ def validate_evaluation_record(
         )
     result = diagnosis
     reason = result.limitations[0] if result.limitations else None
-    expected_status = "INCONCLUSIVE"
+    expected_status: Literal["COMPLETED", "FAILED", "TIMEOUT", "INCONCLUSIVE"] = (
+        "INCONCLUSIVE"
+    )
     finished = run.events[-1].at
     if verification is not None:
         reason = verification.reason_code
@@ -758,20 +762,42 @@ def validate_evaluation_record(
             and isinstance(output_tokens, int)
             else None
         )
-    if (
-        public.executed_checks != expected_checks
-        or public.status != expected_status
-        or public.failure_reason != reason
-        or public.usage != expected_usage
-        or public.latency_ms != expected_latency
-        or public.cost_usd != expected_cost
-        or public.patch_hash != (candidate.patched_source_hash if candidate else None)
-        or public.oracle_passed != (verification.public_oracle_passed if verification else None)
-        or public.verdict != (verification.verdict.value if verification else None)
-        or public.regression_detected
-        != bool(verification and verification.verdict == VerificationVerdict.REGRESSION_DETECTED)
-    ):
+    validated = PublicEvaluationRecord(
+        record_id=run.id,
+        corpus_cutoff=attempt.corpus_cutoff,
+        lineage=NativeEvaluationLineage(
+            corpus_cutoff=attempt.corpus_cutoff,
+            diagnosis_run_id=run.id,
+            diagnosis_hash=diagnosis_ref.sha256,
+            evidence_hash=evidence_refs[-1].sha256,
+            provider_invocation_hashes=terminal_hashes,
+            candidate_run_id=candidates[0].id if candidate is not None else None,
+            verification_run_id=(verifications[0].id if verification is not None else None),
+            public_verification_hash=(verification_ref.sha256 if verification_ref else None),
+        ),
+        case_id=item.case_id,
+        template_id=item.template_id,
+        mode=item.mode,
+        repeat=item.repeat,
+        input_hash=source_refs[0].sha256,
+        evidence_hash=evidence_refs[-1].sha256,
+        executed_checks=expected_checks,
+        status=expected_status,
+        diagnosis=diagnosis.model_dump(mode="json"),
+        patch_hash=candidate.patched_source_hash if candidate else None,
+        oracle_passed=verification.public_oracle_passed if verification else None,
+        verdict=verification.verdict.value if verification else None,
+        regression_detected=bool(
+            verification and verification.verdict == VerificationVerdict.REGRESSION_DETECTED
+        ),
+        usage=expected_usage,
+        latency_ms=expected_latency,
+        cost_usd=expected_cost,
+        failure_reason=reason,
+    )
+    if public != validated:
         raise ValueError("evaluation record summary differs from native artifacts")
+    return validated
 
 
 def registered_cases(
