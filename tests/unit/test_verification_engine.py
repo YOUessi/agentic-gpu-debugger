@@ -1006,28 +1006,101 @@ def test_incomplete_public_verification_replay_fails_closed_without_mutation(
     assert _public_tree(store.root) == before
 
 
+@pytest.mark.parametrize("tamper", ["lifecycle", "artifact_owner"])
+def test_noncanonical_public_verification_replay_fails_closed_without_mutation(
+    store, tmp_path, original, container_boundary, tamper
+):
+    from gpu_agent.verification.engine import verification_run_id
+
+    candidate_id, _ = register_variant(store, original, "human")
+    engine = _engine(store, tmp_path)
+    result = engine.verify(original[0], candidate_id, "standard")
+    run_id = verification_run_id(original[0], result.candidate_hash, "standard")
+    manifest_path = store.root / run_id / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    if tamper == "lifecycle":
+        manifest["last_completed_phase"] = "PREPARING"
+    else:
+        forged_owner = "f" * 32
+        manifest["artifact_refs"][0]["run_id"] = forged_owner
+        artifact_id = manifest["artifact_refs"][0]["id"]
+        manifest["artifact_refs"][0]["relative_path"] = f"{forged_owner}/artifacts/{artifact_id}"
+    manifest_path.write_text(json.dumps(manifest))
+    private = _evaluator_store(tmp_path)
+    before_public = _public_tree(store.root)
+    before_private = _public_tree(private.root)
+    before_calls = list(container_boundary)
+    with pytest.raises(ValueError, match="existing public verification conflicts"):
+        engine.verify(original[0], candidate_id, "standard")
+    assert _public_tree(store.root) == before_public
+    assert _public_tree(private.root) == before_private
+    assert container_boundary == before_calls
+
+
 def test_concurrent_exact_public_verification_replay_is_idempotent(
     store, tmp_path, original, container_boundary
 ):
     candidate_id, _ = register_variant(store, original, "human")
+    engine = _engine(store, tmp_path, "shared-concurrent-evaluator")
     with ThreadPoolExecutor(max_workers=2) as pool:
         futures = [
             pool.submit(
-                _engine(store, tmp_path, f"concurrent-evaluator-{index}").verify,
+                engine.verify,
                 original[0],
                 candidate_id,
                 "standard",
             )
-            for index in range(2)
+            for _ in range(2)
         ]
     results = [future.result() for future in futures]
     assert results[0] == results[1]
+    private = _evaluator_store(tmp_path, "shared-concurrent-evaluator")
+    audit = private.load(results[0].evaluator_audit_run_id)
+    child_index_ref = next(
+        ref for ref in audit.artifact_refs if ref.name == "verification/child-index.json"
+    )
+    child_count = len(json.loads(private.read(child_index_ref))["child_run_ids"])
+    # The fixture records only ordinary execution and sanitizer execution;
+    # compilation is handled separately by its synthetic container stub.
+    assert len(container_boundary) == child_count * 2
+    before_calls = list(container_boundary)
+    assert engine.verify(original[0], candidate_id, "standard") == results[0]
+    assert container_boundary == before_calls
     verifications = [
         store.load(path.name)
         for path in store.root.iterdir()
         if path.is_dir() and len(path.name) == 32 and store.load(path.name).kind == "verification"
     ]
     assert len(verifications) == 1
+
+
+@pytest.mark.parametrize("state", ["incomplete", "conflicting"])
+def test_existing_evaluator_audit_fails_closed_without_mutation(
+    store, tmp_path, original, container_boundary, state
+):
+    from gpu_agent.contracts import ExternalRunOrigin
+
+    candidate_id, candidate = register_variant(store, original, "human")
+    private = _evaluator_store(tmp_path)
+    audit_id = hashlib.sha256(
+        (f"verification-audit-v1:{original[0]}:{candidate.patched_source_hash}:standard").encode()
+    ).hexdigest()[:32]
+    audit = private.create_run(
+        "verification_audit" if state == "incomplete" else "conflicting_audit",
+        binding=store.load(original[0]).binding,
+        external_origin=ExternalRunOrigin(run_id=original[0], visibility="public"),
+        _run_id=audit_id,
+    )
+    if state == "conflicting":
+        private.transition(audit.id, "RUNNING", "FINALIZING")
+        private.transition(audit.id, "COMPLETED", None)
+    before_public = _public_tree(store.root)
+    before_private = _public_tree(private.root)
+    with pytest.raises(ValueError, match="existing evaluator verification audit conflicts"):
+        _engine(store, tmp_path).verify(original[0], candidate_id, "standard")
+    assert _public_tree(store.root) == before_public
+    assert _public_tree(private.root) == before_private
+    assert container_boundary == []
 
 
 def test_changed_binary_is_rejected_before_execution(

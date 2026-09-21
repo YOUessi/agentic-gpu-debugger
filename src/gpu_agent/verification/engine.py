@@ -19,7 +19,15 @@ from typing import Literal, TypeVar
 from pydantic import Field, StrictFloat, model_validator
 
 from gpu_agent._resources import runtime_resource
-from gpu_agent.contracts import ArtifactRef, ExternalRunOrigin, RunBinding, RunStatus, ToolResult
+from gpu_agent.contracts import (
+    ArtifactRef,
+    CurrentPhase,
+    ExternalRunOrigin,
+    RunBinding,
+    RunManifest,
+    RunStatus,
+    ToolResult,
+)
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import _evidence
 from gpu_agent.execution.isolated import IsolatedGPUBackend
@@ -40,7 +48,7 @@ from gpu_agent.patching import (
     materialize_candidate,
 )
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
-from gpu_agent.verification.derivation import derive_verification
+from gpu_agent.verification.derivation import derive_verification, validate_persisted_derivation
 from gpu_agent.verification.models import (
     OracleResult,
     VerificationAuditResult,
@@ -74,6 +82,19 @@ def verification_run_id(
     mode_suffix = "" if mode == "standard" else ":full"
     return hashlib.sha256(
         f"verification-v1:{original_run_id}:{candidate_hash}{mode_suffix}".encode()
+    ).hexdigest()[:32]
+
+
+def verification_audit_run_id(
+    original_run_id: str,
+    candidate_hash: str,
+    mode: Literal["standard", "full"] = "standard",
+) -> str:
+    """Return the evaluator-owned audit slot for one candidate and plan."""
+    if mode not in {"standard", "full"}:
+        raise ValueError("invalid verification mode")
+    return hashlib.sha256(
+        f"verification-audit-v1:{original_run_id}:{candidate_hash}:{mode}".encode()
     ).hexdigest()[:32]
 
 
@@ -264,6 +285,26 @@ class VerificationEngine:
         candidate_id: str,
         mode: Literal["standard", "full"] = "standard",
     ) -> VerificationResult:
+        """Verify once per deterministic mode slot, with exact replay semantics."""
+        if mode not in {"standard", "full"}:
+            raise ValueError("M1 requires full public/private verification")
+        # This pre-existing controller authority serializes the evaluator audit and
+        # public projection as one operation.  It works across threads/processes and
+        # does not create any state on a conflict path.
+        with self._store._lock(original_run_id):
+            original = self._store.load(original_run_id)
+            candidate = self._candidate(original_run_id, candidate_id, original.binding)
+            replay = self._load_exact_replay(original, candidate, mode)
+            if replay is not None:
+                return replay
+            return self._verify_locked(original_run_id, candidate_id, mode)
+
+    def _verify_locked(
+        self,
+        original_run_id: str,
+        candidate_id: str,
+        mode: Literal["standard", "full"] = "standard",
+    ) -> VerificationResult:
         if mode not in {"standard", "full"}:
             raise ValueError("M1 requires full public/private verification")
         original_manifest = self._store.load(original_run_id)
@@ -279,12 +320,7 @@ class VerificationEngine:
             original_run_id if self._store.visibility == "evaluator" else None,
             binding=binding,
             external_origin=origin,
-            _run_id=hashlib.sha256(
-                (
-                    f"verification-audit-v1:{original_run_id}:"
-                    f"{candidate.patched_source_hash}:{mode}"
-                ).encode()
-            ).hexdigest()[:32],
+            _run_id=verification_audit_run_id(original_run_id, candidate.patched_source_hash, mode),
         )
         self._private.transition(audit.id, "RUNNING", "PREPARING")
         bundle = _evidence(self._store).view(original_run_id)
@@ -558,7 +594,7 @@ class VerificationEngine:
                 binding,
             )
             self._finish_audit(audit.id, derived.audit)
-            return self._persist_public(original_run_id, derived.public, mode)
+            return self._persist_public_locked(original_run_id, derived.public, mode)
         finally:
             shutil.rmtree(directory)
 
@@ -579,6 +615,126 @@ class VerificationEngine:
             checked = sanitizer.tool_result.typed_payload
             if checked.binary_ref != binary or checked.stdin_ref != stdin:
                 raise ValueError("sanitizer provenance mismatch")
+
+    @staticmethod
+    def _canonical_terminal(
+        run: RunManifest,
+        phases: tuple[CurrentPhase | None, ...],
+    ) -> bool:
+        return bool(
+            run.status == RunStatus.COMPLETED
+            and run.current_phase is None
+            and run.last_completed_phase == CurrentPhase.FINALIZING
+            and tuple((event.status, event.phase) for event in run.events)
+            == tuple(
+                (RunStatus.QUEUED, None)
+                if phase is None and index == 0
+                else ((RunStatus.COMPLETED, None) if phase is None else (RunStatus.RUNNING, phase))
+                for index, phase in enumerate(phases)
+            )
+        )
+
+    def _load_exact_replay(
+        self,
+        original: RunManifest,
+        candidate: PatchCandidate,
+        mode: Literal["standard", "full"],
+    ) -> VerificationResult | None:
+        original_run_id = original.id
+        public_id = verification_run_id(original_run_id, candidate.patched_source_hash, mode)
+        audit_id = verification_audit_run_id(original_run_id, candidate.patched_source_hash, mode)
+        try:
+            with self._store.run_directory_set_lease((public_id,)) as lease:
+                public_run = lease.load_optional(public_id)
+                if public_run is None:
+                    public_result = None
+                else:
+                    refs = [
+                        ref
+                        for ref in public_run.artifact_refs
+                        if ref.name == "verification/result.json"
+                    ]
+                    if (
+                        public_run.kind != "verification"
+                        or public_run.parent_run_id != original_run_id
+                        or public_run.binding != original.binding
+                        or public_run.external_origin != original.external_origin
+                        or not self._canonical_terminal(
+                            public_run,
+                            (None, CurrentPhase.FINALIZING, None),
+                        )
+                        or len(public_run.artifact_refs) != 1
+                        or len(refs) != 1
+                        or refs[0].run_id != public_run.id
+                        or refs[0].relative_path != f"{public_run.id}/artifacts/{refs[0].id}"
+                    ):
+                        raise ValueError
+                    public_result = VerificationResult.model_validate_json(lease.read(refs[0]))
+                    if (
+                        public_result.candidate_hash != candidate.patched_source_hash
+                        or public_result.evaluator_audit_run_id != audit_id
+                    ):
+                        raise ValueError
+        except (OSError, ValueError):
+            raise ValueError("existing public verification conflicts") from None
+
+        if public_result is None:
+            try:
+                with self._private.run_directory_set_lease((audit_id,)) as lease:
+                    if lease.load_optional(audit_id) is not None:
+                        raise ValueError
+            except (OSError, ValueError):
+                raise ValueError("existing evaluator verification audit conflicts") from None
+            return None
+
+        origin = (
+            ExternalRunOrigin(run_id=original_run_id, visibility="public")
+            if self._store.visibility == "public"
+            else original.external_origin
+        )
+        try:
+            with self._private.run_directory_set_lease((audit_id,)) as lease:
+                audit = lease.load_optional(audit_id)
+                # A different evaluator authority may share the public store but
+                # have no local copy of this deterministic audit.  It must perform
+                # its own private derivation; the existing public projection is
+                # compared byte-for-byte when that derivation is published.
+                if audit is None:
+                    return None
+                if (
+                    audit.kind != "verification_audit"
+                    or audit.parent_run_id
+                    != (original_run_id if self._store.visibility == "evaluator" else None)
+                    or audit.binding != original.binding
+                    or audit.external_origin != origin
+                    or not self._canonical_terminal(
+                        audit,
+                        (
+                            None,
+                            CurrentPhase.PREPARING,
+                            CurrentPhase.FINALIZING,
+                            None,
+                        ),
+                    )
+                ):
+                    raise ValueError
+                for ref in audit.artifact_refs:
+                    if (
+                        ref.run_id != audit.id
+                        or ref.relative_path != f"{audit.id}/artifacts/{ref.id}"
+                    ):
+                        raise ValueError
+                    lease.read(ref)
+                validate_persisted_derivation(
+                    self._store,
+                    self._private,
+                    original_run_id,
+                    public_result,
+                    original.binding,
+                )
+        except (OSError, ValueError):
+            raise ValueError("existing evaluator verification audit conflicts") from None
+        return public_result
 
     def _publish(
         self,
@@ -620,7 +776,7 @@ class VerificationEngine:
             evaluator_audit_run_id=evaluator_audit_run_id,
             limitations=["Containers share the host kernel and GPU driver."],
         )
-        return self._persist_public(original_run_id, result, mode)
+        return self._persist_public_locked(original_run_id, result, mode)
 
     def _persist_public(
         self,
@@ -628,52 +784,64 @@ class VerificationEngine:
         result: VerificationResult,
         mode: Literal["standard", "full"] = "standard",
     ) -> VerificationResult:
-        run_id = verification_run_id(original_run_id, result.candidate_hash, mode)
-        content = result.model_dump_json().encode()
         # The parent lock is pre-existing authority shared by every publisher of
         # this deterministic child ID; it serializes both threads and processes
         # without creating conflict-path state in the public store.
         with self._store._lock(original_run_id):
-            parent = self._store.load(original_run_id)
-            try:
-                os.lstat(self._store.root / run_id)
-            except FileNotFoundError:
-                run = self._store.create_run(
-                    "verification",
-                    original_run_id,
-                    _run_id=run_id,
-                )
-                self._store.put(
-                    run.id,
-                    "verification/result.json",
-                    content,
-                    self._store.visibility,
-                )
-                self._store.transition(run.id, "RUNNING", "FINALIZING")
-                self._store.transition(run.id, "COMPLETED", None)
-                return result
+            return self._persist_public_locked(original_run_id, result, mode)
 
-            try:
-                run = self._store.load(run_id)
-                refs = [ref for ref in run.artifact_refs if ref.name == "verification/result.json"]
-                persisted_content = self._store.read(refs[0]) if len(refs) == 1 else None
+    def _persist_public_locked(
+        self,
+        original_run_id: str,
+        result: VerificationResult,
+        mode: Literal["standard", "full"] = "standard",
+    ) -> VerificationResult:
+        run_id = verification_run_id(original_run_id, result.candidate_hash, mode)
+        content = result.model_dump_json().encode()
+        parent = self._store.load(original_run_id)
+        try:
+            os.lstat(self._store.root / run_id)
+        except FileNotFoundError:
+            run = self._store.create_run(
+                "verification",
+                original_run_id,
+                _run_id=run_id,
+            )
+            self._store.put(
+                run.id,
+                "verification/result.json",
+                content,
+                self._store.visibility,
+            )
+            self._store.transition(run.id, "RUNNING", "FINALIZING")
+            self._store.transition(run.id, "COMPLETED", None)
+            return result
+
+        try:
+            with self._store.run_directory_set_lease((run_id,)) as lease:
+                existing = lease.load_optional(run_id)
+                if existing is None:
+                    raise ValueError
+                refs = [
+                    ref for ref in existing.artifact_refs if ref.name == "verification/result.json"
+                ]
                 if (
-                    run.kind != "verification"
-                    or run.parent_run_id != original_run_id
-                    or run.binding != parent.binding
-                    or run.external_origin != parent.external_origin
-                    or run.status != RunStatus.COMPLETED
-                    or run.current_phase is not None
-                    or len(run.artifact_refs) != 1
+                    existing.kind != "verification"
+                    or existing.parent_run_id != original_run_id
+                    or existing.binding != parent.binding
+                    or existing.external_origin != parent.external_origin
+                    or not self._canonical_terminal(existing, (None, CurrentPhase.FINALIZING, None))
+                    or len(existing.artifact_refs) != 1
                     or len(refs) != 1
-                    or persisted_content != content
+                    or refs[0].run_id != existing.id
+                    or refs[0].relative_path != f"{existing.id}/artifacts/{refs[0].id}"
+                    or lease.read(refs[0]) != content
                 ):
                     raise ValueError
-                assert persisted_content is not None
-                persisted = VerificationResult.model_validate_json(persisted_content)
-            except (OSError, ValueError):
-                raise ValueError("existing public verification conflicts") from None
-            return persisted
+                persisted = VerificationResult.model_validate_json(content)
+        except (OSError, ValueError):
+            raise ValueError("existing public verification conflicts") from None
+        return persisted
 
     @staticmethod
     def _with_check_plan(
