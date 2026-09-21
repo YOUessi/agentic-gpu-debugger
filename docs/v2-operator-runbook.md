@@ -73,6 +73,10 @@ The controller root, public store, evaluator store, and checkout must be distinc
 Keep the controller and stores owner-only. Provisioning records only the public signing key.
 
 ```bash
+install -d -m 0700 /srv/gpu-agent-data/v2-public
+install -d -m 0700 /srv/gpu-agent-private/v2-evaluator
+install -d -m 0700 /srv/gpu-agent-private/v2-evaluator/runs
+
 gpu-agent benchmark provision-family \
   --controller-root /srv/gpu-agent-controller/family-v2 \
   --public-store /srv/gpu-agent-data/v2-public \

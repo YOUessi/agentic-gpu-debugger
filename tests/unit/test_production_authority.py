@@ -4,12 +4,28 @@ from datetime import UTC, datetime
 import pytest
 
 
+def _provision_tree(root):
+    return {
+        str(path.relative_to(root)): (
+            ("symlink", path.readlink().as_posix())
+            if path.is_symlink()
+            else path.read_bytes()
+            if path.is_file()
+            else None
+        )
+        for path in root.rglob("*")
+    }
+
+
 def test_production_family_stores_only_schedule_public_key(tmp_path):
     import json
 
     from gpu_agent.benchmark.ledger import CorpusFamily
 
     public_key = b"-----BEGIN PUBLIC KEY-----\nreviewed\n-----END PUBLIC KEY-----\n"
+    for path in (tmp_path / "public", tmp_path / "evaluator"):
+        path.mkdir(mode=0o700)
+    (tmp_path / "repository").mkdir()
     family = CorpusFamily.provision_production(
         tmp_path / "controller",
         public_store=tmp_path / "public",
@@ -28,6 +44,101 @@ def test_production_family_stores_only_schedule_public_key(tmp_path):
     assert config["evaluator_store_pin"]["visibility"] == "evaluator"
     assert config["public_store_pin"]["device"] >= 0
     assert config["public_store_pin"]["inode"] > 0
+
+
+@pytest.mark.parametrize("fault", ["missing", "mode", "file", "symlink"])
+def test_production_family_rejects_unsafe_store_before_controller_mutation(tmp_path, fault):
+    from gpu_agent.benchmark.ledger import CorpusFamily
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    public = tmp_path / "public"
+    evaluator = tmp_path / "evaluator"
+    safe = tmp_path / "safe"
+    safe.mkdir(mode=0o700)
+    evaluator.mkdir(mode=0o700)
+    if fault == "mode":
+        public.mkdir(mode=0o755)
+    elif fault == "file":
+        public.write_bytes(b"not-a-directory")
+    elif fault == "symlink":
+        public.symlink_to(safe, target_is_directory=True)
+    before = _provision_tree(tmp_path)
+
+    with pytest.raises((OSError, ValueError)):
+        CorpusFamily.provision_production(
+            tmp_path / "controller",
+            public_store=public,
+            evaluator_store=evaluator,
+            repository=repository,
+            schedule_public_key=b"reviewed-public-key",
+        )
+
+    assert _provision_tree(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "controller_mode",
+        "ledger_mode",
+        "config_mode",
+        "config_hardlink",
+        "key_mode",
+        "key_hardlink",
+        "marker_mode",
+        "marker_hardlink",
+        "marker_symlink",
+    ],
+)
+def test_production_family_open_rejects_metadata_tamper_without_mutation(tmp_path, tamper):
+    import os
+
+    from gpu_agent.benchmark.ledger import CorpusFamily
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    public = tmp_path / "public"
+    evaluator = tmp_path / "evaluator"
+    public.mkdir(mode=0o700)
+    evaluator.mkdir(mode=0o700)
+    family = CorpusFamily.provision_production(
+        tmp_path / "controller",
+        public_store=public,
+        evaluator_store=evaluator,
+        repository=repository,
+        schedule_public_key=b"reviewed-public-key",
+    )
+    targets = {
+        "controller_mode": family.root,
+        "ledger_mode": family.root / "ledger",
+        "config_mode": family.root / "family.json",
+        "config_hardlink": family.root / "family.json",
+        "key_mode": family.root / "schedule-authority.pub",
+        "key_hardlink": family.root / "schedule-authority.pub",
+        "marker_mode": public / ".corpus-family.json",
+        "marker_hardlink": public / ".corpus-family.json",
+        "marker_symlink": public / ".corpus-family.json",
+    }
+    target = targets[tamper]
+    if tamper in {"controller_mode", "ledger_mode"}:
+        target.chmod(0o755)
+    elif tamper in {"config_mode", "marker_mode"}:
+        target.chmod(0o644)
+    elif tamper == "key_mode":
+        target.chmod(0o600)
+    elif tamper.endswith("hardlink"):
+        os.link(target, target.with_name(f"{target.name}.linked"))
+    else:
+        original = target.with_name(f"{target.name}.original")
+        target.rename(original)
+        target.symlink_to(original.name)
+    before = _provision_tree(tmp_path)
+
+    with pytest.raises((OSError, ValueError)):
+        CorpusFamily.open(family.root)
+
+    assert _provision_tree(tmp_path) == before
 
 
 def _signing_request():

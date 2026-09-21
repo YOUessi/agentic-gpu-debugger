@@ -80,6 +80,8 @@ def test_production_store_configuration_requires_exact_family_layout(tmp_path, m
     repository.mkdir(mode=0o700)
     evaluator_root = tmp_path / "evaluator-root"
     evaluator_root.mkdir(mode=0o700)
+    (evaluator_root / "runs").mkdir(mode=0o700)
+    (tmp_path / "public").mkdir(mode=0o700)
     signer = TestScheduleCommitClient.create(tmp_path / "signer")
     family = CorpusFamily.provision_production(
         tmp_path / "controller",
@@ -109,8 +111,10 @@ def test_production_store_configuration_fault_is_read_only(tmp_path, monkeypatch
     repository = tmp_path / "repository"
     repository.mkdir(mode=0o700)
     public = tmp_path / "public"
+    public.mkdir(mode=0o700)
     evaluator_root = tmp_path / "evaluator-root"
     evaluator_root.mkdir(mode=0o700)
+    (evaluator_root / "runs").mkdir(mode=0o700)
     signer = TestScheduleCommitClient.create(tmp_path / "signer")
     family = CorpusFamily.provision_production(
         tmp_path / "controller",

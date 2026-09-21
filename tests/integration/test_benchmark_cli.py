@@ -257,9 +257,7 @@ def test_production_evaluation_requires_attested_cost_before_construction(
 @pytest.mark.parametrize(
     "fault", ["wrong_public", "wrong_evaluator_parent", "symlink", "replaced_inode", "visibility"]
 )
-def test_production_evaluate_rejects_store_fault_before_side_effect(
-    tmp_path, monkeypatch, fault
-):
+def test_production_evaluate_rejects_store_fault_before_side_effect(tmp_path, monkeypatch, fault):
     import json
 
     from schedule_authority_support import TestScheduleCommitClient
@@ -271,8 +269,10 @@ def test_production_evaluate_rejects_store_fault_before_side_effect(
     repository = tmp_path / "repository"
     repository.mkdir(mode=0o700)
     public = tmp_path / "public"
+    public.mkdir(mode=0o700)
     evaluator_root = tmp_path / "evaluator-root"
     evaluator_root.mkdir(mode=0o700)
+    (evaluator_root / "runs").mkdir(mode=0o700)
     signer = TestScheduleCommitClient.create(tmp_path / "signer")
     family = CorpusFamily.provision_production(
         tmp_path / "controller",
@@ -349,6 +349,155 @@ def test_production_evaluate_rejects_store_fault_before_side_effect(
     assert "COST_BOUND_UNAVAILABLE" in result.output
     assert provider_calls == []
     assert _tree_bytes(tmp_path) == before
+
+
+@pytest.mark.parametrize("split", ["development", "holdout"])
+def test_configured_evaluation_runner_builds_exact_split_services(tmp_path, monkeypatch, split):
+    import shutil
+    import subprocess
+    from datetime import UTC, datetime
+
+    from schedule_authority_support import TestScheduleCommitClient
+
+    from gpu_agent.agent.prompts import PROMPT_VERSION
+    from gpu_agent.agent.provider import OpenAIResponsesProvider
+    from gpu_agent.benchmark.evaluation import EvaluationProviderPolicy, PricingAttestation
+    from gpu_agent.benchmark.holdout import HoldoutBatch, HoldoutController
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.benchmark.models import CaseManifest
+    from gpu_agent.cli import _configured_evaluation_runner
+    from gpu_agent.environment import load_toolchain_lock
+    from gpu_agent.execution.isolated import LOCK_PATH
+    from gpu_agent.provenance import capture_repository_snapshot
+
+    repository = tmp_path / "repository"
+    (repository / "containers").mkdir(parents=True)
+    for source_name in ("toolchain.lock.json", "runner.py", "Dockerfile"):
+        shutil.copy2(LOCK_PATH.with_name(source_name), repository / "containers" / source_name)
+    for arguments in (
+        ["init", "-q"],
+        ["add", "."],
+        ["-c", "user.name=Test", "-c", "user.email=test@example.org", "commit", "-qm", "fixture"],
+    ):
+        subprocess.run(["git", "-C", str(repository), *arguments], check=True)
+    snapshot = capture_repository_snapshot(repository)
+    toolchain_hash = load_toolchain_lock(LOCK_PATH).lock_hash
+    public = tmp_path / "public"
+    evaluator_root = tmp_path / "evaluator-root"
+    evaluator = evaluator_root / "runs"
+    public.mkdir(mode=0o700)
+    evaluator.mkdir(parents=True, mode=0o700)
+    evaluator_root.chmod(0o700)
+    signer = TestScheduleCommitClient.create(tmp_path / "signer")
+    family = CorpusFamily.provision_production(
+        tmp_path / "controller",
+        public_store=public,
+        evaluator_store=evaluator,
+        repository=repository,
+        schedule_public_key=signer.public_key,
+    )
+    authority = tmp_path / "authority"
+    authority.write_text("#!/bin/sh\nexit 1\n")
+    authority.chmod(0o700)
+    monkeypatch.setenv("GPU_AGENT_CORPUS_FAMILY_ROOT", str(family.root))
+    monkeypatch.setenv("GPU_AGENT_RUN_ROOT", str(public))
+    monkeypatch.setenv("GPU_AGENT_EVALUATOR_ROOT", str(evaluator_root))
+    monkeypatch.setenv("GPU_AGENT_SCHEDULE_AUTHORITY_COMMAND", str(authority))
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://api.deepseek.com")
+    monkeypatch.setenv("OPENAI_MODEL", "deepseek-chat")
+    monkeypatch.setenv("OPENAI_API_KEY", "test-only-key")
+    monkeypatch.setenv("GPU_AGENT_STORE_FALSE_SUPPORTED", "1")
+    preliminary = PricingAttestation.reviewed(
+        provider="deepseek-responses",
+        model="deepseek-chat",
+        commit=snapshot.commit,
+        model_config_hash="0" * 64,
+        input_usd_per_million=1,
+        output_usd_per_million=1,
+        source_uri="https://example.invalid/pricing",
+        reviewed_at=datetime(2026, 9, 21, tzinfo=UTC),
+        source_content_hash="1" * 64,
+    )
+    policy = EvaluationProviderPolicy(
+        provider="deepseek-responses",
+        endpoint_host="api.deepseek.com",
+        configured_model="deepseek-chat",
+        allowed_response_models=["deepseek-chat"],
+        prompt_version=PROMPT_VERSION,
+        pricing_hash=preliminary.rate_card_hash,
+    )
+    pricing = preliminary.model_copy(update={"model_config_hash": policy.sha256})
+    pricing_path = tmp_path / "pricing.json"
+    pricing_path.write_text(pricing.model_dump_json())
+    pricing_path.chmod(0o600)
+    monkeypatch.setenv("GPU_AGENT_PRICING_ATTESTATION", str(pricing_path))
+    source = b'extern "C" __global__ void kernel() {}\n'
+    case_root = tmp_path / "cases"
+    selected = case_root / "case_0100" / "public_input"
+    selected.mkdir(parents=True)
+    (selected / "kernel.cu").write_bytes(source)
+    case = CaseManifest(
+        id="case_0100",
+        source_hash=hashlib.sha256(source).hexdigest(),
+        harness_hash="2" * 64,
+        mutation_id="delete-guard",
+        template_id="vector-add",
+        split="public" if split == "development" else "private",
+        oracle_id="vector-add-cpu-v1",
+        target_tool="memcheck",
+        expected_finding="out of bounds",
+        validation_run_ids=["a" * 32, "b" * 32],
+        toolchain_hash=toolchain_hash,
+        input_set_hash="4" * 64,
+    )
+    monkeypatch.setattr(
+        "gpu_agent.benchmark.executor.registered_cases",
+        lambda *_args, **_kwargs: {case.id: case},
+    )
+    batch = HoldoutBatch(
+        public_run_id="1" * 32,
+        evaluator_run_id="2" * 32,
+        aliases=["3" * 64],
+        public_alias_hash="4" * 64,
+        corpus_cutoff=1,
+    )
+    monkeypatch.setattr(HoldoutController, "prepare", lambda _self: batch)
+    provider_ensures = []
+    monkeypatch.setattr(
+        OpenAIResponsesProvider,
+        "ensure_available",
+        lambda _self: provider_ensures.append(True),
+    )
+
+    runner = _configured_evaluation_runner(
+        repository=repository,
+        case_root=case_root,
+        corpus_root=public if split == "development" else evaluator,
+        split=split,
+        commit=snapshot.commit,
+        toolchain_hash=toolchain_hash,
+        model_config_hash=policy.sha256,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+    )
+
+    assert provider_ensures == [True]
+    assert runner.store.identity == family.corpus_store("public").identity
+    if split == "development":
+        assert runner.executor.holdout_service is None
+        assert runner.holdout_controller is None and runner.holdout_batch is None
+    else:
+        assert runner.executor.holdout_service is not None
+        assert (
+            runner.executor.holdout_service.store.identity
+            == family.corpus_store("evaluator").identity
+        )
+        assert (
+            runner.executor.holdout_service.evaluator_store.identity
+            == family.corpus_store("evaluator").identity
+        )
+        assert runner.holdout_controller is not None and runner.holdout_batch == batch
+        assert runner.holdout_controller._schedule_verifier is runner.executor._schedule_verifier
 
 
 def test_evaluate_uses_injected_executor_and_prints_reservation(
@@ -435,6 +584,8 @@ def _holdout_cli_family(tmp_path, monkeypatch):
 
     repository = tmp_path / "repository"
     repository.mkdir(mode=0o700)
+    (tmp_path / "public").mkdir(mode=0o700)
+    (tmp_path / "evaluator").mkdir(mode=0o700)
     signer = TestScheduleCommitClient.create(tmp_path / "test-only-schedule-authority")
     family = CorpusFamily.provision_production(
         tmp_path / "controller",

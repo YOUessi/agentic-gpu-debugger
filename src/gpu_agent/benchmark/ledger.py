@@ -178,6 +178,92 @@ def _is_within(path: Path, parent: Path) -> bool:
     return True
 
 
+def _require_directory(path: Path, *, owner_only: bool) -> os.stat_result:
+    reject_symlinks(path)
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        pinned = os.fstat(fd)
+        named = path.stat(follow_symlinks=False)
+        expected_mode = 0o700 if owner_only else stat.S_IMODE(pinned.st_mode)
+        if (
+            not stat.S_ISDIR(pinned.st_mode)
+            or not stat.S_ISDIR(named.st_mode)
+            or pinned.st_uid != os.geteuid()
+            or named.st_uid != os.geteuid()
+            or stat.S_IMODE(pinned.st_mode) != expected_mode
+            or stat.S_IMODE(named.st_mode) != expected_mode
+            or (pinned.st_dev, pinned.st_ino) != (named.st_dev, named.st_ino)
+        ):
+            raise ValueError("production family path is unavailable or unsafe")
+        reject_symlinks(path)
+        confirmed = path.stat(follow_symlinks=False)
+        if (confirmed.st_dev, confirmed.st_ino) != (pinned.st_dev, pinned.st_ino):
+            raise ValueError("production family path identity changed")
+        return pinned
+    finally:
+        os.close(fd)
+
+
+def _read_owned_regular(path: Path, limit: int, *, mode: int) -> bytes:
+    """Read one controller file through a no-follow fd and pin its pathname identity."""
+    parent = path.parent
+    reject_symlinks(parent)
+    parent_fd = os.open(parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    file_fd = -1
+    try:
+        parent_info = os.fstat(parent_fd)
+        parent_named = parent.stat(follow_symlinks=False)
+        if not stat.S_ISDIR(parent_info.st_mode) or (parent_info.st_dev, parent_info.st_ino) != (
+            parent_named.st_dev,
+            parent_named.st_ino,
+        ):
+            raise ValueError("controller file parent identity changed")
+        file_fd = os.open(
+            path.name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent_fd,
+        )
+        pinned = os.fstat(file_fd)
+        named = os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)
+
+        def validate(observed: os.stat_result) -> None:
+            if (
+                not stat.S_ISREG(observed.st_mode)
+                or observed.st_uid != os.geteuid()
+                or stat.S_IMODE(observed.st_mode) != mode
+                or observed.st_nlink != 1
+                or (observed.st_dev, observed.st_ino) != (pinned.st_dev, pinned.st_ino)
+                or observed.st_size > limit
+            ):
+                raise ValueError("controller file is unavailable or unsafe")
+
+        validate(pinned)
+        validate(named)
+        data = b""
+        while len(data) <= limit:
+            chunk = os.read(file_fd, min(64 * 1024, limit + 1 - len(data)))
+            if not chunk:
+                break
+            data += chunk
+        if len(data) > limit:
+            raise ValueError("controller file grew beyond limit")
+        validate(os.fstat(file_fd))
+        validate(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False))
+        parent_confirmed = parent.stat(follow_symlinks=False)
+        if (parent_confirmed.st_dev, parent_confirmed.st_ino) != (
+            parent_info.st_dev,
+            parent_info.st_ino,
+        ):
+            raise ValueError("controller file parent identity changed")
+        return data
+    except OSError as exc:
+        raise ValueError("controller file is unavailable or unsafe") from exc
+    finally:
+        if file_fd >= 0:
+            os.close(file_fd)
+        os.close(parent_fd)
+
+
 def _atomic_create(path: Path, content: bytes, mode: int) -> None:
     """Install a complete durable file without ever exposing a partial destination."""
     fd, temporary = tempfile.mkstemp(prefix=".create-", dir=path.parent)
@@ -233,7 +319,7 @@ class CorpusFamily:
         marker = path / ".corpus-family.json"
         expected = self._marker_bytes(visibility)
         _atomic_create(marker, expected, 0o600)
-        if read_regular(marker, 64 * 1024) != expected:
+        if _read_owned_regular(marker, 64 * 1024, mode=0o600) != expected:
             raise ValueError("corpus store is already pinned to another family")
 
     def _verify_store_pins(self) -> None:
@@ -246,7 +332,7 @@ class CorpusFamily:
             if store.identity != self._store_pin(visibility).identity():
                 raise ValueError("corpus store identity pin changed")
             marker = path / ".corpus-family.json"
-            if read_regular(marker, 64 * 1024) != self._marker_bytes(visibility):
+            if _read_owned_regular(marker, 64 * 1024, mode=0o600) != self._marker_bytes(visibility):
                 raise ValueError("corpus store family pin is missing or changed")
 
     @classmethod
@@ -324,21 +410,50 @@ class CorpusFamily:
         public = public_store.absolute()
         evaluator = evaluator_store.absolute()
         repo = repository.absolute()
+        public_capability: RunStore | None = None
+        evaluator_capability: RunStore | None = None
+        if schedule_authority_profile == "PRODUCTION":
+            reject_symlinks(controller_root)
+            if controller_root.exists():
+                _require_directory(controller_root, owner_only=True)
+            _require_directory(public, owner_only=True)
+            _require_directory(evaluator, owner_only=True)
+            _require_directory(repo, owner_only=False)
+            resolved = tuple(path.resolve(strict=True) for path in (public, evaluator, repo))
+            resolved_controller = controller_root.resolve(strict=False)
+            if any(
+                _is_within(left, right) or _is_within(right, left)
+                for left, right in (
+                    (resolved[0], resolved[1]),
+                    (resolved[0], resolved[2]),
+                    (resolved[1], resolved[2]),
+                    (resolved_controller, resolved[0]),
+                    (resolved_controller, resolved[1]),
+                    (resolved_controller, resolved[2]),
+                )
+            ):
+                raise ValueError("production stores and repository must not overlap")
+            public_capability = RunStore(public, visibility="public")
+            evaluator_capability = RunStore(evaluator, visibility="evaluator")
+            if (
+                public_capability.identity.device,
+                public_capability.identity.inode,
+            ) == (
+                evaluator_capability.identity.device,
+                evaluator_capability.identity.inode,
+            ):
+                raise ValueError("production stores must be distinct")
         if public == evaluator or any(
             _is_within(controller_root, store) or _is_within(store, controller_root)
             for store in (public, evaluator, repo)
         ):
             raise ValueError("corpus controller state must be separate from stores and repository")
-        if schedule_authority_profile == "PRODUCTION" and any(
-            _is_within(left, right) or _is_within(right, left)
-            for left, right in ((public, evaluator), (public, repo), (evaluator, repo))
-        ):
-            raise ValueError("production stores and repository must not overlap")
         reject_symlinks(controller_root)
         controller_root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(controller_root, 0o700)
-        public_capability = RunStore(public, visibility="public")
-        evaluator_capability = RunStore(evaluator, visibility="evaluator")
+        _require_directory(controller_root, owner_only=True)
+        public_capability = public_capability or RunStore(public, visibility="public")
+        evaluator_capability = evaluator_capability or RunStore(evaluator, visibility="evaluator")
         if (schedule_authority_profile == "UNCONFIGURED") != (schedule_public_key is None):
             raise ValueError("schedule authority profile and public key differ")
         key_hash = (
@@ -356,13 +471,15 @@ class CorpusFamily:
         )
         config_path = controller_root / "family.json"
         _atomic_create(config_path, config.model_dump_json().encode(), 0o600)
-        observed = _FamilyConfig.model_validate_json(read_regular(config_path, 64 * 1024))
+        observed = _FamilyConfig.model_validate_json(
+            _read_owned_regular(config_path, 64 * 1024, mode=0o600)
+        )
         if observed != config:
             raise ValueError("corpus family is already configured for different stores")
         if schedule_public_key is not None:
             key_path = controller_root / "schedule-authority.pub"
             _atomic_create(key_path, schedule_public_key, 0o400)
-            if read_regular(key_path, 64 * 1024) != schedule_public_key:
+            if _read_owned_regular(key_path, 64 * 1024, mode=0o400) != schedule_public_key:
                 raise ValueError("schedule public key differs from family configuration")
         family = cls(controller_root, observed, CorpusLedger(controller_root / "ledger"))
         family._verify_schedule_key()
@@ -374,10 +491,9 @@ class CorpusFamily:
     def open(cls, root: Path) -> "CorpusFamily":
         controller_root = root.absolute()
         reject_symlinks(controller_root)
-        if not controller_root.is_dir() or controller_root.stat().st_mode & 0o077:
-            raise ValueError("corpus family controller root is unavailable or unsafe")
+        _require_directory(controller_root, owner_only=True)
         config = _FamilyConfig.model_validate_json(
-            read_regular(controller_root / "family.json", 64 * 1024)
+            _read_owned_regular(controller_root / "family.json", 64 * 1024, mode=0o600)
         )
         public, evaluator = Path(config.public_store), Path(config.evaluator_store)
         if public == evaluator or any(
@@ -390,14 +506,7 @@ class CorpusFamily:
             (evaluator, config.evaluator_store_pin, "evaluator"),
         )
         for path, pin, visibility in stores:
-            reject_symlinks(path)
-            info = path.stat(follow_symlinks=False)
-            if (
-                not stat.S_ISDIR(info.st_mode)
-                or info.st_uid != os.geteuid()
-                or stat.S_IMODE(info.st_mode) != 0o700
-            ):
-                raise ValueError("corpus store is unavailable or unsafe")
+            info = _require_directory(path, owner_only=True)
             observed = RunStoreIdentity(
                 resolved_root=str(path.resolve(strict=True)),
                 device=info.st_dev,
@@ -434,7 +543,7 @@ class CorpusFamily:
             if self._config.schedule_public_key_hash is not None:
                 raise ValueError("unconfigured schedule authority has a public key")
             return
-        content = read_regular(self.root / "schedule-authority.pub", 64 * 1024)
+        content = _read_owned_regular(self.root / "schedule-authority.pub", 64 * 1024, mode=0o400)
         if hashlib.sha256(content).hexdigest() != self._config.schedule_public_key_hash:
             raise ValueError("schedule authority public key is unavailable or changed")
 
@@ -456,9 +565,7 @@ class CorpusFamily:
     def corpus_store(self, visibility: Visibility) -> RunStore:
         """Open one store fixed by the controller-private family configuration."""
         path = Path(
-            self._config.public_store
-            if visibility == "public"
-            else self._config.evaluator_store
+            self._config.public_store if visibility == "public" else self._config.evaluator_store
         )
         store = RunStore(path, visibility=visibility)
         self.require_store(store)
@@ -477,8 +584,7 @@ class CorpusLedger:
         if create:
             self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
             os.chmod(self.root, 0o700)
-        elif not self.root.is_dir() or self.root.stat().st_mode & 0o077:
-            raise ValueError("corpus ledger root is unavailable or unsafe")
+        _require_directory(self.root, owner_only=True)
         self.key_path = self.root / "identity.key"
         init_path = self.root / ".init-lock"
         flags = os.O_RDWR | os.O_NOFOLLOW | (os.O_CREAT if create else 0)
@@ -493,9 +599,24 @@ class CorpusLedger:
                 or init_info.st_nlink != 1
             ):
                 raise ValueError("corpus ledger lock is unavailable or unsafe")
+            init_named = init_path.stat(follow_symlinks=False)
+            if (
+                not stat.S_ISREG(init_named.st_mode)
+                or init_named.st_uid != os.geteuid()
+                or stat.S_IMODE(init_named.st_mode) != 0o600
+                or init_named.st_nlink != 1
+                or (init_named.st_dev, init_named.st_ino) != (init_info.st_dev, init_info.st_ino)
+            ):
+                raise ValueError("corpus ledger lock is unavailable or unsafe")
             if create and not self.key_path.exists():
                 _atomic_create(self.key_path, os.urandom(32), 0o600)
-            self.__key = read_regular(self.key_path, 32)
+            self.__key = _read_owned_regular(self.key_path, 32, mode=0o600)
+            confirmed = init_path.stat(follow_symlinks=False)
+            if (confirmed.st_dev, confirmed.st_ino) != (
+                init_info.st_dev,
+                init_info.st_ino,
+            ):
+                raise ValueError("corpus ledger lock identity changed")
         finally:
             os.close(init_fd)
         key_info = self.key_path.stat(follow_symlinks=False)
