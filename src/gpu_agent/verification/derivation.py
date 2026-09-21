@@ -254,6 +254,7 @@ def derive_verification(
     """Derive both views afresh from immutable native child artifacts."""
     if evaluator.visibility != "evaluator":
         raise ValueError("verification stores have invalid visibility")
+    origin: ExternalRunOrigin | None
     if public.visibility == "public":
         public_root = public.root.resolve()
         evaluator_root = evaluator.root.resolve()
@@ -266,8 +267,11 @@ def derive_verification(
     elif public.visibility == "evaluator":
         if public.identity != evaluator.identity:
             raise ValueError("verification stores have invalid topology")
+        diagnosis_run = public.load(diagnosis_run_id)
+        if diagnosis_run.kind != "diagnosis" or diagnosis_run.binding != binding:
+            raise ValueError("evaluation diagnosis is invalid")
         audit_parent = diagnosis_run_id
-        origin = None
+        origin = diagnosis_run.external_origin
     else:
         raise ValueError("verification stores have invalid visibility")
     audit_run = evaluator.load(audit_run_id)
@@ -306,17 +310,32 @@ def derive_verification(
     ):
         raise ValueError("evaluation verification suite is invalid")
 
+    child_index = json.loads(
+        evaluator.read(_one_ref(audit_run, "verification/child-index.json"))
+    )
+    if (
+        not isinstance(child_index, dict)
+        or set(child_index) != {"schema_version", "child_run_ids"}
+        or child_index["schema_version"] != 1
+        or not isinstance(child_index["child_run_ids"], list)
+        or not child_index["child_run_ids"]
+        or any(
+            not isinstance(run_id, str) or not re.fullmatch(r"[a-f0-9]{32}", run_id)
+            for run_id in child_index["child_run_ids"]
+        )
+        or len(set(child_index["child_run_ids"])) != len(child_index["child_run_ids"])
+        or len(child_index["child_run_ids"]) > spec.expected_child_count
+    ):
+        raise ValueError("evaluation verification child inventory is invalid")
     children: dict[int, RunManifest] = {}
-    for path in evaluator.root.iterdir():
-        if not path.is_dir() or not re.fullmatch(r"[a-f0-9]{32}", path.name):
-            continue
-        child = evaluator.load(path.name)
-        if child.kind != "verification_input" or child.parent_run_id != audit_run.id:
-            continue
+    for expected_index, child_run_id in enumerate(child_index["child_run_ids"]):
+        child = evaluator.load(child_run_id)
         index = json.loads(evaluator.read(_one_ref(child, "input-index.json"))).get("index")
         if (
-            type(index) is not int
-            or index < 0
+            child.kind != "verification_input"
+            or child.parent_run_id != audit_run.id
+            or type(index) is not int
+            or index != expected_index
             or index >= spec.expected_child_count
             or index in children
             or child.status != RunStatus.COMPLETED

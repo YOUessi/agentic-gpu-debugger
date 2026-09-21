@@ -106,13 +106,13 @@ def test_live_candidate_verification(tmp_path, request, variant, want):
     store.transition(original.id, "COMPLETED", None)
     # Evaluator root is independent even if a persistent public run root was requested.
     private_root = tmp_path / "evaluator"
-    result = VerificationEngine(store, private_root).verify(original.id, candidate_id, "full")
+    evaluator = RunStore(private_root / "runs", visibility="evaluator")
+    result = VerificationEngine(store, evaluator).verify(original.id, candidate_id, "full")
     assert result.verdict.value == want, result.model_dump_json(indent=2)
     assert result.candidate_hash == candidate.patched_source_hash
     if variant == "human":
         from gpu_agent.verification.models import VerificationAuditResult
 
-        evaluator = RunStore(private_root / "runs", visibility="evaluator")
         audit = evaluator.load(result.evaluator_audit_run_id)
         audit_ref = next(
             ref for ref in audit.artifact_refs if ref.name == "verification/audit-result.json"

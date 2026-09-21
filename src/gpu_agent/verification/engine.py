@@ -252,7 +252,7 @@ class VerificationEngine:
         origin = (
             ExternalRunOrigin(run_id=original_run_id, visibility="public")
             if self._store.visibility == "public"
-            else None
+            else original_manifest.external_origin
         )
         audit = self._private.create_run(
             "verification_audit",
@@ -373,6 +373,7 @@ class VerificationEngine:
                 name: hashlib.sha256(content).hexdigest() for name, content in sources.items()
             }
             oracle = NumericOracle(case.atol, case.rtol, False, False)
+            child_run_ids: list[str] = []
             for index, input_data in enumerate(suite):
                 run = self._private.create_run(
                     "verification_input",
@@ -380,6 +381,7 @@ class VerificationEngine:
                     binding=binding,
                     external_origin=origin,
                 )
+                child_run_ids.append(run.id)
                 self._private.put(
                     run.id,
                     "input-index.json",
@@ -519,6 +521,15 @@ class VerificationEngine:
                     backend.cleanup(handle)
                     self._private.transition(run.id, "RUNNING", "FINALIZING")
                     self._private.transition(run.id, "COMPLETED", None)
+            self._private.put(
+                audit.id,
+                "verification/child-index.json",
+                json.dumps(
+                    {"schema_version": 1, "child_run_ids": child_run_ids},
+                    separators=(",", ":"),
+                ).encode(),
+                "evaluator",
+            )
             derived = derive_verification(
                 self._store,
                 self._private,
