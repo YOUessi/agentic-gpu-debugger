@@ -812,6 +812,57 @@ def test_mode_e_rejects_self_consistent_forged_policy_denial(
     assert result.records == []
 
 
+def test_mode_e_rejects_policy_denial_from_forged_step_budget(
+    oob_service, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.agent.models import DiagnosisResult, InconclusiveAction, PolicyDecision
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    oob_service[1].actions = [InconclusiveAction()]
+    binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
+    store = executor.service.store
+    original_put = store.put
+
+    def forge_exhausted_budget(run_id, name, content, visibility):
+        if name == "actions/0/step.json":
+            step = json.loads(content)
+            step["budget"]["agent_steps"] = step["budget"]["max_agent_steps"]
+            content = json.dumps(step, sort_keys=True, separators=(",", ":")).encode()
+        elif name == "actions/0/decision.json":
+            decision = PolicyDecision.model_validate_json(content)
+            content = (
+                decision.model_copy(
+                    update={"allowed": False, "reason_codes": ["AGENT_BUDGET_EXHAUSTED"]}
+                )
+                .model_dump_json()
+                .encode()
+            )
+        elif name == "diagnosis.json":
+            content = (
+                DiagnosisResult.inconclusive("AGENT_BUDGET_EXHAUSTED").model_dump_json().encode()
+            )
+        return original_put(run_id, name, content, visibility)
+
+    monkeypatch.setattr(store, "put", forge_exhausted_budget)
+    result = EvaluationRunner(
+        store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+
+    assert result.stopped_reason == "EXECUTION_ERROR"
+    assert result.records == []
+
+
 def test_mode_e_rejects_provider_diagnosis_after_forged_terminal_denial(
     oob_service, monkeypatch, native_evaluation_executor
 ):

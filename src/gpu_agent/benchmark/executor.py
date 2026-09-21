@@ -624,7 +624,9 @@ def _validate_evaluation_record_against_case(
         sequence = 0
         index = 0
         logical_kinds: list[str] = []
+        logical_physical_before: list[int] = []
         while index < len(ordered_started):
+            physical_before = index
             first = ordered_started[index]
             first_final = terminal_by_id[first.invocation_id]
             expected_request_id = hashlib.sha256(
@@ -664,6 +666,7 @@ def _validate_evaluation_record_against_case(
                 raise ValueError("provider invocation did not complete")
             logical_kinds.append(first.kind)
             logical_terminals.append(completed)
+            logical_physical_before.append(physical_before)
             sequence += 1
         terminals = list(terminal_by_id.values())
         if logical_kinds.count("plan") != len(decision_refs) or len(
@@ -683,8 +686,38 @@ def _validate_evaluation_record_against_case(
         )
         if len(step_refs) != len(decision_refs):
             raise ValueError("agent controller action steps are incomplete")
+        initial_budget = AgentBudget.model_validate_json(
+            store.read(_one_ref(run, "agent/initial-budget.json"))
+        )
+        budget_audit = json.loads(store.read(_one_ref(run, "agent/budget-audit.json")))
+        if initial_budget != AgentBudget() or not isinstance(budget_audit, list):
+            raise ValueError("agent controller initial budget is invalid")
+        plan_physical_before = [
+            before
+            for before, kind in zip(logical_physical_before, logical_kinds, strict=True)
+            if kind == "plan"
+        ]
+        if len(plan_physical_before) != len(step_refs):
+            raise ValueError("agent controller plan inventory is invalid")
         agent_seen: set[str] = set()
         agent_evidence_by_id = {ref.id: ref for ref in evidence_refs}
+        initial_evidence_indices = [
+            evidence_index
+            for evidence_index, observed in enumerate(bundles)
+            if observed.build_result is not None
+            and observed.execution_result is not None
+            and not observed.sanitizer_results
+            and not observed.retrieved_chunks
+        ]
+        if not initial_evidence_indices:
+            raise ValueError("agent controller initial evidence is unavailable")
+        expected_evidence_index = max(initial_evidence_indices)
+        expected_budget = initial_budget
+        agent_expected_audit: list[dict[str, object]] = []
+        acquisition_actions = sanitizer_actions | {
+            "retrieve_official_docs",
+            "inspect_source",
+        }
         for index, (step_ref, decision_ref) in enumerate(
             zip(step_refs, decision_refs, strict=True)
         ):
@@ -712,13 +745,35 @@ def _validate_evaluation_record_against_case(
             step_budget = AgentBudget.model_validate(step["budget"])
             evidence_ref = ArtifactRef.model_validate(step["evidence_ref"])
             authoritative_ref = agent_evidence_by_id.get(evidence_ref.id)
-            if authoritative_ref != evidence_ref:
+            if (
+                authoritative_ref != evidence_ref
+                or evidence_ref != evidence_refs[expected_evidence_index]
+            ):
                 raise ValueError("agent controller evidence reference is invalid")
             observed_bundle = EvidenceBundle.model_validate_json(store.read(evidence_ref))
             if evidence != public_evidence_from_bundle(store, observed_bundle):
                 raise ValueError("agent controller evidence snapshot is invalid")
             if step["seen"] != sorted(agent_seen):
                 raise ValueError("agent controller seen state is invalid")
+            expected_step_budget = expected_budget.model_copy(
+                update={
+                    "llm_calls": plan_physical_before[index],
+                    "remaining_seconds": step_budget.remaining_seconds,
+                }
+            )
+            if (
+                step_budget != expected_step_budget
+                or step_budget.remaining_seconds > expected_budget.remaining_seconds
+            ):
+                raise ValueError("agent controller step budget is invalid")
+            planner_id = len(agent_expected_audit) // 3 + 1
+            agent_expected_audit.extend(
+                [
+                    {"id": planner_id, "action": "planner_llm", "state": "ATTEMPTED"},
+                    {"id": planner_id, "action": "planner_llm", "state": "STARTED"},
+                    {"id": planner_id, "action": "planner_llm", "state": "COMPLETED"},
+                ]
+            )
             expected_decision = decide_action(
                 action,
                 evidence,
@@ -730,6 +785,96 @@ def _validate_evaluation_record_against_case(
                 raise ValueError("agent controller decision differs from policy replay")
             if expected_decision.allowed:
                 agent_seen.add(action.action_type + action.typed_arguments.model_dump_json())
+                agent_updates: dict[str, object] = {
+                    "agent_steps": step_budget.agent_steps + 1,
+                }
+                if action.action_type in acquisition_actions:
+                    reservation_id = len(agent_expected_audit) // 3 + 1
+                    agent_audit_slice = budget_audit[
+                        len(agent_expected_audit) : len(agent_expected_audit) + 3
+                    ]
+                    agent_prefix: list[dict[str, object]] = [
+                        {
+                            "id": reservation_id,
+                            "action": action.action_type,
+                            "state": "ATTEMPTED",
+                        },
+                        {
+                            "id": reservation_id,
+                            "action": action.action_type,
+                            "state": "STARTED",
+                        },
+                    ]
+                    if len(agent_audit_slice) != 3 or agent_audit_slice[:2] != agent_prefix:
+                        raise ValueError("agent controller acquisition audit is invalid")
+                    terminal = agent_audit_slice[2]
+                    if terminal not in (
+                        {
+                            "id": reservation_id,
+                            "action": action.action_type,
+                            "state": "COMPLETED",
+                        },
+                        {
+                            "id": reservation_id,
+                            "action": action.action_type,
+                            "state": "FAILED",
+                        },
+                    ):
+                        raise ValueError("agent controller acquisition audit is invalid")
+                    assert isinstance(terminal, dict)
+                    agent_expected_audit.extend([*agent_prefix, terminal])
+                    if index + 1 < len(step_refs):
+                        if terminal["state"] != "COMPLETED":
+                            raise ValueError("agent controller continued after failed acquisition")
+                        if action.action_type != "inspect_source":
+                            expected_evidence_index += 1
+                    if action.action_type in sanitizer_actions:
+                        agent_updates["sanitizer_calls"] = step_budget.sanitizer_calls + 1
+                    elif action.action_type == "retrieve_official_docs":
+                        agent_updates["rag_calls"] = step_budget.rag_calls + 1
+                    else:
+                        agent_updates["source_reads"] = step_budget.source_reads + 1
+                elif action.action_type == "finish_diagnosis":
+                    reservation_id = len(agent_expected_audit) // 3 + 1
+                    agent_expected_audit.extend(
+                        [
+                            {
+                                "id": reservation_id,
+                                "action": "diagnosis_llm",
+                                "state": "ATTEMPTED",
+                            },
+                            {
+                                "id": reservation_id,
+                                "action": "diagnosis_llm",
+                                "state": "STARTED",
+                            },
+                            {
+                                "id": reservation_id,
+                                "action": "diagnosis_llm",
+                                "state": "COMPLETED",
+                            },
+                        ]
+                    )
+                if index + 1 < len(step_refs) and action.action_type not in acquisition_actions:
+                    raise ValueError("agent controller continued after terminal action")
+                expected_budget = step_budget.model_copy(update=agent_updates)
+        expected_final_budget = expected_budget.model_copy(
+            update={
+                "llm_calls": len(invocations),
+                "remaining_seconds": budget.remaining_seconds,
+            }
+        )
+        if (
+            budget != expected_final_budget
+            or budget.remaining_seconds > expected_budget.remaining_seconds
+            or budget_audit != agent_expected_audit
+        ):
+            raise ValueError("agent controller final budget or audit is invalid")
+        if rejected_decision is not None and (
+            acquisition.sanitizer_calls != expected_budget.sanitizer_calls
+            or acquisition.retrieval_calls != expected_budget.rag_calls
+        ):
+            raise ValueError("agent controller denied after inconsistent acquisition usage")
         diagnosis_hashes = [
             value.output_hash for value in logical_terminals if value.kind == "diagnose"
         ]
