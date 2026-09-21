@@ -1378,6 +1378,80 @@ def test_release_resolver_rejects_duplicate_mode_e_diagnosis_ids(tmp_path, repos
     assert getattr(error.value, "code", None) == "RELEASE_ACCEPTANCE_INVALID"
 
 
+def test_release_acceptance_uses_private_native_lineage_for_blind_holdout(tmp_path, repository):
+    from gpu_agent.benchmark.evaluation import (
+        HoldoutEvaluationLineage,
+        NativeEvaluationLineage,
+    )
+    from gpu_agent.benchmark.release import ReleaseEvidenceRoots, _ReleaseEvidenceResolver
+    from gpu_agent.store import RunStore
+
+    roots = ReleaseEvidenceRoots(
+        development_evaluation_run_id="1" * 32,
+        holdout_evaluation_run_id="2" * 32,
+        private_binding_run_id="3" * 32,
+        release_test_run_id="4" * 32,
+    )
+    resolver = _ReleaseEvidenceResolver(
+        roots,
+        RunStore(tmp_path / "public"),
+        RunStore(tmp_path / "evaluator", visibility="evaluator"),
+        object(),
+        tmp_path / "repository",
+        repository,
+    )
+    development = SimpleNamespace(
+        schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
+        records=[
+            SimpleNamespace(
+                lineage=NativeEvaluationLineage(
+                    corpus_cutoff=1,
+                    diagnosis_run_id="5" * 32,
+                    diagnosis_hash="b" * 64,
+                    evidence_hash="c" * 64,
+                    provider_invocation_hashes=[],
+                )
+            )
+        ],
+        native_records=[],
+    )
+    holdout = SimpleNamespace(
+        schedule=SimpleNamespace(items=[SimpleNamespace(mode="E")]),
+        records=[
+            SimpleNamespace(
+                lineage=HoldoutEvaluationLineage(
+                    corpus_cutoff=1,
+                    execution_commitment="6" * 64,
+                    diagnosis_hash="b" * 64,
+                    evidence_hash="c" * 64,
+                    provider_invocation_hashes=[],
+                )
+            )
+        ],
+        native_records=[
+            SimpleNamespace(
+                lineage=NativeEvaluationLineage(
+                    corpus_cutoff=1,
+                    diagnosis_run_id="7" * 32,
+                    diagnosis_hash="d" * 64,
+                    evidence_hash="e" * 64,
+                    provider_invocation_hashes=[],
+                )
+            )
+        ],
+    )
+    public_cases = {"case": SimpleNamespace(validation_run_ids=["8" * 32, "9" * 32])}
+
+    acceptance = resolver._acceptance(
+        public_cases,
+        development,
+        holdout,
+        {"a" * 32},
+    )
+
+    assert acceptance["live_llm"] == ["5" * 32, "7" * 32]
+
+
 def _freeze_resolution(repository, evidence):
     from gpu_agent.benchmark.release import ReleaseEvidenceResolution
 

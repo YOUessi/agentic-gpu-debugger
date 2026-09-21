@@ -26,11 +26,15 @@ from gpu_agent.benchmark.controller_artifacts import (
 from gpu_agent.benchmark.evaluation import (
     EvaluationAttempt,
     EvaluationManifest,
+    EvaluationRecord,
     EvaluationSchedule,
+    NativeEvaluationLineage,
     PublicEvaluationRecord,
 )
 from gpu_agent.benchmark.holdout import (
     EvaluatorRecordBinding,
+    HoldoutBatch,
+    HoldoutController,
     _PrivateAliasMap,
     _PrivateScore,
 )
@@ -86,6 +90,20 @@ def external_release_artifact_path(
         )
     except ValueError as exc:
         raise ValueError(f"{variable} must name an external absolute path") from exc
+
+
+def _native_diagnosis_run_id(record: object) -> str:
+    """Return a native diagnosis ID; commitment-only production records fail closed."""
+    lineage = getattr(record, "lineage", None)
+    if isinstance(lineage, NativeEvaluationLineage):
+        return lineage.diagnosis_run_id
+    # A few focused resolver tests use structural test doubles.  Production
+    # records are Pydantic models and may only pass through the typed branch.
+    if not isinstance(record, PublicEvaluationRecord):
+        value = getattr(lineage, "diagnosis_run_id", None)
+        if isinstance(value, str) and re.fullmatch(r"[a-f0-9]{32}", value):
+            return value
+    raise ValueError("acceptance evidence is not native evaluator lineage")
 
 
 class TestCounts(ExecutionModel):
@@ -391,6 +409,7 @@ class _EvaluationEvidence:
         manifest: EvaluationManifest,
         records: list[PublicEvaluationRecord],
         record_hashes: dict[int, str],
+        native_records: list[EvaluationRecord | PublicEvaluationRecord] | None = None,
     ) -> None:
         self.run = run
         self.binding = binding
@@ -398,6 +417,7 @@ class _EvaluationEvidence:
         self.manifest = manifest
         self.records = records
         self.record_hashes = record_hashes
+        self.native_records = native_records or list(records)
 
 
 class _ReleaseEvidenceResolver:
@@ -856,22 +876,33 @@ class _ReleaseEvidenceResolver:
             }
             if observed != expected or len(observed) != len(evidence.schedule.items):
                 raise ValueError("holdout schedule is not the full Cartesian product")
-            from gpu_agent.benchmark.executor import validate_evaluation_record
+            from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
-            attempts = self._attempts(evidence)
-            for item, record in zip(evidence.schedule.items, evidence.records, strict=True):
-                private_case_id, _ = alias_map[item.case_id]
-                validate_evaluation_record(
-                    self.public,
-                    record,
-                    item,
-                    attempts[item.ordinal],
-                    evidence.binding,
-                    self.evaluator,
-                    self.evaluator,
-                    self.family,
-                    private_case_id,
-                )
+            batch = HoldoutBatch(
+                public_run_id=alias_run.id,
+                evaluator_run_id=mapping_run.id,
+                aliases=aliases,
+                public_alias_hash=alias_ref.sha256,
+                corpus_cutoff=cutoff,
+            )
+            controller = HoldoutController(
+                self.public,
+                self.evaluator,
+                binding=evidence.binding,
+                _schedule_verifier=EvaluationScheduleVerifier.for_family(self.family, self.public),
+                _schedule_family=self.family,
+            )
+            validated = controller.validated_evaluation(batch, evidence.run.id)
+            if (
+                validated.schedule != evidence.schedule
+                or list(validated.records) != evidence.records
+                or {ordinal: ref.sha256 for ordinal, ref in enumerate(validated.record_refs)}
+                != evidence.record_hashes
+            ):
+                raise ValueError("holdout evaluation differs from private resolution")
+            evidence.native_records = [
+                resolved.native_record for resolved in validated.resolved_records
+            ]
             private_score_bindings, private_score_run_ids = self._private_scores(
                 mapping_run, mapping, evidence, alias_map
             )
@@ -1169,11 +1200,11 @@ class _ReleaseEvidenceResolver:
 
         try:
             mode_e_ids = [
-                record.lineage.diagnosis_run_id
+                _native_diagnosis_run_id(record)
                 for evaluation in (development, holdout)
                 for item, record in zip(
                     evaluation.schedule.items,
-                    evaluation.records,
+                    getattr(evaluation, "native_records", None) or evaluation.records,
                     strict=True,
                 )
                 if item.mode == "E"

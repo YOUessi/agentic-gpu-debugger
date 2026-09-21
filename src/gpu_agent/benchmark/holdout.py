@@ -55,6 +55,8 @@ _EXECUTION_GUARD = threading.Lock()
 _EXECUTION_LOCKS: dict[str, threading.Lock] = {}
 
 if TYPE_CHECKING:
+    from gpu_agent.benchmark.ledger import CorpusFamily
+    from gpu_agent.benchmark.models import CaseManifest
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
     from gpu_agent.service import ApplicationService
 
@@ -107,12 +109,21 @@ class PreparedHoldoutScore(ExecutionModel):
     private_score_content: bytes
 
 
+class ResolvedHoldoutEvaluationRecord(ExecutionModel):
+    """Private resolution of one blind public ordinal to its exact transaction."""
+
+    public_record: PublicEvaluationRecord
+    native_record: EvaluationRecord
+    execution_binding: HoldoutExecutionBinding
+
+
 class ValidatedHoldoutEvaluation(ExecutionModel):
     evaluation_run_id: str
     schedule: EvaluationSchedule
     schedule_hash: str
     records: tuple[PublicEvaluationRecord, ...]
     record_refs: tuple[ArtifactRef, ...]
+    resolved_records: tuple[ResolvedHoldoutEvaluationRecord, ...] = ()
 
 
 class _PrivateIdentity(ExecutionModel):
@@ -159,6 +170,7 @@ class HoldoutController:
         *,
         binding: RunBinding,
         _schedule_verifier: EvaluationScheduleVerifier | None = None,
+        _schedule_family: CorpusFamily | None = None,
     ) -> None:
         if (
             public.visibility != "public"
@@ -171,10 +183,12 @@ class HoldoutController:
 
         from gpu_agent.benchmark.ledger import CorpusFamily
 
-        family_root = os.environ.get("GPU_AGENT_CORPUS_FAMILY_ROOT")
-        if family_root is None:
-            raise ValueError("trusted corpus family configuration is required")
-        self._schedule_family = CorpusFamily.open(Path(family_root))
+        if _schedule_family is None:
+            family_root = os.environ.get("GPU_AGENT_CORPUS_FAMILY_ROOT")
+            if family_root is None:
+                raise ValueError("trusted corpus family configuration is required")
+            _schedule_family = CorpusFamily.open(Path(family_root))
+        self._schedule_family = _schedule_family
         if _schedule_verifier is None:
             from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
@@ -332,8 +346,11 @@ class HoldoutController:
         evaluation_run_id: str,
         item: EvaluationScheduleItem,
         attempt: EvaluationAttempt,
+        *,
+        _proof: HoldoutScheduleProof | None = None,
+        _identity: _PrivateIdentity | None = None,
     ) -> PreparedHoldoutExecution:
-        proof = self.validate_batch(batch)
+        proof = _proof or self.validate_batch(batch)
         if (
             evaluation_run_id != attempt.run_id
             or item.ordinal != attempt.ordinal
@@ -345,7 +362,9 @@ class HoldoutController:
             or attempt.corpus_cutoff != batch.corpus_cutoff
         ):
             raise ValueError("holdout execution request is invalid")
-        identity = self._identity(batch, item.case_id)
+        identity = _identity or self._identity(batch, item.case_id)
+        if identity.alias != item.case_id:
+            raise ValueError("holdout execution request is invalid")
         attempt_hash = self._content_hash(attempt)
         execution_run_id = hashlib.sha256(
             (
@@ -716,6 +735,8 @@ class HoldoutController:
         prepared: PreparedHoldoutExecution,
         native: EvaluationRecord,
         lease: RunDirectorySetLease | None = None,
+        *,
+        _trusted_case: CaseManifest | None = None,
     ) -> PublicEvaluationRecord:
         _, diagnosis = self._validate_execution_reservation(prepared, lease)
         if diagnosis.status != RunStatus.COMPLETED:
@@ -751,6 +772,7 @@ class HoldoutController:
             prepared.binding.private_case_id,
             diagnosis_parent_run_id=prepared.execution_run_id,
             expected_visibility="evaluator",
+            _trusted_case=_trusted_case,
         )
 
     def _execution_commitment(
@@ -902,7 +924,18 @@ class HoldoutController:
         prepared: PreparedHoldoutExecution,
         lease: RunDirectorySetLease | None = None,
     ) -> PublicEvaluationRecord:
-        batch = self._validate_prepared_execution(prepared)
+        return self._resolve_prepared_execution(prepared, lease).public_record
+
+    def _resolve_prepared_execution(
+        self,
+        prepared: PreparedHoldoutExecution,
+        lease: RunDirectorySetLease | None = None,
+        *,
+        _validated_batch: HoldoutBatch | None = None,
+        _trusted_case: CaseManifest | None = None,
+    ) -> ResolvedHoldoutEvaluationRecord:
+        """Validate and load the exact terminal evaluator transaction."""
+        batch = _validated_batch or self._validate_prepared_execution(prepared)
         execution, _ = self._validate_execution_reservation(prepared, lease)
         expected_names = {
             "holdout/native-record.json",
@@ -934,7 +967,9 @@ class HoldoutController:
                 "public_record_hash": hashlib.sha256(public_content).hexdigest(),
             }
         )
-        validated_native = self._validate_native_execution(prepared, native, lease)
+        validated_native = self._validate_native_execution(
+            prepared, native, lease, _trusted_case=_trusted_case
+        )
         expected_public = self._public_projection(
             batch, prepared, validated_native, expected_binding.native_record_hash or ""
         )
@@ -949,7 +984,47 @@ class HoldoutController:
             raise ValueError("holdout execution transaction is invalid")
         if lease is not None:
             lease.validate()
-        return public
+        return ResolvedHoldoutEvaluationRecord(
+            public_record=public,
+            native_record=native,
+            execution_binding=final_binding,
+        )
+
+    def resolve_scheduled_record(
+        self,
+        batch: HoldoutBatch,
+        item: EvaluationScheduleItem,
+        attempt: EvaluationAttempt,
+        *,
+        expected_public: PublicEvaluationRecord | EvaluationRecord | None = None,
+        _proof: HoldoutScheduleProof | None = None,
+        _identity: _PrivateIdentity | None = None,
+        _batch_is_validated: bool = False,
+        _trusted_case: CaseManifest | None = None,
+    ) -> ResolvedHoldoutEvaluationRecord:
+        """Resolve one signed public schedule ordinal without scanning evaluator runs."""
+        prepared = self._prepared_execution(
+            batch,
+            attempt.run_id,
+            item,
+            attempt,
+            _proof=_proof,
+            _identity=_identity,
+        )
+        resolved = self._resolve_prepared_execution(
+            prepared,
+            _validated_batch=batch if _batch_is_validated else None,
+            _trusted_case=_trusted_case,
+        )
+        if expected_public is not None:
+            observed = (
+                expected_public.public()
+                if isinstance(expected_public, EvaluationRecord)
+                else expected_public
+            )
+            if resolved.public_record.model_dump_json() != observed.model_dump_json():
+                raise ValueError("holdout public record differs from evaluator transaction")
+        return resolved
 
     def recover_execution(
         self,
@@ -1169,9 +1244,9 @@ class HoldoutController:
         _context: _MetricLoadContext | None = None,
     ) -> EvaluationRecord:
         """Reload a scored record for the metric module's persisted-reference API."""
-        private_score, public = self._load_score(binding, _context=_context)
-        raw = public.model_dump(mode="json")
-        build = public.executed_checks.get("verification/build")
+        private_score, public, native = self._load_score(binding, _context=_context)
+        raw = native.model_dump(mode="json")
+        build = native.executed_checks.get("verification/build")
         raw.update(
             score=private_score.score,
             evaluator_labels=private_score.labels,
@@ -1353,6 +1428,15 @@ class HoldoutController:
         ):
             raise ValueError("public evaluation record is invalid")
         identities = {alias: self._identity(batch, alias) for alias in batch.aliases}
+        from gpu_agent.benchmark.executor import registered_cases
+
+        trusted_cases = registered_cases(
+            self.evaluator,
+            self.binding,
+            self._schedule_family,
+            cutoff=batch.corpus_cutoff,
+        )
+        resolved_records: dict[int, ResolvedHoldoutEvaluationRecord] = {}
         for record_ordinal, observed_record in records.items():
             scheduled_item = schedule.items[record_ordinal]
             if (
@@ -1364,20 +1448,43 @@ class HoldoutController:
             ):
                 raise ValueError("public evaluation record is invalid")
             identity = identities.get(scheduled_item.case_id)
-            if identity is None:
-                raise ValueError("public evaluation record is invalid")
-            recovered = self.recover_execution(
-                batch, scheduled_item, attempts[record_ordinal]
+            trusted_case = (
+                trusted_cases.get(identity.private_case_id) if identity is not None else None
             )
-            if recovered is None or recovered != observed_record:
+            if (
+                identity is None
+                or trusted_case is None
+                or trusted_case.template_id != identity.private_template_id
+            ):
                 raise ValueError("public evaluation record is invalid")
+            resolved = self.resolve_scheduled_record(
+                batch,
+                scheduled_item,
+                attempts[record_ordinal],
+                expected_public=observed_record,
+                _proof=proof,
+                _identity=identity,
+                _batch_is_validated=True,
+                _trusted_case=trusted_case,
+            )
+            resolved_records[record_ordinal] = resolved
         return ValidatedHoldoutEvaluation(
             evaluation_run_id=run.id,
             schedule=schedule,
             schedule_hash=schedule_hash,
             records=tuple(ordered_records),
             record_refs=tuple(record_refs[index] for index in range(len(records))),
+            resolved_records=tuple(resolved_records[index] for index in range(len(records))),
         )
+
+    def resolve_evaluation_record(
+        self, batch: HoldoutBatch, evaluation_run_id: str, ordinal: int
+    ) -> ResolvedHoldoutEvaluationRecord:
+        """Resolve a public evaluation locator to exactly one validated native record."""
+        evaluation = self.validated_evaluation(batch, evaluation_run_id)
+        if ordinal < 0 or ordinal >= len(evaluation.resolved_records):
+            raise ValueError("public evaluation ordinal is invalid")
+        return evaluation.resolved_records[ordinal]
 
     def _score_run_id(self, batch: HoldoutBatch, record_id: str) -> str:
         run = self.evaluator.load(batch.evaluator_run_id)
@@ -1515,7 +1622,7 @@ class HoldoutController:
         binding: EvaluatorRecordBinding,
         *,
         _context: _MetricLoadContext | None = None,
-    ) -> tuple[_PrivateScore, PublicEvaluationRecord]:
+    ) -> tuple[_PrivateScore, PublicEvaluationRecord, EvaluationRecord]:
         run = self.evaluator.load(binding.evaluator_score_run_id)
         score_refs = [r for r in run.artifact_refs if r.name == "holdout/private-score.json"]
         binding_refs = [r for r in run.artifact_refs if r.name == "holdout/record-binding.json"]
@@ -1548,7 +1655,13 @@ class HoldoutController:
             raise ValueError("holdout score transaction is invalid")
         batch = self._score_batch(run)
         if _context is None:
-            public = self._validated_public_record(refs[0], batch)
+            evaluation = self.validated_evaluation(batch, binding.public_evaluation_run_id)
+            try:
+                ordinal = evaluation.record_refs.index(refs[0])
+                public = evaluation.records[ordinal]
+                native = evaluation.resolved_records[ordinal].native_record
+            except (ValueError, IndexError):
+                raise ValueError("holdout score transaction is invalid") from None
             identity = self._identity(batch, public.case_id)
         else:
             if batch != _context.batch or binding.public_evaluation_run_id != (
@@ -1558,6 +1671,7 @@ class HoldoutController:
             try:
                 ordinal = _context.evaluation.record_refs.index(refs[0])
                 public = _context.evaluation.records[ordinal]
+                native = _context.evaluation.resolved_records[ordinal].native_record
                 identity = _context.identities[public.case_id]
             except (KeyError, ValueError, IndexError):
                 raise ValueError("holdout score transaction is invalid") from None
@@ -1573,4 +1687,4 @@ class HoldoutController:
             or batch.corpus_cutoff != binding.corpus_cutoff
         ):
             raise ValueError("holdout score transaction is invalid")
-        return private_score, public
+        return private_score, public, native

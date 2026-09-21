@@ -122,9 +122,7 @@ def evaluator_native_record(service, store, prepared, item, case):
         pricing = PricingAttestation.model_validate_json(
             store.read(
                 next(
-                    ref
-                    for ref in run.artifact_refs
-                    if ref.name == "agent/pricing-attestation.json"
+                    ref for ref in run.artifact_refs if ref.name == "agent/pricing-attestation.json"
                 )
             )
         )
@@ -151,9 +149,7 @@ def evaluator_native_record(service, store, prepared, item, case):
         candidate_run = store.load(candidate_run_id)
         candidate = PatchCandidate.model_validate_json(
             store.read(
-                next(
-                    ref for ref in candidate_run.artifact_refs if ref.name == "candidate.json"
-                )
+                next(ref for ref in candidate_run.artifact_refs if ref.name == "candidate.json")
             )
         )
         service.verify(run.id, candidate_run_id)
@@ -162,9 +158,7 @@ def evaluator_native_record(service, store, prepared, item, case):
         )
         verification_run_id = verification_run.id
         verification_ref = next(
-            ref
-            for ref in verification_run.artifact_refs
-            if ref.name == "verification/result.json"
+            ref for ref in verification_run.artifact_refs if ref.name == "verification/result.json"
         )
         verification = VerificationResult.model_validate_json(store.read(verification_ref))
         checks.update(
@@ -218,11 +212,14 @@ def evaluator_native_record(service, store, prepared, item, case):
             "oracle_passed": verification.public_oracle_passed if verification else None,
             "verdict": verification.verdict.value if verification else None,
             "regression_detected": bool(
-                verification
-                and verification.verdict == VerificationVerdict.REGRESSION_DETECTED
+                verification and verification.verdict == VerificationVerdict.REGRESSION_DETECTED
             ),
             "usage": usage,
-            "latency_ms": (finished - run.events[0].at).total_seconds() * 1000,
+            # The synthetic provider fixture may advance its deterministic clock
+            # independently from the store event clock.  Latency is not the
+            # subject of this persisted-lineage fixture, but the production
+            # schema correctly rejects a negative duration.
+            "latency_ms": max(0.0, (finished - run.events[0].at).total_seconds() * 1000),
             "cost_usd": cost,
             "failure_reason": reason,
         }
@@ -250,15 +247,6 @@ class ScoringFixture:
             _schedule_verifier=executor._schedule_verifier,
         )
         self.batch = self.holdout.prepare()
-        holdout_executor = EvaluationExecutor(
-            executor.service,
-            executor.corpus,
-            executor.sources,
-            holdout_controller=self.holdout,
-            holdout_batch=self.batch,
-            _corpus_family=executor._corpus_family,
-            _schedule_verifier=executor._schedule_verifier,
-        )
         from gpu_agent.benchmark.executor import registered_cases
         from gpu_agent.service import ApplicationService
 
@@ -273,6 +261,16 @@ class ScoringFixture:
             _evaluation_schedule_verifier=executor._schedule_verifier,
         )
         evaluator_service._pricing_attestation = executor.service._pricing_attestation
+        holdout_executor = EvaluationExecutor(
+            executor.service,
+            executor.corpus,
+            executor.sources,
+            holdout_service=evaluator_service,
+            holdout_controller=self.holdout,
+            holdout_batch=self.batch,
+            _corpus_family=executor._corpus_family,
+            _schedule_verifier=executor._schedule_verifier,
+        )
         reservations = {}
 
         def use_reserved_diagnosis(_verifier, unit):
@@ -1565,3 +1563,75 @@ def test_grouped_metrics_load_once_and_match_independent_aggregate(scoring_fixtu
     assert result.overall == expected
     assert loads == [binding.public_record_id for binding in bindings]
     assert validations == [f.evaluation_run_id]
+
+
+def test_private_commitment_resolution_returns_exact_native_transaction(scoring_fixture):
+    """A blind public ordinal resolves to one exact terminal evaluator record."""
+    from gpu_agent.benchmark.evaluation import NativeEvaluationLineage
+
+    f = scoring_fixture
+    ordinal = 73
+    resolved = f.holdout.resolve_evaluation_record(f.batch, f.evaluation_run_id, ordinal)
+
+    assert resolved.public_record == f.records[ordinal]
+    assert resolved.execution_binding.ordinal == ordinal
+    assert resolved.execution_binding.public_evaluation_run_id == f.evaluation_run_id
+    assert resolved.execution_binding.alias == f.records[ordinal].case_id
+    assert resolved.native_record.case_id == resolved.execution_binding.private_case_id
+    assert resolved.native_record.template_id == resolved.execution_binding.private_template_id
+    assert isinstance(resolved.native_record.lineage, NativeEvaluationLineage)
+    assert (
+        resolved.native_record.lineage.diagnosis_run_id
+        == resolved.execution_binding.diagnosis_run_id
+    )
+
+
+def test_persisted_metric_record_uses_validated_native_diagnosis(scoring_fixture):
+    """Metrics consume evaluator-native diagnosis, not the blind public projection."""
+    from gpu_agent.benchmark.holdout import EvaluatorRecordBinding
+
+    f = scoring_fixture
+    run_id = f.seed(0)
+    run = f.evaluator.load(run_id)
+    binding = EvaluatorRecordBinding.model_validate_json(
+        f.evaluator.read(
+            next(ref for ref in run.artifact_refs if ref.name == "holdout/record-binding.json")
+        )
+    )
+    loaded = f.controller.holdout._load_metric_record(binding)
+    resolved = f.holdout.resolve_evaluation_record(f.batch, f.evaluation_run_id, 0)
+
+    assert loaded.diagnosis == resolved.native_record.diagnosis
+    assert loaded.diagnosis
+
+
+def test_private_scoring_canaries_never_enter_public_store(scoring_fixture):
+    f = scoring_fixture
+    f.seed(0)
+    mapping = json.loads(
+        f.evaluator.read(
+            next(
+                ref
+                for ref in f.evaluator.load(f.mapping_run_id).artifact_refs
+                if ref.name == "holdout/private-alias-map.json"
+            )
+        )
+    )
+    public_bytes = b"\n".join(
+        path.read_bytes() for path in sorted(f.public.root.rglob("*")) if path.is_file()
+    )
+    execution_ids = [
+        path.name.encode()
+        for path in f.evaluator.root.iterdir()
+        if path.is_dir()
+        and len(path.name) == 32
+        and f.evaluator.load(path.name).kind in {"holdout_execution", "diagnosis"}
+    ]
+
+    for canary in (
+        b"PRIVATE-JUDGMENT-CANARY",
+        mapping["nonce_hex"].encode(),
+        str(f.evaluator.root).encode(),
+        *execution_ids,
+    ):
+        assert canary not in public_bytes
