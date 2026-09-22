@@ -542,6 +542,7 @@ def _configure_responses_provider(
     mock_provider=True,
     full_script=False,
     invalid_plan_after=None,
+    invalid_plan_calls=frozenset(),
 ):
     from pydantic import SecretStr
 
@@ -564,13 +565,19 @@ def _configure_responses_provider(
     class Port:
         def __init__(self):
             self.plan_index = 0
+            self.physical_plan_index = 0
 
         def call(self, request):
+            physical_plan_index = self.physical_plan_index
+            if request.kind == "plan":
+                self.physical_plan_index += 1
             if (
                 full_script
                 and request.kind == "plan"
-                and invalid_plan_after is not None
-                and self.plan_index >= invalid_plan_after
+                and (
+                    physical_plan_index in invalid_plan_calls
+                    or (invalid_plan_after is not None and self.plan_index >= invalid_plan_after)
+                )
             ):
                 value = {"invalid": True}
             elif full_script and request.kind == "plan":
@@ -786,6 +793,42 @@ def test_mode_e_records_terminal_invalid_planner_output_and_continues_batch(
         monkeypatch,
         full_script=True,
         invalid_plan_after=1,
+    )
+
+    result = EvaluationRunner(
+        executor.service.store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=1,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+
+    assert result.executed_units == 1
+    assert result.records[0].status == "FAILED"
+    assert result.records[0].failure_reason == "LLM_INVALID_OUTPUT"
+    assert result.records[0].usage["physical_calls"] == 3
+    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+
+
+def test_mode_e_records_invalid_plan_after_format_retry_was_already_used(
+    oob_service, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.agent.models import MemcheckAction
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    oob_service[1].actions = [MemcheckAction()]
+    binding, _ = _configure_responses_provider(
+        executor,
+        monkeypatch,
+        full_script=True,
+        invalid_plan_calls=frozenset({0, 2}),
     )
 
     result = EvaluationRunner(

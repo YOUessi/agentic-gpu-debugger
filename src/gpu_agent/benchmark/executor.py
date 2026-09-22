@@ -646,34 +646,47 @@ def _validate_evaluation_record_against_case(
                 first_final.state == "FAILED"
                 and first_final.error_code == "LLM_INVALID_OUTPUT"
                 and not first_final.retryable
-                and index + 1 < len(ordered_started)
             ):
-                retry = ordered_started[index + 1]
-                retry_final = terminal_by_id[retry.invocation_id]
-                expected_retry_id = hashlib.sha256(
-                    f"{attempt.idempotency_key}:{sequence}:{first.kind}:1".encode()
-                ).hexdigest()[:32]
-                if (
-                    retry.kind != first.kind
-                    or retry.attempt != 1
-                    or retry.format_retry_of != first.invocation_id
-                    or retry.client_request_id != expected_retry_id
-                ):
-                    raise ValueError("provider retry lineage is invalid")
-                if retry_final.state == "COMPLETED":
-                    completed = retry_final
-                    index += 2
+                if index + 1 < len(ordered_started):
+                    retry = ordered_started[index + 1]
+                    retry_final = terminal_by_id[retry.invocation_id]
+                    expected_retry_id = hashlib.sha256(
+                        f"{attempt.idempotency_key}:{sequence}:{first.kind}:1".encode()
+                    ).hexdigest()[:32]
+                    if (
+                        retry.kind != first.kind
+                        or retry.attempt != 1
+                        or retry.format_retry_of != first.invocation_id
+                        or retry.client_request_id != expected_retry_id
+                    ):
+                        raise ValueError("provider retry lineage is invalid")
+                    if retry_final.state == "COMPLETED":
+                        completed = retry_final
+                        index += 2
+                    elif (
+                        retry_final.state == "FAILED"
+                        and retry_final.error_code == "LLM_INVALID_OUTPUT"
+                        and not retry_final.retryable
+                        and first.kind == "plan"
+                        and index + 2 == len(ordered_started)
+                        and diagnosis.diagnostic_outcome == "INCONCLUSIVE"
+                        and diagnosis.limitations == ["LLM_INVALID_OUTPUT"]
+                    ):
+                        terminal_provider_failure = retry_final
+                        index += 2
+                        sequence += 1
+                        break
+                    else:
+                        raise ValueError("provider retry lineage is invalid")
                 elif (
-                    retry_final.state == "FAILED"
-                    and retry_final.error_code == "LLM_INVALID_OUTPUT"
-                    and not retry_final.retryable
-                    and first.kind == "plan"
-                    and index + 2 == len(ordered_started)
+                    first.kind == "plan"
+                    and index + 1 == len(ordered_started)
+                    and any(value.attempt == 1 for value in ordered_started[:index])
                     and diagnosis.diagnostic_outcome == "INCONCLUSIVE"
                     and diagnosis.limitations == ["LLM_INVALID_OUTPUT"]
                 ):
-                    terminal_provider_failure = retry_final
-                    index += 2
+                    terminal_provider_failure = first_final
+                    index += 1
                     sequence += 1
                     break
                 else:
