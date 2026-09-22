@@ -245,15 +245,18 @@ def invoke_sdk(
         }
         deepseek = _is_deepseek_endpoint(request.endpoint)
         if deepseek:
-            schema = json.dumps(
-                output_model.model_json_schema(), ensure_ascii=True, separators=(",", ":")
-            )
+            from openai.lib._pydantic import to_strict_json_schema
+
             raw = client.responses.with_raw_response.create(
                 **common,
-                instructions=instructions
-                + "\nReturn only one JSON object validating against this JSON Schema: "
-                + schema,
-                text={"format": {"type": "json_object"}},
+                instructions=instructions,
+                text={
+                    "format": {
+                        "type": "json_schema",
+                        "name": output_model.__name__,
+                        "schema": to_strict_json_schema(output_model),
+                    }
+                },
                 reasoning={"effort": "none"},
             )
         else:

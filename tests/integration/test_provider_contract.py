@@ -474,8 +474,7 @@ def test_real_sdk_offline_transport_sends_strict_schema_and_parses_result(store)
     assert provider.invocations()[-1].provider_request_id == "req_transport"
 
 
-def test_deepseek_responses_uses_json_object_then_local_domain_validation(store):
-    """DeepSeek rejects the domain union's nested anyOf JSON schema."""
+def test_deepseek_responses_uses_server_enforced_json_schema(store):
     import json
 
     import httpx2
@@ -550,7 +549,12 @@ def test_deepseek_responses_uses_json_object_then_local_domain_validation(store)
         port=SDKContractPort(factory),
     )
     assert provider.plan(PublicEvidence(), AgentBudget()).action_type == "run_memcheck"
-    assert requests[0]["text"]["format"] == {"type": "json_object"}
+    output_format = requests[0]["text"]["format"]
+    assert output_format["type"] == "json_schema"
+    assert output_format["name"] == "AgentActionOutput"
+    assert output_format["schema"]["additionalProperties"] is False
+    assert "action" in output_format["schema"]["required"]
+    assert "anyOf" in json.dumps(output_format["schema"])
     assert requests[0]["reasoning"] == {"effort": "none"}
     assert requests[0]["store"] is False
     assert provider.provider_name == "deepseek-responses"
