@@ -829,6 +829,22 @@ class RunStore:
                 external_origin=parent.external_origin,
                 events=[StateEvent(status=RunStatus.QUEUED, phase=None)],
             )
+            if (self.root / child_id).exists():
+                existing = self.load(child_id)
+                unit_refs = [
+                    ref for ref in existing.artifact_refs if ref.name == "evaluation/unit.json"
+                ]
+                if (
+                    existing.kind != child.kind
+                    or existing.parent_run_id != child.parent_run_id
+                    or existing.binding != child.binding
+                    or existing.external_origin != child.external_origin
+                    or existing.status != RunStatus.COMPLETED
+                    or len(unit_refs) != 1
+                    or self.read(unit_refs[0]) != unit.model_dump_json().encode()
+                ):
+                    raise ValueError("existing evaluation child is not exactly recoverable")
+                return existing
             self._create_atomic_run(child)
             self.put(
                 child.id,

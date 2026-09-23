@@ -714,22 +714,25 @@ class EvaluationRunner:
             )
 
         spent = 0.0
-        for record in records:
-            if record.cost_usd is None:
-                return EvaluationRunner._terminal(
-                    self, run_id, schedule, records, "COST_UNKNOWN", RunStatus.COMPLETED
-                )
-            if record.cost_usd > schedule.bindings.max_unit_cost_usd:
+        for ordinal, record in enumerate(records):
+            if (
+                record.cost_usd is not None
+                and record.cost_usd > schedule.bindings.max_unit_cost_usd
+            ):
                 return EvaluationRunner._terminal(
                     self, run_id, schedule, records, "UNIT_COST_CEILING_EXCEEDED", RunStatus.FAILED
                 )
-            spent += record.cost_usd
+            spent += (
+                record.cost_usd
+                if record.cost_usd is not None
+                else attempts[ordinal].reserved_cost_usd
+            )
 
         incomplete_attempts = [
             attempt for ordinal, attempt in attempts.items() if ordinal >= len(records)
         ]
         if incomplete_attempts:
-            recovered_records: list[PublicEvaluationRecord] = []
+            recovered_records: list[tuple[EvaluationAttempt, PublicEvaluationRecord]] = []
             for attempt in sorted(incomplete_attempts, key=lambda value: value.ordinal):
                 try:
                     from gpu_agent.benchmark.executor import EvaluationExecutor
@@ -741,7 +744,7 @@ class EvaluationRunner:
                         raise ValueError("evaluator completion is unavailable")
                     item = schedule.items[attempt.ordinal]
                     EvaluationRunner._validate_record(self, recovered, item, attempt)
-                    recovered_records.append(recovered)
+                    recovered_records.append((attempt, recovered))
                 except (OSError, ValueError):
                     spent += sum(value.reserved_cost_usd for value in incomplete_attempts)
                     return EvaluationRunner._terminal(
@@ -752,7 +755,7 @@ class EvaluationRunner:
                         "AMBIGUOUS_STARTED_ATTEMPT",
                         RunStatus.FAILED,
                     )
-            for recovered in recovered_records:
+            for attempt, recovered in recovered_records:
                 EvaluationRunner._put(
                     self,
                     run_id,
@@ -761,11 +764,10 @@ class EvaluationRunner:
                 )
                 attempts = EvaluationRunner._attempts(self, run_id, schedule)
                 records = EvaluationRunner._records(self, run_id, schedule, attempts)
-                if recovered.cost_usd is None:
-                    return EvaluationRunner._terminal(
-                        self, run_id, schedule, records, "COST_UNKNOWN", RunStatus.COMPLETED
-                    )
-                if recovered.cost_usd > schedule.bindings.max_unit_cost_usd:
+                if (
+                    recovered.cost_usd is not None
+                    and recovered.cost_usd > schedule.bindings.max_unit_cost_usd
+                ):
                     return EvaluationRunner._terminal(
                         self,
                         run_id,
@@ -774,7 +776,11 @@ class EvaluationRunner:
                         "UNIT_COST_CEILING_EXCEEDED",
                         RunStatus.FAILED,
                     )
-                spent += recovered.cost_usd
+                spent += (
+                    recovered.cost_usd
+                    if recovered.cost_usd is not None
+                    else attempt.reserved_cost_usd
+                )
 
         for item in schedule.items[len(records) :]:
             if spent + schedule.bindings.max_unit_cost_usd > schedule.bindings.max_cost_usd:
@@ -816,15 +822,18 @@ class EvaluationRunner:
                 )
             attempts = EvaluationRunner._attempts(self, run_id, schedule)
             records = EvaluationRunner._records(self, run_id, schedule, attempts)
-            if record.cost_usd is None:
-                return EvaluationRunner._terminal(
-                    self, run_id, schedule, records, "COST_UNKNOWN", RunStatus.COMPLETED
-                )
-            if record.cost_usd > schedule.bindings.max_unit_cost_usd:
+            if (
+                record.cost_usd is not None
+                and record.cost_usd > schedule.bindings.max_unit_cost_usd
+            ):
                 return EvaluationRunner._terminal(
                     self, run_id, schedule, records, "UNIT_COST_CEILING_EXCEEDED", RunStatus.FAILED
                 )
-            spent += record.cost_usd
+            spent += (
+                record.cost_usd
+                if record.cost_usd is not None
+                else attempt.reserved_cost_usd
+            )
         return EvaluationRunner._terminal(
             self, run_id, schedule, records, None, RunStatus.COMPLETED
         )

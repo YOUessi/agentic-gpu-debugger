@@ -543,6 +543,7 @@ def _configure_responses_provider(
     full_script=False,
     invalid_plan_after=None,
     invalid_plan_calls=frozenset(),
+    uncertain_plan_calls=frozenset(),
 ):
     from pydantic import SecretStr
 
@@ -571,6 +572,8 @@ def _configure_responses_provider(
             physical_plan_index = self.physical_plan_index
             if request.kind == "plan":
                 self.physical_plan_index += 1
+            if request.kind == "plan" and physical_plan_index in uncertain_plan_calls:
+                return SDKResult(error_code="LLM_CONNECTION_ERROR", state="UNCERTAIN")
             if (
                 full_script
                 and request.kind == "plan"
@@ -849,6 +852,46 @@ def test_mode_e_records_invalid_plan_after_format_retry_was_already_used(
     assert result.records[0].status == "FAILED"
     assert result.records[0].failure_reason == "LLM_INVALID_OUTPUT"
     assert result.records[0].usage["physical_calls"] == 3
+    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+
+
+def test_mode_e_records_uncertain_plan_and_reserves_unknown_cost(
+    oob_service, monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.agent.models import MemcheckAction
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+
+    executor = native_evaluation_executor
+    oob_service[1].actions = [MemcheckAction()]
+    binding, _ = _configure_responses_provider(
+        executor,
+        monkeypatch,
+        full_script=True,
+        invalid_plan_calls=frozenset({0}),
+        uncertain_plan_calls=frozenset({2}),
+    )
+
+    result = EvaluationRunner(
+        executor.service.store,
+        executor,
+        schedule_client=schedule_client_for_test(executor),
+        commit=binding.repository.commit,
+        prompt_version=binding.prompt_version or "",
+        toolchain_hash=binding.toolchain_lock_hash or "",
+        model_config_hash=binding.model_config_hash or "",
+        binding=binding,
+        max_cost_usd=2,
+        max_unit_cost_usd=1,
+        random_seed=7,
+    ).run("E", "development", 3)
+
+    assert result.executed_units == 2
+    assert [record.failure_reason for record in result.records] == [
+        "LLM_CONNECTION_ERROR",
+        "LLM_CONNECTION_ERROR",
+    ]
+    assert all(record.status == "FAILED" for record in result.records)
+    assert all(record.cost_usd is None for record in result.records)
     assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
 
 

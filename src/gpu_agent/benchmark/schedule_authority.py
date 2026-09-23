@@ -1010,7 +1010,10 @@ def _validate_evaluation_unit(
             store.read(_one_ref(child, "evaluation/unit.json"))
         )
         child_ordinals.append(child_unit.ordinal)
-    if sorted(child_ordinals) != expected_previous:
+    if sorted(child_ordinals) not in (
+        expected_previous,
+        [*expected_previous, unit.ordinal],
+    ):
         raise ValueError("evaluation parent has extra or missing diagnosis children")
 
 

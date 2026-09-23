@@ -28,7 +28,7 @@ from gpu_agent.benchmark.evaluation import (
     PricingAttestation,
 )
 from gpu_agent.benchmark.ledger import CorpusFamily
-from gpu_agent.contracts import RunBinding, RunManifest
+from gpu_agent.contracts import RunBinding, RunManifest, RunStatus
 from gpu_agent.environment import load_toolchain_lock
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import _evidence
@@ -390,6 +390,8 @@ class ApplicationService:
             run = self.store.validate_and_create_evaluation_child(
                 self._evaluation_schedule_verifier, evaluation_unit
             )
+            if run.status == RunStatus.COMPLETED:
+                return run
         elif evaluation_unit is None:
             run = self.store.create_run("diagnosis", binding=self._binding)
         if run is None:

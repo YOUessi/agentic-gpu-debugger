@@ -83,6 +83,48 @@ def test_resume_persists_completed_evaluator_projection_without_reexecution(
     assert executor.holdout_service._provider.kinds == provider_before == []
 
 
+def test_resume_persists_completed_development_projection_without_reexecution(
+    monkeypatch, native_evaluation_executor
+):
+    from gpu_agent.benchmark.evaluation import EvaluationRunner
+    from gpu_agent.service import ApplicationService
+
+    executor = native_evaluation_executor
+    native_diagnose = ApplicationService._diagnose
+    native_put = EvaluationRunner._put
+    calls = {"diagnose": 0, "backend": 0}
+    backend_type = executor.service._backend_factory
+    native_container = backend_type._container
+
+    def counted_diagnose(self, *args, **kwargs):
+        calls["diagnose"] += 1
+        return native_diagnose(self, *args, **kwargs)
+
+    def counted_container(self, *args, **kwargs):
+        calls["backend"] += 1
+        return native_container(self, *args, **kwargs)
+
+    def interrupt_before_public_record(self, run_id, name, content):
+        if name == "evaluation/records/0.json":
+            raise KeyboardInterrupt
+        return native_put(self, run_id, name, content)
+
+    monkeypatch.setattr(ApplicationService, "_diagnose", counted_diagnose)
+    monkeypatch.setattr(backend_type, "_container", counted_container)
+    monkeypatch.setattr(EvaluationRunner, "_put", interrupt_before_public_record)
+    with pytest.raises(KeyboardInterrupt):
+        _runner(executor).run("D", "development", 3)
+    run_id = executor.service.store.recoverable_runs()[0].id
+    before = calls.copy()
+    assert before == {"diagnose": 1, "backend": 3}
+
+    monkeypatch.setattr(EvaluationRunner, "_put", native_put)
+    recovered = _runner(executor).resume(run_id, "D", "development", 3)
+    assert recovered.executed_units == 3
+    assert recovered.stopped_reason is None
+    assert calls == {"diagnose": 4, "backend": 9}
+
+
 @pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
 @pytest.mark.parametrize("fault", ["partial", "started"])
 def test_resume_keeps_incomplete_evaluator_attempt_ambiguous_without_reexecution(

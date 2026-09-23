@@ -600,6 +600,15 @@ def _validate_evaluation_record_against_case(
                 raise ValueError("provider invocation is not terminal and unique")
             final = terminal[0]
             terminal_by_id[started[0].invocation_id] = final
+            uncertain_shape = (
+                final.state == "UNCERTAIN"
+                and final.error_code
+                in {"LLM_TIMEOUT", "LLM_CONNECTION_ERROR", "LLM_WORKER_ERROR"}
+                and final.response_model is None
+                and final.usage is None
+                and final.output_hash is None
+                and final.http_status is None
+            )
             if (
                 final.kind != started[0].kind
                 or final.attempt != started[0].attempt
@@ -615,10 +624,15 @@ def _validate_evaluation_record_against_case(
                 or final.format_retry_of != started[0].format_retry_of
                 or final.prompt_version != binding.prompt_version
                 or final.configured_model != policy.configured_model
-                or final.response_model not in policy.allowed_response_models
                 or not final.store_false_sent
-                or final.usage is None
-                or (final.state == "COMPLETED") != (final.output_hash is not None)
+                or (
+                    not uncertain_shape
+                    and (
+                        final.response_model not in policy.allowed_response_models
+                        or final.usage is None
+                        or (final.state == "COMPLETED") != (final.output_hash is not None)
+                    )
+                )
             ):
                 raise ValueError("provider invocation policy is invalid")
         sequence = 0
@@ -691,6 +705,19 @@ def _validate_evaluation_record_against_case(
                     break
                 else:
                     raise ValueError("provider retry lineage is invalid")
+            elif (
+                first_final.state == "UNCERTAIN"
+                and first_final.error_code
+                in {"LLM_TIMEOUT", "LLM_CONNECTION_ERROR", "LLM_WORKER_ERROR"}
+                and first.kind == "plan"
+                and index + 1 == len(ordered_started)
+                and diagnosis.diagnostic_outcome == "INCONCLUSIVE"
+                and diagnosis.limitations == [first_final.error_code]
+            ):
+                terminal_provider_failure = first_final
+                index += 1
+                sequence += 1
+                break
             else:
                 raise ValueError("provider invocation did not complete")
             logical_kinds.append(first.kind)
@@ -1470,7 +1497,8 @@ class EvaluationExecutor:
             if (
                 sorted(attempt_ordinals) != list(range(ordinal + 1))
                 or sorted(record_ordinals) != list(range(ordinal))
-                or sorted(claim_ordinals) != list(range(ordinal))
+                or sorted(claim_ordinals)
+                not in (list(range(ordinal)), list(range(ordinal + 1)))
                 or len(attempt_ordinals) != len(set(attempt_ordinals))
                 or len(record_ordinals) != len(set(record_ordinals))
                 or len(claim_ordinals) != len(set(claim_ordinals))
@@ -1835,8 +1863,6 @@ class EvaluationExecutor:
         """Recover only an exact terminal evaluator projection for one public attempt."""
         if not re.fullmatch(r"[a-f0-9]{32}", evaluation_run_id) or ordinal < 0:
             raise ValueError("evaluation run locator is invalid")
-        if self.holdout_controller is None or self.holdout_batch is None:
-            return None
         parent = self.service.store.load(evaluation_run_id)
         if (
             parent.kind != "evaluation"
@@ -1874,6 +1900,11 @@ class EvaluationExecutor:
             reserved_cost_usd=schedule.bindings.max_unit_cost_usd,
         )
         item = schedule.items[ordinal]
+        if item.split == "development":
+            recovered = self.execute_scheduled(evaluation_run_id, ordinal)
+            return recovered.public() if isinstance(recovered, EvaluationRecord) else recovered
+        if self.holdout_controller is None or self.holdout_batch is None:
+            return None
         claim = EvaluationExecutionClaim.model_validate_json(
             self.service.store.read(
                 EvaluationExecutor._ref(self, parent, f"evaluation/claims/{ordinal}.json")
