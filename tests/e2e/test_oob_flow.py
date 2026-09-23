@@ -6,7 +6,16 @@ import pytest
 from typer.testing import CliRunner
 
 
-def test_fake_diagnose_single_candidate_verify_and_report(oob_service):
+def test_fake_diagnose_single_candidate_verify_and_report(oob_service, monkeypatch):
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+    from gpu_agent.execution.models import BackendInfrastructureError
+
+    def unavailable(self):
+        raise BackendInfrastructureError("CONTAINER_UNAVAILABLE")
+
+    # The diagnosis is synthetic. Make the verifier's unavailable runtime explicit,
+    # independent of whether the developer machine happens to have Docker/GPU.
+    monkeypatch.setattr(IsolatedGPUBackend, "_attest_runtime", unavailable)
     service, provider, source = oob_service
     run = service.diagnose(source)
     candidate_id = service.candidates(run.id)[0]
@@ -15,7 +24,8 @@ def test_fake_diagnose_single_candidate_verify_and_report(oob_service):
     assert len(service.candidates(run.id)) == 1
     assert provider.kinds.count("patch") == 1
     report = service.report(run.id)
-    assert "Verification: UNVERIFIED" in report and "Single candidate" in report
+    assert "Public verification: INCONCLUSIVE" in report and "Single candidate" in report
+    assert "Public verification: VERIFIED_FIXED" not in report
     assert "Observed facts" in report and "Model inferences" in report
 
 
@@ -62,11 +72,16 @@ def test_live_oob_flow(tmp_path, monkeypatch):
         missing.append(availability.reason)
     if not all(os.environ.get(k) for k in ("OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL")):
         missing.append("LLM_UNAVAILABLE: explicit provider configuration absent")
+    if os.environ.get("GPU_AGENT_ALLOW_PAID_CALLS") != "1":
+        missing.append("PAID_CALLS_NOT_ALLOWED: explicit development opt-in absent")
     if missing:
         pytest.skip("; ".join(missing))
     monkeypatch.setenv("GPU_AGENT_RUN_ROOT", str(store.root))
     monkeypatch.setenv("GPU_AGENT_EVALUATOR_ROOT", str(tmp_path / "evaluator"))
     service = ApplicationService.configured()
+    from gpu_agent.agent.provider import DevelopmentCallPolicy
+
+    service.allow_development_paid_calls(DevelopmentCallPolicy(max_llm_calls=40))
     source = Path(__file__).resolve().parents[2] / "benchmarks/public/case_0001/public_input"
     run = service.diagnose(source)
     result = service.verify(run.id)

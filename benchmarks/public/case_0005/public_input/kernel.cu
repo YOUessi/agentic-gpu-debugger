@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 
 namespace {
-__global__ void invalid_store(float* out, std::size_t n) {
+__global__ void store_marker(float* out, std::size_t n) {
     if (threadIdx.x == 0) out[n] = 5.0F;
 }
 
@@ -41,12 +41,9 @@ int run_vector_add(const float* a, const float* b, float* out, std::size_t n) {
     for (float* pointer : {device_out, device_b, device_a}) {
         if (pointer != nullptr) check(cudaFree(pointer));
     }
-    // Preserve the trusted result before triggering the intentional defect. The
-    // sanitizer may terminate the context, so its expected error is not folded
-    // into the functional status returned to the host harness.
     if (first_error == cudaSuccess &&
         check(cudaMalloc(reinterpret_cast<void**>(&probe), bytes))) {
-        invalid_store<<<1, 1>>>(probe, n);
+        store_marker<<<1, 1>>>(probe, n);
         if (check(cudaGetLastError())) (void)cudaDeviceSynchronize();
         (void)cudaFree(probe);
     }

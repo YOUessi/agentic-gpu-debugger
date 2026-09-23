@@ -170,3 +170,33 @@ def capture_repository_snapshot(
     if before != after:
         raise ValueError("repository changed during capture")
     return RepositorySnapshot(commit=before[0], tracked_tree_hash=before[2], clean=True)
+
+
+def runtime_code_fingerprint(repository: Path) -> str:
+    """Hash the gpu_agent code that is actually executing and bind it to `repository`.
+
+    A clean git snapshot says nothing about which files Python imported: an editable
+    install pointing at another checkout, or files edited after capture, would run code the
+    snapshot never saw. The imported package must live at <repository>/src/gpu_agent, every
+    loaded gpu_agent module must come from it, and the hash covers every .py file there.
+    """
+    import sys
+
+    import gpu_agent
+
+    package = Path(gpu_agent.__file__).resolve().parent
+    expected = (repository.absolute() / "src" / "gpu_agent").resolve()
+    if package != expected:
+        raise ValueError("executing gpu_agent is not the captured repository")
+    for name, module in list(sys.modules.items()):
+        if name != "gpu_agent" and not name.startswith("gpu_agent."):
+            continue
+        location = getattr(module, "__file__", None)
+        if location is not None and not Path(location).resolve().is_relative_to(package):
+            raise ValueError("a loaded gpu_agent module comes from another location")
+    digest = hashlib.sha256()
+    for path in sorted(package.rglob("*.py")):
+        relative = path.relative_to(package).as_posix()
+        digest.update(relative.encode() + b"\0")
+        digest.update(hashlib.sha256(read_regular(path, 16 * 1024 * 1024)).digest())
+    return digest.hexdigest()

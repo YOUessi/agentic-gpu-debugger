@@ -703,6 +703,7 @@ class HoldoutController:
         *,
         required_tools: tuple[SanitizerTool, ...],
         expected_source_hash: str,
+        expected_input_hash: str | None = None,
     ) -> RunManifest:
         """Execute through the service's authority-validating reserved entry."""
         return service._diagnose_reserved(
@@ -713,6 +714,7 @@ class HoldoutController:
             mode=prepared.evaluation_unit.mode,
             required_tools=required_tools,
             expected_source_hash=expected_source_hash,
+            expected_input_hash=expected_input_hash,
         )
 
     @staticmethod

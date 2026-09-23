@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
+from responses_support import _configure_responses_provider, provider_artifacts
 from schedule_authority_support import reserve_schedule_for_test, schedule_client_for_test
 
 
@@ -50,17 +51,18 @@ def test_mode_a_exposes_only_source_and_runtime(oob_service):
     run, evidence, budget = observation(service, provider, source, "A")
     assert evidence["sources"] and evidence["observed_facts"]
     assert not evidence["tool_findings"] and not evidence["documentation"]
-    assert provider.kinds == []
+    # Same diagnosis and patch model as every other mode; A only lacks tools and docs.
+    assert provider.kinds == ["diagnose", "patch"]
     assert budget["sanitizer_calls"] == budget["rag_calls"] == 0
-    assert service.diagnosis(run.id).limitations == ["DETERMINISTIC_NO_FINDING"]
-    assert not service.candidates(run.id)
+    assert service.diagnosis(run.id).diagnostic_outcome == "DIAGNOSED"
+    assert service.candidates(run.id)
 
 
 def test_mode_b_adds_frozen_retrieval_without_tools(oob_service):
     service, provider, source = oob_service
     _, evidence, budget = observation(service, provider, source, "B")
     assert evidence["documentation"] and not evidence["tool_findings"]
-    assert provider.kinds == []
+    assert provider.kinds == ["diagnose", "patch"]
     assert budget["sanitizer_calls"] == 0 and budget["rag_calls"] == 1
 
 
@@ -69,7 +71,7 @@ def test_mode_c_uses_precollected_tools_without_planner(oob_service):
     _, evidence, budget = observation(service, provider, source, "C")
     assert evidence["tool_findings"] and not evidence["documentation"]
     assert evidence["sanitizer_outcomes"] == {"memcheck": "FINDING"}
-    assert provider.kinds == []
+    assert provider.kinds == ["diagnose", "patch"]
     assert budget["sanitizer_calls"] == 1 and budget["rag_calls"] == 0
 
 
@@ -113,7 +115,13 @@ def test_mode_c_clean_memcheck_runs_registered_target(
         SanitizerTool.MEMCHECK,
         SanitizerTool(target_tool),
     ], case_id
-    assert provider.kinds == []
+    # The fake racecheck log lacks a racecheck summary, so that tool reports TOOL_ERROR and
+    # the unit ends before diagnosis; otherwise the shared model diagnoses and patches.
+    limitations = service.diagnosis(run.id).limitations
+    if target_tool == "racecheck":
+        assert provider.kinds == [] and limitations == ["SANITIZER_EVIDENCE_UNAVAILABLE"]
+    else:
+        assert provider.kinds == ["diagnose", "patch"]
 
 
 def test_mode_d_uses_rule_router_and_never_planner(oob_service):
@@ -122,17 +130,18 @@ def test_mode_d_uses_rule_router_and_never_planner(oob_service):
     provider.actions = []
     run, evidence, budget = observation(service, provider, source, "D")
     assert evidence["tool_findings"] and evidence["documentation"]
-    assert provider.kinds == []
+    # The rule router replaces only the planner; diagnosis and patch are the shared model.
+    assert provider.kinds == ["diagnose", "patch"]
     assert budget["sanitizer_calls"] == budget["rag_calls"] == 1
     assert service.diagnosis(run.id).diagnostic_outcome == "DIAGNOSED"
-    assert not service.candidates(run.id)
+    assert service.candidates(run.id)
     trace = json.loads(
         service.store.read(
             next(ref for ref in run.artifact_refs if ref.name == "agent/controller-lineage.json")
         )
     )
     assert trace["controller"] == "rule_router"
-    assert trace["mode"] == "D" and trace["provider_calls_allowed"] is False
+    assert trace["mode"] == "D" and trace["provider_calls_allowed"] is True
     assert trace["evidence_ref"]["sha256"]
     assert trace["acquisition_policy_ref"]["sha256"]
     assert [item["name"] for item in trace["route_decision_refs"]] == [
@@ -157,8 +166,8 @@ def test_development_lineage_and_source_remain_public(native_evaluation_executor
         toolchain_hash=binding.toolchain_lock_hash,
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
         random_seed=7,
     ).run("D", "development", 3)
     assert result.executed_units == 3
@@ -336,6 +345,9 @@ def test_executor_rejects_verification_without_native_children(
     oob_service, native_evaluation_executor
 ):
     executor = native_evaluation_executor
+    # A scripted in-process fake leaves no native provider artifacts: it can never be
+    # evaluation evidence, whatever the mode.
+    executor.service._provider = executor.scripted_provider
     with pytest.raises(ValueError, match="lineage artifact|child selection"):
         _execute_claimed_test_unit(executor, "E")
     assert oob_service[1].kinds == ["plan", "plan", "plan", "diagnose", "patch"]
@@ -377,6 +389,7 @@ def test_executor_rejects_synthetic_mode_failure_without_native_provider_lineage
     oob_service, tmp_path, native_evaluation_executor
 ):
     executor = native_evaluation_executor
+    executor.service._provider = executor.scripted_provider
     oob_service[1].actions = []
     with pytest.raises(ValueError, match="lineage artifact"):
         _execute_claimed_test_unit(executor, "E")
@@ -401,8 +414,8 @@ def test_runner_persists_only_schedule_bound_native_lineage(
         toolchain_hash=binding.toolchain_lock_hash,
         model_config_hash=binding.model_config_hash,
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
         random_seed=7,
     ).run("D", "development", 3)
     assert result.stopped_reason is None and result.executed_units == 3
@@ -410,7 +423,9 @@ def test_runner_persists_only_schedule_bound_native_lineage(
         run = executor.service.store.load(record.lineage.diagnosis_run_id)
         assert run.parent_run_id == result.run_id
         assert record.record_id == run.id
-        assert record.lineage.provider_invocation_hashes == []
+        # D shares the diagnosis/patch model, so its native provider lineage is bound too.
+        assert len(record.lineage.provider_invocation_hashes) == record.usage["physical_calls"]
+        assert record.usage["physical_calls"] >= 1
 
 
 @pytest.mark.parametrize("mode", ["A", "B", "C", "D"])
@@ -525,167 +540,12 @@ def test_runner_rejects_forged_native_lineage(
         toolchain_hash=binding.toolchain_lock_hash,
         model_config_hash=binding.model_config_hash,
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
         random_seed=7,
     ).run("D", "development", 3)
     assert result.stopped_reason is None
     assert len(result.records) == 3
-
-
-def _configure_responses_provider(
-    executor,
-    monkeypatch,
-    *,
-    response_model="eval-model",
-    usage=True,
-    mock_provider=True,
-    full_script=False,
-    invalid_plan_after=None,
-    invalid_plan_calls=frozenset(),
-    uncertain_plan_calls=frozenset(),
-):
-    from pydantic import SecretStr
-
-    import gpu_agent.service as service_module
-    from gpu_agent.agent.models import DiagnosisResult, EvidenceClaim, InconclusiveAction
-    from gpu_agent.agent.prompts import PROMPT_VERSION
-    from gpu_agent.agent.provider import (
-        MockResponsesProvider,
-        OpenAIProviderSettings,
-        OpenAIResponsesProvider,
-        ResponseMetadata,
-        SDKResult,
-        Usage,
-    )
-    from gpu_agent.benchmark.evaluation import PricingAttestation
-    from gpu_agent.execution.models import SourceLocation
-
-    scripted = executor.service._provider
-
-    class Port:
-        def __init__(self):
-            self.plan_index = 0
-            self.physical_plan_index = 0
-
-        def call(self, request):
-            physical_plan_index = self.physical_plan_index
-            if request.kind == "plan":
-                self.physical_plan_index += 1
-            if request.kind == "plan" and physical_plan_index in uncertain_plan_calls:
-                return SDKResult(error_code="LLM_CONNECTION_ERROR", state="UNCERTAIN")
-            if (
-                full_script
-                and request.kind == "plan"
-                and (
-                    physical_plan_index in invalid_plan_calls
-                    or (invalid_plan_after is not None and self.plan_index >= invalid_plan_after)
-                )
-            ):
-                value = {"invalid": True}
-            elif full_script and request.kind == "plan":
-                value = {"action": scripted.actions[self.plan_index].model_dump(mode="json")}
-                self.plan_index += 1
-            elif full_script and request.kind == "diagnose":
-                evidence = request.payload["evidence"]
-                if getattr(scripted, "force_limitation", False):
-                    value = DiagnosisResult.inconclusive(scripted.limitation_canary).model_dump(
-                        mode="json"
-                    )
-                else:
-                    value = DiagnosisResult(
-                        diagnostic_outcome="DIAGNOSED",
-                        failure_family="out_of_bounds",
-                        root_cause=(
-                            "The thread index can exceed the input length."
-                            + getattr(scripted, "response_canary", "")
-                        ),
-                        source_locations=[SourceLocation(path="kernel.cu", line=9)],
-                        observed_facts=[
-                            EvidenceClaim.model_validate(item)
-                            for item in evidence["observed_facts"]
-                        ],
-                        tool_findings=[
-                            EvidenceClaim(
-                                text=item["category"],
-                                citation_ids=[item["artifact_id"]],
-                            )
-                            for item in evidence["tool_findings"]
-                        ],
-                        documentation_evidence=[
-                            EvidenceClaim(text=item["text"], citation_ids=[item["chunk_id"]])
-                            for item in evidence["documentation"]
-                        ],
-                        model_inferences=[
-                            "An index guard may prevent the reported write."
-                            + getattr(scripted, "path_canary", "")
-                        ],
-                        recommended_change="Guard the write with i < n.",
-                        confidence_label="high",
-                        limitations=(
-                            [scripted.limitation_canary]
-                            if getattr(scripted, "limitation_canary", "")
-                            else []
-                        ),
-                    ).model_dump(mode="json")
-            elif full_script and request.kind == "patch":
-                value = {"unified_diff": scripted.diff}
-            else:
-                value = {"action": InconclusiveAction().model_dump(mode="json")}
-            return SDKResult(
-                value=value,
-                metadata=ResponseMetadata(
-                    response_id="response-1",
-                    provider_request_id="request-1",
-                    response_model=response_model,
-                    usage=(
-                        Usage(input_tokens=3, output_tokens=2, total_tokens=5) if usage else None
-                    ),
-                    http_status=200,
-                ),
-            )
-
-    settings = OpenAIProviderSettings(
-        endpoint="https://api.openai.com/v1",
-        model="eval-model",
-        api_key=SecretStr("fixture-only"),
-        supports_store_false=True,
-    )
-    provider_name = "mock-responses" if mock_provider else "openai-responses"
-    rate_card = PricingAttestation._for_test(
-        provider_name,
-        "eval-model",
-        executor.service.binding.repository.commit,
-        "0" * 64,
-    )
-    policy = {
-        "schema_version": 1,
-        "provider": provider_name,
-        "endpoint_host": "api.openai.com",
-        "configured_model": "eval-model",
-        "allowed_response_models": ["eval-model"],
-        "prompt_version": PROMPT_VERSION,
-        "pricing_hash": rate_card.rate_card_hash,
-        "store_false_required": True,
-    }
-    policy_hash = hashlib.sha256(
-        json.dumps(policy, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
-    binding = executor.service.binding.model_copy(update={"model_config_hash": policy_hash})
-    executor.service._binding = binding
-    executor.service._pricing_attestation = PricingAttestation._for_test(
-        provider_name, "eval-model", binding.repository.commit, policy_hash
-    )
-    executor.service._provider = None
-    monkeypatch.setattr(service_module.OpenAIProviderSettings, "from_environment", lambda: settings)
-    monkeypatch.setattr(
-        service_module,
-        "OpenAIResponsesProvider",
-        lambda settings, gate, store, run_id, **kwargs: (
-            MockResponsesProvider if mock_provider else OpenAIResponsesProvider
-        )(settings, gate, store, run_id, port=Port(), **kwargs),
-    )
-    return binding, policy
 
 
 def test_test_pricing_cannot_unlock_real_provider(
@@ -742,8 +602,8 @@ def test_mode_e_binds_native_provider_policy_invocation_and_usage(
         max_unit_cost_usd=1,
         random_seed=7,
     ).run("E", "development", 3)
-    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
-    assert result.executed_units == 1
+    assert result.stopped_reason is None
+    assert result.executed_units == 3
     record = result.records[0]
     assert record.usage["physical_calls"] == 1
     assert record.cost_usd == 0.000005
@@ -753,14 +613,15 @@ def test_mode_e_binds_native_provider_policy_invocation_and_usage(
     assert json.loads(executor.service.store.read(policy_ref)) == policy
 
 
-def test_mode_e_persists_policy_denied_duplicate_as_bounded_failure(
+def test_mode_e_persists_policy_denied_duplicate_as_bounded_inconclusive(
     oob_service, monkeypatch, native_evaluation_executor
 ):
     from gpu_agent.agent.models import MemcheckAction
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
     executor = native_evaluation_executor
-    oob_service[1].actions = [MemcheckAction(), MemcheckAction()]
+    # One replan after the first denial; the second denial is final.
+    oob_service[1].actions = [MemcheckAction(), MemcheckAction(), MemcheckAction()]
     binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
 
     result = EvaluationRunner(
@@ -777,10 +638,11 @@ def test_mode_e_persists_policy_denied_duplicate_as_bounded_failure(
         random_seed=7,
     ).run("E", "development", 3)
 
-    assert result.executed_units == 1
-    assert result.records[0].status == "FAILED"
+    assert result.executed_units == 3
+    # A policy-denied planner proposal is the agent's outcome, not infrastructure.
+    assert result.records[0].status == "INCONCLUSIVE"
     assert result.records[0].failure_reason == "DUPLICATE_NO_BENEFIT"
-    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+    assert result.stopped_reason is None
 
 
 def test_mode_e_records_terminal_invalid_planner_output_and_continues_batch(
@@ -812,11 +674,11 @@ def test_mode_e_records_terminal_invalid_planner_output_and_continues_batch(
         random_seed=7,
     ).run("E", "development", 3)
 
-    assert result.executed_units == 1
+    assert result.executed_units == 3
     assert result.records[0].status == "FAILED"
     assert result.records[0].failure_reason == "LLM_INVALID_OUTPUT"
     assert result.records[0].usage["physical_calls"] == 3
-    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+    assert result.stopped_reason is None
 
 
 def test_mode_e_records_invalid_plan_after_format_retry_was_already_used(
@@ -848,14 +710,14 @@ def test_mode_e_records_invalid_plan_after_format_retry_was_already_used(
         random_seed=7,
     ).run("E", "development", 3)
 
-    assert result.executed_units == 1
+    assert result.executed_units == 3
     assert result.records[0].status == "FAILED"
     assert result.records[0].failure_reason == "LLM_INVALID_OUTPUT"
     assert result.records[0].usage["physical_calls"] == 3
-    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+    assert result.stopped_reason is None
 
 
-def test_mode_e_records_uncertain_plan_and_reserves_unknown_cost(
+def test_mode_e_records_uncertain_plan_and_keeps_unknown_cost_without_stopping(
     oob_service, monkeypatch, native_evaluation_executor
 ):
     from gpu_agent.agent.models import MemcheckAction
@@ -885,14 +747,15 @@ def test_mode_e_records_uncertain_plan_and_reserves_unknown_cost(
         random_seed=7,
     ).run("E", "development", 3)
 
-    assert result.executed_units == 2
+    assert result.executed_units == 3
     assert [record.failure_reason for record in result.records] == [
+        "LLM_CONNECTION_ERROR",
         "LLM_CONNECTION_ERROR",
         "LLM_CONNECTION_ERROR",
     ]
     assert all(record.status == "FAILED" for record in result.records)
     assert all(record.cost_usd is None for record in result.records)
-    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+    assert result.stopped_reason is None
 
 
 def test_mode_e_rejects_self_consistent_forged_policy_denial(
@@ -1126,11 +989,11 @@ def test_scheduled_repair_resolves_native_private_verification(
         max_unit_cost_usd=1,
         random_seed=7,
     ).run("E", "development", 3)
-    assert result.executed_units == 1
+    assert result.executed_units == 3
     assert result.records[0].lineage.verification_run_id is not None
     assert "verification/runtime" in result.records[0].executed_checks
     assert "verification/private_oracle" not in result.records[0].executed_checks
-    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
+    assert result.stopped_reason is None
     verification_run = executor.service.store.load(result.records[0].lineage.verification_run_id)
     public_result = json.loads(
         executor.service.store.read(
@@ -1256,9 +1119,9 @@ def test_scheduled_repair_rejects_public_only_verification_summary(
         )
         executor.service.store.transition(child.id, "RUNNING", "FINALIZING")
         executor.service.store.transition(child.id, "COMPLETED", None)
-        return value
+        return value, child.id
 
-    monkeypatch.setattr(executor.service, "verify", fake_verify)
+    monkeypatch.setattr(executor.service, "verify_exact", fake_verify)
     result = EvaluationRunner(
         executor.service.store,
         executor,
@@ -1339,7 +1202,8 @@ def test_unscheduled_mode_e_cannot_reach_paid_provider(
     executor = native_evaluation_executor
     _configure_responses_provider(executor, monkeypatch)
     run = executor.service.diagnose(oob_service[2], mode="E")
-    assert executor.service.diagnosis(run.id).limitations == ["PRICING_ATTESTATION_REQUIRED"]
+    # Outside evaluation a real provider needs the explicit development opt-in.
+    assert executor.service.diagnosis(run.id).limitations == ["PAID_CALLS_NOT_ALLOWED"]
     assert not any(ref.name.startswith("provider/") for ref in run.artifact_refs)
 
 
@@ -1658,8 +1522,8 @@ def test_deterministic_mode_rejects_unexpected_verification_child(
         toolchain_hash=binding.toolchain_lock_hash or "",
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
         random_seed=7,
     ).run("D", "development", 3)
     assert result.stopped_reason is None and len(result.records) == 3
@@ -1687,8 +1551,8 @@ def test_mode_d_replay_rejects_future_evidence_and_forged_budget(
         toolchain_hash=binding.toolchain_lock_hash or "",
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
         random_seed=7,
     ).run("D", "development", 3)
     evaluation_run = executor.service.store.load(result.run_id)
@@ -1754,7 +1618,7 @@ def test_mode_d_replay_rejects_future_evidence_and_forged_budget(
 
 
 @pytest.mark.parametrize("failure", ["sanitizer", "docs"])
-def test_mode_d_failed_acquisition_is_terminal_inconclusive(
+def test_mode_d_failed_acquisition_is_a_failed_record_not_a_batch_error(
     native_evaluation_executor, monkeypatch, failure
 ):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
@@ -1790,13 +1654,15 @@ def test_mode_d_failed_acquisition_is_terminal_inconclusive(
         toolchain_hash=binding.toolchain_lock_hash or "",
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
         random_seed=7,
     ).run("D", "development", 3)
+    # A tool or corpus fault is infrastructure (docs/mode-contract.md section 4): each unit
+    # is a bounded FAILED record and the batch continues.
     assert result.stopped_reason is None and len(result.records) == 3
-    assert all(record.status == "INCONCLUSIVE" for record in result.records)
-    assert all(expected in record.diagnosis["limitations"] for record in result.records)
+    assert all(record.status == "FAILED" for record in result.records)
+    assert all(record.failure_reason == expected for record in result.records)
     for record in result.records:
         run = executor.service.store.load(record.record_id)
         audit_ref = next(ref for ref in run.artifact_refs if ref.name == "agent/budget-audit.json")
@@ -1821,8 +1687,8 @@ def test_private_case_cannot_enter_public_schedule_without_holdout_alias(
         toolchain_hash=binding.toolchain_lock_hash or "",
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
     )
     with pytest.raises(ValueError, match="holdout alias proof"):
         runner.run("D", "holdout", 3)
@@ -1931,10 +1797,11 @@ def test_executor_rejects_self_authored_verification_summary(
         )
         service.store.transition(run.id, "RUNNING", "FINALIZING")
         service.store.transition(run.id, "COMPLETED", None)
-        return result
+        return result, run.id
 
-    monkeypatch.setattr(service, "verify", persist_verification)
-    with pytest.raises(ValueError, match="verification lineage"):
+    # The executor verifies through verify_exact; forge exactly that seam.
+    monkeypatch.setattr(service, "verify_exact", persist_verification)
+    with pytest.raises(ValueError, match="verification.*lineage"):
         _execute_claimed_test_unit(executor, "E")
 
 
@@ -2020,12 +1887,11 @@ def test_executor_rejects_incomplete_or_unbounded_acquisition_usage(
 
 @pytest.fixture
 def prepared_holdout_execution(native_evaluation_executor, monkeypatch):
-    from gpu_agent.agent.models import AcquisitionUsage, AgentBudget
-    from gpu_agent.benchmark import evaluation as evaluation_module
+    from test_holdout_scoring import evaluator_native_record
+
     from gpu_agent.benchmark.evaluation import EvaluationAttempt, EvaluationScheduleItem
     from gpu_agent.benchmark.executor import registered_cases
     from gpu_agent.benchmark.holdout import HoldoutController
-    from gpu_agent.evidence.repository import EvidenceRepository
     from gpu_agent.service import ApplicationService
 
     executor = native_evaluation_executor
@@ -2066,6 +1932,7 @@ def prepared_holdout_execution(native_evaluation_executor, monkeypatch):
         _binding=executor.service.binding,
         _evaluation_schedule_verifier=executor._schedule_verifier,
     )
+    evaluator_service._pricing_attestation = executor.service._pricing_attestation
     monkeypatch.setattr(
         executor.corpus,
         "validate_and_create_evaluation_child",
@@ -2088,70 +1955,9 @@ def prepared_holdout_execution(native_evaluation_executor, monkeypatch):
         expected_source_hash=case.source_hash,
         evaluation_unit=prepared.evaluation_unit,
     )
-    diagnosis = evaluator_service.diagnosis(run.id)
-    diagnosis_ref = next(ref for ref in run.artifact_refs if ref.name == "diagnosis.json")
-    evidence_refs = [ref for ref in run.artifact_refs if ref.name == "evidence/bundle.json"]
-    bundle = EvidenceRepository(executor.corpus, evaluator=True).view(run.id)
-    budget = AgentBudget.model_validate_json(
-        executor.corpus.read(
-            next(ref for ref in run.artifact_refs if ref.name == "agent/final-budget.json")
-        )
-    )
-    acquisition = AcquisitionUsage.model_validate_json(
-        executor.corpus.read(
-            next(ref for ref in run.artifact_refs if ref.name == "agent/acquisition-usage.json")
-        )
-    )
-    diagnostic_calls = (
-        acquisition.sanitizer_calls
-        + acquisition.retrieval_calls
-        + int(bundle.build_result is not None)
-        + int(bundle.execution_result is not None)
-    )
-    usage = {
-        "physical_calls": budget.llm_calls,
-        "sanitizer_calls": acquisition.sanitizer_calls,
-        "retrieval_calls": acquisition.retrieval_calls,
-        "sanitizer_attempts": budget.sanitizer_calls,
-        "retrieval_attempts": budget.rag_calls,
-        "build_calls": int(bundle.build_result is not None),
-        "runtime_calls": int(bundle.execution_result is not None),
-        "diagnostic_tool_calls": diagnostic_calls,
-        "tool_calls": diagnostic_calls,
-        "total_sanitizer_calls": acquisition.sanitizer_calls,
-        "input_tokens": None,
-        "output_tokens": None,
-        "total_tokens": None,
-    }
-    private_case_id, private_template_id = controller.resolve_private(batch, item.case_id)
-    native = evaluation_module.EvaluationRecord(
-        record_id=prepared.diagnosis_run_id,
-        corpus_cutoff=batch.corpus_cutoff,
-        lineage=evaluation_module.NativeEvaluationLineage(
-            corpus_cutoff=batch.corpus_cutoff,
-            diagnosis_run_id=prepared.diagnosis_run_id,
-            diagnosis_hash=diagnosis_ref.sha256,
-            evidence_hash=evidence_refs[-1].sha256,
-            provider_invocation_hashes=[],
-        ),
-        case_id=private_case_id,
-        template_id=private_template_id,
-        mode=item.mode,
-        repeat=item.repeat,
-        input_hash=case.source_hash,
-        evidence_hash=evidence_refs[-1].sha256,
-        executed_checks={
-            result.tool_result.typed_payload.tool: result.check_outcome
-            for result in bundle.sanitizer_results
-            if result.tool_result is not None
-        },
-        status="INCONCLUSIVE",
-        diagnosis=diagnosis.model_dump(mode="json"),
-        usage=usage,
-        latency_ms=(run.events[-1].at - run.events[0].at).total_seconds() * 1000,
-        cost_usd=0,
-        failure_reason=None,
-    )
+    assert run.id == prepared.diagnosis_run_id
+    # Every mode calls the shared provider, so derive the record like the executor does.
+    native = evaluator_native_record(evaluator_service, executor.corpus, prepared, item, case)
     return SimpleNamespace(
         controller=controller,
         batch=batch,
@@ -2337,7 +2143,7 @@ def test_forged_reserved_diagnosis_capability_has_zero_side_effects(
         unit.model_dump_json().encode(),
         "evaluator",
     )
-    before_provider = list(service._provider.kinds)
+    before_provider = provider_artifacts(service.store)
     selected = executor.sources[private_case_id] / "kernel.cu"
     with pytest.raises(TypeError):
         service.diagnose(
@@ -2378,7 +2184,7 @@ def test_forged_reserved_diagnosis_capability_has_zero_side_effects(
             expected_source_hash=hashlib.sha256(selected.read_bytes()).hexdigest(),
         )
     assert store.load(diagnosis.id).status == RunStatus.RUNNING
-    assert service._provider.kinds == before_provider
+    assert provider_artifacts(service.store) == before_provider
     assert backend_calls == []
 
 
@@ -2452,8 +2258,7 @@ def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_s
     import difflib
     import shutil
 
-    import gpu_agent.verification.derivation as verification_derivation
-    import gpu_agent.verification.engine as verification_engine
+    import gpu_agent.verification.truth as verification_truth
     from gpu_agent.benchmark.evaluation import EvaluationRunner
     from gpu_agent.benchmark.executor import EvaluationExecutor
     from gpu_agent.benchmark.holdout import HoldoutController
@@ -2467,7 +2272,7 @@ def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_s
     verification_canary = b"VERIFICATION-CANARY-task3-d64c"
     label_canary = b"LABEL-CANARY-task3-e55b"
     path_canary = b"PATH-CANARY-task3-f46a"
-    scripted = original.service._provider
+    scripted = original.scripted_provider
     scripted.response_canary = " " + provider_canary.decode()
     scripted.path_canary = " " + path_canary.decode()
     source_path = original.sources["case_0100"] / "kernel.cu"
@@ -2487,15 +2292,31 @@ def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_s
         )
     )
     truth_root = tmp_path / "canary-truth"
-    shutil.copytree(verification_engine.TRUTH_ROOT, truth_root)
-    truth_case = json.loads((truth_root / "case.json").read_bytes())
-    truth_case["source_hashes"]["kernel.cu"] = hashlib.sha256(source_path.read_bytes()).hexdigest()
-    (truth_root / "case.json").write_text(json.dumps(truth_case))
+    truth_root.mkdir()
+    shutil.copy(verification_truth.BASE_TRUTH, truth_root / "case.json")
     (truth_root / "reference.cu").write_bytes(
-        (truth_root / "reference.cu").read_bytes() + b"\n// " + verification_canary + b"\n"
+        verification_truth.REFERENCE.read_bytes() + b"\n// " + verification_canary + b"\n"
     )
-    monkeypatch.setattr(verification_engine, "TRUTH_ROOT", truth_root)
-    monkeypatch.setattr(verification_derivation, "_TRUTH_CASE", truth_root / "case.json")
+    (truth_root / "registry.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "cases": [
+                    {
+                        "case_id": "case_0100",
+                        "split": "public",
+                        "oracle_id": "vector-add-cpu-v1",
+                        "mutant_source_hash": hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                        "target_tool": "memcheck",
+                        "expected_finding": "Invalid __global__ read",
+                    }
+                ],
+            }
+        )
+    )
+    monkeypatch.setattr(verification_truth, "BASE_TRUTH", truth_root / "case.json")
+    monkeypatch.setattr(verification_truth, "REFERENCE", truth_root / "reference.cu")
+    monkeypatch.setattr(verification_truth, "REGISTRY", truth_root / "registry.json")
     binding, _ = _configure_responses_provider(original, monkeypatch, full_script=True)
     original.service.evaluator_store = original.corpus
     marker = original.corpus.create_run("holdout_private_canaries", binding=binding)
@@ -2563,7 +2384,7 @@ def test_holdout_mode_e_uses_exact_candidate_and_verification_ids_without_root_s
         holdout_controller=controller,
         holdout_batch=batch,
     ).run("E", "holdout", 3)
-    assert result.executed_units == 1
+    assert result.executed_units == 3
     assert result.records[0].usage["physical_calls"] > 0
     assert result.records[0].lineage.candidate_hash is not None
     assert result.records[0].lineage.verification_hash is not None
@@ -2607,8 +2428,8 @@ def test_holdout_mode_e_provider_limitation_is_evaluator_only(
 
     original = native_evaluation_executor
     limitation_canary = b"LIMITATION_SECRET_CANARY_TASK3"
-    original.service._provider.limitation_canary = limitation_canary.decode()
-    original.service._provider.force_limitation = True
+    original.scripted_provider.limitation_canary = limitation_canary.decode()
+    original.scripted_provider.force_limitation = True
     binding, _ = _configure_responses_provider(original, monkeypatch, full_script=True)
     original.service.evaluator_store = original.corpus
     controller = HoldoutController(
@@ -2652,7 +2473,7 @@ def test_holdout_mode_e_provider_limitation_is_evaluator_only(
         holdout_controller=controller,
         holdout_batch=batch,
     ).run("E", "holdout", 3)
-    assert result.executed_units == 1
+    assert result.executed_units == 3
     assert result.records[0].usage["physical_calls"] > 0
     assert result.records[0].failure_reason is None
     public_bytes = b"\n".join(
@@ -2786,7 +2607,7 @@ def test_holdout_mode_e_started_provider_call_is_not_reexecuted_on_resume(
     "field,replacement",
     [
         ("input_hash", "f" * 64),
-        ("status", "COMPLETED"),
+        ("status", "INCONCLUSIVE"),
         ("usage", {"physical_calls": 99}),
         ("latency_ms", 999.0),
         ("cost_usd", 99.0),

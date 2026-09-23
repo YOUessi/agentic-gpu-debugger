@@ -4,6 +4,24 @@ from pathlib import Path
 
 import pytest
 
+_CHECKOUT_SRC = Path(__file__).resolve().parents[1] / "src"
+
+
+def pytest_configure(config: pytest.Config) -> None:
+    """Refuse to test a different gpu_agent than the one in this checkout.
+
+    An editable install in the active environment can point at another worktree;
+    without this guard the suite silently exercises that other code.
+    """
+    import gpu_agent
+
+    imported = Path(gpu_agent.__file__).resolve()
+    if not imported.is_relative_to(_CHECKOUT_SRC):
+        raise pytest.UsageError(
+            f"CHECKOUT_MISMATCH: gpu_agent imported from {imported.parent}, "
+            f"expected {_CHECKOUT_SRC / 'gpu_agent'}"
+        )
+
 
 @pytest.fixture
 def store(tmp_path):
@@ -334,6 +352,8 @@ def native_evaluation_executor(
             (repository / "benchmarks/harness" / source_name).read_bytes()
         )
     input_bytes = json.dumps({"n": 257, "a": [1.0] * 257, "b": [2.0] * 257}).encode()
+    # Each evaluated case carries its registered public input beside kernel.cu.
+    (source / "input.json").write_bytes(input_bytes)
     harness_hash = hashlib.sha256(
         json.dumps(
             sorted(
@@ -413,6 +433,7 @@ def native_evaluation_executor(
                     }
                 )
             )
+            (case_root / "mutant" / "input.json").write_bytes(input_bytes)
             additional_sources.append(case_root)
     registry_bytes = (
         AuthoritativeCaseRegistry(cases=[spec, future_spec, *additional_specs])
@@ -503,8 +524,23 @@ def native_evaluation_executor(
         mutant_id = execute_case(case_controller, case_spec, case_root, "mutant")
         builder.register(builder.validate(clean_id, mutant_id))
         sources[case_spec.case_id] = case_root / "mutant"
+    from types import SimpleNamespace
+
+    from responses_support import _configure_responses_provider
+
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
 
+    # Every mode calls the same provider: bind the zero-cost mock and its policy up front,
+    # before any holdout controller captures the evaluation binding.
+    _configure_responses_provider(
+        SimpleNamespace(service=service, holdout_service=None, scripted_provider=provider),
+        monkeypatch,
+        full_script=True,
+    )
+    # A-E all patch and verify DIAGNOSED units; keep verification offline in unit tests.
+    from verification_boundary import install_offline_container_boundary
+
+    install_offline_container_boundary(monkeypatch)
     verifier = EvaluationScheduleVerifier._for_test(family, service.store)
     if split == "private":
         from gpu_agent.benchmark.holdout import HoldoutController
@@ -527,6 +563,7 @@ def native_evaluation_executor(
             knowledge_version=service.knowledge_version,
             _binding=service.binding,
         )
+        holdout_service._pricing_attestation = service._pricing_attestation
         executor = EvaluationExecutor(
             service,
             corpus,
@@ -559,6 +596,7 @@ def native_evaluation_executor(
         return future_builder.register(future_builder.validate(future_clean_id, future_mutant_id))
 
     executor._register_future_case_for_test = register_future_case_for_test  # type: ignore[attr-defined]
+    executor.scripted_provider = provider  # type: ignore[attr-defined]
     return executor
 
 

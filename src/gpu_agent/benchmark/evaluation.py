@@ -30,9 +30,48 @@ _CLAIM_GUARD = threading.Lock()
 _CLAIM_LOCKS: dict[str, threading.Lock] = {}
 
 EvaluationMode = Literal["A", "B", "C", "D", "E"]
+RecordStatus = Literal["COMPLETED", "FAILED", "TIMEOUT", "INCONCLUSIVE"]
+
+# Diagnostic outcomes of the agent itself (docs/mode-contract.md section 4). Every other
+# reason is a provider, tool or infrastructure fault and maps to FAILED or TIMEOUT.
+DIAGNOSTIC_INCONCLUSIVE_REASONS = frozenset(
+    {
+        "INVALID_DIAGNOSIS_EVIDENCE",
+        "MODEL_DECLARED_INCONCLUSIVE",
+        "NO_INFORMATION_GAIN",
+        "AGENT_BUDGET_EXHAUSTED",
+        # Controller policy denied the planner's proposal.
+        "ACTION_INVALID",
+        "ACTION_PHASE_INVALID",
+        "ACTION_UNSUPPORTED",
+        "DUPLICATE_NO_BENEFIT",
+        "MANDATORY_EVIDENCE_MISSING",
+        "MEMCHECK_PRECHECK_REQUIRED",
+        "SOURCE_NOT_REGISTERED",
+    }
+)
+
+
+def evaluation_record_status(diagnosis: DiagnosisResult) -> tuple[RecordStatus, str | None]:
+    """Single status mapping shared by the executor, its replay validator and the gate.
+
+    A DIAGNOSED unit is COMPLETED whatever happens afterwards: the verification verdict is
+    reported separately, and a failed patch step stays visible in diagnosis.limitations.
+    """
+    if diagnosis.diagnostic_outcome == "DIAGNOSED":
+        return "COMPLETED", None
+    reason = diagnosis.limitations[0] if diagnosis.limitations else "DIAGNOSIS_NOT_COMPLETED"
+    if not re.fullmatch(r"[A-Z0-9_]{1,80}", reason):
+        reason = "EVALUATION_FAILED"
+    if reason in DIAGNOSTIC_INCONCLUSIVE_REASONS:
+        return "INCONCLUSIVE", reason
+    return ("TIMEOUT" if "TIMEOUT" in reason else "FAILED"), reason
+
+
 EvaluationSelection = EvaluationMode | Literal["all"]
 EvaluationSplit = Literal["development", "holdout"]
 StoppedReason = Literal[
+    # Historic reasons remain parseable; current execution never emits cost stops.
     "COST_CAP_REQUIRED",
     "COST_UNKNOWN",
     "COST_CAP_RESERVATION_REQUIRED",
@@ -201,7 +240,7 @@ class PublicEvaluationRecord(ExecutionModel):
     input_hash: str
     evidence_hash: str
     executed_checks: dict[str, str]
-    status: Literal["COMPLETED", "FAILED", "TIMEOUT", "INCONCLUSIVE"]
+    status: RecordStatus
     diagnosis: dict[str, object]
     patch_hash: str | None = None
     oracle_passed: bool | None = None
@@ -372,8 +411,8 @@ class EvaluationRunner:
         toolchain_hash: str,
         model_config_hash: str,
         binding: RunBinding,
-        max_cost_usd: float | None,
-        max_unit_cost_usd: float | None,
+        max_cost_usd: float | None = None,
+        max_unit_cost_usd: float | None = None,
         random_seed: int = 20260915,
         holdout_controller: "HoldoutController | None" = None,
         holdout_batch: "HoldoutBatch | None" = None,
@@ -402,8 +441,9 @@ class EvaluationRunner:
             prompt_version=prompt_version,
             toolchain_hash=toolchain_hash,
             model_config_hash=model_config_hash,
-            max_cost_usd=max_cost_usd,
-            max_unit_cost_usd=max_unit_cost_usd,
+            # Legacy schedule fields remain readable, but never limit spending.
+            max_cost_usd=max_cost_usd if max_cost_usd is not None else 0.0,
+            max_unit_cost_usd=max_unit_cost_usd if max_unit_cost_usd is not None else 0.0,
         )
         self.random_seed = random_seed
         if (holdout_controller is None) != (holdout_batch is None):
@@ -708,25 +748,8 @@ class EvaluationRunner:
         records: list[PersistedOrReturnedRecord],
         attempts: dict[int, EvaluationAttempt],
     ) -> EvaluationManifest:
-        if schedule.bindings.max_cost_usd is None or schedule.bindings.max_unit_cost_usd is None:
-            return EvaluationRunner._terminal(
-                self, run_id, schedule, records, "COST_CAP_REQUIRED", RunStatus.COMPLETED
-            )
-
-        spent = 0.0
-        for ordinal, record in enumerate(records):
-            if (
-                record.cost_usd is not None
-                and record.cost_usd > schedule.bindings.max_unit_cost_usd
-            ):
-                return EvaluationRunner._terminal(
-                    self, run_id, schedule, records, "UNIT_COST_CEILING_EXCEEDED", RunStatus.FAILED
-                )
-            spent += (
-                record.cost_usd
-                if record.cost_usd is not None
-                else attempts[ordinal].reserved_cost_usd
-            )
+        # Keep the validated prefix in memory. Re-read only the newly persisted unit;
+        # recovery and terminal audit still validate the complete disk inventory.
 
         incomplete_attempts = [
             attempt for ordinal, attempt in attempts.items() if ordinal >= len(records)
@@ -746,7 +769,6 @@ class EvaluationRunner:
                     EvaluationRunner._validate_record(self, recovered, item, attempt)
                     recovered_records.append((attempt, recovered))
                 except (OSError, ValueError):
-                    spent += sum(value.reserved_cost_usd for value in incomplete_attempts)
                     return EvaluationRunner._terminal(
                         self,
                         run_id,
@@ -762,36 +784,9 @@ class EvaluationRunner:
                     f"evaluation/records/{len(records)}.json",
                     recovered.model_dump_json().encode(),
                 )
-                attempts = EvaluationRunner._attempts(self, run_id, schedule)
-                records = EvaluationRunner._records(self, run_id, schedule, attempts)
-                if (
-                    recovered.cost_usd is not None
-                    and recovered.cost_usd > schedule.bindings.max_unit_cost_usd
-                ):
-                    return EvaluationRunner._terminal(
-                        self,
-                        run_id,
-                        schedule,
-                        records,
-                        "UNIT_COST_CEILING_EXCEEDED",
-                        RunStatus.FAILED,
-                    )
-                spent += (
-                    recovered.cost_usd
-                    if recovered.cost_usd is not None
-                    else attempt.reserved_cost_usd
-                )
+                records.append(EvaluationRunner._persisted_record(self, run_id, schedule, attempt))
 
         for item in schedule.items[len(records) :]:
-            if spent + schedule.bindings.max_unit_cost_usd > schedule.bindings.max_cost_usd:
-                return EvaluationRunner._terminal(
-                    self,
-                    run_id,
-                    schedule,
-                    records,
-                    "COST_CAP_RESERVATION_REQUIRED",
-                    RunStatus.COMPLETED,
-                )
             attempt = EvaluationRunner._attempt(self, run_id, schedule, item)
             EvaluationRunner._put(
                 self,
@@ -820,20 +815,7 @@ class EvaluationRunner:
                 return EvaluationRunner._terminal(
                     self, run_id, schedule, records, "RECORD_PERSISTENCE_ERROR", RunStatus.FAILED
                 )
-            attempts = EvaluationRunner._attempts(self, run_id, schedule)
-            records = EvaluationRunner._records(self, run_id, schedule, attempts)
-            if (
-                record.cost_usd is not None
-                and record.cost_usd > schedule.bindings.max_unit_cost_usd
-            ):
-                return EvaluationRunner._terminal(
-                    self, run_id, schedule, records, "UNIT_COST_CEILING_EXCEEDED", RunStatus.FAILED
-                )
-            spent += (
-                record.cost_usd
-                if record.cost_usd is not None
-                else attempt.reserved_cost_usd
-            )
+            records.append(EvaluationRunner._persisted_record(self, run_id, schedule, attempt))
         return EvaluationRunner._terminal(
             self, run_id, schedule, records, None, RunStatus.COMPLETED
         )
@@ -883,12 +865,35 @@ class EvaluationRunner:
     def _public(record: PersistedOrReturnedRecord) -> PublicEvaluationRecord:
         return record.public() if isinstance(record, EvaluationRecord) else record
 
+    def _persisted_record(
+        self, run_id: str, schedule: EvaluationSchedule, attempt: EvaluationAttempt
+    ) -> PublicEvaluationRecord:
+        parent = RunStore.load(self.store, run_id)
+        refs = [
+            ref
+            for ref in parent.artifact_refs
+            if ref.name == f"evaluation/records/{attempt.ordinal}.json"
+        ]
+        if len(refs) != 1:
+            raise ValueError("persisted evaluation record is missing or ambiguous")
+        record = PublicEvaluationRecord.model_validate_json(RunStore.read(self.store, refs[0]))
+        EvaluationRunner._validate_record(self, record, schedule.items[attempt.ordinal], attempt)
+        return record
+
     def _records(
         self,
         run_id: str,
         schedule: EvaluationSchedule,
         attempts: dict[int, EvaluationAttempt],
+        trusted: dict[int, str] | None = None,
     ) -> list[PublicEvaluationRecord]:
+        """Load and natively validate persisted records.
+
+        `trusted` maps ordinal -> record artifact hash already validated by this runner in
+        this batch. Such records are parsed and bound but not re-derived, which keeps a batch
+        at O(n) native validations instead of O(n^2); `_terminal` always passes no cache and
+        re-derives every record once.
+        """
         records: dict[int, PublicEvaluationRecord] = {}
         for ref in RunStore.load(self.store, run_id).artifact_refs:
             if not ref.name.startswith("evaluation/records/"):
@@ -904,9 +909,21 @@ class EvaluationRunner:
             if ordinal not in attempts:
                 raise ValueError("completed evaluation record has no durable attempt")
             record = PublicEvaluationRecord.model_validate_json(RunStore.read(self.store, ref))
-            EvaluationRunner._validate_record(
-                self, record, schedule.items[ordinal], attempts[ordinal]
-            )
+            if trusted is not None and trusted.get(ordinal) == ref.sha256:
+                item = schedule.items[ordinal]
+                if (record.case_id, record.template_id, record.mode, record.repeat) != (
+                    item.case_id,
+                    item.template_id,
+                    item.mode,
+                    item.repeat,
+                ) or record.corpus_cutoff != attempts[ordinal].corpus_cutoff:
+                    raise ValueError("evaluation record does not match scheduled unit")
+            else:
+                EvaluationRunner._validate_record(
+                    self, record, schedule.items[ordinal], attempts[ordinal]
+                )
+                if trusted is not None:
+                    trusted[ordinal] = ref.sha256
             records[ordinal] = record
         if set(records) != set(range(len(records))):
             raise ValueError("evaluation record ordinals have a gap")

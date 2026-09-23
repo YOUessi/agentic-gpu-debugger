@@ -18,7 +18,6 @@ from typing import Literal, TypeVar
 
 from pydantic import Field, StrictFloat, model_validator
 
-from gpu_agent._resources import runtime_resource
 from gpu_agent.contracts import (
     ArtifactRef,
     CurrentPhase,
@@ -61,8 +60,13 @@ from gpu_agent.verification.policy import (
     decide_verdict,
     plan_checks,
 )
+from gpu_agent.verification.truth import (
+    VerificationTruth,
+    reference_source,
+    required_tools,
+    resolve_run_truth,
+)
 
-TRUTH_ROOT = runtime_resource("benchmarks/development_truth/case_0001")
 Payload = TypeVar("Payload")
 
 
@@ -96,16 +100,6 @@ def verification_audit_run_id(
     return hashlib.sha256(
         f"verification-audit-v1:{original_run_id}:{candidate_hash}:{mode}".encode()
     ).hexdigest()[:32]
-
-
-class _Case(ExecutionModel):
-    oracle: Literal["vector-add-cpu-v1"]
-    atol: float = Field(ge=0)
-    rtol: float = Field(ge=0)
-    private_seed: int
-    boundary_sizes: list[int]
-    random_cases: int
-    source_hashes: dict[str, str]
 
 
 class _Input(ExecutionModel):
@@ -238,36 +232,25 @@ class VerificationEngine:
             or not self._registered_tool(run_id, built)
         ):
             return [], None
-        for result in reversed(bundle.sanitizer_results):
-            tool = result.tool_result
-            if tool is None:
-                continue
-            payload = tool.typed_payload
-            if (
-                tool.tool_name == "sanitizer"
-                and payload.tool == "memcheck"
-                and not _infrastructure_failure(tool)
-                and tool.exit_code is not None
-                and 0 <= tool.exit_code < 128
-                and result.completed
-                and payload.completed
-                and result.check_outcome == payload.check_outcome == "FINDING"
-                and result.findings
-                and result.findings == payload.findings
-                and all(
-                    f.tool.value == "memcheck" and f.raw_ref == tool.stderr_artifact
-                    for f in result.findings
-                )
-                and payload.binary_ref == build.binary_ref
-                and payload.stdin_ref is not None
-                and result.program_output_ref == payload.program_output_ref
-                and self._registered_tool(run_id, tool)
-            ):
-                return result.findings, payload.stdin_ref
-        return [], None
+        # The public input is the one the diagnosis run executed. It must not depend on
+        # which sanitizers the agent chose: modes A/B run none, and non-memcheck cases
+        # never have a memcheck finding. Original-finding truth comes from the registered
+        # case (verification.truth), never from agent evidence.
+        execution = bundle.execution_result
+        if execution is None:
+            return [], None
+        ran = execution.tool_result
+        if (
+            ran.tool_name != "run"
+            or _infrastructure_failure(ran)
+            or ran.typed_payload.binary_ref != build.binary_ref
+            or not self._registered_tool(run_id, ran)
+        ):
+            return [], None
+        return [], ran.typed_payload.stdin_ref
 
     @staticmethod
-    def _suite(case: _Case) -> list[_Input]:
+    def _suite(case: VerificationTruth) -> list[_Input]:
         rng = random.Random(case.private_seed)
         sizes = [*case.boundary_sizes, *(rng.randint(2, 2048) for _ in range(case.random_cases))]
         return [
@@ -348,8 +331,8 @@ class VerificationEngine:
         try:
             snapshot = self._snapshot(original_run_id, bundle, base)
             sources = materialize_candidate(snapshot, candidate)
-            case = _Case.model_validate_json(read_regular(TRUTH_ROOT / "case.json", 65536))
-            if snapshot.hashes != case.source_hashes:
+            case = resolve_run_truth(self._store, original_run_id, snapshot.hashes)
+            if case is None:
                 self._finish_audit(
                     audit.id,
                     self._precondition_audit(mode),
@@ -390,7 +373,7 @@ class VerificationEngine:
             self._private.put(
                 audit.id,
                 "reference.cu",
-                read_regular(TRUTH_ROOT / "reference.cu", 65536),
+                reference_source(),
                 "evaluator",
             )
             self._private.put(
@@ -465,27 +448,25 @@ class VerificationEngine:
                             workspace_id=handle.id, stdin_ref=stdin, timeout_seconds=120
                         )
                     )
+                    # Memcheck, then the case's target tool, then (full mode, memcheck
+                    # clean) the rest: derivation replays exactly this order.
+                    tools = required_tools(
+                        case.target_tool,
+                        mode,
+                        sanitizer.completed and sanitizer.check_outcome == "CLEAN",
+                    )
                     sanitizers = [sanitizer]
-                    if (
-                        mode == "full"
-                        and sanitizer.completed
-                        and sanitizer.check_outcome == "CLEAN"
-                    ):
-                        sanitizers.extend(
-                            backend.run_sanitizer(
-                                SanitizerRequest(
-                                    workspace_id=handle.id,
-                                    stdin_ref=stdin,
-                                    tool=tool.value,
-                                    timeout_seconds=120,
-                                )
-                            )
-                            for tool in (
-                                SanitizerTool.RACECHECK,
-                                SanitizerTool.INITCHECK,
-                                SanitizerTool.SYNCCHECK,
+                    sanitizers.extend(
+                        backend.run_sanitizer(
+                            SanitizerRequest(
+                                workspace_id=handle.id,
+                                stdin_ref=stdin,
+                                tool=tool.value,
+                                timeout_seconds=120,
                             )
                         )
+                        for tool in tools[1:]
+                    )
                     for checked in sanitizers:
                         self._check_provenance(
                             build.binary_ref, stdin, ordinary.tool_result, checked
@@ -620,8 +601,7 @@ class VerificationEngine:
         _, input_ref = self._baseline(original_run_id, bundle, source_hashes)
         if input_ref is None:
             return True
-        case = _Case.model_validate_json(read_regular(TRUTH_ROOT / "case.json", 65536))
-        return source_hashes != case.source_hashes
+        return resolve_run_truth(self._store, original_run_id, source_hashes) is None
 
     @staticmethod
     def _canonical_terminal(

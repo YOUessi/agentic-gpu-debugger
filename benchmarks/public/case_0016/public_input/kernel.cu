@@ -3,15 +3,15 @@
 #include <cuda_runtime.h>
 
 namespace {
-__device__ float sync_sink;
+__device__ float warp_summary;
 
-__global__ void second_warp_extra_caller() {
+__global__ void warp_step() {
     const unsigned int lane = threadIdx.x & 31U;
     const unsigned int warp = threadIdx.x / 32U;
     const unsigned int mask = __ballot_sync(0xffffffffU, warp == 1U && lane < 16U);
     if (warp == 1U && lane <= 16U) {
         __syncwarp(mask);
-        if (lane == 0) sync_sink = 16.0F;
+        if (lane == 0) warp_summary = 16.0F;
     }
 }
 
@@ -49,7 +49,7 @@ int run_vector_add(const float* a, const float* b, float* out, std::size_t n) {
         if (pointer != nullptr) check(cudaFree(pointer));
     }
     if (first_error == cudaSuccess) {
-        second_warp_extra_caller<<<1, 64>>>();
+        warp_step<<<1, 64>>>();
         if (check(cudaGetLastError())) (void)cudaDeviceSynchronize();
     }
     return static_cast<int>(first_error);

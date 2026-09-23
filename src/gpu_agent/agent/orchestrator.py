@@ -113,6 +113,15 @@ def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
     return public_evidence_from_bundle(store, _evidence(store).view(run_id))
 
 
+def derive_final_diagnosis(model: DiagnosisResult, evidence: PublicEvidence) -> DiagnosisResult:
+    """Map one accepted model diagnosis to the controller's terminal diagnosis."""
+    if model.diagnostic_outcome != "DIAGNOSED":
+        return DiagnosisResult.inconclusive("MODEL_DECLARED_INCONCLUSIVE")
+    if not validate_diagnosis(model, evidence):
+        return DiagnosisResult.inconclusive("INVALID_DIAGNOSIS_EVIDENCE")
+    return model
+
+
 class AgentOrchestrator:
     def __init__(
         self,
@@ -268,6 +277,7 @@ class AgentOrchestrator:
             raise ProviderError("AGENT_BUDGET_EXHAUSTED") from error
 
     def _diagnose(self, evidence: PublicEvidence) -> DiagnosisResult:
+        """The single final diagnosis step shared by every mode (docs/mode-contract.md)."""
         diagnosis = self._reserve("diagnosis_llm")
         try:
             result = self.provider.diagnose(evidence)
@@ -275,34 +285,14 @@ class AgentOrchestrator:
             self.ledger.settle(diagnosis, "FAILED")
             raise
         self.ledger.settle(diagnosis)
-        if not validate_diagnosis(result, evidence):
-            return DiagnosisResult.inconclusive("INVALID_DIAGNOSIS_EVIDENCE")
-        return result
-
-    @staticmethod
-    def _deterministic_diagnosis(evidence: PublicEvidence) -> DiagnosisResult:
-        if not evidence.tool_findings:
-            return DiagnosisResult.inconclusive("DETERMINISTIC_NO_FINDING")
-        finding = evidence.tool_findings[0]
-        result = DiagnosisResult(
-            diagnostic_outcome="DIAGNOSED",
-            failure_family=finding.category,
-            root_cause=finding.category,
-            source_locations=[finding.source_location] if finding.source_location else [],
-            observed_facts=evidence.observed_facts,
-            tool_findings=[
-                EvidenceClaim(text=finding.category, citation_ids=[finding.artifact_id])
-            ],
-            documentation_evidence=[
-                EvidenceClaim(text=item.text[:2000], citation_ids=[item.chunk_id])
-                for item in evidence.documentation
-            ],
-            recommended_change="Review the controller-observed sanitizer finding.",
-            confidence_label="medium",
+        # Persist the exact accepted model output so validators can replay the derivation.
+        self.store.put(
+            self.handle.run_id,
+            "agent/model-diagnosis.json",
+            result.model_dump_json().encode(),
+            self.store.visibility,
         )
-        if not validate_diagnosis(result, evidence):
-            return DiagnosisResult.inconclusive("INVALID_DIAGNOSIS_EVIDENCE")
-        return result
+        return derive_final_diagnosis(result, evidence)
 
     def investigate(
         self,
@@ -358,7 +348,9 @@ class AgentOrchestrator:
                         raise
                     self.ledger.settle(reservation)
             if mode in {"A", "B", "C"}:
-                return self._deterministic_diagnosis(public_evidence(self.store, run_id))
+                return self._diagnose(public_evidence(self.store, run_id))
+            replanned = False
+            feedback: list[str] | None = None
             while True:
                 evidence = public_evidence(self.store, run_id)
                 self.budget = self.budget.model_copy(
@@ -377,7 +369,7 @@ class AgentOrchestrator:
                 else:
                     planner = self._reserve("planner_llm")
                     try:
-                        proposed = self.provider.plan(evidence, self.budget)
+                        proposed = self.provider.plan(evidence, self.budget, feedback)
                         self.ledger.settle(planner)
                     except ProviderError:
                         self.ledger.settle(planner, "FAILED")
@@ -420,7 +412,17 @@ class AgentOrchestrator:
                 )
                 # Do not persist model budget snapshots or arbitrary rationale as controller state.
                 if not decision.allowed:
+                    # A denied proposal consumes a step. E replans once, seeing only the
+                    # controller's reason codes; a second denial (or any in D) is final.
+                    self.budget = self.budget.model_copy(
+                        update={"agent_steps": self.budget.agent_steps + 1}
+                    )
+                    if mode == "E" and not replanned:
+                        replanned = True
+                        feedback = list(decision.reason_codes)
+                        continue
                     raise ProviderError(decision.reason_codes[0])
+                feedback = None
                 self.seen.add(action.action_type + action.typed_arguments.model_dump_json())
                 self.budget = self.budget.model_copy(
                     update={"agent_steps": self.budget.agent_steps + 1}
@@ -428,11 +430,7 @@ class AgentOrchestrator:
                 if action.action_type == "declare_inconclusive":
                     return DiagnosisResult.inconclusive("MODEL_DECLARED_INCONCLUSIVE")
                 if action.action_type == "finish_diagnosis":
-                    return (
-                        self._deterministic_diagnosis(evidence)
-                        if mode == "D"
-                        else self._diagnose(evidence)
-                    )
+                    return self._diagnose(evidence)
                 self.registry[action.action_type](action)
         except ProviderError as exc:
             return DiagnosisResult.inconclusive(exc.code)
@@ -492,7 +490,7 @@ class AgentOrchestrator:
                             if mode == "D"
                             else "planner"
                         ),
-                        "provider_calls_allowed": mode == "E",
+                        "provider_calls_allowed": True,
                         "acquisition_policy_ref": {
                             "id": policies[0].id,
                             "sha256": policies[0].sha256,

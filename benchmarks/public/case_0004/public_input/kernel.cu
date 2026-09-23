@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 
 namespace {
-__global__ void exercise_barrier(float* marker, std::size_t n) {
+__global__ void warp_reduce(float* marker, std::size_t n) {
     __shared__ volatile float scratch[32];
     const unsigned int lane = threadIdx.x;
     const unsigned int mask = __ballot_sync(0xffffffffU, lane < 16U);
@@ -39,7 +39,7 @@ int run_vector_add(const float* a, const float* b, float* out, std::size_t n) {
         if (!check(cudaMalloc(reinterpret_cast<void**>(&device_out), bytes))) break;
         if (!check(cudaMemcpy(device_a, a, bytes, cudaMemcpyHostToDevice))) break;
         if (!check(cudaMemcpy(device_b, b, bytes, cudaMemcpyHostToDevice))) break;
-        exercise_barrier<<<1, 32>>>(device_out, n);
+        warp_reduce<<<1, 32>>>(device_out, n);
         vector_add<<<grid_size, block_size>>>(device_a, device_b, device_out, n);
         if (!check(cudaGetLastError())) break;
         if (!check(cudaDeviceSynchronize())) break;

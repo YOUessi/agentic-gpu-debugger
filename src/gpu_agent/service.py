@@ -14,12 +14,15 @@ from gpu_agent.agent.orchestrator import AgentOrchestrator, public_evidence
 from gpu_agent.agent.policy import LLMCallGate
 from gpu_agent.agent.prompts import PROMPT_VERSION
 from gpu_agent.agent.provider import (
+    DevelopmentCallPolicy,
     FakeProvider,
+    Invocation,
     LLMProvider,
     MockResponsesProvider,
     OpenAIProviderSettings,
     OpenAIResponsesProvider,
     ProviderError,
+    provider_invocations,
 )
 from gpu_agent.benchmark.evaluation import (
     EvaluationMode,
@@ -35,6 +38,7 @@ from gpu_agent.evidence.repository import _evidence
 from gpu_agent.execution.backend import ExecutionBackend
 from gpu_agent.execution.isolated import IsolatedGPUBackend
 from gpu_agent.execution.models import (
+    BackendInfrastructureError,
     BuildRequest,
     ExecutionRequest,
     SanitizerTool,
@@ -49,7 +53,7 @@ from gpu_agent.patching import (
     apply_candidate,
     apply_generated_candidate,
 )
-from gpu_agent.provenance import capture_repository_snapshot
+from gpu_agent.provenance import capture_repository_snapshot, runtime_code_fingerprint
 from gpu_agent.store import RunStore, read_regular
 from gpu_agent.verification.engine import (
     VerificationEngine,
@@ -69,28 +73,6 @@ if TYPE_CHECKING:
         PreparedHoldoutExecution,
     )
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
-
-
-class _ControllerOnlyProvider:
-    """Local gate carrier for deterministic A-D evaluation; inference is forbidden."""
-
-    provider_name = "deterministic-controller"
-    model_name = None
-
-    def __init__(self, gate: LLMCallGate) -> None:
-        self.gate = gate
-
-    def ensure_available(self) -> None:
-        return None
-
-    def plan(self, *_args: object, **_kwargs: object) -> object:
-        raise ProviderError("PROVIDER_FORBIDDEN")
-
-    def diagnose(self, *_args: object, **_kwargs: object) -> DiagnosisResult:
-        raise ProviderError("PROVIDER_FORBIDDEN")
-
-    def propose_patch(self, *_args: object, **_kwargs: object) -> str:
-        raise ProviderError("PROVIDER_FORBIDDEN")
 
 
 class ApplicationService:
@@ -114,11 +96,16 @@ class ApplicationService:
         self._binding = _binding
         self._evaluation_schedule_verifier = _evaluation_schedule_verifier
         self._pricing_attestation: PricingAttestation | None = None
+        self._paid_calls: DevelopmentCallPolicy | None = None
+        self._repository_root: Path | None = None
 
     @property
     def evaluator_root(self) -> Path:
         """Compatibility path for callers not yet migrated to the exact store capability."""
         return self.evaluator_store.root.parent
+
+    def provider_invocations(self, run_id: str) -> list[Invocation]:
+        return provider_invocations(self.store, run_id)
 
     def _bind_evaluation_schedule_verifier(self, verifier: "EvaluationScheduleVerifier") -> None:
         from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
@@ -130,6 +117,27 @@ class ApplicationService:
         ):
             raise ValueError("evaluation service authority is already bound")
         self._evaluation_schedule_verifier = verifier
+
+    def allow_development_paid_calls(self, policy: DevelopmentCallPolicy) -> None:
+        """Opt one non-evaluation service into a bounded number of physical calls.
+
+        Runs produced this way carry `agent/development-mode.json` and are never evaluation
+        or release evidence.
+        """
+        if self._binding is not None:
+            raise ValueError("development paid calls are forbidden on a bound service")
+        self._paid_calls = DevelopmentCallPolicy.model_validate(policy.model_dump())
+
+    def _attest_runtime_code(self) -> str | None:
+        """Re-hash the executing code for every evaluation unit; any drift stops the batch."""
+        expected = self._binding.runtime_code_hash if self._binding else None
+        if expected is None:
+            return None
+        if self._repository_root is None:
+            raise ValueError("runtime code binding has no repository root")
+        if runtime_code_fingerprint(self._repository_root) != expected:
+            raise ValueError("executing code changed after the evaluation binding")
+        return expected
 
     def _bind_pricing_attestation(self, attestation: PricingAttestation) -> None:
         """Bind one controller-reviewed rate card before any evaluation provider call."""
@@ -175,6 +183,7 @@ class ApplicationService:
         prompt_version: str | None = None,
         model_config_hash: str | None = None,
         require_corpus_family: bool = False,
+        cost_policy: Literal["capped", "record_only"] = "record_only",
         workflow_visibility: Literal["public", "evaluator"] = "public",
     ) -> "ApplicationService":
         """Construct a bound service only from controller-observed repository state."""
@@ -203,7 +212,11 @@ class ApplicationService:
             raise ValueError("repository changed while release configuration was captured")
         binding = RunBinding(
             repository=snapshot,
+            cost_policy=cost_policy,
             purpose=purpose,
+            runtime_code_hash=(
+                runtime_code_fingerprint(repository) if purpose == "evaluation" else None
+            ),
             toolchain_lock_hash=toolchain.lock_hash,
             prompt_version=prompt_version,
             model_config_hash=model_config_hash,
@@ -232,7 +245,7 @@ class ApplicationService:
             ordinary = cls.configured()
             if family is not None:
                 family.require_store(ordinary.store)
-        return cls(
+        bound = cls(
             ordinary.store,
             ordinary.evaluator_store,
             provider=ordinary._provider,
@@ -241,6 +254,8 @@ class ApplicationService:
             knowledge_version=ordinary.knowledge_version,
             _binding=binding,
         )
+        bound._repository_root = repository.absolute()
+        return bound
 
     def _save_diagnosis(self, run_id: str, result: DiagnosisResult) -> None:
         self.store.put(
@@ -287,6 +302,7 @@ class ApplicationService:
         mode: EvaluationMode = "E",
         required_tools: tuple[SanitizerTool, ...] = (SanitizerTool.MEMCHECK,),
         expected_source_hash: str | None = None,
+        expected_input_hash: str | None = None,
         evaluation_unit: EvaluationUnitBinding | None = None,
     ) -> RunManifest:
         return self._diagnose(
@@ -294,8 +310,30 @@ class ApplicationService:
             mode=mode,
             required_tools=required_tools,
             expected_source_hash=expected_source_hash,
+            expected_input_hash=expected_input_hash,
             evaluation_unit=evaluation_unit,
         )
+
+    @staticmethod
+    def _public_input(
+        kernel: Path, expected_hash: str | None, evaluation_unit: EvaluationUnitBinding | None
+    ) -> bytes:
+        """The case's registered public input (`input.json` beside kernel.cu).
+
+        Evaluation units must use exactly the input the corpus validated for that case; a
+        single hard-coded size would miss defects that only a case's own input triggers.
+        Ad-hoc development runs without an input file keep the historical default.
+        """
+        path = kernel.parent / "input.json"
+        if path.exists():
+            content = read_regular(path.absolute(), 4 * 1024 * 1024)
+        elif expected_hash is None and evaluation_unit is None:
+            return json.dumps({"n": 257, "a": [1.0] * 257, "b": [2.0] * 257}).encode()
+        else:
+            raise ValueError("registered public input is unavailable")
+        if expected_hash is not None and hashlib.sha256(content).hexdigest() != expected_hash:
+            raise ValueError("registered public input hash mismatch")
+        return content
 
     def _diagnose_reserved(
         self,
@@ -307,6 +345,7 @@ class ApplicationService:
         mode: EvaluationMode,
         required_tools: tuple[SanitizerTool, ...],
         expected_source_hash: str,
+        expected_input_hash: str | None = None,
     ) -> RunManifest:
         from gpu_agent.benchmark.holdout import (
             HoldoutBatch,
@@ -325,6 +364,7 @@ class ApplicationService:
             mode=mode,
             required_tools=required_tools,
             expected_source_hash=expected_source_hash,
+            expected_input_hash=expected_input_hash,
             evaluation_unit=prepared.evaluation_unit,
             _reserved_controller=controller,
             _reserved_batch=batch,
@@ -339,6 +379,7 @@ class ApplicationService:
         required_tools: tuple[SanitizerTool, ...],
         expected_source_hash: str | None,
         evaluation_unit: EvaluationUnitBinding | None,
+        expected_input_hash: str | None = None,
         _reserved_controller: object | None = None,
         _reserved_batch: object | None = None,
         _reserved_prepared: object | None = None,
@@ -351,6 +392,7 @@ class ApplicationService:
             or evaluation_unit.mode != mode
         ):
             raise ValueError("evaluation unit requires an evaluation-bound service")
+        runtime_code_hash = self._attest_runtime_code() if evaluation_unit is not None else None
         reserved_values = (
             _reserved_controller,
             _reserved_batch,
@@ -383,6 +425,7 @@ class ApplicationService:
             and hashlib.sha256(data).hexdigest() != expected_source_hash
         ):
             raise ValueError("registered source hash mismatch")
+        public_input = self._public_input(selected, expected_input_hash, evaluation_unit)
         text = data.decode("utf-8")
         if evaluation_unit is not None and not reserved_started:
             if self._evaluation_schedule_verifier is None:
@@ -411,6 +454,13 @@ class ApplicationService:
             ).encode(),
             self.store.visibility,
         )
+        if runtime_code_hash is not None:
+            self.store.put(
+                run.id,
+                "agent/runtime-code.json",
+                json.dumps({"runtime_code_hash": runtime_code_hash}).encode(),
+                self.store.visibility,
+            )
         ref = self.store.put(run.id, "sources/kernel.cu", data, self.store.visibility)
         _evidence(self.store).save(run.id, EvidenceBundle(source_snapshot=[ref]))
         gate = LLMCallGate()
@@ -426,9 +476,7 @@ class ApplicationService:
             try:
                 # Explicitly injected fakes are test-only; ambient config cannot select them.
                 provider: LLMProvider
-                if mode != "E":
-                    provider = _ControllerOnlyProvider(gate)  # type: ignore[assignment]
-                elif self._provider is None:
+                if self._provider is None:
                     provider = OpenAIResponsesProvider(
                         OpenAIProviderSettings.from_environment(),
                         gate,
@@ -438,6 +486,7 @@ class ApplicationService:
                         idempotency_key=(
                             evaluation_unit.idempotency_key if evaluation_unit else None
                         ),
+                        call_policy=self._paid_calls if evaluation_unit is None else None,
                     )
                 else:
                     provider = self._provider
@@ -446,9 +495,17 @@ class ApplicationService:
                 # Capability validation is local-only. It must finish before pricing checks,
                 # while every physical provider invocation remains behind both gates.
                 provider.ensure_available()
-                if mode == "E" and not isinstance(provider, FakeProvider):
-                    if evaluation_unit is None:
-                        raise ProviderError("PRICING_ATTESTATION_REQUIRED")
+                if evaluation_unit is None and not isinstance(provider, FakeProvider):
+                    # Outside evaluation a real provider needs the explicit development opt-in.
+                    if self._paid_calls is None:
+                        raise ProviderError("PAID_CALLS_NOT_ALLOWED")
+                    self.store.put(
+                        run.id,
+                        "agent/development-mode.json",
+                        self._paid_calls.model_dump_json().encode(),
+                        self.store.visibility,
+                    )
+                elif not isinstance(provider, FakeProvider):
                     settings = getattr(provider, "settings", None)
                     if not isinstance(settings, OpenAIProviderSettings):
                         raise ProviderError("MODEL_CONFIG_MISMATCH")
@@ -525,11 +582,7 @@ class ApplicationService:
                 )
                 if not build.success:
                     raise ProviderError(build.tool_result.tool_error or "BUILD_FAILED")
-                stdin = (
-                    json.dumps({"n": 257, "a": [1.0] * 257, "b": [2.0] * 257}).encode()
-                    if vector
-                    else b""
-                )
+                stdin = public_input if vector else b""
                 stdin_ref = self.store.put(
                     run.id, "public-input.json", stdin, self.store.visibility
                 )
@@ -552,7 +605,7 @@ class ApplicationService:
                     self.knowledge,
                     self.knowledge_version,
                 ).investigate(run.id, mode=mode, required_tools=required_tools)
-                if result.diagnostic_outcome == "DIAGNOSED" and mode == "E":
+                if result.diagnostic_outcome == "DIAGNOSED":
                     self.store.transition(run.id, "RUNNING", "PATCH_GENERATING")
                     public_source = public_evidence(self.store, run.id).sources[0]
                     diff = provider.propose_patch(public_source, result)
@@ -569,13 +622,16 @@ class ApplicationService:
                         }
                     )
                     register_candidate(self.store, candidate)
-            except ProviderError as exc:
+            except (ProviderError, BackendInfrastructureError) as exc:
+                code = (
+                    exc.code
+                    if isinstance(exc, ProviderError)
+                    else "EXECUTION_INFRASTRUCTURE_UNAVAILABLE"
+                )
                 if result.diagnostic_outcome == "DIAGNOSED":
-                    result = result.model_copy(
-                        update={"limitations": [*result.limitations, exc.code]}
-                    )
+                    result = result.model_copy(update={"limitations": [*result.limitations, code]})
                 else:
-                    result = DiagnosisResult.inconclusive(exc.code)
+                    result = DiagnosisResult.inconclusive(code)
             finally:
                 if backend is not None and handle is not None:
                     backend.cleanup(handle)

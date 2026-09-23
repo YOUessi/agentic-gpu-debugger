@@ -124,8 +124,8 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(native_evaluati
         toolchain_hash=binding.toolchain_lock_hash or "",
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
     ).run("D", "development", 3)
 
     artifacts = {ref.name: store.read(ref) for ref in store.load(result.run_id).artifact_refs}
@@ -143,7 +143,12 @@ def test_public_evaluation_artifacts_exclude_hidden_truth_fields(native_evaluati
         assert b"evaluator_labels" not in content
         assert b"PRIVATE_CHECK_CANARY" not in content
         assert b"private_oracle" not in content
-    assert record.executed_checks == {"memcheck": "FINDING"}
+    # Diagnosis evidence plus the public verification view; never a private check.
+    assert record.executed_checks["memcheck"] == "FINDING"
+    assert all(
+        key == "memcheck" or key.startswith("verification/") for key in record.executed_checks
+    )
+    assert "verification/private_oracle" not in record.executed_checks
 
 
 def test_blind_rejects_untyped_diagnosis_metadata():

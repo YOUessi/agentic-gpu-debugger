@@ -3,14 +3,14 @@
 #include <cuda_runtime.h>
 
 namespace {
-__device__ float race_sink;
+__device__ float block_summary;
 
 __global__ void folded_cross_warp_writes() {
     __shared__ volatile float slots[32];
     const unsigned int slot = threadIdx.x & 31U;
     slots[slot] = static_cast<float>(threadIdx.x);
     __syncthreads();
-    if (threadIdx.x == 0) race_sink = slots[0];
+    if (threadIdx.x == 0) block_summary = slots[0];
 }
 
 __global__ void vector_add(const float* a, const float* b, float* out, std::size_t n) {

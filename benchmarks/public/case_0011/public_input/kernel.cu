@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 
 namespace {
-__global__ void consume_uninitialized(const float* scratch, float* marker) {
+__global__ void copy_scalar(const float* scratch, float* marker) {
     if (threadIdx.x == 0) marker[0] = scratch[0];
 }
 
@@ -37,7 +37,7 @@ int run_vector_add(const float* a, const float* b, float* out, std::size_t n) {
         if (!check(cudaGetLastError())) break;
         if (!check(cudaDeviceSynchronize())) break;
         if (!check(cudaMemcpy(out, device_out, bytes, cudaMemcpyDeviceToHost))) break;
-        consume_uninitialized<<<1, 1>>>(scratch, device_out);
+        copy_scalar<<<1, 1>>>(scratch, device_out);
         if (check(cudaGetLastError())) (void)cudaDeviceSynchronize();
     } while (false);
     for (float* pointer : {scratch, device_out, device_b, device_a}) {

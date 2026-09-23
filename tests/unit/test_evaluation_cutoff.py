@@ -26,8 +26,8 @@ def _runner(executor, **overrides) -> EvaluationRunner:
         "toolchain_hash": binding.toolchain_lock_hash,
         "model_config_hash": binding.model_config_hash,
         "binding": binding,
-        "max_cost_usd": 0.0,
-        "max_unit_cost_usd": 0.0,
+        "max_cost_usd": 1000.0,
+        "max_unit_cost_usd": 1.0,
         "random_seed": 7,
     }
     options.update(overrides)

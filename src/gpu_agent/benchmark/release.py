@@ -25,6 +25,7 @@ from gpu_agent.benchmark.controller_artifacts import (
 )
 from gpu_agent.benchmark.evaluation import (
     EvaluationAttempt,
+    EvaluationExecutionClaim,
     EvaluationManifest,
     EvaluationRecord,
     EvaluationSchedule,
@@ -532,6 +533,9 @@ class _ReleaseEvidenceResolver:
                 or run.binding.toolchain_lock_hash is None
                 or run.binding.prompt_version is None
                 or run.binding.model_config_hash is None
+                # The executing code itself must be bound; a batch that ran patched or
+                # out-of-tree code (e.g. an editable install elsewhere) is not evidence.
+                or run.binding.runtime_code_hash is None
             ):
                 raise _ReleaseRootError("EVALUATION_EVIDENCE_INVALID")
             refs = _owned_artifacts(
@@ -550,8 +554,14 @@ class _ReleaseEvidenceResolver:
                 "evaluation/schedule-receipt.json",
                 "evaluation/manifest.json",
                 *(f"evaluation/attempts/{ordinal}.json" for ordinal in range(len(schedule.items))),
+                *(f"evaluation/claims/{ordinal}.json" for ordinal in range(len(schedule.items))),
                 *(f"evaluation/records/{ordinal}.json" for ordinal in range(len(schedule.items))),
             }
+            if split == "development":
+                expected_names.update(
+                    f"evaluation/completions/{ordinal}.json"
+                    for ordinal in range(len(schedule.items))
+                )
             refs = _owned_artifacts(
                 run,
                 expected_visibility="public",
@@ -618,22 +628,40 @@ class _ReleaseEvidenceResolver:
                     or attempt.reserved_cost_usd != schedule.bindings.max_unit_cost_usd
                 ):
                     raise ValueError("evaluation attempt differs from schedule")
+                claim = EvaluationExecutionClaim.model_validate_json(
+                    self.public.read(refs[f"evaluation/claims/{ordinal}.json"])
+                )
+                if claim != EvaluationExecutionClaim(
+                    run_id=run.id,
+                    ordinal=ordinal,
+                    schedule_hash=schedule_hash,
+                    corpus_cutoff=schedule.corpus_cutoff,
+                    attempt_hash=attempt_refs[ordinal].sha256,
+                ):
+                    raise ValueError("evaluation execution claim differs from attempt")
                 record = PublicEvaluationRecord.model_validate_json(
                     self.public.read(record_refs[ordinal])
                 )
+                if (
+                    split == "development"
+                    and PublicEvaluationRecord.model_validate_json(
+                        self.public.read(refs[f"evaluation/completions/{ordinal}.json"])
+                    )
+                    != record
+                ):
+                    raise ValueError("evaluation completion differs from record")
                 if (
                     (record.case_id, record.template_id, record.mode, record.repeat)
                     != (item.case_id, item.template_id, item.mode, item.repeat)
                     or record.corpus_cutoff != schedule.corpus_cutoff
                     or record.lineage.corpus_cutoff != schedule.corpus_cutoff
-                    or record.status != "COMPLETED"
-                    or record.failure_reason is not None
-                    or record.cost_usd is None
+                    # Coverage, not success: every contract status is admissible evidence,
+                    # but a COMPLETED record carries no failure and others carry a reason.
+                    or (record.status == "COMPLETED") != (record.failure_reason is None)
                 ):
-                    raise ValueError("evaluation record is failed, stopped, or unbound")
+                    raise ValueError("evaluation record is stopped or unbound")
                 records.append(record)
                 record_hashes[ordinal] = record_refs[ordinal].sha256
-            total_cost = sum(record.cost_usd or 0 for record in records)
             if (
                 manifest.run_id != run.id
                 or manifest.commit != schedule.bindings.commit
@@ -650,11 +678,6 @@ class _ReleaseEvidenceResolver:
                 or manifest.random_seed != schedule.random_seed
                 or manifest.records != records
                 or manifest.stopped_reason is not None
-                or any(
-                    (record.cost_usd or 0) > schedule.bindings.max_unit_cost_usd
-                    for record in records
-                )
-                or total_cost > schedule.bindings.max_cost_usd
             ):
                 raise ValueError("evaluation terminal manifest differs from records")
             return _EvaluationEvidence(run, run.binding, schedule, manifest, records, record_hashes)

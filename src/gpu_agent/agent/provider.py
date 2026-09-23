@@ -20,6 +20,7 @@ from gpu_agent.agent.models import (
     AgentBudget,
     DiagnosisResult,
     PatchOutput,
+    PlannerOutput,
     ProviderError,
     PublicEvidence,
     PublicSource,
@@ -85,6 +86,73 @@ class Usage(ExecutionModel):
     reasoning_tokens: int | None = None
 
 
+class ValidationIssue(ExecutionModel):
+    """One schema failure location. Never contains model-produced values."""
+
+    loc: str = Field(max_length=200)
+    type: str = Field(max_length=100)
+    constraint: str | None = Field(default=None, max_length=200)
+
+
+class OutputDiagnostics(ExecutionModel):
+    """Bounded, value-free telemetry for a rejected or accepted model output."""
+
+    failure_class: (
+        Literal["NO_OUTPUT_TEXT", "NOT_JSON", "SCHEMA_INVALID", "DOMAIN_REJECTED"] | None
+    ) = None
+    output_chars: int | None = Field(default=None, ge=0)
+    output_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    issues: list[ValidationIssue] = Field(default_factory=list, max_length=10)
+
+
+_CONSTRAINT_KEYS = ("max_length", "min_length", "pattern", "ge", "gt", "le", "lt", "expected")
+
+
+def validation_issues(exc: ValidationError) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    for error in exc.errors(include_input=False, include_url=False)[:10]:
+        context = error.get("ctx") or {}
+        constraint = ",".join(f"{key}={context[key]}" for key in _CONSTRAINT_KEYS if key in context)
+        issues.append(
+            ValidationIssue(
+                loc=".".join(str(part) for part in error.get("loc", ()))[:200] or "<root>",
+                type=str(error.get("type", "unknown"))[:100],
+                constraint=constraint[:200] or None,
+            )
+        )
+    return issues
+
+
+def correction_hints(diagnostics: "OutputDiagnostics | None") -> list[str]:
+    if diagnostics is None:
+        return []
+    hints = [
+        f"{issue.loc}: {issue.type}" + (f" ({issue.constraint})" if issue.constraint else "")
+        for issue in diagnostics.issues
+    ]
+    if not hints and diagnostics.failure_class:
+        hints = [diagnostics.failure_class]
+    return [hint[:300] for hint in hints[:10]]
+
+
+_CONTROLLER_OWNED_PLAN_KEYS = ("action_id", "budget_snapshot")
+
+
+def normalize_wire_value(kind: "CallKind", value: object) -> object:
+    """Drop controller-owned planner fields; the controller never trusts model identities."""
+    if kind == "plan" and isinstance(value, dict) and isinstance(value.get("action"), dict):
+        action = {
+            key: item
+            for key, item in value["action"].items()
+            if key not in _CONTROLLER_OWNED_PLAN_KEYS
+        }
+        return {**value, "action": action}
+    return value
+
+
+WIRE_MODELS: "dict[CallKind, type[BaseModel]]" = {}
+
+
 class Invocation(ExecutionModel):
     invocation_id: str
     run_id: str
@@ -108,6 +176,7 @@ class Invocation(ExecutionModel):
     format_retry_of: str | None = None
     store_false_sent: bool = True
     output_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    output_diagnostics: OutputDiagnostics | None = None
 
 
 class WorkerRequest(ExecutionModel):
@@ -119,6 +188,7 @@ class WorkerRequest(ExecutionModel):
     client_request_id: str
     timeout_seconds: float = Field(gt=0, le=60)
     attempt: int = Field(ge=0, le=1)
+    correction_hints: list[str] = Field(default_factory=list, max_length=10)
 
 
 class ResponseMetadata(ExecutionModel):
@@ -151,6 +221,7 @@ class SDKResult(ExecutionModel):
     ) = None
     state: Literal["COMPLETED", "FAILED", "UNCERTAIN"] = "COMPLETED"
     retryable: bool = False
+    diagnostics: OutputDiagnostics | None = None
 
     @model_validator(mode="after")
     def consistent_envelope(self) -> "SDKResult":
@@ -176,12 +247,16 @@ def _is_deepseek_endpoint(endpoint: str) -> bool:
     return urlsplit(endpoint).hostname == "api.deepseek.com"
 
 
-def _deepseek_json_value(
-    envelope: dict[str, object], output_model: type[BaseModel]
-) -> dict[str, object]:
+class _OutputRejected(Exception):
+    def __init__(self, diagnostics: OutputDiagnostics) -> None:
+        super().__init__(diagnostics.failure_class)
+        self.diagnostics = diagnostics
+
+
+def _deepseek_output_text(envelope: dict[str, object]) -> str:
     output = envelope.get("output")
     if not isinstance(output, list):
-        raise ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
+        raise _OutputRejected(OutputDiagnostics(failure_class="NO_OUTPUT_TEXT"))
     text_parts: list[str] = []
     for item in output:
         if not isinstance(item, dict) or item.get("type") != "message":
@@ -197,8 +272,30 @@ def _deepseek_json_value(
             ):
                 text_parts.append(part["text"])
     if not text_parts:
-        raise ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
-    return output_model.model_validate(json.loads("".join(text_parts))).model_dump(mode="json")
+        raise _OutputRejected(OutputDiagnostics(failure_class="NO_OUTPUT_TEXT"))
+    return "".join(text_parts)
+
+
+def parse_wire_text(
+    kind: "CallKind", text: str, output_model: type[BaseModel]
+) -> tuple[dict[str, object], OutputDiagnostics]:
+    """Classify a raw model text; diagnostics carry only sizes, hashes and schema locations."""
+    base = OutputDiagnostics(
+        output_chars=len(text), output_sha256=hashlib.sha256(text.encode()).hexdigest()
+    )
+    try:
+        decoded = json.loads(text)
+    except json.JSONDecodeError:
+        raise _OutputRejected(base.model_copy(update={"failure_class": "NOT_JSON"})) from None
+    try:
+        value = output_model.model_validate(normalize_wire_value(kind, decoded))
+    except ValidationError as exc:
+        raise _OutputRejected(
+            base.model_copy(
+                update={"failure_class": "SCHEMA_INVALID", "issues": validation_issues(exc)}
+            )
+        ) from None
+    return value.model_dump(mode="json"), base
 
 
 def invoke_sdk(
@@ -212,16 +309,12 @@ def invoke_sdk(
         ]:
             logging.getLogger(name).disabled = True
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
-    output_models: dict[CallKind, type[BaseModel]] = {
-        "plan": AgentActionOutput,
-        "diagnose": DiagnosisResult,
-        "patch": PatchOutput,
-    }
-    output_model = output_models[request.kind]
+    output_model = WIRE_MODELS[request.kind]
     metadata: dict[str, object] = {}
     client = None
     value: dict[str, object] | None = None
     error: ProviderError | None = None
+    diagnostics: OutputDiagnostics | None = None
     try:
         client = client_factory(
             api_key=request.api_key.get_secret_value(),
@@ -232,14 +325,14 @@ def invoke_sdk(
         correction = ""
         if request.attempt:
             correction = "\nPrevious output failed schema/scope validation; correct its format."
-            if request.kind == "patch":
-                correction += " Re-check that no n != integer fixed-length guard remains."
+            if request.correction_hints:
+                correction += " Rejected fields: " + "; ".join(request.correction_hints) + "."
         instructions = PROMPTS[request.kind] + correction
         common = {
             "model": request.model,
             "input": json.dumps({"untrusted_data": request.payload}, ensure_ascii=False),
             "store": False,
-            "max_output_tokens": 4096,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
             "timeout": request.timeout_seconds,
             "extra_headers": {"X-Client-Request-Id": request.client_request_id},
         }
@@ -280,13 +373,22 @@ def invoke_sdk(
             or envelope.get("incomplete_details")
         ):
             raise ProviderError("LLM_INCOMPLETE", state="FAILED")
-        value = (
-            _deepseek_json_value(envelope, output_model)
-            if deepseek
-            else output_model.model_validate(
-                getattr(raw.parse(), "output_parsed", None)
-            ).model_dump(mode="json")
-        )
+        if deepseek:
+            value, diagnostics = parse_wire_text(
+                request.kind, _deepseek_output_text(envelope), output_model
+            )
+        else:
+            parsed = getattr(raw.parse(), "output_parsed", None)
+            if isinstance(parsed, BaseModel):
+                parsed = parsed.model_dump(mode="json")
+            try:
+                value = output_model.model_validate(
+                    normalize_wire_value(request.kind, parsed)
+                ).model_dump(mode="json")
+            except ValidationError as exc:
+                raise _OutputRejected(
+                    OutputDiagnostics(failure_class="SCHEMA_INVALID", issues=validation_issues(exc))
+                ) from None
     except openai.APITimeoutError:
         error = ProviderError("LLM_TIMEOUT", state="UNCERTAIN")
     except openai.APIConnectionError:
@@ -306,6 +408,9 @@ def invoke_sdk(
             retryable=exc.status_code in {409, 429} or exc.status_code >= 500,
         )
         metadata.update(provider_request_id=exc.request_id, http_status=exc.status_code)
+    except _OutputRejected as exc:
+        error = ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
+        diagnostics = exc.diagnostics
     except (ValidationError, json.JSONDecodeError):
         error = ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
     except ProviderError as exc:
@@ -320,8 +425,12 @@ def invoke_sdk(
             error_code=error.code if error else None,
             state=error.state if error else "COMPLETED",
             retryable=error.retryable if error else False,
+            diagnostics=diagnostics,
         )
     )
+
+
+WIRE_MODELS.update({"plan": PlannerOutput, "diagnose": DiagnosisResult, "patch": PatchOutput})
 
 
 class LLMProvider(Protocol):
@@ -330,9 +439,40 @@ class LLMProvider(Protocol):
     model_name: str | None
 
     def ensure_available(self) -> None: ...
-    def plan(self, evidence: PublicEvidence, budget: AgentBudget) -> AgentAction: ...
+    def plan(
+        self,
+        evidence: PublicEvidence,
+        budget: AgentBudget,
+        feedback: list[str] | None = None,
+    ) -> AgentAction: ...
     def diagnose(self, evidence: PublicEvidence) -> DiagnosisResult: ...
     def propose_patch(self, public_source: PublicSource, diagnosis: DiagnosisResult) -> str: ...
+
+
+MAX_OUTPUT_TOKENS = 4096
+
+
+class DevelopmentCallPolicy(ExecutionModel):
+    """Explicit development opt-in; bound physical calls, record token usage."""
+
+    schema_version: Literal[1] = 1
+    evaluation: Literal[False] = False
+    max_llm_calls: int = Field(default=40, ge=1, le=40, strict=True)
+
+
+def provider_invocations(store: RunStore, run_id: str) -> list[Invocation]:
+    """Read latest persisted state without constructing a provider or sending requests."""
+    records: dict[str, Invocation] = {}
+    for ref in store.load(run_id).artifact_refs:
+        if ref.name.startswith("provider/"):
+            record = Invocation.model_validate_json(store.read(ref))
+            records[record.invocation_id] = record
+    return [
+        item.model_copy(update={"state": "UNCERTAIN", "error_code": "INTERRUPTED_INVOCATION"})
+        if item.state == "STARTED"
+        else item
+        for item in records.values()
+    ]
 
 
 class OpenAIResponsesProvider:
@@ -349,8 +489,10 @@ class OpenAIResponsesProvider:
         cancel: Event | None = None,
         diff_validator: Callable[[str], object] | None = None,
         idempotency_key: str | None = None,
+        call_policy: DevelopmentCallPolicy | None = None,
     ) -> None:
         self.settings, self.gate, self.store, self.run_id = settings, gate, store, run_id
+        self._call_policy = call_policy
         self.model_name = settings.model
         if settings.endpoint and _is_deepseek_endpoint(settings.endpoint):
             self.provider_name = "deepseek-responses"
@@ -378,18 +520,14 @@ class OpenAIResponsesProvider:
         )
 
     def invocations(self) -> list[Invocation]:
-        records: dict[str, Invocation] = {}
-        for ref in self.store.load(self.run_id).artifact_refs:
-            if ref.name.startswith("provider/"):
-                record = Invocation.model_validate_json(self.store.read(ref))
-                records[record.invocation_id] = record
-        # A crash after STARTED cannot establish whether inference was sent or completed.
-        return [
-            r.model_copy(update={"state": "UNCERTAIN", "error_code": "INTERRUPTED_INVOCATION"})
-            if r.state == "STARTED"
-            else r
-            for r in records.values()
-        ]
+        return provider_invocations(self.store, self.run_id)
+
+    def _check_call_limit(self) -> None:
+        if (
+            self._call_policy is not None
+            and len(self.invocations()) >= self._call_policy.max_llm_calls
+        ):
+            raise ProviderError("AGENT_BUDGET_EXHAUSTED")
 
     @staticmethod
     def _metadata(response: dict[str, Any]) -> dict[str, object]:
@@ -418,6 +556,9 @@ class OpenAIResponsesProvider:
         payload: dict[str, object],
         output_model: type[Output],
         validate: Callable[[Output], Output] | None = None,
+        *,
+        wire_model: type[BaseModel] | None = None,
+        convert: Callable[[Any], Output] | None = None,
     ) -> Output:
         self.ensure_available()
         if self._cancel is not None and self._cancel.is_set():
@@ -440,9 +581,11 @@ class OpenAIResponsesProvider:
         if any(i.state == "UNCERTAIN" for i in self.invocations()):
             raise ProviderError("LLM_UNCERTAIN_INVOCATION")
         previous: str | None = None
+        hints: list[str] = []
         sequence = self._call_sequence
         self._call_sequence += 1
         for attempt in range(2):
+            self._check_call_limit()
             timeout = min(self.settings.timeout_seconds, self.gate.reserve(kind, attempt=attempt))
             invocation = Invocation(
                 invocation_id=new_id(),
@@ -467,6 +610,7 @@ class OpenAIResponsesProvider:
             metadata: dict[str, object] = {}
             error: ProviderError | None = None
             value: Output | None = None
+            diagnostics: OutputDiagnostics | None = None
             try:
                 assert self.settings.api_key is not None
                 result = self._port.call(
@@ -479,8 +623,10 @@ class OpenAIResponsesProvider:
                         client_request_id=invocation.client_request_id,
                         timeout_seconds=self.gate.timeout(timeout),
                         attempt=attempt,
+                        correction_hints=hints if attempt else [],
                     )
                 )
+                diagnostics = result.diagnostics
                 metadata = result.metadata.model_dump()
                 metadata["usage"] = result.metadata.usage
                 if result.error_code is not None:
@@ -489,9 +635,33 @@ class OpenAIResponsesProvider:
                     )
                 if result.state != "COMPLETED":
                     raise ProviderError("LLM_WORKER_ERROR", state="UNCERTAIN")
-                value = output_model.model_validate(result.value)
+                try:
+                    received = normalize_wire_value(kind, result.value)
+                    if wire_model is not None and convert is not None:
+                        value = convert(wire_model.model_validate(received))
+                    else:
+                        value = output_model.model_validate(received)
+                except ValidationError as exc:
+                    diagnostics = (diagnostics or OutputDiagnostics()).model_copy(
+                        update={
+                            "failure_class": "SCHEMA_INVALID",
+                            "issues": validation_issues(exc),
+                        }
+                    )
+                    raise
                 if validate is not None:
-                    value = validate(value)
+                    try:
+                        value = validate(value)
+                    except ProviderError:
+                        diagnostics = (diagnostics or OutputDiagnostics()).model_copy(
+                            update={
+                                "failure_class": "DOMAIN_REJECTED",
+                                "issues": [
+                                    ValidationIssue(loc=f"<{kind}>", type=f"{kind}_policy_rejected")
+                                ],
+                            }
+                        )
+                        raise
             except (ValidationError, json.JSONDecodeError):
                 error = ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
             except ProviderError as exc:
@@ -511,6 +681,7 @@ class OpenAIResponsesProvider:
                         if error is None and value is not None
                         else None
                     ),
+                    "output_diagnostics": diagnostics,
                 }
             )
             self._save(terminal)
@@ -520,16 +691,28 @@ class OpenAIResponsesProvider:
             if error.code != "LLM_INVALID_OUTPUT" or error.state != "FAILED" or attempt:
                 raise error
             previous = invocation.invocation_id
+            hints = correction_hints(diagnostics)
         raise AssertionError("bounded request loop")
 
-    def plan(self, evidence: PublicEvidence, budget: AgentBudget) -> AgentAction:
+    def plan(
+        self,
+        evidence: PublicEvidence,
+        budget: AgentBudget,
+        feedback: list[str] | None = None,
+    ) -> AgentAction:
+        payload: dict[str, object] = {
+            "evidence": evidence.model_dump(mode="json"),
+            "budget": budget.model_dump(mode="json"),
+        }
+        if feedback:
+            # Controller reason codes for the one rejected proposal (bounded, no free text).
+            payload["controller_feedback"] = {"rejected_previous_action": list(feedback)}
         return self._call(
             "plan",
-            {
-                "evidence": evidence.model_dump(mode="json"),
-                "budget": budget.model_dump(mode="json"),
-            },
+            payload,
             AgentActionOutput,
+            wire_model=PlannerOutput,
+            convert=lambda wire: wire.to_action_output(new_id()),
         ).action
 
     def diagnose(self, evidence: PublicEvidence) -> DiagnosisResult:
@@ -602,14 +785,19 @@ class FakeProvider:
         self.kinds.append(kind)
         self.inputs.append(json.loads(json.dumps(payload)))
 
-    def plan(self, evidence: PublicEvidence, budget: AgentBudget) -> AgentAction:
-        self._record(
-            "plan",
-            {
-                "evidence": evidence.model_dump(mode="json"),
-                "budget": budget.model_dump(mode="json"),
-            },
-        )
+    def plan(
+        self,
+        evidence: PublicEvidence,
+        budget: AgentBudget,
+        feedback: list[str] | None = None,
+    ) -> AgentAction:
+        payload: dict[str, object] = {
+            "evidence": evidence.model_dump(mode="json"),
+            "budget": budget.model_dump(mode="json"),
+        }
+        if feedback:
+            payload["controller_feedback"] = {"rejected_previous_action": list(feedback)}
+        self._record("plan", payload)
         if not self.actions:
             raise ProviderError("FAKE_SCRIPT_EXHAUSTED")
         return self.actions.pop(0)

@@ -67,7 +67,7 @@ def test_holdout_execution_has_zero_private_bytes_in_public_store(
         from gpu_agent.benchmark.executor import EvaluationExecutor
         from gpu_agent.benchmark.holdout import HoldoutController
 
-        executor.service._provider.actions = [InconclusiveAction() for _ in range(3)]
+        executor.scripted_provider.actions = [InconclusiveAction() for _ in range(3)]
         binding, _ = _configure_responses_provider(executor, monkeypatch, full_script=True)
         assert executor.holdout_service is not None
         executor.holdout_service._binding = binding
@@ -102,8 +102,8 @@ def test_holdout_execution_has_zero_private_bytes_in_public_store(
         toolchain_hash=binding.toolchain_lock_hash,
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=3 if mode == "E" else 0,
-        max_unit_cost_usd=1 if mode == "E" else 0,
+        max_cost_usd=3,
+        max_unit_cost_usd=1,
         random_seed=7,
         holdout_controller=executor.holdout_controller,
         holdout_batch=executor.holdout_batch,

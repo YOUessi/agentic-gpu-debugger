@@ -37,8 +37,8 @@ def _runner(executor, *, client=True):
         toolchain_hash=binding.toolchain_lock_hash or "",
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
         random_seed=7,
         schedule_client=schedule_client_for_test(executor) if client else None,
     )

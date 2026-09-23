@@ -5,13 +5,12 @@
 namespace {
 __global__ void vector_add(const float* a, const float* b, float* out, std::size_t n) {
     const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-    // Intentional benchmark defect: the final block has 255 threads beyond n.
     out[i] = a[i] + b[i];
 }
 }  // namespace
 
 int run_vector_add(const float* a, const float* b, float* out, std::size_t n) {
-    if (a == nullptr || b == nullptr || out == nullptr || n != 257) {
+    if (a == nullptr || b == nullptr || out == nullptr || n == 0 || n > 65536) {
         return static_cast<int>(cudaErrorInvalidValue);
     }
     float* device_a = nullptr;

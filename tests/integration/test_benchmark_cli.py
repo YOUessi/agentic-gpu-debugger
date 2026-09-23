@@ -14,8 +14,8 @@ def _private_json(path):
     return path
 
 
-@pytest.mark.parametrize("cap", [[], ["--max-cost-usd", "10"], ["--max-unit-cost-usd", "1"]])
-def test_missing_caps_exit_before_service_construction(monkeypatch, cap):
+@pytest.mark.parametrize("cap", [["--max-cost-usd", "10"], ["--max-unit-cost-usd", "1"]])
+def test_dollar_limit_options_are_removed(monkeypatch, cap):
     from gpu_agent.cli import app
     from gpu_agent.service import ApplicationService
 
@@ -30,7 +30,7 @@ def test_missing_caps_exit_before_service_construction(monkeypatch, cap):
         app,
         ["benchmark", "evaluate", "--mode", "A", "--split", "development", "--repeats", "3", *cap],
     )
-    assert result.exit_code == 2 and "COST_CAP_REQUIRED" in result.output
+    assert result.exit_code == 2 and "No such option" in result.output
     assert not constructed
 
 
@@ -186,10 +186,7 @@ def test_validate_refuses_unattested_serialized_claims(tmp_path, monkeypatch, vi
     assert b"PRIVATE" not in (corpus / ".corpus-family.json").read_bytes()
 
 
-@pytest.mark.parametrize("cap", ["0", "10"])
-def test_production_evaluation_requires_attested_cost_before_construction(
-    tmp_path, monkeypatch, cap
-):
+def test_production_evaluation_requires_attested_cost_before_construction(tmp_path, monkeypatch):
     from gpu_agent.benchmark.models import CaseManifest
     from gpu_agent.cli import app
     from gpu_agent.service import ApplicationService
@@ -233,10 +230,6 @@ def test_production_evaluation_requires_attested_cost_before_construction(
             "development",
             "--repeats",
             "3",
-            "--max-cost-usd",
-            cap,
-            "--max-unit-cost-usd",
-            cap,
             "--corpus-root",
             str(corpus.root),
             "--case-root",
@@ -326,10 +319,6 @@ def test_production_evaluate_rejects_store_fault_before_side_effect(tmp_path, mo
             "development",
             "--repeats",
             "3",
-            "--max-cost-usd",
-            "1",
-            "--max-unit-cost-usd",
-            "1",
             "--corpus-root",
             str(public),
             "--case-root",
@@ -381,6 +370,9 @@ def test_configured_evaluation_runner_builds_exact_split_services(tmp_path, monk
     ):
         subprocess.run(["git", "-C", str(repository), *arguments], check=True)
     snapshot = capture_repository_snapshot(repository)
+    # This fixture contains only toolchain files. Runtime binding is exercised with
+    # real package trees in provenance tests, not this service-wiring test.
+    monkeypatch.setattr("gpu_agent.service.runtime_code_fingerprint", lambda _: "9" * 64)
     toolchain_hash = load_toolchain_lock(LOCK_PATH).lock_hash
     public = tmp_path / "public"
     evaluator_root = tmp_path / "evaluator-root"
@@ -477,8 +469,6 @@ def test_configured_evaluation_runner_builds_exact_split_services(tmp_path, monk
         commit=snapshot.commit,
         toolchain_hash=toolchain_hash,
         model_config_hash=policy.sha256,
-        max_cost_usd=1,
-        max_unit_cost_usd=1,
     )
 
     assert provider_ensures == [True]
@@ -538,8 +528,8 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(
         toolchain_hash=binding.toolchain_lock_hash or "",
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1,
+        max_unit_cost_usd=0.1,
     )
     result = CliRunner().invoke(
         cli.app,
@@ -552,10 +542,6 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(
             "development",
             "--repeats",
             "3",
-            "--max-cost-usd",
-            "0",
-            "--max-unit-cost-usd",
-            "0",
             "--corpus-root",
             str(executor.corpus.root),
             "--case-root",
@@ -571,7 +557,7 @@ def test_evaluate_uses_injected_executor_and_prints_reservation(
     )
     assert result.exit_code == 0, result.output
     assert "1 case × 1 mode × 3 repeats = 3 units" in result.output
-    assert "Cost reservation: $0.00" in result.output
+    assert "Usage and cost are recorded only; no dollar ceiling." in result.output
     assert "Hard maximum" not in result.output
     assert calls == []
 

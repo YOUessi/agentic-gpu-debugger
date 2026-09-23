@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 from threading import Event
 from typing import cast
 
@@ -15,6 +16,20 @@ from gpu_agent.agent.provider import SDKResult, WorkerRequest
 
 MAX_INPUT = 32 * 1024 * 1024
 MAX_OUTPUT = 8 * 1024 * 1024
+
+
+def worker_command() -> list[str]:
+    # -I ignores PYTHONPATH and editable installs may target another checkout.
+    # Pin the package root selected by the controller, never a model-supplied path.
+    source_root = str(Path(__file__).resolve().parents[2])
+    return [
+        sys.executable,
+        "-I",
+        "-c",
+        "import sys,runpy; sys.path.insert(0,sys.argv[1]); "
+        "runpy.run_module('gpu_agent.agent.provider_worker',run_name='__main__')",
+        source_root,
+    ]
 
 
 class ProviderProcessPort:
@@ -39,7 +54,7 @@ class ProviderProcessPort:
             process = process_type.__new__(process_type)
             process_type.__init__(
                 process,
-                [sys.executable, "-I", "-m", "gpu_agent.agent.provider_worker"],
+                worker_command(),
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

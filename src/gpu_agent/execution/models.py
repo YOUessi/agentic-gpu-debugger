@@ -9,6 +9,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from gpu_agent.contracts import ArtifactRef, ToolResult
 
 
+class BackendInfrastructureError(ValueError):
+    """The container runtime could not run or attest a job; no integrity violation.
+
+    Distinct from plain ValueError (policy/hash/integrity violations), so one unit's
+    infrastructure fault becomes a FAILED record instead of stopping an evaluation batch.
+    """
+
+
 class ExecutionModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
 

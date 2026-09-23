@@ -139,6 +139,77 @@ class AgentActionOutput(ExecutionModel):
     action: ActionVariants
 
 
+# Model-facing planner contract. Controller-owned fields (action_id, budget_snapshot)
+# are deliberately absent: under strict structured output every property becomes
+# required, which previously forced the model to invent a 32-hex identifier and to
+# echo the controller budget. The controller assigns those after validation.
+PLANNER_RATIONALE_LIMIT = 300
+PLANNER_QUERY_LIMIT = 500
+PLANNER_MAX_K = 5
+
+
+class _PlannerChoice(ExecutionModel):
+    rationale: str = Field(default="", max_length=4000)
+    expected_information_gain: Literal["low", "medium", "high"] = "medium"
+
+
+class PlanNoArgumentAction(_PlannerChoice):
+    action_type: Literal[
+        "run_memcheck",
+        "run_racecheck",
+        "run_initcheck",
+        "run_synccheck",
+        "finish_diagnosis",
+        "declare_inconclusive",
+    ]
+    typed_arguments: NoArguments = Field(default_factory=NoArguments)
+
+
+class PlanDocsArguments(ExecutionModel):
+    query: str = Field(min_length=1, max_length=2000)
+    k: int = Field(default=PLANNER_MAX_K, ge=1, le=50)
+
+
+class PlanRetrieveDocsAction(_PlannerChoice):
+    action_type: Literal["retrieve_official_docs"]
+    typed_arguments: PlanDocsArguments
+
+
+class PlanInspectSourceAction(_PlannerChoice):
+    action_type: Literal["inspect_source"]
+    typed_arguments: SourceArguments
+
+
+PlannerChoice = PlanNoArgumentAction | PlanRetrieveDocsAction | PlanInspectSourceAction
+
+
+class PlannerOutput(ExecutionModel):
+    """What the planner model returns; converted to a full AgentAction by the controller."""
+
+    action: PlannerChoice
+
+    def to_action_output(self, action_id: str) -> "AgentActionOutput":
+        choice = self.action
+        arguments: dict[str, object]
+        if isinstance(choice, PlanRetrieveDocsAction):
+            arguments = {
+                "query": choice.typed_arguments.query[:PLANNER_QUERY_LIMIT],
+                "k": min(choice.typed_arguments.k, PLANNER_MAX_K),
+            }
+        else:
+            arguments = choice.typed_arguments.model_dump()
+        action = ACTION_ADAPTER.validate_python(
+            {
+                "action_id": action_id,
+                "action_type": choice.action_type,
+                "rationale": choice.rationale[:PLANNER_RATIONALE_LIMIT],
+                "expected_information_gain": choice.expected_information_gain,
+                "typed_arguments": arguments,
+            }
+        )
+        return AgentActionOutput(action=action)
+
+
 class PublicSource(ExecutionModel):
     source_id: Identifier
     path: Literal["kernel.cu"] = "kernel.cu"
@@ -167,9 +238,31 @@ class PublicEvidence(ExecutionModel):
     limitations: list[str] = Field(default_factory=list)
 
 
+# Frozen before any evaluation run (evaluation/development-labels.json uses the same set).
+# A closed vocabulary makes family accuracy a label comparison, not a spelling contest.
+FailureFamily = Literal[
+    "out_of_bounds",
+    "misaligned_access",
+    "shared_memory_race",
+    "uninitialized_memory_read",
+    "barrier_misuse",
+    "other",
+    "unknown",
+]
+FAILURE_FAMILIES: tuple[str, ...] = (
+    "out_of_bounds",
+    "misaligned_access",
+    "shared_memory_race",
+    "uninitialized_memory_read",
+    "barrier_misuse",
+    "other",
+    "unknown",
+)
+
+
 class DiagnosisResult(ExecutionModel):
     diagnostic_outcome: Literal["DIAGNOSED", "INCONCLUSIVE", "LLM_UNAVAILABLE"]
-    failure_family: str = "unknown"
+    failure_family: FailureFamily = "unknown"
     root_cause: str = Field(default="", max_length=2000)
     source_locations: list[SourceLocation] = Field(default_factory=list)
     observed_facts: list[EvidenceClaim] = Field(default_factory=list)

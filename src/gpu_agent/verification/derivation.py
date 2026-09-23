@@ -13,7 +13,6 @@ import random
 import re
 from dataclasses import dataclass
 
-from gpu_agent._resources import runtime_resource
 from gpu_agent.contracts import (
     ArtifactRef,
     ExternalRunOrigin,
@@ -32,7 +31,7 @@ from gpu_agent.execution.models import (
     SanitizerTool,
 )
 from gpu_agent.execution.process import ProcessCapture
-from gpu_agent.store import RunStore, read_regular
+from gpu_agent.store import RunStore
 from gpu_agent.verification.models import (
     CheckRequirement,
     OracleResult,
@@ -42,9 +41,9 @@ from gpu_agent.verification.models import (
     VerificationSuiteSpec,
 )
 from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
-from gpu_agent.verification.policy import decide_verdict, finding_signature, plan_checks
+from gpu_agent.verification.policy import decide_verdict, plan_checks
+from gpu_agent.verification.truth import VerificationTruth, required_tools, resolve_run_truth
 
-_TRUTH_CASE = runtime_resource("benchmarks/development_truth/case_0001/case.json")
 _LIMITATIONS = ["Containers share the host kernel and GPU driver."]
 
 
@@ -57,8 +56,8 @@ class _ChildFacts:
     sanitizer_states: dict[SanitizerTool, str]
     oracle_passed: bool | None
     findings: tuple[Finding, ...]
-    memcheck_findings: tuple[Finding, ...]
-    memcheck_completed: bool
+    target_findings: tuple[Finding, ...]
+    target_completed: bool
     infrastructure_missing: bool
     binary_hash: str | None
     passed: bool
@@ -109,9 +108,9 @@ def _state(states: list[str], *, absent: str = "NOT_RUN") -> str:
     return "FAILED"
 
 
-def _requirements(mode: str) -> list[CheckRequirement]:
+def _requirements(mode: str, target: SanitizerTool) -> list[CheckRequirement]:
     return plan_checks(
-        SanitizerTool.MEMCHECK,
+        target,
         "strict" if mode == "full" else "standard",
         {tool: "SUPPORTED" for tool in SanitizerTool},
     )
@@ -217,9 +216,10 @@ def _public_projection(
     original_present: bool | None,
     public_new_findings: list[Finding],
     audit_run_id: str,
+    target: SanitizerTool,
 ) -> VerificationResult:
     """Project only child-zero facts.  No full-suite object is accepted here."""
-    requirements = _requirements(mode)
+    requirements = _requirements(mode, target)
     observation, checks = _observation(
         [fact], requirements, original_present, public_new_findings, True
     )
@@ -291,13 +291,26 @@ def derive_verification(
     spec = VerificationSuiteSpec.model_validate_json(
         evaluator.read(_one_ref(audit_run, "verification/suite-spec.json"))
     )
-    trusted_case = json.loads(read_regular(_TRUTH_CASE, 65536))
-    if json.loads(evaluator.read(_one_ref(audit_run, "case.json"))) != trusted_case:
+    baseline_bundle = _evidence(public).view(diagnosis_run_id)
+    original_hashes = {
+        ref.name.rsplit("/", 1)[-1]: ref.sha256 for ref in baseline_bundle.source_snapshot
+    }
+    resolved: VerificationTruth | None = resolve_run_truth(
+        public, diagnosis_run_id, original_hashes
+    )
+    if resolved is None:
+        raise ValueError("evaluation verification has no truth for this case")
+    trusted = resolved
+    stored_case = VerificationTruth.model_validate_json(
+        evaluator.read(_one_ref(audit_run, "case.json"))
+    )
+    if stored_case != trusted:
         raise ValueError("evaluation verification case policy is invalid")
-    rng = random.Random(trusted_case["private_seed"])
+    target = trusted.target_tool
+    rng = random.Random(trusted.private_seed)
     sizes = [
-        *trusted_case["boundary_sizes"],
-        *(rng.randint(2, 2048) for _ in range(trusted_case["random_cases"])),
+        *trusted.boundary_sizes,
+        *(rng.randint(2, 2048) for _ in range(trusted.random_cases)),
     ]
     holdouts = [
         {
@@ -351,55 +364,7 @@ def derive_verification(
     if not children or sorted(children) != list(range(len(children))):
         raise ValueError("evaluation verification input sequence is invalid")
 
-    baseline_bundle = _evidence(public).view(diagnosis_run_id)
-    baseline_items = [
-        item
-        for item in baseline_bundle.sanitizer_results
-        if item.tool_result is not None
-        and item.tool_result.typed_payload.tool == SanitizerTool.MEMCHECK
-    ]
-    if len(baseline_items) != 1 or baseline_items[0].tool_result is None:
-        raise ValueError("evaluation verification baseline sanitizer is invalid")
-    baseline = baseline_items[0].tool_result
-    baseline_capture = ProcessCapture(
-        exit_code=baseline.exit_code,
-        stdout=public.read(baseline.stdout_artifact),
-        stderr=public.read(baseline.stderr_artifact),
-        timed_out=baseline.timed_out,
-        elapsed_ms=baseline.elapsed_ms,
-        started_at=baseline.started_at,
-        finished_at=baseline.finished_at,
-        truncated=baseline.truncated,
-        cancelled=baseline.cancelled,
-        tool_error=baseline.tool_error,
-    )
-    baseline_reparsed = parse_sanitizer(SanitizerTool.MEMCHECK, baseline_capture)
-    baseline_findings = [
-        item.model_copy(update={"raw_ref": baseline.stderr_artifact})
-        for item in baseline_reparsed.findings
-    ]
-    baseline_payload = baseline.typed_payload
-    if (
-        baseline_reparsed.status != baseline_payload.status
-        or baseline_reparsed.completed != baseline_payload.completed
-        or baseline_reparsed.parser_version != baseline_payload.parser_version
-        or baseline_reparsed.check_outcome != baseline_payload.check_outcome
-        or baseline_findings != baseline_payload.findings
-        or baseline_items[0].findings != baseline_findings
-        or baseline_payload.program_output_ref != baseline.stdout_artifact
-    ):
-        raise ValueError(
-            "evaluation verification baseline sanitizer is not reproducible: "
-            f"{baseline_reparsed.status != baseline_payload.status=}, "
-            f"{baseline_reparsed.completed != baseline_payload.completed=}, "
-            f"{baseline_reparsed.parser_version != baseline_payload.parser_version=}, "
-            f"{baseline_reparsed.check_outcome != baseline_payload.check_outcome=}, "
-            f"{baseline_findings != baseline_payload.findings=}, "
-            f"{baseline_items[0].findings != baseline_findings=}, "
-            f"{baseline_payload.program_output_ref != baseline.stdout_artifact=}"
-        )
-    baseline_signatures = {finding_signature(item) for item in baseline_findings}
-    oracle = NumericOracle(trusted_case["atol"], trusted_case["rtol"], False, False)
+    oracle = NumericOracle(trusted.atol, trusted.rtol, False, False)
     facts: list[_ChildFacts] = []
 
     for index, child in sorted(children.items()):
@@ -440,8 +405,8 @@ def derive_verification(
         sanitizers: list[ToolResult[SanitizerPayload]] = []
         sanitizer_states: dict[SanitizerTool, str] = {}
         findings: list[Finding] = []
-        memcheck_findings: tuple[Finding, ...] = ()
-        memcheck_completed = False
+        target_findings: tuple[Finding, ...] = ()
+        target_completed = False
         for ref in native_refs:
             raw = evaluator.read(ref)
             payload = json.loads(raw)
@@ -496,9 +461,9 @@ def derive_verification(
                     else "FINDING"
                 )
                 findings.extend(raw_findings)
-                if tool == SanitizerTool.MEMCHECK:
-                    memcheck_findings = tuple(raw_findings)
-                    memcheck_completed = reparsed.completed and not sanitizer_infra
+                if tool == target:
+                    target_findings = tuple(raw_findings)
+                    target_completed = reparsed.completed and not sanitizer_infra
                 native_artifacts = (
                     sanitizer_model.stdout_artifact,
                     sanitizer_model.stderr_artifact,
@@ -513,16 +478,15 @@ def derive_verification(
         build_infra = _infra(build)
         build_ok = build.exit_code == 0 and binary is not None and not build_infra
         build_state = "TOOL_ERROR" if build_infra else "CLEAN" if build_ok else "FAILED"
-        expected_tools = [SanitizerTool.MEMCHECK]
-        if (
-            spec.mode == "full"
-            and sanitizers
-            and SanitizerTool(sanitizers[0].typed_payload.tool) == SanitizerTool.MEMCHECK
-            and sanitizer_states.get(SanitizerTool.MEMCHECK) == "CLEAN"
-        ):
-            expected_tools.extend(
-                [SanitizerTool.RACECHECK, SanitizerTool.INITCHECK, SanitizerTool.SYNCCHECK]
-            )
+        expected_tools = required_tools(
+            target,
+            "full" if spec.mode == "full" else "standard",
+            bool(
+                sanitizers
+                and SanitizerTool(sanitizers[0].typed_payload.tool) == SanitizerTool.MEMCHECK
+                and sanitizer_states.get(SanitizerTool.MEMCHECK) == "CLEAN"
+            ),
+        )
         observed_tools = [SanitizerTool(item.typed_payload.tool) for item in sanitizers]
         if build_ok:
             if run is None or observed_tools != expected_tools:
@@ -629,8 +593,8 @@ def derive_verification(
                 sanitizer_states=sanitizer_states,
                 oracle_passed=oracle_passed,
                 findings=tuple(findings),
-                memcheck_findings=memcheck_findings,
-                memcheck_completed=memcheck_completed,
+                target_findings=target_findings,
+                target_completed=target_completed,
                 infrastructure_missing=infrastructure_missing,
                 binary_hash=binary.sha256 if binary else None,
                 passed=passed,
@@ -638,24 +602,23 @@ def derive_verification(
         )
 
     public_input = _one_ref(children[0], "input.json")
-    same_public_input = bool(
-        baseline_payload.stdin_ref is not None
-        and baseline_payload.stdin_ref.sha256 == public_input.sha256
-        and public.read(baseline_payload.stdin_ref) == evaluator.read(public_input)
-    )
+    execution = baseline_bundle.execution_result
+    if execution is None or public.read(
+        execution.tool_result.typed_payload.stdin_ref
+    ) != evaluator.read(public_input):
+        raise ValueError("evaluation verification public input differs from the diagnosis run")
     public_fact = facts[0]
-    original_present: bool | None = None
-    if same_public_input and baseline_signatures and public_fact.memcheck_completed:
-        candidate_signatures = {finding_signature(item) for item in public_fact.memcheck_findings}
-        original_present = any(
-            signature is not None and signature in candidate_signatures
-            for signature in baseline_signatures
-        )
-    public_new = [
-        item
-        for item in public_fact.findings
-        if finding_signature(item) not in baseline_signatures or finding_signature(item) is None
-    ]
+
+    def is_original(item: Finding) -> bool:
+        # The registered defect: target tool and exact registered finding category.
+        return item.tool == target and item.category == trusted.expected_finding
+
+    original_present: bool | None = (
+        any(is_original(item) for item in public_fact.target_findings)
+        if public_fact.target_completed
+        else None
+    )
+    public_new = [item for item in public_fact.findings if not is_original(item)]
     private_findings = [item for fact in facts[1:] for item in fact.findings]
     full_new = [*public_new, *private_findings]
     private_facts = facts[1:]
@@ -666,7 +629,7 @@ def derive_verification(
         if len(private_facts) == spec.expected_child_count - 1
         else None
     )
-    requirements = _requirements(spec.mode)
+    requirements = _requirements(spec.mode, target)
     observation, checks = _observation(
         facts, requirements, original_present, full_new, private_passed
     )
@@ -698,6 +661,7 @@ def derive_verification(
             original_present,
             public_new,
             audit_run.id,
+            target,
         ),
     )
 

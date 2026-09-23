@@ -46,7 +46,7 @@ test -x /srv/gpu-agent-signer/bin/schedule-authority
 For each invocation, the application sends exactly one
 `EvaluationScheduleSigningRequest` JSON object on stdin. It has `schema_version: 4` and binds the
 transaction and evaluation IDs, target store, schedule and immutable `RunBinding`, selection,
-modes, split, repeats, random seed, approved cost caps, case/template universe, corpus namespace
+modes, split, repeats, random seed, record-only cost policy, case/template universe, corpus namespace
 and cutoff, authority key hash, and pristine queued-run hashes. The signer must return exactly one
 `EvaluationScheduleReceipt` JSON object on stdout with:
 
@@ -144,11 +144,11 @@ gpu-agent benchmark attest-pricing \
 export GPU_AGENT_PRICING_ATTESTATION=/srv/gpu-agent-controller/attestations/v2-pricing.json
 ```
 
-Obtain explicit user approval for both a total cap and a per-unit cap before any provider call.
-Record the approved decimal values in the controller change record. Do not infer approval from the
-attestation, an earlier run, or available account credit. Every evaluation command below must use
-those exact approved values; absence of either cap must stop before the first external call. Load
-the provider API key only into this trusted controller shell and never print or persist it.
+Real provider calls require user authorization. Do not infer authorization from an attestation,
+an earlier run, or available account credit. Record actual token usage and calculable costs only;
+there are no per-unit or total dollar limits, balance checks, or cost-triggered stops. Unknown
+cost stays null. Load the provider API key only into this trusted controller shell and never
+print or persist it. The existing 40-request unit boundary prevents unbounded agent loops.
 
 ## 6. Run the signed 240+120 evaluations
 
@@ -158,8 +158,6 @@ Use all five modes and three repeats. The development command must report
 ```bash
 gpu-agent benchmark evaluate \
   --mode all --split development --repeats 3 \
-  --max-cost-usd APPROVED_DEVELOPMENT_TOTAL_CAP \
-  --max-unit-cost-usd APPROVED_UNIT_CAP \
   --corpus-root /srv/gpu-agent-data/v2-public \
   --case-root /opt/releases/agentic-gpu-debugger/benchmarks/public \
   --repository /opt/releases/agentic-gpu-debugger \
@@ -174,8 +172,6 @@ evaluator-controlled source root. It must report `8 case × 5 mode × 3 repeats 
 ```bash
 gpu-agent benchmark evaluate \
   --mode all --split holdout --repeats 3 \
-  --max-cost-usd APPROVED_HOLDOUT_TOTAL_CAP \
-  --max-unit-cost-usd APPROVED_UNIT_CAP \
   --corpus-root /srv/gpu-agent-private/v2-evaluator/runs \
   --case-root /srv/gpu-agent-private/cases-v2 \
   --repository /opt/releases/agentic-gpu-debugger \

@@ -14,6 +14,7 @@ def worker_provider(store, monkeypatch):
     from gpu_agent.agent.models import AgentBudget
     from gpu_agent.agent.policy import LLMCallGate
     from gpu_agent.agent.provider import OpenAIProviderSettings, OpenAIResponsesProvider
+    from gpu_agent.agent.provider_process import worker_command
 
     real_popen = subprocess.Popen
     children = []
@@ -23,9 +24,10 @@ def worker_provider(store, monkeypatch):
         class Launch(real_popen):
             def __init__(self, argv, **kwargs):
                 launches.append((argv, kwargs))
-                assert argv == [sys.executable, "-I", "-m", "gpu_agent.agent.provider_worker"]
+                assert argv == worker_command()
                 assert "secret-canary" not in repr(argv) + repr(kwargs.get("env"))
-                super().__init__([sys.executable, "-I", "-c", code], **kwargs)
+                bootstrap = f"import sys; sys.path.insert(0, {argv[-1]!r});\n"
+                super().__init__([sys.executable, "-I", "-c", bootstrap + code], **kwargs)
                 children.append(self)
 
         monkeypatch.setattr(subprocess, "Popen", Launch)
@@ -200,8 +202,10 @@ def test_cleanup_reap_failure_does_not_replace_original_timeout(worker_provider,
 
 
 def test_actual_worker_malformed_stdin_exits_without_error_body():
+    from gpu_agent.agent.provider_process import worker_command
+
     result = subprocess.run(
-        [sys.executable, "-I", "-m", "gpu_agent.agent.provider_worker"],
+        worker_command(),
         input=b'{"api_key":"secret-canary"}',
         capture_output=True,
         timeout=5,

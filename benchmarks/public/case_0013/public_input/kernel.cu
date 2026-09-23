@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 
 namespace {
-__global__ void consume_tail(const float* scratch, float* marker, std::size_t n) {
+__global__ void copy_last(const float* scratch, float* marker, std::size_t n) {
     if (threadIdx.x == 0) marker[0] = scratch[n - 1];
 }
 
@@ -38,7 +38,7 @@ int run_vector_add(const float* a, const float* b, float* out, std::size_t n) {
         if (!check(cudaDeviceSynchronize())) break;
         if (!check(cudaMemcpy(out, device_out, bytes, cudaMemcpyDeviceToHost))) break;
         if (n / 2 > 0 && !check(cudaMemset(scratch, 0, (n / 2) * sizeof(float)))) break;
-        consume_tail<<<1, 1>>>(scratch, device_out, n);
+        copy_last<<<1, 1>>>(scratch, device_out, n);
         if (check(cudaGetLastError())) (void)cudaDeviceSynchronize();
     } while (false);
     for (float* pointer : {scratch, device_out, device_b, device_a}) {

@@ -57,6 +57,11 @@ def test_release_service_factory_captures_repository_and_lock_internally(tmp_pat
         return captured
 
     monkeypatch.setattr("gpu_agent.service.capture_repository_snapshot", capture)
+    fingerprints = []
+    monkeypatch.setattr(
+        "gpu_agent.service.runtime_code_fingerprint",
+        lambda repo: fingerprints.append(repo) or "d" * 64,
+    )
     locked = load_toolchain_lock(LOCK_PATH)
     lock_calls = []
 
@@ -76,6 +81,8 @@ def test_release_service_factory_captures_repository_and_lock_internally(tmp_pat
     assert lock_calls == [tmp_path / "containers/toolchain.lock.json"]
     assert service.binding.repository == captured
     assert service.binding.toolchain_lock_hash == locked.lock_hash
+    # Evaluation binds the executing code, not only the git snapshot.
+    assert fingerprints == [tmp_path] and service.binding.runtime_code_hash == "d" * 64
 
 
 def test_release_evaluation_service_selects_exact_family_visibility(tmp_path, monkeypatch):
@@ -101,6 +108,7 @@ def test_release_evaluation_service_selects_exact_family_visibility(tmp_path, mo
     monkeypatch.setenv("GPU_AGENT_EVALUATOR_ROOT", str(evaluator_root))
     snapshot = RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True)
     monkeypatch.setattr("gpu_agent.service.capture_repository_snapshot", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("gpu_agent.service.runtime_code_fingerprint", lambda _repo: "d" * 64)
     monkeypatch.setattr(
         "gpu_agent.service.load_toolchain_lock", lambda _path: load_toolchain_lock(LOCK_PATH)
     )
@@ -235,3 +243,43 @@ def test_evaluator_candidate_and_verification_remain_parent_scoped(evaluator_oob
         for run in (service.store.load(diagnosis.id), service.store.load(candidate[0]))
         for ref in run.artifact_refs
     )
+
+
+def test_runtime_code_fingerprint_rejects_code_imported_from_another_checkout(tmp_path):
+    from gpu_agent.provenance import runtime_code_fingerprint
+
+    with pytest.raises(ValueError, match="not the captured repository"):
+        runtime_code_fingerprint(tmp_path)
+
+
+def test_runtime_code_fingerprint_binds_this_checkout_and_detects_drift(monkeypatch):
+    from pathlib import Path
+
+    import gpu_agent
+    from gpu_agent.provenance import runtime_code_fingerprint
+
+    repository = Path(gpu_agent.__file__).resolve().parents[2]
+    first = runtime_code_fingerprint(repository)
+    assert first == runtime_code_fingerprint(repository)
+    original = Path.read_bytes
+
+    def drifted(path):
+        content = original(path)
+        return content + b"# patched" if path.name == "policy.py" else content
+
+    monkeypatch.setattr("gpu_agent.provenance.read_regular", lambda path, _limit: drifted(path))
+    assert runtime_code_fingerprint(repository) != first
+
+
+def test_evaluation_unit_refuses_code_that_drifted_after_binding(oob_service, tmp_path):
+    from gpu_agent.contracts import RepositorySnapshot, RunBinding
+
+    service = oob_service[0]
+    service._binding = RunBinding(
+        repository=RepositorySnapshot(commit="a" * 40, tracked_tree_hash="b" * 64, clean=True),
+        purpose="evaluation",
+        runtime_code_hash="0" * 64,
+    )
+    service._repository_root = __import__("pathlib").Path(__file__).resolve().parents[2]
+    with pytest.raises(ValueError, match="executing code changed"):
+        service._attest_runtime_code()

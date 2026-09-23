@@ -11,7 +11,15 @@ def test_required_live_skip_fails_instead_of_passing(pytester, monkeypatch, mode
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.setenv("PYTHONNOUSERSITE", "1")
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
-    pytester.makeconftest(Path(__file__).parents[1].joinpath("conftest.py").read_text())
+    original = Path(__file__).resolve().parents[1] / "conftest.py"
+    # Execute the real hook with its real location; copying it changes the checkout
+    # anchor to pytester's synthetic directory.
+    pytester.makeconftest(
+        "import runpy, sys\n"
+        f"sys.path.insert(0, {str(original.parent.parent / 'src')!r})\n"
+        f"hooks = runpy.run_path({str(original)!r})\n"
+        "globals().update({k: v for k, v in hooks.items() if not k.startswith('__')})\n"
+    )
     pytester.makeini("[pytest]\nmarkers = gpu: real hardware required\n")
     source = {
         "runtime": "import pytest\n@pytest.mark.gpu\ndef test_gpu(): pytest.skip('no GPU')\n",

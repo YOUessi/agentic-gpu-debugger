@@ -67,7 +67,7 @@ def _rewrite_child_index(evaluator, audit_id, child_run_ids, *, schema_version=1
     (evaluator.root / audit_id / "manifest.json").write_text(updated.model_dump_json(indent=2))
 
 
-def _original(store, tmp_path, *, holdout_origin=None):
+def _original(store, tmp_path, *, holdout_origin=None, case="case_0001", n=257):
     from gpu_agent.contracts import RepositorySnapshot, RunBinding, ToolResult, now
     from gpu_agent.environment import load_toolchain_lock
     from gpu_agent.evidence.models import EvidenceBundle
@@ -76,6 +76,8 @@ def _original(store, tmp_path, *, holdout_origin=None):
     from gpu_agent.execution.models import (
         BuildPayload,
         BuildResult,
+        ExecutionPayload,
+        ExecutionResult,
         Finding,
         SanitizerPayload,
         SanitizerResult,
@@ -85,7 +87,7 @@ def _original(store, tmp_path, *, holdout_origin=None):
 
     repo = Path(__file__).resolve().parents[2] / "benchmarks"
     source_paths = [
-        repo / "public/case_0001/public_input/kernel.cu",
+        repo / f"public/{case}/public_input/kernel.cu",
         repo / "harness/vector_io.cpp",
         repo / "harness/vector_api.h",
         repo / "harness/vendor/json.hpp",
@@ -114,13 +116,13 @@ def _original(store, tmp_path, *, holdout_origin=None):
     stdin = store.put(
         run.id,
         "public-input.json",
-        json.dumps({"n": 257, "a": [1] * 257, "b": [2] * 257}).encode(),
+        json.dumps({"n": n, "a": [1] * n, "b": [2] * n}).encode(),
         store.visibility,
     )
     stdout = store.put(
         run.id,
         "memcheck.stdout",
-        json.dumps({"dtype": "float32", "shape": [257], "values": [3.0] * 257}).encode(),
+        json.dumps({"dtype": "float32", "shape": [n], "values": [3.0] * n}).encode(),
         store.visibility,
     )
     raw = store.put(
@@ -209,8 +211,37 @@ def _original(store, tmp_path, *, holdout_origin=None):
         tool.model_dump_json().encode(),
         store.visibility,
     )
+    # Every diagnosis run executes the program once; verification takes its public input
+    # from that ordinary run, not from whichever sanitizer the agent chose.
+    run_tool = ToolResult(
+        tool_name="run",
+        request_id="original-run",
+        started_at=now(),
+        finished_at=now(),
+        elapsed_ms=1,
+        exit_code=0,
+        timed_out=False,
+        stdout_artifact=stdout,
+        stderr_artifact=raw,
+        typed_payload=ExecutionPayload(
+            runtime_status="SUCCESS", output_ref=stdout, stdin_ref=stdin, binary_ref=binary
+        ),
+    )
+    store.put(
+        run.id,
+        "run/original-run/result.json",
+        run_tool.model_dump_json().encode(),
+        store.visibility,
+    )
+    execution = ExecutionResult(output_ref=stdout, runtime_status="SUCCESS", tool_result=run_tool)
     _evidence(store).save(
-        run.id, EvidenceBundle(source_snapshot=refs, build_result=build, sanitizer_results=[result])
+        run.id,
+        EvidenceBundle(
+            source_snapshot=refs,
+            build_result=build,
+            execution_result=execution,
+            sanitizer_results=[result],
+        ),
     )
     return run.id, SourceSnapshot(parent_run_id=run.id, root=root, hashes=hashes)
 
@@ -233,19 +264,16 @@ def evaluator_original(tmp_path):
     "fault",
     [
         "missing_build",
-        "missing_binary",
+        "missing_execution",
         "unrelated_binary",
-        "incomplete_payload",
         "timed_out",
         "transport_error",
         "wrong_tool",
+        "unregistered_run",
         "source_manifest",
         "missing_source_manifest",
-        "unrelated_input",
-        "missing_input",
         "build_timed_out",
         "build_binary_mismatch",
-        "outer_findings_mismatch",
         "missing_source_snapshot",
         "mismatched_source_snapshot",
     ],
@@ -253,30 +281,36 @@ def evaluator_original(tmp_path):
 def test_invalid_original_provenance_is_inconclusive(
     store, tmp_path, original, container_boundary, fault
 ):
+    """The verifier's public input comes from the diagnosis run's ordinary execution.
+
+    It no longer depends on agent-chosen sanitizer evidence; any break in the build or
+    ordinary-run provenance leaves the oracle unavailable (INCONCLUSIVE, nothing run).
+    """
     from gpu_agent.evidence.repository import EvidenceRepository
 
     run_id, _ = original
     repo = EvidenceRepository(store)
     bundle = repo.public_view(run_id)
-    baseline = bundle.sanitizer_results[0]
-    tool = baseline.tool_result
-    payload = tool.typed_payload
+    execution = bundle.execution_result
+    ran = execution.tool_result
     build = bundle.build_result
     if fault == "missing_build":
         build = None
-    elif fault == "missing_binary":
-        payload = payload.model_copy(update={"binary_ref": None})
+    elif fault == "missing_execution":
+        execution = None
     elif fault == "unrelated_binary":
         ref = store.put(run_id, "unrelated-binary", b"another executable", "public")
-        payload = payload.model_copy(update={"binary_ref": ref})
-    elif fault == "incomplete_payload":
-        payload = payload.model_copy(update={"completed": False})
+        ran = ran.model_copy(
+            update={"typed_payload": ran.typed_payload.model_copy(update={"binary_ref": ref})}
+        )
     elif fault == "timed_out":
-        tool = tool.model_copy(update={"timed_out": True})
+        ran = ran.model_copy(update={"timed_out": True})
     elif fault == "transport_error":
-        tool = tool.model_copy(update={"tool_error": "CONTAINER_ERROR"})
+        ran = ran.model_copy(update={"tool_error": "CONTAINER_ERROR"})
     elif fault == "wrong_tool":
-        tool = tool.model_copy(update={"tool_name": "run"})
+        ran = ran.model_copy(update={"tool_name": "sanitizer"})
+    elif fault == "unregistered_run":
+        ran = ran.model_copy(update={"request_id": "never-recorded"})
     elif fault in {"source_manifest", "missing_source_manifest"}:
         manifest = {} if fault == "missing_source_manifest" else {"kernel.cu": "0" * 64}
         build = build.model_copy(
@@ -290,39 +324,26 @@ def test_invalid_original_provenance_is_inconclusive(
                 )
             }
         )
-    elif fault == "unrelated_input":
-        ref = store.put(
-            run_id,
-            "other-input",
-            json.dumps({"n": 257, "a": [3] * 257, "b": [4] * 257}).encode(),
-            "public",
-        )
-        payload = payload.model_copy(update={"stdin_ref": ref})
-    elif fault == "missing_input":
-        payload = payload.model_copy(update={"stdin_ref": None})
     elif fault == "build_timed_out":
         build = build.model_copy(
             update={"tool_result": build.tool_result.model_copy(update={"timed_out": True})}
         )
     elif fault == "build_binary_mismatch":
-        build = build.model_copy(update={"binary_ref": tool.stdout_artifact})
-    elif fault == "outer_findings_mismatch":
-        payload = payload.model_copy(update={"findings": []})
+        build = build.model_copy(update={"binary_ref": ran.stdout_artifact})
     elif fault == "missing_source_snapshot":
         bundle = bundle.model_copy(update={"source_snapshot": bundle.source_snapshot[:-1]})
     elif fault == "mismatched_source_snapshot":
         ref = store.put(run_id, "sources/changed/kernel.cu", b"unrelated source\n", "public")
         refs = [ref if Path(r.name).name == "kernel.cu" else r for r in bundle.source_snapshot]
         bundle = bundle.model_copy(update={"source_snapshot": refs})
-    tool = tool.model_copy(update={"typed_payload": payload})
-    if fault != "unrelated_input":
-        # Malformed observations must fail even if the bundle exactly matches the
-        # immutable execution record, rather than only through record comparison.
-        tool = tool.model_copy(update={"request_id": "invalid-record"})
+    if fault not in {"unregistered_run", "missing_execution"}:
+        # Malformed observations must fail even when the bundle matches an immutable
+        # execution record exactly, not only through record comparison.
+        ran = ran.model_copy(update={"request_id": "invalid-record"})
         store.put(
             run_id,
-            f"{tool.tool_name}/invalid-record/result.json",
-            tool.model_dump_json().encode(),
+            f"{ran.tool_name}/invalid-record/result.json",
+            ran.model_dump_json().encode(),
             "public",
         )
         if build is not None:
@@ -334,9 +355,11 @@ def test_invalid_original_provenance_is_inconclusive(
                 "public",
             )
             build = build.model_copy(update={"tool_result": built})
-    baseline = baseline.model_copy(update={"tool_result": tool})
+    if execution is not None:
+        execution = execution.model_copy(update={"tool_result": ran})
     repo.save(
-        run_id, bundle.model_copy(update={"build_result": build, "sanitizer_results": [baseline]})
+        run_id,
+        bundle.model_copy(update={"build_result": build, "execution_result": execution}),
     )
     candidate_id, _ = register_variant(store, original, "human")
     result = _engine(store, tmp_path).verify(run_id, candidate_id)
@@ -360,6 +383,9 @@ def register_variant(store, original, variant):
         after = after.replace("a[i] + b[i]", "n == 257 ? a[i] + b[i] : 0.0f")
     if variant == "syntax":
         after += "INVALID CUDA SYNTAX\n"
+    if variant == "oob":
+        # A cosmetic edit that leaves the defect in place.
+        after += "// reviewed\n"
     diff = "".join(
         difflib.unified_diff(
             before.splitlines(True),
@@ -374,63 +400,9 @@ def register_variant(store, original, variant):
 
 @pytest.fixture
 def container_boundary(monkeypatch):
-    from gpu_agent.environment import RuntimeToolchainAttestation
-    from gpu_agent.execution.isolated import IsolatedGPUBackend
-    from gpu_agent.execution.process import ProcessCapture
+    from verification_boundary import install_offline_container_boundary
 
-    calls = []
-
-    def attest(self):
-        assert self._expected_toolchain is not None
-        return RuntimeToolchainAttestation(
-            runtime_session_id=self._runtime_session_id,
-            lock_hash=self._expected_toolchain.lock_hash,
-            image_id=self._expected_toolchain.image_id,
-            cuda_nvcc=self._expected_toolchain.cuda_nvcc,
-            compute_sanitizer=self._expected_toolchain.compute_sanitizer,
-            compute_capability="8.9",
-            target_arch=self._expected_toolchain.target_arch,
-            policy_hash=hashlib.sha256(self.policy.model_dump_json().encode()).hexdigest(),
-        )
-
-    def container(self, path, operation, timeout, *, stdin=b"", cancel=None):
-        source = (path / "kernel.cu").read_text()
-        assert set(p.name for p in path.iterdir()) <= {
-            "kernel.cu",
-            "vector_io.cpp",
-            "vector_api.h",
-            "json.hpp",
-            "vector_add",
-        }
-        if operation == "build":
-            assert not ((path / "kernel.cu").stat().st_mode & 0o222)
-            if "INVALID CUDA SYNTAX" in source:
-                return ProcessCapture(1, b"", b"compiler error", False), b"", b""
-            return ProcessCapture(0, b"", b"", False), hashlib.sha256(source.encode()).digest(), b""
-        data = json.loads(stdin)
-        assert set(data) == {"a", "b", "n"}
-        calls.append((path, operation, data))
-        values = [a + b for a, b in zip(data["a"], data["b"], strict=True)]
-        if "0.0f" in source and ("n == 257 ?" not in source or data["n"] != 257):
-            values = [0] * data["n"]
-        output = json.dumps({"dtype": "float32", "shape": [data["n"]], "values": values}).encode()
-        if operation == "memcheck" and "if (i < n)" not in source:
-            log = (
-                b"========= Invalid __global__ write of size 4 bytes\n"
-                b"=========     at vector_add(float const *, float const *, float *, unsigned long)"
-                b" in /input/kernel.cu:10\n========= ERROR SUMMARY: 1 error\n"
-            )
-            return ProcessCapture(86, output, b"", False), b"", log
-        clean = (
-            b"========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)\n"
-            if operation == "racecheck"
-            else b"========= ERROR SUMMARY: 0 errors\n"
-        )
-        return ProcessCapture(0, output, b"", False), b"", clean
-
-    monkeypatch.setattr(IsolatedGPUBackend, "_container", container)
-    monkeypatch.setattr(IsolatedGPUBackend, "_attest_runtime", attest)
-    return calls
+    return install_offline_container_boundary(monkeypatch)
 
 
 @pytest.mark.parametrize(
@@ -1201,7 +1173,12 @@ def test_original_provenance_from_isolated_backend_is_accepted(
     store, tmp_path, original, container_boundary
 ):
     from gpu_agent.execution.isolated import IsolatedGPUBackend
-    from gpu_agent.execution.models import BuildRequest, SanitizerRequest, WorkspaceRequest
+    from gpu_agent.execution.models import (
+        BuildRequest,
+        ExecutionRequest,
+        SanitizerRequest,
+        WorkspaceRequest,
+    )
 
     _, snapshot = original
     backend = IsolatedGPUBackend(store, snapshot.root, tmp_path / "baseline-tasks")
@@ -1216,6 +1193,8 @@ def test_original_provenance_from_isolated_backend_is_accepted(
             json.dumps({"n": 257, "a": [1] * 257, "b": [2] * 257}).encode(),
             "public",
         )
+        ordinary = backend.run(ExecutionRequest(workspace_id=handle.id, stdin_ref=stdin))
+        assert ordinary.runtime_status == "SUCCESS"
         result = backend.run_sanitizer(SanitizerRequest(workspace_id=handle.id, stdin_ref=stdin))
         assert result.completed and result.check_outcome == "FINDING"
     finally:
@@ -1224,3 +1203,71 @@ def test_original_provenance_from_isolated_backend_is_accepted(
     candidate_id, _ = register_variant(store, registered, "human")
     result = _engine(store, tmp_path).verify(run.id, candidate_id)
     assert result.verdict.value == "VERIFIED_FIXED"
+
+
+RACE_LOG = (
+    b"========= COMPUTE-SANITIZER\n"
+    b"========= Error: Race reported between Write access at vector_add(float const *, "
+    b"float const *, float *, float *, unsigned long)+0x180 in /input/kernel.cu:12\n"
+    b"=========     and Read access at vector_add(float const *, float const *, float *, "
+    b"float *, unsigned long)+0x220 in /input/kernel.cu:18 [1020 hazards]\n"
+    b"========= RACECHECK SUMMARY: 1 hazard displayed (1 error, 0 warnings)\n"
+)
+
+
+@pytest.mark.parametrize(
+    "fixed,verdict,reason",
+    [
+        (False, "NOT_FIXED", "ORIGINAL_FINDING_PRESENT"),
+        (True, "VERIFIED_FIXED", "ALL_REQUIRED_CHECKS_PASSED"),
+    ],
+)
+def test_target_tool_decides_a_race_case_not_the_numeric_oracle(
+    store, tmp_path, monkeypatch, container_boundary, fixed, verdict, reason
+):
+    """case_0002's race does not change output: only racecheck can tell fixed from not."""
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+    from gpu_agent.execution.process import ProcessCapture
+    from gpu_agent.patching import apply_candidate
+    from gpu_agent.verification.engine import register_candidate
+
+    native = IsolatedGPUBackend._container
+
+    def racy(self, path, operation, timeout, *, stdin=b"", cancel=None):
+        if operation == "racecheck":
+            clean = "__syncthreads();" in (path / "kernel.cu").read_text()
+            data = json.loads(stdin)
+            output = json.dumps(
+                {"dtype": "float32", "shape": [data["n"]], "values": [3.0] * data["n"]}
+            ).encode()
+            log = (
+                b"========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)\n"
+                if clean
+                else RACE_LOG
+            )
+            return ProcessCapture(0 if clean else 86, output, b"", False), b"", log
+        return native(self, path, operation, timeout, stdin=stdin, cancel=cancel)
+
+    monkeypatch.setattr(IsolatedGPUBackend, "_container", racy)
+    original = _original(store, tmp_path, case="case_0002", n=256)
+    run_id, snapshot = original
+    before = (snapshot.root / "kernel.cu").read_text()
+    after = (
+        before.replace(
+            "    if (threadIdx.x == 0) {", "    __syncthreads();\n    if (threadIdx.x == 0) {"
+        )
+        if fixed
+        else before + "// reviewed\n"
+    )
+    diff = "".join(
+        difflib.unified_diff(
+            before.splitlines(True), after.splitlines(True), "a/kernel.cu", "b/kernel.cu"
+        )
+    )
+    candidate_id = register_candidate(store, apply_candidate(snapshot, diff, ["kernel.cu"]))
+    result = _engine(store, tmp_path).verify(run_id, candidate_id)
+    assert result.verdict.value == verdict and result.reason_code == reason
+    assert result.public_oracle_passed is True
+    required = {item.tool.value for item in result.check_requirements if item.required}
+    assert required == {"memcheck", "racecheck"}
+    assert result.original_finding_present is (not fixed)

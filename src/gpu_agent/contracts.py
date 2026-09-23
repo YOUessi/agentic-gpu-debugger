@@ -77,6 +77,11 @@ class RunBinding(BaseModel):
     model_config_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     case_registry_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     corpus_ledger_namespace_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    # Hash of the gpu_agent source actually imported (provenance.runtime_code_fingerprint).
+    runtime_code_hash: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    # Legacy metadata only. New production bindings use record_only; neither
+    # value imposes spending limits in current execution or release validation.
+    cost_policy: Literal["capped", "record_only"] = "capped"
 
 
 class ExternalRunOrigin(BaseModel):

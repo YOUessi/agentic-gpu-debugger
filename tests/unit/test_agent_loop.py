@@ -71,13 +71,16 @@ def test_public_projection_deduplicates_repeated_identical_findings():
     assert _deduplicate_findings([repeated, repeated]) == [repeated]
 
 
-def test_plan_prompt_gives_an_unambiguous_mandatory_evidence_sequence():
+def test_plan_prompt_states_constraints_not_the_rule_router_procedure():
+    """E must differ from D only in acquisition policy, so the planner is not handed D's
+    fixed sequence; it gets the controller's hard constraints and a goal instead."""
     from gpu_agent.agent.prompts import PROMPTS
 
     prompt = PROMPTS["plan"]
-    assert "sanitizer_outcomes has no memcheck" in prompt
-    assert "retrieve official docs for that finding" in prompt
-    assert "racecheck, initcheck, or synccheck" in prompt
+    assert "requires memcheck before any other sanitizer" in prompt
+    assert "rejects actions that repeat evidence" in prompt
+    assert "sanitizer_outcomes has no memcheck" not in prompt
+    assert "retrieve official docs for that finding and then finish" not in prompt
 
 
 def test_diagnosis_prompt_names_the_exact_citation_and_location_constraints():
@@ -86,7 +89,10 @@ def test_diagnosis_prompt_names_the_exact_citation_and_location_constraints():
     prompt = PROMPTS["diagnose"]
     assert "tool_findings may cite only artifact_id" in prompt
     assert "documentation_evidence may cite only chunk_id" in prompt
-    assert "source_locations must copy a non-null tool finding location" in prompt
+    assert "copy one of those locations exactly" in prompt
+    # The gate is evidence-derived: runs without findings or docs can still be DIAGNOSED.
+    assert "if and only if the evidence contains tool_findings" in prompt
+    assert "if and only if the evidence contains documentation" in prompt
 
 
 def test_patch_prompt_forbids_observed_input_size_hardcoding():
@@ -94,19 +100,23 @@ def test_patch_prompt_forbids_observed_input_size_hardcoding():
 
     prompt = PROMPTS["patch"]
     assert "Inspect the entire public source" in prompt
-    assert "must not hard-code the observed input length" in prompt
-    assert "general valid positive lengths" in prompt
-    assert "n != integer" in prompt
+    assert "hard-code or narrow the accepted input sizes" in prompt
+    # Generic across cases: no case_0001-specific guard wording leaks into the prompt.
+    assert "257" not in prompt and "n != integer" not in prompt
 
 
 def test_repeated_no_benefit_action_stops_without_second_tool(oob_service):
     from gpu_agent.agent.models import MemcheckAction
 
     service, provider, source = oob_service
-    provider.actions = [MemcheckAction(), MemcheckAction()]
+    # The first denial earns one replan; repeating the denied action again is final.
+    provider.actions = [MemcheckAction(), MemcheckAction(), MemcheckAction()]
     run = service.diagnose(source)
     assert "DUPLICATE_NO_BENEFIT" in service.diagnosis(run.id).limitations
-    assert provider.kinds == ["plan", "plan"]
+    assert provider.kinds == ["plan", "plan", "plan"]
+    assert provider.inputs[2]["controller_feedback"] == {
+        "rejected_previous_action": ["DUPLICATE_NO_BENEFIT"]
+    }
     assert not service.candidates(run.id)
 
 
@@ -114,7 +124,7 @@ def test_finish_cannot_bypass_mandatory_evidence(oob_service):
     from gpu_agent.agent.models import FinishAction
 
     service, provider, source = oob_service
-    provider.actions = [FinishAction()]
+    provider.actions = [FinishAction(), FinishAction()]
     run = service.diagnose(source)
     assert service.diagnosis(run.id).diagnostic_outcome == "INCONCLUSIVE"
     assert "MANDATORY_EVIDENCE_MISSING" in service.diagnosis(run.id).limitations
@@ -125,7 +135,7 @@ def test_unsupported_action_is_typed_and_never_executes(oob_service):
     from gpu_agent.agent.models import RunProgramAction
 
     service, provider, source = oob_service
-    provider.actions = [RunProgramAction()]
+    provider.actions = [RunProgramAction(), RunProgramAction()]
     run = service.diagnose(source)
     assert "ACTION_UNSUPPORTED" in service.diagnosis(run.id).limitations
 

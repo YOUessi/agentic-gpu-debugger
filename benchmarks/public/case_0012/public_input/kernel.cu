@@ -3,12 +3,12 @@
 #include <cuda_runtime.h>
 
 namespace {
-__global__ void initialize_even(float* scratch, std::size_t n) {
+__global__ void fill_scratch(float* scratch, std::size_t n) {
     const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n && i % 2 == 0) scratch[i] = static_cast<float>(i);
 }
 
-__global__ void consume_all(const float* scratch, float* marker, std::size_t n) {
+__global__ void copy_scratch(const float* scratch, float* marker, std::size_t n) {
     const std::size_t i = static_cast<std::size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
     if (i < n) marker[i] = scratch[i];
 }
@@ -43,8 +43,8 @@ int run_vector_add(const float* a, const float* b, float* out, std::size_t n) {
         if (!check(cudaGetLastError())) break;
         if (!check(cudaDeviceSynchronize())) break;
         if (!check(cudaMemcpy(out, device_out, bytes, cudaMemcpyDeviceToHost))) break;
-        initialize_even<<<grid_size, block_size>>>(scratch, n);
-        consume_all<<<grid_size, block_size>>>(scratch, device_out, n);
+        fill_scratch<<<grid_size, block_size>>>(scratch, n);
+        copy_scratch<<<grid_size, block_size>>>(scratch, device_out, n);
         if (check(cudaGetLastError())) (void)cudaDeviceSynchronize();
     } while (false);
     for (float* pointer : {scratch, device_out, device_b, device_a}) {

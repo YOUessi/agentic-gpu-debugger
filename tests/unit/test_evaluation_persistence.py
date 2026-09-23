@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from threading import Event, Lock
 
 import pytest
+from responses_support import provider_artifacts as _provider_artifacts
 from schedule_authority_support import reserve_schedule_for_test, schedule_client_for_test
 
 from gpu_agent.benchmark.evaluation import (
@@ -28,8 +29,8 @@ def _runner(executor, execute_owner=None, **overrides) -> EvaluationRunner:
         "toolchain_hash": binding.toolchain_lock_hash,
         "model_config_hash": binding.model_config_hash,
         "binding": binding,
-        "max_cost_usd": 0.0,
-        "max_unit_cost_usd": 0.0,
+        "max_cost_usd": 1000.0,
+        "max_unit_cost_usd": 1.0,
         "random_seed": 7,
         "holdout_controller": executor.holdout_controller,
         "holdout_batch": executor.holdout_batch,
@@ -73,14 +74,14 @@ def test_resume_persists_completed_evaluator_projection_without_reexecution(
         _runner(executor).run("D", "holdout", 3)
     run_id = executor.service.store.recoverable_runs()[0].id
     before = calls.copy()
-    provider_before = list(executor.holdout_service._provider.kinds)
+    provider_before = _provider_artifacts(executor.holdout_service.store)
     assert before == {"diagnose": 3, "backend": 9}
     monkeypatch.setattr(EvaluationRunner, "_put", native_put)
     recovered = _runner(executor).resume(run_id, "D", "holdout", 3)
     assert recovered.executed_units == 3
     assert recovered.stopped_reason is None
     assert calls == before
-    assert executor.holdout_service._provider.kinds == provider_before == []
+    assert _provider_artifacts(executor.holdout_service.store) == provider_before
 
 
 def test_resume_persists_completed_development_projection_without_reexecution(
@@ -122,7 +123,7 @@ def test_resume_persists_completed_development_projection_without_reexecution(
     recovered = _runner(executor).resume(run_id, "D", "development", 3)
     assert recovered.executed_units == 3
     assert recovered.stopped_reason is None
-    assert calls == {"diagnose": 4, "backend": 9}
+    assert calls == {"diagnose": 3, "backend": 9}
 
 
 @pytest.mark.parametrize("native_evaluation_executor", ["private_split"], indirect=True)
@@ -243,7 +244,7 @@ def test_record_is_durable_before_next_unit(native_evaluation_executor, monkeypa
     assert run.status == RunStatus.COMPLETED
 
 
-def test_unit_reservation_stops_before_cost_cap_can_be_exceeded(native_evaluation_executor):
+def test_legacy_dollar_reservations_never_stop_execution(native_evaluation_executor):
     proxy = _Proxy(native_evaluation_executor)
     result = _runner(
         native_evaluation_executor,
@@ -251,8 +252,8 @@ def test_unit_reservation_stops_before_cost_cap_can_be_exceeded(native_evaluatio
         max_cost_usd=0.5,
         max_unit_cost_usd=0.6,
     ).run("D", "development", 3)
-    assert result.stopped_reason == "COST_CAP_RESERVATION_REQUIRED"
-    assert result.executed_units == 0 and proxy.calls == []
+    assert result.stopped_reason is None
+    assert result.executed_units == 3
 
 
 def test_unexpected_executor_failure_preserves_completed_records(
@@ -416,7 +417,7 @@ def test_resume_recomputes_exact_attempt_set(native_evaluation_executor, fault):
     activate_schedule(store, executor._schedule_verifier, run.id)
     attempt = runner._attempt(run.id, schedule, schedule.items[0])
     if fault == "reservation":
-        attempt = attempt.model_copy(update={"reserved_cost_usd": 1})
+        attempt = attempt.model_copy(update={"reserved_cost_usd": 2})
         runner._put(run.id, "evaluation/attempts/0.json", attempt.model_dump_json().encode())
     elif fault == "extra_attempt":
         extra = attempt.model_copy(update={"ordinal": len(schedule.items)})
@@ -470,8 +471,8 @@ def test_runner_rejects_non_public_store(tmp_path, native_evaluation_executor):
             toolchain_hash=binding.toolchain_lock_hash or "",
             model_config_hash=binding.model_config_hash or "",
             binding=binding,
-            max_cost_usd=0,
-            max_unit_cost_usd=0,
+            max_cost_usd=1000,
+            max_unit_cost_usd=1,
         )
 
 
@@ -493,8 +494,8 @@ def test_runner_rejects_duck_typed_executor(native_evaluation_executor):
             toolchain_hash=binding.toolchain_lock_hash or "",
             model_config_hash=binding.model_config_hash or "",
             binding=binding,
-            max_cost_usd=0,
-            max_unit_cost_usd=0,
+            max_cost_usd=1000,
+            max_unit_cost_usd=1,
         )
 
 

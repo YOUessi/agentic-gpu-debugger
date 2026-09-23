@@ -11,7 +11,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
-from gpu_agent._resources import runtime_resource
 from gpu_agent.agent.models import (
     ACTION_ADAPTER,
     AcquisitionUsage,
@@ -20,7 +19,7 @@ from gpu_agent.agent.models import (
     PolicyDecision,
     PublicEvidence,
 )
-from gpu_agent.agent.orchestrator import public_evidence_from_bundle
+from gpu_agent.agent.orchestrator import derive_final_diagnosis, public_evidence_from_bundle
 from gpu_agent.agent.policy import decide_action
 from gpu_agent.agent.provider import Invocation
 from gpu_agent.agent.rule_router import RuleRouter
@@ -35,6 +34,7 @@ from gpu_agent.benchmark.evaluation import (
     NativeEvaluationLineage,
     PricingAttestation,
     PublicEvaluationRecord,
+    evaluation_record_status,
 )
 from gpu_agent.benchmark.models import CaseManifest
 from gpu_agent.contracts import (
@@ -46,9 +46,12 @@ from gpu_agent.contracts import (
 )
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import EvidenceRepository
+from gpu_agent.evidence.sanitizer import parse_sanitizer
 from gpu_agent.execution.models import (
+    SanitizerResult,
     SanitizerTool,
 )
+from gpu_agent.execution.process import ProcessCapture
 from gpu_agent.patching import PatchCandidate, SourceSnapshot, materialize_candidate
 from gpu_agent.service import ApplicationService
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
@@ -63,9 +66,6 @@ if TYPE_CHECKING:
     from gpu_agent.benchmark.holdout import HoldoutBatch, HoldoutController
     from gpu_agent.benchmark.ledger import CorpusFamily
     from gpu_agent.benchmark.schedule_authority import EvaluationScheduleVerifier
-
-
-_TRUTH_CASE = runtime_resource("benchmarks/development_truth/case_0001/case.json")
 
 
 class CostBoundUnavailable(ValueError):
@@ -87,6 +87,34 @@ def _validate_verification_audit(
     binding: RunBinding,
 ) -> VerificationAuditResult:
     """Resolve the public projection from fresh evaluator-owned native output."""
+    if result.reason_code == "ORACLE_OR_BASELINE_UNAVAILABLE":
+        # No suite ran: the case has no verification truth yet. This is an honest
+        # INCONCLUSIVE verdict, replayed exactly by the engine rather than a batch error.
+        from gpu_agent.verification.engine import (
+            VerificationEngine,
+            candidate_run_id,
+            verification_audit_run_id,
+        )
+
+        if evaluator is None:
+            raise ValueError("evaluation verification has no evaluator audit lineage")
+        audit_modes: tuple[Literal["standard", "full"], ...] = ("standard", "full")
+        modes = [
+            value
+            for value in audit_modes
+            if verification_audit_run_id(diagnosis_run_id, result.candidate_hash, value)
+            == result.evaluator_audit_run_id
+        ]
+        if len(modes) != 1:
+            raise ValueError("evaluation verification audit mode is unresolvable")
+        mode = modes[0]
+        engine = VerificationEngine(public, evaluator)
+        candidate = PatchCandidate.model_validate_json(
+            public.read(_one_ref(public.load(candidate_run_id(diagnosis_run_id)), "candidate.json"))
+        )
+        if engine._load_exact_replay(public.load(diagnosis_run_id), candidate, mode) != result:
+            raise ValueError("evaluation verification precondition replay differs")
+        return engine._precondition_audit(mode)
     return validate_persisted_derivation(public, evaluator, diagnosis_run_id, result, binding)
 
 
@@ -125,6 +153,153 @@ def validate_evaluation_record(
         diagnosis_parent_run_id=diagnosis_parent_run_id,
         expected_visibility=expected_visibility,
     )
+
+
+def _diagnosis_audit(reservation_id: int, remaining: list[object]) -> list[dict[str, object]]:
+    """Expected ledger triple for the single final diagnosis reservation."""
+    prefix: list[dict[str, object]] = [
+        {"id": reservation_id, "action": "diagnosis_llm", "state": "ATTEMPTED"},
+        {"id": reservation_id, "action": "diagnosis_llm", "state": "STARTED"},
+    ]
+    terminal = remaining[2] if len(remaining) >= 3 else None
+    if remaining[:2] != prefix or terminal not in (
+        {"id": reservation_id, "action": "diagnosis_llm", "state": "COMPLETED"},
+        {"id": reservation_id, "action": "diagnosis_llm", "state": "FAILED"},
+    ):
+        raise ValueError("diagnosis reservation audit is invalid")
+    assert isinstance(terminal, dict)
+    return [*prefix, terminal]
+
+
+# Provider/pricing configuration faults are controller-state errors, not unit outcomes.
+CONTROLLER_CONFIGURATION_FAILURES = frozenset(
+    {
+        "PRICING_ATTESTATION_REQUIRED",
+        "MODEL_CONFIG_MISMATCH",
+        "PAID_CALLS_NOT_ALLOWED",
+        "LLM_UNAVAILABLE",
+        "LLM_CAPABILITY_UNAVAILABLE",
+    }
+)
+
+
+def _validated_preparation_failure(
+    store: RunStore,
+    run: RunManifest,
+    public: PublicEvaluationRecord,
+    lineage: NativeEvaluationLineage,
+    item: EvaluationScheduleItem,
+    attempt: EvaluationAttempt,
+    diagnosis: DiagnosisResult,
+    diagnosis_ref: ArtifactRef,
+    evidence_refs: list[ArtifactRef],
+    bundle: EvidenceBundle,
+    source_refs: list[ArtifactRef],
+    budget: AgentBudget,
+    acquisition: AcquisitionUsage,
+) -> PublicEvaluationRecord:
+    from gpu_agent.verification.engine import candidate_run_id
+
+    status, reason = evaluation_record_status(diagnosis)
+    if reason in CONTROLLER_CONFIGURATION_FAILURES:
+        # Misconfiguration affects every unit alike: stop the batch, never emit records.
+        raise ValueError("evaluation provider configuration is invalid")
+    if (
+        any(
+            ref.name.startswith(("provider/", "actions/"))
+            or ref.name in {"agent/model-diagnosis.json", "agent/budget-audit.json"}
+            for ref in run.artifact_refs
+        )
+        or diagnosis.diagnostic_outcome != "INCONCLUSIVE"
+        or len(diagnosis.limitations) != 1
+        or status == "INCONCLUSIVE"
+        or budget.llm_calls != 0
+        or acquisition.sanitizer_calls
+        or acquisition.retrieval_calls
+        or bundle.sanitizer_results
+        or bundle.retrieved_chunks
+        or (store.root / candidate_run_id(run.id)).exists()
+    ):
+        raise ValueError("evaluation preparation failure has invalid lineage")
+    usage: dict[str, int | None] = {
+        "physical_calls": 0,
+        "sanitizer_calls": 0,
+        "retrieval_calls": 0,
+        "sanitizer_attempts": budget.sanitizer_calls,
+        "retrieval_attempts": budget.rag_calls,
+        "build_calls": int(bundle.build_result is not None),
+        "runtime_calls": int(bundle.execution_result is not None),
+    }
+    usage["diagnostic_tool_calls"] = usage["build_calls"] + usage["runtime_calls"]  # type: ignore[operator]
+    usage["tool_calls"] = usage["diagnostic_tool_calls"]
+    usage["total_sanitizer_calls"] = 0
+    for field in ("input_tokens", "output_tokens", "total_tokens"):
+        usage[field] = None
+    validated = PublicEvaluationRecord(
+        record_id=run.id,
+        corpus_cutoff=attempt.corpus_cutoff,
+        lineage=NativeEvaluationLineage(
+            corpus_cutoff=attempt.corpus_cutoff,
+            diagnosis_run_id=run.id,
+            diagnosis_hash=diagnosis_ref.sha256,
+            evidence_hash=evidence_refs[-1].sha256,
+            provider_invocation_hashes=[],
+        ),
+        case_id=item.case_id,
+        template_id=item.template_id,
+        mode=item.mode,
+        repeat=item.repeat,
+        input_hash=source_refs[0].sha256,
+        evidence_hash=evidence_refs[-1].sha256,
+        executed_checks={},
+        status=status,
+        diagnosis=diagnosis.model_dump(mode="json"),
+        usage=usage,
+        latency_ms=(run.events[-1].at - run.events[0].at).total_seconds() * 1000,
+        cost_usd=0.0,
+        failure_reason=reason,
+    )
+    if public != validated or lineage != validated.lineage:
+        raise ValueError("evaluation record summary differs from native artifacts")
+    return validated
+
+
+def _sanitizer_reproduces(store: RunStore, result: SanitizerResult) -> bool:
+    tool = result.tool_result
+    assert tool is not None
+    capture = ProcessCapture(
+        exit_code=tool.exit_code,
+        stdout=store.read(tool.stdout_artifact),
+        stderr=store.read(tool.stderr_artifact),
+        timed_out=tool.timed_out,
+        elapsed_ms=tool.elapsed_ms,
+        started_at=tool.started_at,
+        finished_at=tool.finished_at,
+        truncated=tool.truncated,
+        cancelled=tool.cancelled,
+        tool_error=tool.tool_error,
+    )
+    reparsed = parse_sanitizer(SanitizerTool(tool.typed_payload.tool), capture)
+    findings = [
+        item.model_copy(update={"raw_ref": tool.stderr_artifact}) for item in reparsed.findings
+    ]
+    payload = tool.typed_payload
+    return (
+        reparsed.status == payload.status
+        and reparsed.completed == payload.completed == result.completed
+        and reparsed.check_outcome == payload.check_outcome == result.check_outcome
+        and findings == payload.findings == result.findings
+    )
+
+
+def _record_cost(pricing: PricingAttestation | None, usage: dict[str, int | None]) -> float | None:
+    """Every mode calls the same provider: zero calls cost 0, unknown usage or price is null."""
+    if usage.get("physical_calls") == 0:
+        return 0.0
+    input_tokens, output_tokens = usage.get("input_tokens"), usage.get("output_tokens")
+    if pricing is None or not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+        return None
+    return pricing.cost(input_tokens, output_tokens)
 
 
 def _validate_evaluation_record_against_case(
@@ -181,6 +356,14 @@ def _validate_evaluation_record_against_case(
     if unit != expected_unit:
         raise ValueError("evaluation unit differs from its frozen schedule")
 
+    code_refs = [ref for ref in run.artifact_refs if ref.name == "agent/runtime-code.json"]
+    if binding.runtime_code_hash is None:
+        if code_refs:
+            raise ValueError("evaluation runtime code attestation is unbound")
+    elif len(code_refs) != 1 or json.loads(store.read(code_refs[0])) != {
+        "runtime_code_hash": binding.runtime_code_hash
+    }:
+        raise ValueError("evaluation unit ran code other than the bound runtime")
     diagnosis_ref = _one_ref(run, "diagnosis.json")
     diagnosis = DiagnosisResult.model_validate_json(store.read(diagnosis_ref))
     if (
@@ -244,6 +427,12 @@ def _validate_evaluation_record_against_case(
     source_refs = [ref for ref in bundle.source_snapshot if ref.name.endswith("/kernel.cu")]
     if len(source_refs) != 1 or source_refs[0].sha256 != public.input_hash:
         raise ValueError("evaluation input lineage is invalid")
+    for sanitizer_result in bundle.sanitizer_results:
+        # executed_checks and the agent's evidence must be reproducible from native logs.
+        if sanitizer_result.tool_result is not None and not _sanitizer_reproduces(
+            store, sanitizer_result
+        ):
+            raise ValueError("evaluation sanitizer evidence is not reproducible")
     budget = AgentBudget.model_validate_json(store.read(_one_ref(run, "agent/final-budget.json")))
     acquisition = AcquisitionUsage.model_validate_json(
         store.read(_one_ref(run, "agent/acquisition-usage.json"))
@@ -252,6 +441,24 @@ def _validate_evaluation_record_against_case(
     if summary.get("physical_calls") != budget.llm_calls:
         raise ValueError("native evaluation usage artifacts disagree")
 
+    if not any(ref.name == "agent/controller-lineage.json" for ref in run.artifact_refs):
+        # The unit failed while preparing (build, run, container runtime) before the
+        # controller started. It is a bounded FAILED record, not a batch error.
+        return _validated_preparation_failure(
+            store,
+            run,
+            public,
+            lineage,
+            item,
+            attempt,
+            diagnosis,
+            diagnosis_ref,
+            evidence_refs,
+            bundle,
+            source_refs,
+            budget,
+            acquisition,
+        )
     trace = json.loads(store.read(_one_ref(run, "agent/controller-lineage.json")))
     expected_controller = "fixed" if item.mode in {"A", "B", "C"} else "rule_router"
     policy_ref = _one_ref(run, "agent/acquisition-policy.json")
@@ -267,19 +474,27 @@ def _validate_evaluation_record_against_case(
     rejected_decisions = [
         (index, decision) for index, decision in enumerate(decisions) if not decision.allowed
     ]
+    # E may replan once: the first denied proposal is followed by another plan; a second
+    # denial is terminal. D (rule router) and fixed modes never have denied decisions.
     rejected_decision: PolicyDecision | None = None
+    replan_index: int | None = None
     if rejected_decisions:
-        rejected_index, rejected = rejected_decisions[0]
         if (
             item.mode != "E"
-            or len(rejected_decisions) != 1
-            or rejected_index != len(decisions) - 1
-            or diagnosis.diagnostic_outcome != "INCONCLUSIVE"
-            or len(rejected.reason_codes) != 1
-            or diagnosis.limitations != rejected.reason_codes
+            or len(rejected_decisions) > 2
+            or any(len(value.reason_codes) != 1 for _, value in rejected_decisions)
         ):
             raise ValueError("controller route contains an invalid rejected decision")
-        rejected_decision = rejected
+        replan_index = rejected_decisions[0][0]
+        if len(rejected_decisions) == 2:
+            terminal_index, rejected = rejected_decisions[1]
+            if (
+                terminal_index != len(decisions) - 1
+                or diagnosis.diagnostic_outcome != "INCONCLUSIVE"
+                or diagnosis.limitations != rejected.reason_codes
+            ):
+                raise ValueError("controller route contains an invalid rejected decision")
+            rejected_decision = rejected
     acquisition_policy = json.loads(store.read(policy_ref))
     if (
         set(acquisition_policy) != {"mode", "required_tools"}
@@ -295,7 +510,7 @@ def _validate_evaluation_record_against_case(
         "schema_version": 1,
         "mode": item.mode,
         "controller": expected_controller if item.mode != "E" else "planner",
-        "provider_calls_allowed": item.mode == "E",
+        "provider_calls_allowed": True,
         "acquisition_policy_ref": {"id": policy_ref.id, "sha256": policy_ref.sha256},
         "evidence_ref": {
             "id": evidence_refs[-1].id,
@@ -354,6 +569,10 @@ def _validate_evaluation_record_against_case(
         raise ValueError("scheduled case is absent from the trusted corpus")
     if acquisition_policy["required_tools"] != [trusted_case.target_tool]:
         raise ValueError("acquisition policy differs from the trusted case manifest")
+    # The unit must have executed exactly the input the corpus validated for this case.
+    input_refs = [ref for ref in run.artifact_refs if ref.name == "public-input.json"]
+    if len(input_refs) > 1 or (input_refs and input_refs[0].sha256 != trusted_case.input_set_hash):
+        raise ValueError("evaluation unit ran an input other than the registered one")
     required_tools = [SanitizerTool.MEMCHECK.value, trusted_case.target_tool]
     expected_c_tools = list(dict.fromkeys(required_tools))
     observed_tools = [
@@ -543,9 +762,17 @@ def _validate_evaluation_record_against_case(
                 ):
                     raise ValueError("failed acquisition did not terminate inconclusively")
             expected_budget = expected_step_budget.model_copy(update=updates)
+            if action.action_type == "finish_diagnosis":
+                reservation_id = len(expected_audit) // 3 + 1
+                expected_audit.extend(
+                    _diagnosis_audit(reservation_id, budget_audit[len(expected_audit) :])
+                )
         final_budget = budget
         expected_final = expected_budget.model_copy(
-            update={"remaining_seconds": final_budget.remaining_seconds}
+            update={
+                "remaining_seconds": final_budget.remaining_seconds,
+                "llm_calls": len(invocations),
+            }
         )
         if (
             final_budget != expected_final
@@ -557,181 +784,184 @@ def _validate_evaluation_record_against_case(
             or acquisition.retrieval_calls != expected_retrieval_physical
         ):
             raise ValueError("rule controller final budget or audit is invalid")
-    if item.mode in {"A", "B", "C", "D"}:
-        if (
-            trace != expected_trace
-            or (item.mode in {"A", "B", "C"} and decision_refs)
-            or (item.mode == "D" and not decision_refs)
-            or provider_refs
-            or lineage.provider_invocation_hashes
-            or public.usage.get("physical_calls") != 0
-            or lineage.candidate_run_id is not None
-            or lineage.verification_run_id is not None
-            or lineage.public_verification_hash is not None
-        ):
-            raise ValueError("deterministic evaluation mode has invalid lineage")
-    else:
-        policy_ref = _one_ref(run, "agent/provider-policy.json")
-        policy = EvaluationProviderPolicy.model_validate_json(store.read(policy_ref))
-        pricing = PricingAttestation.model_validate_json(
-            store.read(_one_ref(run, "agent/pricing-attestation.json"))
+    if (
+        trace != expected_trace
+        or (item.mode in {"A", "B", "C"} and decision_refs)
+        or (item.mode == "D" and not decision_refs)
+    ):
+        raise ValueError("evaluation controller lineage differs from scheduled mode")
+    # Every mode uses the same provider, so every mode is bound to the same policy.
+    policy_ref = _one_ref(run, "agent/provider-policy.json")
+    policy = EvaluationProviderPolicy.model_validate_json(store.read(policy_ref))
+    pricing = PricingAttestation.model_validate_json(
+        store.read(_one_ref(run, "agent/pricing-attestation.json"))
+    )
+    if (
+        policy_ref.sha256 != binding.model_config_hash
+        or policy.sha256 != binding.model_config_hash
+        or policy.prompt_version != binding.prompt_version
+        or policy.allowed_response_models != [policy.configured_model]
+        or policy.pricing_hash != pricing.rate_card_hash
+        or pricing.provider != policy.provider
+        or pricing.model != policy.configured_model
+        or pricing.repository_commit != binding.repository.commit
+        or pricing.model_config_hash != binding.model_config_hash
+    ):
+        raise ValueError("provider policy differs from immutable evaluation binding")
+    if item.mode == "E" and not invocations:
+        raise ValueError("agent evaluation mode has no provider lineage")
+    if terminal_hashes != lineage.provider_invocation_hashes:
+        raise ValueError("provider invocation hashes differ from native artifacts")
+    terminal_by_id: dict[str, Invocation] = {}
+    for history in invocations.values():
+        started = [value for value in history if value.state == "STARTED"]
+        terminal = [value for value in history if value.state != "STARTED"]
+        if len(started) != 1 or len(terminal) != 1:
+            raise ValueError("provider invocation is not terminal and unique")
+        final = terminal[0]
+        terminal_by_id[started[0].invocation_id] = final
+        uncertain_shape = (
+            final.error_code in {"LLM_TIMEOUT", "LLM_CONNECTION_ERROR", "LLM_WORKER_ERROR"}
+            and final.response_model is None
+            and final.usage is None
+            and final.output_hash is None
+            and final.http_status is None
         )
         if (
-            policy_ref.sha256 != binding.model_config_hash
-            or policy.sha256 != binding.model_config_hash
-            or policy.prompt_version != binding.prompt_version
-            or policy.allowed_response_models != [policy.configured_model]
-            or policy.pricing_hash != pricing.rate_card_hash
-            or pricing.provider != policy.provider
-            or pricing.model != policy.configured_model
-            or pricing.repository_commit != binding.repository.commit
-            or pricing.model_config_hash != binding.model_config_hash
-        ):
-            raise ValueError("provider policy differs from immutable evaluation binding")
-        if trace != expected_trace or not invocations:
-            raise ValueError("agent evaluation mode has no provider lineage")
-        if terminal_hashes != lineage.provider_invocation_hashes:
-            raise ValueError("provider invocation hashes differ from native artifacts")
-        terminal_by_id: dict[str, Invocation] = {}
-        for history in invocations.values():
-            started = [value for value in history if value.state == "STARTED"]
-            terminal = [value for value in history if value.state != "STARTED"]
-            if len(started) != 1 or len(terminal) != 1:
-                raise ValueError("provider invocation is not terminal and unique")
-            final = terminal[0]
-            terminal_by_id[started[0].invocation_id] = final
-            uncertain_shape = (
-                final.state == "UNCERTAIN"
-                and final.error_code
-                in {"LLM_TIMEOUT", "LLM_CONNECTION_ERROR", "LLM_WORKER_ERROR"}
-                and final.response_model is None
-                and final.usage is None
-                and final.output_hash is None
-                and final.http_status is None
+            final.kind != started[0].kind
+            or final.attempt != started[0].attempt
+            or final.client_request_id != started[0].client_request_id
+            or final.endpoint_host != started[0].endpoint_host
+            or final.endpoint_host != policy.endpoint_host
+            or final.configured_model != started[0].configured_model
+            or final.started_at != started[0].started_at
+            or final.finished_at is None
+            or final.finished_at < final.started_at
+            or final.elapsed_ms is None
+            or final.elapsed_ms < 0
+            or final.format_retry_of != started[0].format_retry_of
+            or final.prompt_version != binding.prompt_version
+            or final.configured_model != policy.configured_model
+            or not final.store_false_sent
+            or (final.state == "UNCERTAIN" and not uncertain_shape)
+            or (
+                final.response_model is not None
+                and final.response_model not in policy.allowed_response_models
             )
-            if (
-                final.kind != started[0].kind
-                or final.attempt != started[0].attempt
-                or final.client_request_id != started[0].client_request_id
-                or final.endpoint_host != started[0].endpoint_host
-                or final.endpoint_host != policy.endpoint_host
-                or final.configured_model != started[0].configured_model
-                or final.started_at != started[0].started_at
-                or final.finished_at is None
-                or final.finished_at < final.started_at
-                or final.elapsed_ms is None
-                or final.elapsed_ms < 0
-                or final.format_retry_of != started[0].format_retry_of
-                or final.prompt_version != binding.prompt_version
-                or final.configured_model != policy.configured_model
-                or not final.store_false_sent
-                or (
-                    not uncertain_shape
-                    and (
-                        final.response_model not in policy.allowed_response_models
-                        or final.usage is None
-                        or (final.state == "COMPLETED") != (final.output_hash is not None)
-                    )
-                )
-            ):
-                raise ValueError("provider invocation policy is invalid")
-        sequence = 0
-        index = 0
-        logical_kinds: list[str] = []
-        logical_physical_before: list[int] = []
-        terminal_provider_failure: Invocation | None = None
-        while index < len(ordered_started):
-            physical_before = index
-            first = ordered_started[index]
-            first_final = terminal_by_id[first.invocation_id]
-            expected_request_id = hashlib.sha256(
-                f"{attempt.idempotency_key}:{sequence}:{first.kind}:0".encode()
+            or (final.state == "COMPLETED")
+            != (final.output_hash is not None and final.response_model is not None)
+            or (final.state == "COMPLETED" and final.usage is None)
+        ):
+            raise ValueError("provider invocation policy is invalid")
+
+    def terminal_failure_matches(kind: str, code: str | None) -> bool:
+        """A provider failure ends the unit; it must be the unit's recorded outcome."""
+        if code is None:
+            return False
+        if kind in {"plan", "diagnose"}:
+            return diagnosis.diagnostic_outcome == "INCONCLUSIVE" and diagnosis.limitations == [
+                code
+            ]
+        return (
+            kind == "patch"
+            and diagnosis.diagnostic_outcome == "DIAGNOSED"
+            and bool(diagnosis.limitations)
+            and diagnosis.limitations[-1] == code
+        )
+
+    sequence = 0
+    index = 0
+    logical_kinds: list[str] = []
+    logical_physical_before: list[int] = []
+    terminal_provider_failure: Invocation | None = None
+    while index < len(ordered_started):
+        physical_before = index
+        first = ordered_started[index]
+        first_final = terminal_by_id[first.invocation_id]
+        last = index + 1 == len(ordered_started)
+        expected_request_id = hashlib.sha256(
+            f"{attempt.idempotency_key}:{sequence}:{first.kind}:0".encode()
+        ).hexdigest()[:32]
+        if (
+            first.attempt != 0
+            or first.format_retry_of is not None
+            or first.client_request_id != expected_request_id
+        ):
+            raise ValueError("provider invocation sequence is invalid")
+        format_failure = (
+            first_final.state == "FAILED"
+            and first_final.error_code == "LLM_INVALID_OUTPUT"
+            and not first_final.retryable
+        )
+        if first_final.state == "COMPLETED":
+            completed = first_final
+            index += 1
+        elif format_failure and not last and ordered_started[index + 1].attempt == 1:
+            retry = ordered_started[index + 1]
+            retry_final = terminal_by_id[retry.invocation_id]
+            expected_retry_id = hashlib.sha256(
+                f"{attempt.idempotency_key}:{sequence}:{first.kind}:1".encode()
             ).hexdigest()[:32]
             if (
-                first.attempt != 0
-                or first.format_retry_of is not None
-                or first.client_request_id != expected_request_id
+                retry.kind != first.kind
+                or retry.format_retry_of != first.invocation_id
+                or retry.client_request_id != expected_retry_id
             ):
-                raise ValueError("provider invocation sequence is invalid")
-            if first_final.state == "COMPLETED":
-                completed = first_final
-                index += 1
-            elif (
-                first_final.state == "FAILED"
-                and first_final.error_code == "LLM_INVALID_OUTPUT"
-                and not first_final.retryable
+                raise ValueError("provider retry lineage is invalid")
+            if retry_final.state == "COMPLETED":
+                completed = retry_final
+                index += 2
+            elif index + 2 == len(ordered_started) and terminal_failure_matches(
+                first.kind, retry_final.error_code
             ):
-                if index + 1 < len(ordered_started):
-                    retry = ordered_started[index + 1]
-                    retry_final = terminal_by_id[retry.invocation_id]
-                    expected_retry_id = hashlib.sha256(
-                        f"{attempt.idempotency_key}:{sequence}:{first.kind}:1".encode()
-                    ).hexdigest()[:32]
-                    if (
-                        retry.kind != first.kind
-                        or retry.attempt != 1
-                        or retry.format_retry_of != first.invocation_id
-                        or retry.client_request_id != expected_retry_id
-                    ):
-                        raise ValueError("provider retry lineage is invalid")
-                    if retry_final.state == "COMPLETED":
-                        completed = retry_final
-                        index += 2
-                    elif (
-                        retry_final.state == "FAILED"
-                        and retry_final.error_code == "LLM_INVALID_OUTPUT"
-                        and not retry_final.retryable
-                        and first.kind == "plan"
-                        and index + 2 == len(ordered_started)
-                        and diagnosis.diagnostic_outcome == "INCONCLUSIVE"
-                        and diagnosis.limitations == ["LLM_INVALID_OUTPUT"]
-                    ):
-                        terminal_provider_failure = retry_final
-                        index += 2
-                        sequence += 1
-                        break
-                    else:
-                        raise ValueError("provider retry lineage is invalid")
-                elif (
-                    first.kind == "plan"
-                    and index + 1 == len(ordered_started)
-                    and any(value.attempt == 1 for value in ordered_started[:index])
-                    and diagnosis.diagnostic_outcome == "INCONCLUSIVE"
-                    and diagnosis.limitations == ["LLM_INVALID_OUTPUT"]
-                ):
-                    terminal_provider_failure = first_final
-                    index += 1
-                    sequence += 1
-                    break
-                else:
-                    raise ValueError("provider retry lineage is invalid")
-            elif (
-                first_final.state == "UNCERTAIN"
-                and first_final.error_code
-                in {"LLM_TIMEOUT", "LLM_CONNECTION_ERROR", "LLM_WORKER_ERROR"}
-                and first.kind == "plan"
-                and index + 1 == len(ordered_started)
-                and diagnosis.diagnostic_outcome == "INCONCLUSIVE"
-                and diagnosis.limitations == [first_final.error_code]
-            ):
-                terminal_provider_failure = first_final
-                index += 1
-                sequence += 1
+                terminal_provider_failure = retry_final
+                index += 2
                 break
             else:
-                raise ValueError("provider invocation did not complete")
-            logical_kinds.append(first.kind)
-            logical_terminals.append(completed)
-            logical_physical_before.append(physical_before)
-            sequence += 1
-        terminals = list(terminal_by_id.values())
-        if logical_kinds.count("plan") != len(decision_refs) or len(
-            {value.client_request_id for value in terminals}
-        ) != len(terminals):
-            raise ValueError("provider invocation sequence differs from controller route")
-        plan_hashes = [value.output_hash for value in logical_terminals if value.kind == "plan"]
-        if plan_hashes != [decision.action_hash for decision in decisions]:
-            raise ValueError("provider plan outputs differ from controller decisions")
+                raise ValueError("provider retry lineage is invalid")
+        elif last and format_failure:
+            # No retry was sent: the run's single format retry was already spent, or the
+            # retry reservation itself exhausted the budget.
+            retried = any(value.attempt == 1 for value in ordered_started[:index])
+            if not (
+                (retried and terminal_failure_matches(first.kind, "LLM_INVALID_OUTPUT"))
+                or terminal_failure_matches(first.kind, "AGENT_BUDGET_EXHAUSTED")
+            ):
+                raise ValueError("provider retry lineage is invalid")
+            terminal_provider_failure = first_final
+            index += 1
+            break
+        elif last and terminal_failure_matches(first.kind, first_final.error_code):
+            terminal_provider_failure = first_final
+            index += 1
+            break
+        else:
+            raise ValueError("provider invocation did not complete")
+        logical_kinds.append(first.kind)
+        logical_terminals.append(completed)
+        logical_physical_before.append(physical_before)
+        sequence += 1
+    terminals = list(terminal_by_id.values())
+    expected_plans = len(decision_refs) if item.mode == "E" else 0
+    if logical_kinds.count("plan") != expected_plans or len(
+        {value.client_request_id for value in terminals}
+    ) != len(terminals):
+        raise ValueError("provider invocation sequence differs from controller route")
+    plan_hashes = [value.output_hash for value in logical_terminals if value.kind == "plan"]
+    if item.mode == "E" and plan_hashes != [decision.action_hash for decision in decisions]:
+        raise ValueError("provider plan outputs differ from controller decisions")
+    terminal_kind = terminal_provider_failure.kind if terminal_provider_failure else None
+    if (
+        replan_index is not None
+        and rejected_decision is None
+        and replan_index == len(decisions) - 1
+        and not (
+            diagnosis.diagnostic_outcome == "INCONCLUSIVE"
+            and (terminal_kind == "plan" or diagnosis.limitations == ["AGENT_BUDGET_EXHAUSTED"])
+        )
+    ):
+        raise ValueError("agent replan ended without a recorded outcome")
+    if item.mode == "E":
         step_refs = sorted(
             (
                 ref
@@ -839,11 +1069,15 @@ def _validate_evaluation_record_against_case(
             )
             if decisions[index] != expected_decision:
                 raise ValueError("agent controller decision differs from policy replay")
+            # A denied proposal still consumes one agent step (see the orchestrator replan).
+            agent_updates: dict[str, object] = {"agent_steps": step_budget.agent_steps + 1}
+            if not expected_decision.allowed and index not in (
+                replan_index,
+                len(step_refs) - 1,
+            ):
+                raise ValueError("agent controller continued after a final denial")
             if expected_decision.allowed:
                 agent_seen.add(action.action_type + action.typed_arguments.model_dump_json())
-                agent_updates: dict[str, object] = {
-                    "agent_steps": step_budget.agent_steps + 1,
-                }
                 if action.action_type in acquisition_actions:
                     reservation_id = len(agent_expected_audit) // 3 + 1
                     agent_audit_slice = budget_audit[
@@ -893,28 +1127,12 @@ def _validate_evaluation_record_against_case(
                 elif action.action_type == "finish_diagnosis":
                     reservation_id = len(agent_expected_audit) // 3 + 1
                     agent_expected_audit.extend(
-                        [
-                            {
-                                "id": reservation_id,
-                                "action": "diagnosis_llm",
-                                "state": "ATTEMPTED",
-                            },
-                            {
-                                "id": reservation_id,
-                                "action": "diagnosis_llm",
-                                "state": "STARTED",
-                            },
-                            {
-                                "id": reservation_id,
-                                "action": "diagnosis_llm",
-                                "state": "COMPLETED",
-                            },
-                        ]
+                        _diagnosis_audit(reservation_id, budget_audit[len(agent_expected_audit) :])
                     )
                 if index + 1 < len(step_refs) and action.action_type not in acquisition_actions:
                     raise ValueError("agent controller continued after terminal action")
             expected_budget = step_budget.model_copy(update=agent_updates)
-        if terminal_provider_failure is not None:
+        if terminal_kind == "plan":
             reservation_id = len(agent_expected_audit) // 3 + 1
             agent_expected_audit.extend(
                 [
@@ -942,14 +1160,40 @@ def _validate_evaluation_record_against_case(
             or len(bundles[-1].sanitizer_results) != acquisition.sanitizer_calls
         ):
             raise ValueError("agent controller denied after inconsistent acquisition usage")
-        diagnosis_hashes = [
-            value.output_hash for value in logical_terminals if value.kind == "diagnose"
-        ]
-        expected_diagnosis_hash = hashlib.sha256(diagnosis.model_dump_json().encode()).hexdigest()
-        if diagnosis_hashes not in ([], [expected_diagnosis_hash]):
+    diagnosis_calls = [value for value in logical_terminals if value.kind == "diagnose"]
+    reserved_diagnoses = [
+        entry
+        for entry in fixed_audit
+        if isinstance(entry, dict)
+        and entry.get("action") == "diagnosis_llm"
+        and entry.get("state") in {"COMPLETED", "FAILED"}
+    ]
+    if [entry["state"] for entry in reserved_diagnoses] != (
+        ["COMPLETED"] * len(diagnosis_calls) + ["FAILED"] * (terminal_kind == "diagnose")
+    ) or len(diagnosis_calls) > 1:
+        raise ValueError("diagnosis reservation differs from provider calls")
+    model_refs = [ref for ref in run.artifact_refs if ref.name == "agent/model-diagnosis.json"]
+    if diagnosis_calls:
+        if len(model_refs) != 1 or model_refs[0].sha256 != diagnosis_calls[0].output_hash:
+            raise ValueError("provider diagnosis output differs from its artifact")
+        model_diagnosis = DiagnosisResult.model_validate_json(store.read(model_refs[0]))
+        derived = derive_final_diagnosis(
+            model_diagnosis, public_evidence_from_bundle(store, bundles[-1])
+        )
+        # A failed patch step appends exactly one reason code to a DIAGNOSED result.
+        patch_step_failed = (
+            derived.diagnostic_outcome == "DIAGNOSED"
+            and diagnosis.limitations[:-1] == derived.limitations
+            and len(diagnosis.limitations) == len(derived.limitations) + 1
+            and diagnosis == derived.model_copy(update={"limitations": diagnosis.limitations})
+        )
+        consistent = patch_step_failed or (terminal_kind != "patch" and diagnosis == derived)
+        if not consistent:
             raise ValueError("provider diagnosis output differs from terminal diagnosis")
-        if public.usage.get("physical_calls") != len(invocations):
-            raise ValueError("provider usage differs from native invocations")
+    elif model_refs or diagnosis.diagnostic_outcome == "DIAGNOSED":
+        raise ValueError("terminal diagnosis has no provider diagnosis")
+    if public.usage.get("physical_calls") != len(invocations):
+        raise ValueError("provider usage differs from native invocations")
 
     from gpu_agent.verification.engine import candidate_run_id, verification_run_id
 
@@ -1043,15 +1287,17 @@ def _validate_evaluation_record_against_case(
         or public.verdict is not None
     ):
         raise ValueError("evaluation record declares nonexistent child lineage")
-    if item.mode == "E":
-        expected_kinds = ["plan"] * len(decisions)
-        if rejected_decision is None:
-            if any(value.kind == "diagnose" for value in logical_terminals):
-                expected_kinds.append("diagnose")
-            if candidate is not None:
-                expected_kinds.append("patch")
-        if logical_kinds != expected_kinds:
-            raise ValueError("provider call order differs from controller workflow")
+    expected_kinds = ["plan"] * len(decisions) if item.mode == "E" else []
+    if rejected_decision is None:
+        if any(value.kind == "diagnose" for value in logical_terminals):
+            expected_kinds.append("diagnose")
+        if candidate is not None or (
+            diagnosis.diagnostic_outcome == "DIAGNOSED"
+            and any(value.kind == "patch" for value in logical_terminals)
+        ):
+            expected_kinds.append("patch")
+    if logical_kinds != expected_kinds or (terminal_kind == "plan" and item.mode != "E"):
+        raise ValueError("provider call order differs from controller workflow")
 
     expected_checks: dict[str, str] = {
         result.tool_result.typed_payload.tool: result.check_outcome
@@ -1094,37 +1340,10 @@ def _validate_evaluation_record_against_case(
             if values and len(values) == budget.llm_calls and None not in values
             else None
         )
-    result = diagnosis
-    reason = result.limitations[0] if result.limitations else None
-    expected_status: Literal["COMPLETED", "FAILED", "TIMEOUT", "INCONCLUSIVE"] = "INCONCLUSIVE"
-    finished = run.events[-1].at
-    if verification is not None:
-        reason = verification.reason_code
-        finished = verifications[0].events[-1].at
-        if verification.verdict != VerificationVerdict.INCONCLUSIVE:
-            expected_status = "COMPLETED"
-    elif reason and reason not in {
-        "INVALID_DIAGNOSIS_EVIDENCE",
-        "MODEL_DECLARED_INCONCLUSIVE",
-        "SANITIZER_EVIDENCE_UNAVAILABLE",
-        "KNOWLEDGE_UNAVAILABLE",
-        "NO_INFORMATION_GAIN",
-    }:
-        expected_status = "TIMEOUT" if "TIMEOUT" in reason else "FAILED"
-    if reason is not None and not re.fullmatch(r"[A-Z0-9_]{1,80}", reason):
-        reason = "EVALUATION_FAILED"
+    expected_status, reason = evaluation_record_status(diagnosis)
+    finished = verifications[0].events[-1].at if verification is not None else run.events[-1].at
     expected_latency = (finished - run.events[0].at).total_seconds() * 1000
-    expected_cost: float | None = 0.0
-    if item.mode == "E":
-        input_tokens = expected_usage.get("input_tokens")
-        output_tokens = expected_usage.get("output_tokens")
-        expected_cost = (
-            pricing.cost(input_tokens, output_tokens)
-            if pricing is not None
-            and isinstance(input_tokens, int)
-            and isinstance(output_tokens, int)
-            else None
-        )
+    expected_cost = _record_cost(pricing, expected_usage)
     validated = PublicEvaluationRecord(
         record_id=run.id,
         corpus_cutoff=attempt.corpus_cutoff,
@@ -1497,8 +1716,7 @@ class EvaluationExecutor:
             if (
                 sorted(attempt_ordinals) != list(range(ordinal + 1))
                 or sorted(record_ordinals) != list(range(ordinal))
-                or sorted(claim_ordinals)
-                not in (list(range(ordinal)), list(range(ordinal + 1)))
+                or sorted(claim_ordinals) != list(range(ordinal))
                 or len(attempt_ordinals) != len(set(attempt_ordinals))
                 or len(record_ordinals) != len(set(record_ordinals))
                 or len(claim_ordinals) != len(set(claim_ordinals))
@@ -1617,6 +1835,7 @@ class EvaluationExecutor:
                     source,
                     required_tools=(case.target_tool,),
                     expected_source_hash=case.source_hash,
+                    expected_input_hash=case.input_set_hash,
                 )
             else:
                 run = execution_service.diagnose(
@@ -1624,6 +1843,7 @@ class EvaluationExecutor:
                     mode=mode,
                     required_tools=(case.target_tool,),
                     expected_source_hash=case.source_hash,
+                    expected_input_hash=case.input_set_hash,
                     evaluation_unit=unit,
                 )
             run = execution_service.store.load(run.id)
@@ -1692,21 +1912,17 @@ class EvaluationExecutor:
                     if values and len(values) == budget.llm_calls and None not in values
                     else None
                 )
-            cost_usd: float | None = 0.0
-            if mode == "E":
-                pricing_refs = [
-                    ref for ref in run.artifact_refs if ref.name == "agent/pricing-attestation.json"
-                ]
-                cost_usd = None
-                if len(pricing_refs) == 1:
-                    pricing = PricingAttestation.model_validate_json(store.read(pricing_refs[0]))
-                    input_tokens = usage.get("input_tokens")
-                    output_tokens = usage.get("output_tokens")
-                    cost_usd = (
-                        pricing.cost(input_tokens, output_tokens)
-                        if isinstance(input_tokens, int) and isinstance(output_tokens, int)
-                        else None
-                    )
+            pricing_refs = [
+                ref for ref in run.artifact_refs if ref.name == "agent/pricing-attestation.json"
+            ]
+            cost_usd = _record_cost(
+                (
+                    PricingAttestation.model_validate_json(store.read(pricing_refs[0]))
+                    if len(pricing_refs) == 1
+                    else None
+                ),
+                usage,
+            )
             checks: dict[str, str] = {
                 item.tool_result.typed_payload.tool: item.check_outcome
                 for item in bundle.sanitizer_results
@@ -1770,23 +1986,7 @@ class EvaluationExecutor:
                 # counts. Preserve diagnostic components and report totals unknown.
                 usage["tool_calls"] = None
                 usage["total_sanitizer_calls"] = None
-            reason = result.limitations[0] if result.limitations else None
-            status: str = "INCONCLUSIVE"
-            if verification is not None:
-                reason = verification.reason_code
-                if verification.verdict != VerificationVerdict.INCONCLUSIVE:
-                    status = "COMPLETED"
-            elif reason and reason not in {
-                "INVALID_DIAGNOSIS_EVIDENCE",
-                "MODEL_DECLARED_INCONCLUSIVE",
-                "SANITIZER_EVIDENCE_UNAVAILABLE",
-                "KNOWLEDGE_UNAVAILABLE",
-                "NO_INFORMATION_GAIN",
-            }:
-                status = "TIMEOUT" if "TIMEOUT" in reason else "FAILED"
-            # Only bounded reason codes leave this adapter, never an exception message.
-            if reason is not None and not re.fullmatch(r"[A-Z0-9_]{1,80}", reason):
-                reason = "EVALUATION_FAILED"
+            status, reason = evaluation_record_status(result)
             evidence_refs = [ref for ref in run.artifact_refs if ref.name == "evidence/bundle.json"]
             if not evidence_refs:
                 raise ValueError("evaluation evidence is unavailable")
@@ -1853,6 +2053,14 @@ class EvaluationExecutor:
             if prepared is not None:
                 assert self.holdout_controller is not None
                 return self.holdout_controller.complete_execution(prepared, native)
+            # Commit the derived result before publishing its batch projection. Recovery
+            # may read this receipt, but must never redispatch diagnosis or verification.
+            self.service.store.put_if_absent_exact(
+                evaluation_run_id,
+                f"evaluation/completions/{ordinal}.json",
+                native.public().model_dump_json().encode(),
+                "public",
+            )
             return native
         finally:
             os.close(fd)
@@ -1901,8 +2109,20 @@ class EvaluationExecutor:
         )
         item = schedule.items[ordinal]
         if item.split == "development":
-            recovered = self.execute_scheduled(evaluation_run_id, ordinal)
-            return recovered.public() if isinstance(recovered, EvaluationRecord) else recovered
+            if attempt != expected_attempt:
+                return None
+            try:
+                record = PublicEvaluationRecord.model_validate_json(
+                    self.service.store.read(
+                        EvaluationExecutor._ref(
+                            self, parent, f"evaluation/completions/{ordinal}.json"
+                        )
+                    )
+                )
+                EvaluationExecutor.validate_scheduled_record(self, record, item, attempt)
+            except (OSError, ValueError):
+                return None
+            return record
         if self.holdout_controller is None or self.holdout_batch is None:
             return None
         claim = EvaluationExecutionClaim.model_validate_json(

@@ -41,6 +41,7 @@ from gpu_agent.execution.local import (
     _Workspace,
 )
 from gpu_agent.execution.models import (
+    BackendInfrastructureError,
     BuildPayload,
     BuildRequest,
     BuildResult,
@@ -319,7 +320,7 @@ class IsolatedGPUBackend(LocalBackend):
     def _inspect_attestation_container(self, name: str, operation_id: str) -> tuple[str, str]:
         capture = self._docker(["inspect", name], limit=65536)
         if self._runtime_status(capture) != "SUCCESS":
-            raise ValueError("runtime container inspection failed")
+            raise BackendInfrastructureError("runtime container inspection failed")
         try:
             documents = json.loads(capture.stdout)
             if not isinstance(documents, list) or len(documents) != 1:
@@ -379,18 +380,18 @@ class IsolatedGPUBackend(LocalBackend):
             ]
             create = self._docker(argv, limit=65536)
             if self._runtime_status(create) != "SUCCESS":
-                raise ValueError("runtime attestation container unavailable")
+                raise BackendInfrastructureError("runtime attestation container unavailable")
             image_id, policy_hash = self._inspect_attestation_container(name, operation_id)
             capture = self._docker(["start", "--attach", name], limit=65536)
             if (
                 self._runtime_status(capture) != "SUCCESS"
                 or len(capture.stdout) + len(capture.stderr) > 65536
             ):
-                raise ValueError("runtime attestation command failed")
+                raise BackendInfrastructureError("runtime attestation command failed")
             return capture.stdout + b"\n" + capture.stderr, image_id, policy_hash
         finally:
             if not self._remove_container(name, operation_id):
-                raise ValueError("runtime attestation container cleanup failed")
+                raise BackendInfrastructureError("runtime attestation container cleanup failed")
 
     def _attest_runtime(self) -> RuntimeToolchainAttestation:
         if self._expected_toolchain is None:
@@ -422,7 +423,7 @@ class IsolatedGPUBackend(LocalBackend):
             or sanitizer_match is None
             or re.fullmatch(r"[0-9]+\.[0-9]+", capability) is None
         ):
-            raise ValueError("runtime attestation output is invalid")
+            raise BackendInfrastructureError("runtime attestation output is invalid")
         return RuntimeToolchainAttestation(
             runtime_session_id=self._runtime_session_id,
             lock_hash=self._expected_toolchain.lock_hash,

@@ -3,13 +3,13 @@
 #include <cuda_runtime.h>
 
 namespace {
-__device__ float race_sink;
+__device__ float block_summary;
 
 __global__ void shared_waw() {
     __shared__ volatile float slot;
     slot = static_cast<float>(threadIdx.x);
     __syncthreads();
-    if (threadIdx.x == 0) race_sink = slot;
+    if (threadIdx.x == 0) block_summary = slot;
 }
 
 __global__ void vector_add(const float* a, const float* b, float* out, std::size_t n) {

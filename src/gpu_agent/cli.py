@@ -440,8 +440,6 @@ def _configured_evaluation_runner(
     commit: str,
     toolchain_hash: str,
     model_config_hash: str,
-    max_cost_usd: float,
-    max_unit_cost_usd: float,
 ) -> EvaluationRunner:
     """Build the paid runner only from controller-owned, pre-attested configuration."""
     from urllib.parse import urlsplit
@@ -482,6 +480,7 @@ def _configured_evaluation_runner(
         model_config_hash=model_config_hash,
         require_corpus_family=True,
         workflow_visibility="public",
+        cost_policy="record_only",
     )
     binding = service.binding
     if (
@@ -524,6 +523,7 @@ def _configured_evaluation_runner(
             model_config_hash=model_config_hash,
             require_corpus_family=True,
             workflow_visibility="evaluator",
+            cost_policy="record_only",
         )
         if holdout_service.binding != binding:
             raise ValueError("paired evaluation bindings differ")
@@ -562,8 +562,6 @@ def _configured_evaluation_runner(
         toolchain_hash=toolchain_hash,
         model_config_hash=model_config_hash,
         binding=binding,
-        max_cost_usd=max_cost_usd,
-        max_unit_cost_usd=max_unit_cost_usd,
         holdout_controller=holdout_controller,
         holdout_batch=holdout_batch,
         schedule_client=ExternalCommandScheduleCommitClient(Path(authority_command)),
@@ -668,8 +666,6 @@ def benchmark_evaluate(
     mode: Annotated[str, typer.Option("--mode")],
     split: Annotated[str, typer.Option("--split")],
     repeats: Annotated[int, typer.Option("--repeats", min=3)],
-    max_cost_usd: Annotated[float | None, typer.Option("--max-cost-usd")] = None,
-    max_unit_cost_usd: Annotated[float | None, typer.Option("--max-unit-cost-usd")] = None,
     corpus_root: Annotated[Path | None, typer.Option("--corpus-root")] = None,
     case_root: Annotated[Path | None, typer.Option("--case-root")] = None,
     repository: Annotated[Path, typer.Option("--repository")] = Path("."),
@@ -677,14 +673,11 @@ def benchmark_evaluate(
     toolchain_hash: Annotated[str | None, typer.Option("--toolchain-hash")] = None,
     model_config_hash: Annotated[str | None, typer.Option("--model-config-hash")] = None,
 ) -> None:
-    """Paid batches require cost attestation; injected controller runners support offline tests."""
+    """Run a signed evaluation; record usage and costs without dollar limits."""
     from typing import cast
 
     from gpu_agent.benchmark.executor import CostBoundUnavailable
 
-    # This check precedes any configured service, corpus, or provider construction.
-    if max_cost_usd is None or max_unit_cost_usd is None:
-        raise typer.BadParameter("COST_CAP_REQUIRED: both total and unit caps must be explicit.")
     if mode not in {"A", "B", "C", "D", "E", "all"} or split not in {
         "development",
         "holdout",
@@ -707,8 +700,6 @@ def benchmark_evaluate(
                 commit=commit,
                 toolchain_hash=toolchain_hash,
                 model_config_hash=model_config_hash,
-                max_cost_usd=max_cost_usd,
-                max_unit_cost_usd=max_unit_cost_usd,
             )
     except (CostBoundUnavailable, OSError, ValueError):
         raise typer.BadParameter(
@@ -716,11 +707,6 @@ def benchmark_evaluate(
             "before provider execution."
         ) from None
     try:
-        if (
-            runner.bindings.max_cost_usd != max_cost_usd
-            or runner.bindings.max_unit_cost_usd != max_unit_cost_usd
-        ):
-            raise ValueError("injected runner caps differ from requested caps")
         if runner.schedule_client is None:
             raise typer.BadParameter(
                 "SCHEDULE_ATTESTATION_REQUIRED: external schedule authority is unavailable."
@@ -734,9 +720,7 @@ def benchmark_evaluate(
             f"{len(cases)} case × {mode_count} mode × {repeats} repeats = "
             f"{len(cases) * mode_count * repeats} units"
         )
-        typer.echo(
-            f"Cost reservation: ${max_cost_usd:.2f}; unit reservation: ${max_unit_cost_usd:.2f}"
-        )
+        typer.echo("Usage and cost are recorded only; no dollar ceiling.")
         result = runner.run(cast(EvaluationSelection, mode), cast(EvaluationSplit, split), repeats)
     except (OSError, ValueError):
         raise typer.BadParameter("EVALUATION_CONTROLLER_INPUT_INVALID") from None
@@ -785,12 +769,33 @@ def environment_command(
 
 
 @app.command("diagnose")
-def diagnose_command(source: Path) -> None:
-    """Snapshot a source file/directory, investigate and attempt one model patch."""
+def diagnose_command(
+    source: Path,
+    allow_paid_calls: Annotated[
+        bool,
+        typer.Option(
+            "--allow-paid-calls",
+            help="Development only: send real provider requests. Runs are never evaluation "
+            "or release evidence.",
+        ),
+    ] = False,
+    max_llm_calls: Annotated[int, typer.Option("--max-llm-calls", min=1, max=40)] = 40,
+) -> None:
+    """Snapshot a source file/directory, investigate and attempt one model patch.
+
+    Without --allow-paid-calls no provider request is sent and the run records
+    PAID_CALLS_NOT_ALLOWED. With it, physical requests (including retries) are bounded
+    by --max-llm-calls. Token usage is recorded without a dollar ceiling.
+    """
+    from gpu_agent.agent.provider import DevelopmentCallPolicy
     from gpu_agent.service import ApplicationService
 
+    policy = DevelopmentCallPolicy(max_llm_calls=max_llm_calls) if allow_paid_calls else None
     try:
         service = ApplicationService.configured()
+        if policy is not None:
+            service.allow_development_paid_calls(policy)
+            typer.echo("DEVELOPMENT RUN: paid provider calls enabled; not evaluation evidence.")
         run = service.diagnose(source)
     except (OSError, ValueError):
         raise typer.BadParameter(

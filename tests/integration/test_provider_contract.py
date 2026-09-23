@@ -122,7 +122,10 @@ def test_official_parse_parameters_metadata_and_no_implicit_retry(provider_facto
     assert clients[0]["base_url"] == "https://api.openai.com/v1"
     call = calls[0]
     assert call["store"] is False and call["model"] == "configured"
-    assert call["text_format"] is AgentActionOutput
+    # The model-facing planner schema omits controller-owned fields (action_id, budget).
+    from gpu_agent.agent.models import PlannerOutput
+
+    assert call["text_format"] is PlannerOutput
     assert call["extra_headers"]["X-Client-Request-Id"]
     assert not {"tools", "background", "conversation", "previous_response_id"}.intersection(call)
     record = provider.invocations()[-1]
@@ -338,7 +341,8 @@ def test_invalid_patch_format_is_retried_only_once(provider_factory, diff):
             DiagnosisResult.inconclusive("TEST"),
         )
     assert len(calls) == 2 and provider.gate.snapshot().llm_calls == 2
-    assert "no n != integer fixed-length guard remains" in calls[1]["instructions"]
+    assert "failed schema/scope validation" in calls[1]["instructions"]
+    assert "257" not in calls[1]["instructions"]
 
 
 def test_diff_scope_validator_runs_before_acceptance(provider_factory):
@@ -405,9 +409,7 @@ def test_real_sdk_offline_transport_sends_strict_schema_and_parses_result(store)
     import openai
 
     from gpu_agent.agent.models import (
-        AgentActionOutput,
         AgentBudget,
-        MemcheckAction,
         PublicEvidence,
     )
     from gpu_agent.agent.policy import LLMCallGate
@@ -438,7 +440,8 @@ def test_real_sdk_offline_transport_sends_strict_schema_and_parses_result(store)
                     "content": [
                         {
                             "type": "output_text",
-                            "text": AgentActionOutput(action=MemcheckAction()).model_dump_json(),
+                            "text": '{"action":{"action_type":"run_memcheck",'
+                            '"typed_arguments":{}}}',
                             "annotations": [],
                         }
                     ],
@@ -551,7 +554,7 @@ def test_deepseek_responses_uses_server_enforced_json_schema(store):
     assert provider.plan(PublicEvidence(), AgentBudget()).action_type == "run_memcheck"
     output_format = requests[0]["text"]["format"]
     assert output_format["type"] == "json_schema"
-    assert output_format["name"] == "AgentActionOutput"
+    assert output_format["name"] == "PlannerOutput"
     assert output_format["schema"]["additionalProperties"] is False
     assert "action" in output_format["schema"]["required"]
     assert "anyOf" in json.dumps(output_format["schema"])

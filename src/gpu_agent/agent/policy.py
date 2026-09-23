@@ -229,6 +229,14 @@ def decide_action(
 
 
 def validate_diagnosis(result: DiagnosisResult, evidence: PublicEvidence) -> bool:
+    """Evidence gate derived from what this run actually acquired (docs/mode-contract.md).
+
+    Every DIAGNOSED result needs at least one cited observed fact and in-range kernel.cu
+    locations. Tool-finding citations are required exactly when the run holds tool findings,
+    documentation citations exactly when it holds documentation, and when any finding carries
+    a location every diagnosed location must copy one. All citation IDs must exist in the
+    matching evidence layer.
+    """
     if result.diagnostic_outcome != "DIAGNOSED":
         return True
     layers = [
@@ -236,15 +244,21 @@ def validate_diagnosis(result: DiagnosisResult, evidence: PublicEvidence) -> boo
         (result.tool_findings, {f.artifact_id for f in evidence.tool_findings}),
         (result.documentation_evidence, {d.chunk_id for d in evidence.documentation}),
     ]
-    if any(
-        not claims or any(not set(c.citation_ids) <= allowed for c in claims)
-        for claims, allowed in layers
+    if any(not set(c.citation_ids) <= allowed for claims, allowed in layers for c in claims):
+        return False
+    if (
+        not result.observed_facts
+        or (evidence.tool_findings and not result.tool_findings)
+        or (evidence.documentation and not result.documentation_evidence)
+        or not result.source_locations
     ):
         return False
-    return bool(result.source_locations) and all(
+    line_count = max((len(s.content.splitlines()) for s in evidence.sources), default=0)
+    located = [f.source_location for f in evidence.tool_findings if f.source_location is not None]
+    return all(
         loc.path == "kernel.cu"
         and loc.line is not None
-        and any(f.source_location == loc for f in evidence.tool_findings)
-        and any(loc.line <= len(source.content.splitlines()) for source in evidence.sources)
+        and 1 <= loc.line <= line_count
+        and (not located or loc in located)
         for loc in result.source_locations
     )

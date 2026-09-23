@@ -50,8 +50,8 @@ def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_e
         toolchain_hash=binding.toolchain_lock_hash or "",
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=3,
+        max_unit_cost_usd=1,
     )
     result = runner.run("D", "development", 3)
     assert len(result.records) == 3 and result.stopped_reason is None
@@ -66,7 +66,7 @@ def test_evaluation_is_repeated_randomized_serial_and_native(native_evaluation_e
     ]
 
 
-def test_missing_cost_cap_stops_before_external_execution(native_evaluation_executor):
+def test_no_dollar_limits_required_for_evaluation(native_evaluation_executor):
     from gpu_agent.benchmark.evaluation import EvaluationRunner
 
     executor = native_evaluation_executor
@@ -86,4 +86,4 @@ def test_missing_cost_cap_stops_before_external_execution(native_evaluation_exec
         max_unit_cost_usd=None,
     )
     result = runner.run("E", "development", 3)
-    assert result.records == [] and result.stopped_reason == "COST_CAP_REQUIRED"
+    assert len(result.records) == 3 and result.stopped_reason is None

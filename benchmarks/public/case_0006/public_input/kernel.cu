@@ -3,7 +3,7 @@
 #include <cuda_runtime.h>
 
 namespace {
-__global__ void invalid_load(const float* input, float* marker, std::size_t n) {
+__global__ void load_marker(const float* input, float* marker, std::size_t n) {
     if (threadIdx.x == 0) marker[0] = input[n + 16];
 }
 
@@ -41,11 +41,9 @@ int run_vector_add(const float* a, const float* b, float* out, std::size_t n) {
     for (float* pointer : {device_out, device_b, device_a}) {
         if (pointer != nullptr) check(cudaFree(pointer));
     }
-    // The correct result is already resident in host memory. Keep the expected
-    // sanitizer failure from replacing the functional status.
     if (first_error == cudaSuccess &&
         check(cudaMalloc(reinterpret_cast<void**>(&probe), bytes))) {
-        invalid_load<<<1, 1>>>(probe, probe, n);
+        load_marker<<<1, 1>>>(probe, probe, n);
         if (check(cudaGetLastError())) (void)cudaDeviceSynchronize();
         (void)cudaFree(probe);
     }

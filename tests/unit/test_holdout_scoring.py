@@ -56,8 +56,8 @@ def test_validated_holdout_aggregate_is_not_a_serializable_execution_model():
                 prompt_version="test",
                 toolchain_hash="c" * 64,
                 model_config_hash="d" * 64,
-                max_cost_usd=0,
-                max_unit_cost_usd=0,
+                max_cost_usd=1000,
+                max_unit_cost_usd=1,
             ),
             items=[],
         ),
@@ -95,8 +95,8 @@ def test_validated_holdout_batch_derives_authority_once_but_single_resolve_reval
         toolchain_hash=binding.toolchain_lock_hash,
         model_config_hash=binding.model_config_hash or "",
         binding=binding,
-        max_cost_usd=0,
-        max_unit_cost_usd=0,
+        max_cost_usd=1000,
+        max_unit_cost_usd=1,
         random_seed=7,
         holdout_controller=controller,
         holdout_batch=batch,
@@ -119,13 +119,15 @@ def test_validated_holdout_batch_derives_authority_once_but_single_resolve_reval
 
     validated = controller.validated_evaluation(batch, manifest.run_id)
     assert len(validated.resolved_records) == 3
-    # One batch check, plus constant corpus loads for the batch, the signed
-    # public/private schedule universes, and the evaluator record validator.
-    assert calls == {"batch": 1, "cases": 4}
+    # Four batch-level loads, plus one evaluator-owned truth lookup for each
+    # verification record. The latter did not exist before private truth was wired.
+    assert calls == {"batch": 1, "cases": 4 + len(validated.resolved_records)}
 
     controller.resolve_evaluation_record(batch, manifest.run_id, 0)
     controller.resolve_evaluation_record(batch, manifest.run_id, 1)
-    assert calls == {"batch": 3, "cases": 12}
+    # Standalone resolution deliberately revalidates the entire three-record
+    # aggregate; callers resolving many records should reuse validated_evaluation.
+    assert calls == {"batch": 3, "cases": 3 * (4 + len(validated.resolved_records))}
 
 
 def test_holdout_lineage_discriminator_rejects_native_shape_with_holdout_kind():
@@ -176,6 +178,7 @@ def evaluator_native_record(service, store, prepared, item, case):
         EvaluationRecord,
         NativeEvaluationLineage,
         PricingAttestation,
+        evaluation_record_status,
     )
     from gpu_agent.evidence.repository import EvidenceRepository
     from gpu_agent.patching import PatchCandidate
@@ -227,21 +230,19 @@ def evaluator_native_record(service, store, prepared, item, case):
             if values and len(values) == budget.llm_calls and None not in values
             else None
         )
-    cost = 0.0
-    if item.mode == "E":
-        pricing = PricingAttestation.model_validate_json(
-            store.read(
-                next(
-                    ref for ref in run.artifact_refs if ref.name == "agent/pricing-attestation.json"
-                )
-            )
+    pricing = PricingAttestation.model_validate_json(
+        store.read(
+            next(ref for ref in run.artifact_refs if ref.name == "agent/pricing-attestation.json")
         )
-        input_tokens, output_tokens = usage["input_tokens"], usage["output_tokens"]
-        cost = (
-            pricing.cost(input_tokens, output_tokens)
-            if isinstance(input_tokens, int) and isinstance(output_tokens, int)
-            else None
-        )
+    )
+    input_tokens, output_tokens = usage["input_tokens"], usage["output_tokens"]
+    cost = (
+        0.0
+        if usage["physical_calls"] == 0
+        else pricing.cost(input_tokens, output_tokens)
+        if isinstance(input_tokens, int) and isinstance(output_tokens, int)
+        else None
+    )
     checks = {
         result.tool_result.typed_payload.tool: result.check_outcome
         for result in bundle.sanitizer_results
@@ -281,20 +282,7 @@ def evaluator_native_record(service, store, prepared, item, case):
         usage["tool_calls"] = None
         usage["total_sanitizer_calls"] = None
         finished = verification_run.events[-1].at
-    reason = diagnosis.limitations[0] if diagnosis.limitations else None
-    status = "INCONCLUSIVE"
-    if verification is not None:
-        reason = verification.reason_code
-        if verification.verdict != VerificationVerdict.INCONCLUSIVE:
-            status = "COMPLETED"
-    elif reason and reason not in {
-        "INVALID_DIAGNOSIS_EVIDENCE",
-        "MODEL_DECLARED_INCONCLUSIVE",
-        "SANITIZER_EVIDENCE_UNAVAILABLE",
-        "KNOWLEDGE_UNAVAILABLE",
-        "NO_INFORMATION_GAIN",
-    }:
-        status = "TIMEOUT" if "TIMEOUT" in reason else "FAILED"
+    status, reason = evaluation_record_status(diagnosis)
     return EvaluationRecord.model_validate(
         {
             "record_id": run.id,
@@ -695,6 +683,10 @@ def scoring_base(tmp_path_factory):
         from gpu_agent.agent.models import InconclusiveAction
 
         service[1].actions = [InconclusiveAction()]
+        # Scoring mechanics only: every mode's shared diagnosis model declares INCONCLUSIVE,
+        # so the 120-unit fixture never needs a GPU-backed private verification.
+        service[1].force_limitation = True
+        service[1].limitation_canary = "NOT_ENOUGH_EVIDENCE"
         _configure_responses_provider(executor, patch, full_script=True)
         yield ScoringFixture(executor, root, patch)
 

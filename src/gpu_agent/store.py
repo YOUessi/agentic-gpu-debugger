@@ -30,6 +30,7 @@ from gpu_agent.contracts import (
     Visibility,
     new_id,
 )
+from gpu_agent.store_inventory import DirectoryInventory
 
 if TYPE_CHECKING:
     from gpu_agent.benchmark.evaluation import EvaluationUnitBinding
@@ -99,6 +100,17 @@ def _read_regular_at(directory_fd: int, name: str, limit: int) -> bytes:
         if len(data) > limit:
             raise ValueError("file grew beyond limit")
         return data
+
+
+def _copy_manifest(manifest: RunManifest) -> RunManifest:
+    # ArtifactRef, RunBinding and RepositorySnapshot are frozen. Copy only mutable
+    # collections/events instead of recursively cloning every historical artifact.
+    return manifest.model_copy(
+        update={
+            "artifact_refs": list(manifest.artifact_refs),
+            "events": [event.model_copy() for event in manifest.events],
+        }
+    )
 
 
 class EvaluationRunLease:
@@ -214,11 +226,7 @@ class EvaluationRunLease:
 
     def load(self) -> RunManifest:
         self.validate()
-        manifest = RunManifest.model_validate_json(
-            _read_regular_at(self._run_fd, "manifest.json", 8 * 1024 * 1024)
-        )
-        if manifest.id != self.run_id:
-            raise ValueError("manifest ID mismatch")
+        manifest = self.store._load_at(self.run_id, self._run_fd)
         self.validate()
         return manifest
 
@@ -251,7 +259,7 @@ class EvaluationRunLease:
     def children(self) -> list[RunManifest]:
         self.validate()
         children: list[RunManifest] = []
-        for name in sorted(os.listdir(self._root_fd)):
+        for name in self.store._directory_inventory.names(self._root_fd):
             if not re.fullmatch(r"[a-f0-9]{32}", name):
                 continue
             child_fd = -1
@@ -261,9 +269,7 @@ class EvaluationRunLease:
                     os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
                     dir_fd=self._root_fd,
                 )
-                child = RunManifest.model_validate_json(
-                    _read_regular_at(child_fd, "manifest.json", 8 * 1024 * 1024)
-                )
+                child = self.store._load_at(name, child_fd)
             except (OSError, ValueError) as exc:
                 raise ValueError("evaluation child inventory is unsafe") from exc
             finally:
@@ -478,6 +484,12 @@ class RunStore:
             sync_directory(created.parent)
         self.visibility = visibility
         self._evaluation_verifier: EvaluationScheduleVerifier | None = None
+        # Parsed-manifest caches keyed by the manifest file's (dev, inode, mtime_ns, size).
+        # Manifests are only ever replaced atomically (new inode), so a matching key means
+        # the same bytes; any change is a cache miss and a full, checked re-read.
+        self._ref_cache: dict[str, tuple[tuple[int, ...], frozenset[ArtifactRef]]] = {}
+        self._manifest_cache: dict[str, tuple[tuple[int, ...], RunManifest]] = {}
+        self._directory_inventory = DirectoryInventory()
 
     @property
     def identity(self) -> RunStoreIdentity:
@@ -694,10 +706,41 @@ class RunStore:
         return run
 
     def load(self, run_id: str) -> RunManifest:
-        data = read_regular(self._run_dir(run_id) / "manifest.json", 8 * 1024 * 1024)
-        manifest = RunManifest.model_validate_json(data)
+        path = self._run_dir(run_id)
+        reject_symlinks(path)
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except OSError as exc:
+            raise ValueError("run directory is unavailable or unsafe") from exc
+        try:
+            return self._load_at(run_id, fd)
+        finally:
+            os.close(fd)
+
+    def _load_at(self, run_id: str, directory_fd: int) -> RunManifest:
+        """Cache all parsed manifests, including the current parent's children.
+
+        ctime catches in-place changes even if mtime and size are restored. Copies keep
+        callers from mutating the cached authority object. Reads still check file identity.
+        """
+        info = os.stat("manifest.json", dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
+            raise ValueError("not a bounded regular file")
+        key = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+        known = self._manifest_cache.get(run_id)
+        if known is not None and known[0] == key:
+            return _copy_manifest(known[1])
+        manifest = RunManifest.model_validate_json(
+            _read_regular_at(directory_fd, "manifest.json", 8 * 1024 * 1024)
+        )
+        after = os.stat("manifest.json", dir_fd=directory_fd, follow_symlinks=False)
+        if key != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns, after.st_size):
+            raise ValueError("manifest changed while reading")
         if manifest.id != run_id:
             raise ValueError("manifest ID mismatch")
+        if len(self._manifest_cache) >= 4096:
+            self._manifest_cache.clear()
+        self._manifest_cache[run_id] = (key, _copy_manifest(manifest))
         return manifest
 
     def recoverable_runs(self) -> list[RunManifest]:
@@ -928,8 +971,27 @@ class RunStore:
                 return refs[0]
             return self._put_locked(run, name, content, visibility)
 
+    def _registered_refs(self, run_id: str) -> frozenset[ArtifactRef]:
+        """Registered refs of one run; parsed once per manifest version, not per read.
+
+        Reading k artifacts of a run with n artifacts used to parse the n-ref manifest k
+        times, making record inventories quadratic (cubic across an evaluation batch).
+        """
+        path = self._run_dir(run_id) / "manifest.json"
+        reject_symlinks(path)
+        info = os.stat(path, follow_symlinks=False)
+        key = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+        cached = self._ref_cache.get(run_id)
+        if cached is not None and cached[0] == key:
+            return cached[1]
+        refs = frozenset(self.load(run_id).artifact_refs)
+        if len(self._ref_cache) >= 4096:
+            self._ref_cache.clear()
+        self._ref_cache[run_id] = (key, refs)
+        return refs
+
     def read(self, ref: ArtifactRef) -> bytes:
-        if ref.visibility != self.visibility or ref not in self.load(ref.run_id).artifact_refs:
+        if ref.visibility != self.visibility or ref not in self._registered_refs(ref.run_id):
             raise ValueError("unregistered artifact or wrong visibility")
         if ref.relative_path != f"{ref.run_id}/artifacts/{ref.id}":
             raise ValueError("artifact path mismatch")
