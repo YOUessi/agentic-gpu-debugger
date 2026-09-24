@@ -409,3 +409,37 @@ def test_unknown_validator_error_never_reaches_telemetry_or_retry(store):
     for call in provider.invocations():
         assert CANARY not in call.model_dump_json()
         assert call.output_diagnostics.issues[0].type == "patch_invalid"
+
+
+@pytest.mark.parametrize(
+    "text,code",
+    [
+        ("", "empty_output"),
+        ('```json\n{"unified_diff": "x"}\n```', "code_fence"),
+        ("--- a/kernel.cu\n+++ b/kernel.cu\n", "raw_diff"),
+        ('Here is the fix: {"unified_diff": "x"}', "prose_before_json"),
+        ('{"unified_diff": "--- a/kernel.cu\\n', "truncated_json"),
+        ('{"unified_diff": "a\\qb"}', "invalid_escape"),
+        ('{"unified_diff": "a\nb"}', "control_character"),
+        ('{"unified_diff": "x"} {"unified_diff": "y"}', "extra_data"),
+    ],
+)
+def test_unparsable_output_is_classified_by_shape_only(text, code):
+    from gpu_agent.agent.models import PatchOutput
+    from gpu_agent.agent.provider import _OutputRejected, parse_wire_text
+
+    with pytest.raises(_OutputRejected) as rejected:
+        parse_wire_text("patch", text + CANARY if code == "extra_data" else text, PatchOutput)
+    diagnostics = rejected.value.diagnostics
+    assert diagnostics.failure_class == "NOT_JSON"
+    assert [(i.loc, i.type) for i in diagnostics.issues] == [("<json>", code)]
+    assert CANARY not in diagnostics.model_dump_json()
+
+
+def test_not_json_retry_asks_for_the_json_envelope_with_escaped_diff():
+    from gpu_agent.agent.provider import correction_text
+
+    text = correction_text("patch", ["<json>: raw_diff"])
+    assert "not parsable JSON (raw_diff)" in text
+    assert "no bare diff" in text and "\\n" in text
+    assert "correct its format" not in text

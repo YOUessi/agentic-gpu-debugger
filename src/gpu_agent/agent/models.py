@@ -301,3 +301,33 @@ class ProviderError(Exception):
     def __init__(self, code: str, *, state: str = "NOT_STARTED", retryable: bool = False) -> None:
         super().__init__(code)
         self.code, self.state, self.retryable = code, state, retryable
+
+
+MissingEvidence = Literal["memcheck_outcome", "tool_finding", "documentation_for_finding"]
+
+
+class ExecutedAction(ExecutionModel):
+    """A controller-accepted action; controller-owned fields only (no model rationale)."""
+
+    action_type: str
+    typed_arguments: dict[str, str | int]
+
+
+class SourceRange(ExecutionModel):
+    source_id: str
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+
+
+class PlannerState(ExecutionModel):
+    """What the controller tells the planner each step (docs/mode-contract.md §3a).
+
+    It states what evidence finish_diagnosis still requires and what was already done, so
+    the planner can choose its own next action without repeating one. It never names a
+    tool to run or a fixed order.
+    """
+
+    missing_evidence: list[MissingEvidence] = Field(default_factory=list)
+    executed_actions: list[ExecutedAction] = Field(default_factory=list, max_length=40)
+    source_ranges_read: list[SourceRange] = Field(default_factory=list, max_length=40)
+    rejected_previous_action: list[str] = Field(default_factory=list, max_length=4)

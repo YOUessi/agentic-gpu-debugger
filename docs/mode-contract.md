@@ -37,6 +37,9 @@
 - 已知限制：provider 在调用内用同一门禁校验并重试一次；两次都不合规时记录为
   `LLM_INVALID_OUTPUT`（FAILED），`output_diagnostics.failure_class=DOMAIN_REJECTED`
   可与格式错误区分。
+- 格式重试额度按调用类别各一次（plan、diagnose、patch 互不占用），仍计入总调用次数边界。
+  不可解析的输出只记录形状分类（`<json>: raw_diff` / `code_fence` / `truncated_json` /
+  `invalid_escape` 等），不保存原文；重试提示按“格式错误”与“内容被拒”分别给出。
 
 ## 3. 补丁与验证
 
@@ -62,6 +65,9 @@
   `evaluation/development-labels.json` 冻结每个公开 case 的族标签；位置与根因标签未裁定，
   暂不计分。`python -m gpu_agent.benchmark.dev_report RUN_ROOT RUN_ID` 输出按模式的汇总。
 - E 的 planner prompt 只给控制器硬约束和目标，不再复述 RuleRouter 的固定流程。
+- E 每一步都收到 `controller_state`：结束前仍缺的证据类别（`missing_evidence`，与
+  `decide_action` 的结束门禁同一函数 `policy.missing_evidence`）、已执行动作（仅控制器字段）、
+  已读源码范围、上一次被拒的原因码。它不给工具顺序，下一步仍由 planner 自己选。
 - E 允许一次 replan：第一次被策略拒绝的提议消耗一步，planner 只收到拒绝原因码；
   第二次拒绝为终态（INCONCLUSIVE）。D 不 replan。
 - 公开 kernel 已去除描述缺陷的注释和提示性标识符；case_0001 的输入校验改回与 clean

@@ -21,6 +21,7 @@ from gpu_agent.agent.models import (
     DiagnosisResult,
     PatchOutput,
     PlannerOutput,
+    PlannerState,
     ProviderError,
     PublicEvidence,
     PublicSource,
@@ -175,6 +176,19 @@ def correction_text(kind: "CallKind", hints: list[str]) -> str:
             )
             if fixes:
                 text += "; " + "; ".join(fixes)
+        return text + "."
+    json_codes = [hint.removeprefix("<json>: ") for hint in hints if hint.startswith("<json>: ")]
+    if hints and len(json_codes) == len(hints):
+        text = (
+            f"\nThe previous output was not parsable JSON ({', '.join(json_codes)}). Return "
+            "exactly one JSON object matching the schema and nothing else: no prose, no code "
+            "fences"
+        )
+        if kind == "patch":
+            text += (
+                ', no bare diff. Put the whole diff in the "unified_diff" string, escaping '
+                'each newline as \\n and each double quote as \\"'
+            )
         return text + "."
     text = "\nPrevious output failed schema/scope validation; correct its format."
     if hints:
@@ -343,6 +357,41 @@ def _deepseek_output_text(envelope: dict[str, object]) -> str:
     return "".join(text_parts)
 
 
+JSON_ERROR_CODES = (
+    "empty_output",
+    "code_fence",
+    "raw_diff",
+    "prose_before_json",
+    "truncated_json",
+    "invalid_escape",
+    "control_character",
+    "extra_data",
+    "malformed_json",
+)
+
+
+def json_error_code(text: str, exc: json.JSONDecodeError) -> str:
+    """Classify an unparsable output by shape only; the text itself is never recorded."""
+    stripped = text.lstrip()
+    if not stripped:
+        return "empty_output"
+    if stripped.startswith("```"):
+        return "code_fence"
+    if stripped.startswith(("--- a/", "diff --git", "@@ ")):
+        return "raw_diff"
+    if not stripped.startswith(("{", "[")):
+        return "prose_before_json"
+    if exc.msg.startswith("Extra data"):
+        return "extra_data"
+    if exc.msg.startswith("Invalid \\escape"):
+        return "invalid_escape"
+    if exc.msg.startswith("Invalid control character"):
+        return "control_character"
+    if exc.pos >= len(text.rstrip()) or exc.msg.startswith("Unterminated string"):
+        return "truncated_json"
+    return "malformed_json"
+
+
 def parse_wire_text(
     kind: "CallKind", text: str, output_model: type[BaseModel]
 ) -> tuple[dict[str, object], OutputDiagnostics]:
@@ -352,8 +401,15 @@ def parse_wire_text(
     )
     try:
         decoded = json.loads(text)
-    except json.JSONDecodeError:
-        raise _OutputRejected(base.model_copy(update={"failure_class": "NOT_JSON"})) from None
+    except json.JSONDecodeError as exc:
+        raise _OutputRejected(
+            base.model_copy(
+                update={
+                    "failure_class": "NOT_JSON",
+                    "issues": [ValidationIssue(loc="<json>", type=json_error_code(text, exc))],
+                }
+            )
+        ) from None
     try:
         value = output_model.model_validate(normalize_wire_value(kind, decoded))
     except ValidationError as exc:
@@ -509,6 +565,7 @@ class LLMProvider(Protocol):
         evidence: PublicEvidence,
         budget: AgentBudget,
         feedback: list[str] | None = None,
+        state: PlannerState | None = None,
     ) -> AgentAction: ...
     def diagnose(self, evidence: PublicEvidence) -> DiagnosisResult: ...
     def propose_patch(self, public_source: PublicSource, diagnosis: DiagnosisResult) -> str: ...
@@ -765,6 +822,7 @@ class OpenAIResponsesProvider:
         evidence: PublicEvidence,
         budget: AgentBudget,
         feedback: list[str] | None = None,
+        state: PlannerState | None = None,
     ) -> AgentAction:
         payload: dict[str, object] = {
             "evidence": evidence.model_dump(mode="json"),
@@ -773,6 +831,9 @@ class OpenAIResponsesProvider:
         if feedback:
             # Controller reason codes for the one rejected proposal (bounded, no free text).
             payload["controller_feedback"] = {"rejected_previous_action": list(feedback)}
+        if state is not None:
+            # Controller-derived progress: missing evidence, executed actions, read ranges.
+            payload["controller_state"] = state.model_dump(mode="json")
         return self._call(
             "plan",
             payload,
@@ -856,6 +917,7 @@ class FakeProvider:
         evidence: PublicEvidence,
         budget: AgentBudget,
         feedback: list[str] | None = None,
+        state: PlannerState | None = None,
     ) -> AgentAction:
         payload: dict[str, object] = {
             "evidence": evidence.model_dump(mode="json"),
@@ -863,6 +925,8 @@ class FakeProvider:
         }
         if feedback:
             payload["controller_feedback"] = {"rejected_previous_action": list(feedback)}
+        if state is not None:
+            payload["controller_state"] = state.model_dump(mode="json")
         self._record("plan", payload)
         if not self.actions:
             raise ProviderError("FAKE_SCRIPT_EXHAUSTED")

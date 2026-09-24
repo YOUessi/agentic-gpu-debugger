@@ -14,16 +14,20 @@ from gpu_agent.agent.models import (
     DiagnosisResult,
     DocsArguments,
     EvidenceClaim,
+    ExecutedAction,
+    PlannerState,
     PublicEvidence,
     PublicFinding,
     PublicSource,
     RetrieveDocsAction,
+    SourceRange,
 )
 from gpu_agent.agent.policy import (
     BudgetExceeded,
     BudgetLedger,
     BudgetReservation,
     decide_action,
+    missing_evidence,
     validate_diagnosis,
 )
 from gpu_agent.agent.provider import LLMProvider, ProviderError
@@ -142,6 +146,7 @@ class AgentOrchestrator:
         self.ledger = BudgetLedger(self.budget)
         self.rule_router = RuleRouter()
         self.seen: set[str] = set()
+        self.executed: list[ExecutedAction] = []
         self.registry: dict[str, Callable[[AgentAction], None]] = {
             "run_memcheck": self._memcheck,
             "run_racecheck": self._sanitizer,
@@ -270,6 +275,22 @@ class AgentOrchestrator:
         )
         self.ledger.settle(reservation)
 
+    def _planner_state(self, evidence: PublicEvidence, feedback: list[str] | None) -> PlannerState:
+        """Progress the planner needs to avoid repeats; tool choice stays with the planner."""
+        ranges = [
+            SourceRange.model_validate(
+                {key: item.typed_arguments[key] for key in ("source_id", "start_line", "end_line")}
+            )
+            for item in self.executed
+            if item.action_type == "inspect_source"
+        ]
+        return PlannerState(
+            missing_evidence=missing_evidence(evidence),
+            executed_actions=self.executed[-40:],
+            source_ranges_read=ranges[-40:],
+            rejected_previous_action=list(feedback or [])[:4],
+        )
+
     def _reserve(self, action: str) -> BudgetReservation:
         try:
             return self.ledger.reserve(action)
@@ -369,7 +390,12 @@ class AgentOrchestrator:
                 else:
                     planner = self._reserve("planner_llm")
                     try:
-                        proposed = self.provider.plan(evidence, self.budget, feedback)
+                        proposed = self.provider.plan(
+                            evidence,
+                            self.budget,
+                            feedback,
+                            state=self._planner_state(evidence, feedback),
+                        )
                         self.ledger.settle(planner)
                     except ProviderError:
                         self.ledger.settle(planner, "FAILED")
@@ -424,6 +450,12 @@ class AgentOrchestrator:
                     raise ProviderError(decision.reason_codes[0])
                 feedback = None
                 self.seen.add(action.action_type + action.typed_arguments.model_dump_json())
+                self.executed.append(
+                    ExecutedAction(
+                        action_type=action.action_type,
+                        typed_arguments=action.typed_arguments.model_dump(mode="json"),
+                    )
+                )
                 self.budget = self.budget.model_copy(
                     update={"agent_steps": self.budget.agent_steps + 1}
                 )

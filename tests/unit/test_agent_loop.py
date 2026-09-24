@@ -166,17 +166,30 @@ def test_wall_budget_prevents_send():
         gate.reserve("plan")
 
 
-def test_only_one_format_retry_is_available_for_the_run():
+def test_each_call_kind_has_its_own_single_format_retry():
+    """case_0005: a diagnose retry used to consume the only retry, leaving the patch none."""
+    from gpu_agent.agent.models import AgentBudget
     from gpu_agent.agent.policy import LLMCallGate
     from gpu_agent.agent.provider import ProviderError
 
     gate = LLMCallGate()
     gate.reserve("plan")
     gate.reserve("plan", attempt=1)
-    gate.reserve("diagnose")
+    gate.reserve("plan")
     with pytest.raises(ProviderError, match="LLM_INVALID_OUTPUT"):
-        gate.reserve("diagnose", attempt=1)
-    assert gate.snapshot().llm_calls == 3
+        gate.reserve("plan", attempt=1)
+    gate.reserve("diagnose")
+    gate.reserve("diagnose", attempt=1)
+    gate.reserve("patch")
+    gate.reserve("patch", attempt=1)
+    with pytest.raises(ProviderError, match="LLM_INVALID_OUTPUT"):
+        gate.reserve("patch", attempt=1)
+    assert gate.snapshot().llm_calls == 7
+    # The total call bound still applies to retries.
+    bounded = LLMCallGate(AgentBudget(max_llm_calls=1))
+    bounded.reserve("patch")
+    with pytest.raises(ProviderError, match="AGENT_BUDGET_EXHAUSTED"):
+        bounded.reserve("patch", attempt=1)
 
 
 def test_zero_remaining_tool_timeout_is_typed():
@@ -230,3 +243,57 @@ def test_diagnosis_locations_must_match_tool_evidence(oob_service):
         update={"source_locations": [SourceLocation(path="kernel.cu", line=1)]}
     )
     assert not validate_diagnosis(result, public_evidence(service.store, run.id))
+
+
+def test_planner_sees_missing_evidence_executed_actions_and_last_rejection(oob_service):
+    """E gets controller progress each step; it still chooses the next action itself."""
+    from gpu_agent.agent.models import FinishAction, MemcheckAction
+
+    service, provider, source = oob_service
+    provider.actions = [MemcheckAction(), FinishAction(), FinishAction()]
+    run = service.diagnose(source)
+    states = [p["controller_state"] for p in provider.inputs if "controller_state" in p]
+    assert states[0]["missing_evidence"] == ["memcheck_outcome", "tool_finding"]
+    assert states[0]["executed_actions"] == [] and states[0]["rejected_previous_action"] == []
+    # After memcheck reported a finding, only documentation is missing before finishing.
+    assert states[1]["missing_evidence"] == ["documentation_for_finding"]
+    assert [a["action_type"] for a in states[1]["executed_actions"]] == ["run_memcheck"]
+    assert states[2]["rejected_previous_action"] == ["MANDATORY_EVIDENCE_MISSING"]
+    assert "MANDATORY_EVIDENCE_MISSING" in service.diagnosis(run.id).limitations
+
+
+def test_planner_state_lists_source_ranges_already_read(oob_service):
+    from gpu_agent.agent.models import InspectSourceAction, MemcheckAction, SourceArguments
+
+    service, provider, source = oob_service
+    scripted = type(provider).plan
+    states = []
+
+    def plan(self, evidence, budget, feedback=None, state=None):
+        states.append(state)
+        if len(states) == 1:
+            kernel_id = evidence.sources[0].source_id
+            return InspectSourceAction(
+                typed_arguments=SourceArguments(source_id=kernel_id, start_line=1, end_line=8)
+            )
+        return scripted(self, evidence, budget, feedback, state)
+
+    provider.plan = plan.__get__(provider)
+    provider.actions = [MemcheckAction()]
+    service.diagnose(source)
+    ranges = states[1].source_ranges_read
+    assert [(r.start_line, r.end_line) for r in ranges] == [(1, 8)]
+    assert [a.action_type for a in states[1].executed_actions] == ["inspect_source"]
+
+
+def test_missing_evidence_matches_the_finish_gate():
+    from gpu_agent.agent.models import AgentBudget, FinishAction, PublicEvidence
+    from gpu_agent.agent.policy import decide_action, missing_evidence
+    from gpu_agent.contracts import CurrentPhase
+
+    evidence = PublicEvidence()
+    decision = decide_action(
+        FinishAction(), evidence, AgentBudget(), CurrentPhase.DIAGNOSING, set()
+    )
+    assert missing_evidence(evidence) == ["memcheck_outcome", "tool_finding"]
+    assert decision.reason_codes == ["MANDATORY_EVIDENCE_MISSING"]

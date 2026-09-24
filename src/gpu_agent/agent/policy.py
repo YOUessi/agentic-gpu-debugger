@@ -12,6 +12,7 @@ from gpu_agent.agent.models import (
     AgentActionOutput,
     AgentBudget,
     DiagnosisResult,
+    MissingEvidence,
     PolicyDecision,
     ProviderError,
     PublicEvidence,
@@ -121,7 +122,8 @@ class LLMCallGate:
         self._lock = threading.Lock()
         self._calls = self._plans = 0
         self._diagnosed = self._patched = False
-        self._format_retried = False
+        # One format retry per call kind: a diagnose retry must not use up the patch's.
+        self._format_retried: set[CallKind] = set()
 
     def remaining(self) -> float:
         return max(0.0, self._budget.max_wall_time_seconds - (self._clock() - self._start))
@@ -139,7 +141,7 @@ class LLMCallGate:
 
     def reserve(self, kind: CallKind, *, attempt: int = 0) -> float:
         with self._lock:
-            if attempt not in {0, 1} or (attempt == 1 and self._format_retried):
+            if attempt not in {0, 1} or (attempt == 1 and kind in self._format_retried):
                 raise ProviderError("LLM_INVALID_OUTPUT")
             remaining = self.remaining()
             reserve = (
@@ -153,7 +155,8 @@ class LLMCallGate:
             self._plans += int(kind == "plan")
             self._diagnosed |= kind == "diagnose"
             self._patched |= kind == "patch"
-            self._format_retried |= attempt == 1
+            if attempt == 1:
+                self._format_retried.add(kind)
             return min(60.0, remaining)
 
 
@@ -167,6 +170,18 @@ SUPPORTED = {
     "finish_diagnosis",
     "declare_inconclusive",
 }
+
+
+def missing_evidence(evidence: PublicEvidence) -> list[MissingEvidence]:
+    """Evidence finish_diagnosis still lacks; the same rule decide_action enforces."""
+    missing: list[MissingEvidence] = []
+    if "memcheck" not in evidence.sanitizer_outcomes:
+        missing.append("memcheck_outcome")
+    if not evidence.tool_findings:
+        missing.append("tool_finding")
+    elif not evidence.documentation:
+        missing.append("documentation_for_finding")
+    return missing
 
 
 def decide_action(
@@ -191,9 +206,7 @@ def decide_action(
         reason = "ACTION_UNSUPPORTED"
     elif signature in seen:
         reason = "DUPLICATE_NO_BENEFIT"
-    elif action.action_type == "finish_diagnosis" and mandatory:
-        reason = "MANDATORY_EVIDENCE_MISSING"
-    elif action.action_type == "finish_diagnosis" and not evidence.tool_findings:
+    elif action.action_type == "finish_diagnosis" and missing_evidence(evidence):
         reason = "MANDATORY_EVIDENCE_MISSING"
     elif action.action_type in {"run_racecheck", "run_initcheck", "run_synccheck"} and (
         evidence.sanitizer_outcomes.get(SanitizerTool.MEMCHECK) != "CLEAN"
