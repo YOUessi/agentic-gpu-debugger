@@ -341,7 +341,13 @@ def test_invalid_patch_format_is_retried_only_once(provider_factory, diff):
             DiagnosisResult.inconclusive("TEST"),
         )
     assert len(calls) == 2 and provider.gate.snapshot().llm_calls == 2
-    assert "failed schema/scope validation" in calls[1]["instructions"]
+    if diff:
+        # Well-formed JSON whose diff is refused: the retry keeps the JSON envelope and
+        # names the fixed reason code.
+        assert "content was rejected (diff_header_invalid)" in calls[1]["instructions"]
+        assert '{"unified_diff": "..."}' in calls[1]["instructions"]
+    else:
+        assert "failed schema/scope validation" in calls[1]["instructions"]
     assert "257" not in calls[1]["instructions"]
 
 
@@ -400,6 +406,15 @@ def test_invalid_diagnosis_evidence_uses_the_single_format_retry(provider_factor
     assert result == corrected
     assert len(calls) == 2
     assert provider.gate.snapshot().llm_calls == 2
+    retry = calls[1]["instructions"]
+    assert "content was rejected (diagnose_policy_rejected)" in retry
+    assert "Keep exactly the same JSON object format" in retry
+    assert "unified_diff" not in retry
+    assert "each hunk" not in retry
+    assert "correct its format" not in retry
+    failed = [call for call in provider.invocations() if call.state == "FAILED"]
+    assert failed[0].output_diagnostics.failure_class == "DOMAIN_REJECTED"
+    assert failed[0].output_diagnostics.issues[0].type == "diagnose_policy_rejected"
 
 
 def test_real_sdk_offline_transport_sends_strict_schema_and_parses_result(store):

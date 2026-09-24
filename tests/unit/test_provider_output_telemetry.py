@@ -268,3 +268,144 @@ def test_development_paid_calls_are_refused_on_evaluation_bound_services(oob_ser
     )
     with pytest.raises(ValueError):
         service.allow_development_paid_calls(DevelopmentCallPolicy(max_llm_calls=40))
+
+
+_KERNEL = "__global__ void k(float* out, int n) {\n    int i = threadIdx.x;\n    out[i] = 0;\n}\n"
+
+
+def _patch_result(diff):
+    from gpu_agent.agent.provider import ResponseMetadata, SDKResult
+
+    return SDKResult(value={"unified_diff": diff}, metadata=ResponseMetadata(response_model="m"))
+
+
+def _patch_provider(store, port):
+    from gpu_agent.agent.policy import LLMCallGate
+    from gpu_agent.agent.provider import OpenAIProviderSettings, OpenAIResponsesProvider
+
+    run = store.create_run("patch-telemetry")
+    return OpenAIResponsesProvider(
+        OpenAIProviderSettings(
+            endpoint="https://api.openai.com/v1", model="m", api_key=SecretStr("k")
+        ),
+        LLMCallGate(),
+        store,
+        run.id,
+        port=port,
+    )
+
+
+def test_rejected_patch_records_a_value_free_reason_and_retries_with_it(store):
+    from gpu_agent.agent.models import DiagnosisResult, PublicSource
+
+    stale = (
+        "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -3 +3 @@\n-    out[i] = 1; // "
+        + CANARY
+        + "\n+    if (i < n) out[i] = 1;\n"
+    )
+    good = (
+        "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -3 +3 @@\n-    out[i] = 0;\n"
+        "+    if (i < n) out[i] = 0;\n"
+    )
+    port = _ScriptedPort([_patch_result(stale), _patch_result(good)])
+    provider = _patch_provider(store, port)
+    diff = provider.propose_patch(
+        PublicSource(source_id="a" * 32, content=_KERNEL), DiagnosisResult.inconclusive("T")
+    )
+    assert "if (i < n)" in diff
+    failed = [i for i in provider.invocations() if i.state == "FAILED"]
+    assert failed[0].output_diagnostics.failure_class == "DOMAIN_REJECTED"
+    assert [(x.loc, x.type) for x in failed[0].output_diagnostics.issues] == [
+        ("<patch>", "hunk_context_not_found")
+    ]
+    assert CANARY not in failed[0].model_dump_json()
+    assert port.requests[1].correction_hints == ["<patch>: hunk_context_not_found"]
+
+
+def test_missing_final_newline_is_reported_as_a_hunk_line_problem():
+    from gpu_agent.patching import normalize_unified_diff_offsets, patch_rejection_code
+
+    no_newline = "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -3 +3 @@\n-    out[i] = 0;\n+    x;"
+    with pytest.raises(ValueError) as rejected:
+        normalize_unified_diff_offsets(_KERNEL, no_newline)
+    assert patch_rejection_code(rejected.value) == "hunk_line_invalid"
+    assert patch_rejection_code(ValueError("anything else " + CANARY)) == "patch_invalid"
+
+
+def test_domain_rejection_retry_keeps_the_json_envelope():
+    """A content rejection must not instruct the model to replace its JSON envelope."""
+    from gpu_agent.agent.provider import correction_text
+
+    domain = correction_text("patch", ["<patch>: hunk_context_not_found"])
+    assert "correct its format" not in domain
+    assert '{"unified_diff": "..."}' in domain and "copied exactly" in domain
+    schema = correction_text("plan", ["action.extra: extra_forbidden"])
+    assert "correct its format" in schema and "action.extra: extra_forbidden" in schema
+
+
+def test_worker_sends_domain_retry_text_for_patch(monkeypatch):
+    from gpu_agent.agent.provider import WorkerRequest, invoke_sdk
+
+    factory, calls = _deepseek_client([json.dumps({"unified_diff": "--- a/kernel.cu\n"})])
+    request = WorkerRequest(
+        endpoint="https://api.deepseek.com",
+        model="deepseek-test",
+        api_key=SecretStr("secret-canary"),
+        kind="patch",
+        payload={"public_source": {}},
+        client_request_id="b" * 32,
+        timeout_seconds=30,
+        attempt=1,
+        correction_hints=["<patch>: hunk_line_invalid"],
+    )
+    invoke_sdk(request, factory)
+    assert "correct JSON format" in calls[0]["instructions"]
+    assert "including the last line" in calls[0]["instructions"]
+
+
+@pytest.mark.parametrize("reason", [CANARY, "include_changed " + CANARY, [CANARY], None])
+def test_domain_reason_only_accepts_fixed_codes(reason):
+    from gpu_agent.agent.provider import _domain_reason
+
+    assert _domain_reason("patch", reason) == "patch_invalid"
+    assert _domain_reason("diagnose", reason) == "diagnose_policy_rejected"
+    assert _domain_reason("plan", reason) == "plan_policy_rejected"
+    assert _domain_reason("diagnose", "include_changed") == "diagnose_policy_rejected"
+
+
+def test_domain_retry_sanitizes_unknown_codes_even_in_mixed_hints():
+    from gpu_agent.agent.provider import correction_text
+
+    for hints in (["<patch>: " + CANARY], ["<patch>: " + CANARY, "unified_diff: too_short"]):
+        text = correction_text("patch", hints)
+        assert CANARY not in text
+        assert "patch_invalid" in text
+    diagnosis = correction_text("diagnose", ["<diagnose>: include_changed"])
+    assert "diagnose_policy_rejected" in diagnosis
+    assert "unified_diff" not in diagnosis
+    assert "include_changed" not in diagnosis
+
+
+def test_unknown_validator_error_never_reaches_telemetry_or_retry(store):
+    from gpu_agent.agent.models import DiagnosisResult, ProviderError, PublicSource
+
+    good = (
+        "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -3 +3 @@\n-    out[i] = 0;\n"
+        "+    if (i < n) out[i] = 0;\n"
+    )
+    port = _ScriptedPort([_patch_result(good), _patch_result(good)])
+    provider = _patch_provider(store, port)
+
+    def reject(_diff):
+        raise ValueError(CANARY)
+
+    provider._diff_validator = reject
+    with pytest.raises(ProviderError, match="LLM_INVALID_OUTPUT"):
+        provider.propose_patch(
+            PublicSource(source_id="a" * 32, content=_KERNEL), DiagnosisResult.inconclusive("T")
+        )
+    assert len(port.requests) == 2
+    assert port.requests[1].correction_hints == ["<patch>: patch_invalid"]
+    for call in provider.invocations():
+        assert CANARY not in call.model_dump_json()
+        assert call.output_diagnostics.issues[0].type == "patch_invalid"

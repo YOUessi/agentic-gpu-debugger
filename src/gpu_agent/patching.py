@@ -133,6 +133,35 @@ def _apply(source: bytes, diff: str) -> tuple[bytes, dict[int, int | None]]:
     return patched.encode(), mapping
 
 
+# Fixed ValueError messages raised while checking a generated diff, mapped to value-free
+# reason codes. Provider telemetry and correction hints carry only these codes, never the
+# model output, so the reason a patch was refused is visible without storing its text.
+PATCH_REJECTION_CODES = {
+    "only existing kernel.cu unified diffs are supported": "diff_header_invalid",
+    "invalid unified diff": "diff_header_invalid",
+    "unsupported hunk header": "hunk_header_invalid",
+    "unsupported hunk content": "hunk_line_invalid",
+    "hunk context does not have one unique exact location": "hunk_context_not_found",
+    "hunk context mismatch": "hunk_context_mismatch",
+    "hunk line count mismatch": "hunk_line_count_mismatch",
+    "overlapping or out of range hunk": "hunk_out_of_range",
+    "new hunk offset mismatch": "hunk_offset_mismatch",
+    "empty candidate": "diff_empty",
+    "unsupported patch encoding or size": "diff_encoding_or_size",
+    "include directives cannot change": "include_changed",
+    "generated patch retains a fixed input length": "fixed_input_length",
+    "M1 allows only kernel.cu": "file_outside_scope",
+    "unsupported preprocessing syntax": "unsupported_syntax",
+    "unterminated block comment": "unsupported_syntax",
+    "raw string literals are outside the supported patch subset": "unsupported_syntax",
+    "unterminated literal": "unsupported_syntax",
+}
+
+
+def patch_rejection_code(exc: Exception) -> str:
+    return PATCH_REJECTION_CODES.get(str(exc), "patch_invalid")
+
+
 def normalize_unified_diff_offsets(source: str, diff: str) -> str:
     """Repair only hunk coordinates/counts from one unique exact source context."""
     lines = diff.splitlines(keepends=True)

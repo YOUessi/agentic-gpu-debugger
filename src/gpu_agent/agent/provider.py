@@ -29,7 +29,11 @@ from gpu_agent.agent.policy import CallKind, LLMCallGate, validate_diagnosis
 from gpu_agent.agent.prompts import PROMPT_VERSION, PROMPTS
 from gpu_agent.contracts import new_id, now
 from gpu_agent.execution.models import ExecutionModel
-from gpu_agent.patching import normalize_unified_diff_offsets
+from gpu_agent.patching import (
+    PATCH_REJECTION_CODES,
+    normalize_unified_diff_offsets,
+    patch_rejection_code,
+)
 from gpu_agent.store import RunStore
 
 __all__ = [
@@ -121,6 +125,69 @@ def validation_issues(exc: ValidationError) -> list[ValidationIssue]:
             )
         )
     return issues
+
+
+PATCH_REPAIR_HINTS = {
+    "hunk_context_not_found": "each hunk's context and '-' lines must be copied exactly, "
+    "character for character, from the supplied kernel.cu",
+    "hunk_context_mismatch": "each hunk's context and '-' lines must be copied exactly, "
+    "character for character, from the supplied kernel.cu",
+    "hunk_line_invalid": "every hunk line must start with ' ', '+' or '-' and end with a "
+    "newline, including the last line",
+    "hunk_header_invalid": "each hunk must start with a header like '@@ -12,3 +12,4 @@'",
+    "diff_header_invalid": "the diff must start with '--- a/kernel.cu' then '+++ b/kernel.cu'",
+    "include_changed": "do not add, remove or change #include lines",
+    "fixed_input_length": "do not restrict the accepted input length to a fixed value",
+    "file_outside_scope": "change only kernel.cu",
+}
+
+
+def _domain_reason(kind: "CallKind", reason: object) -> str:
+    """Only controller-owned, value-free codes may enter domain telemetry or prompts."""
+    fallback = "patch_invalid" if kind == "patch" else f"{kind}_policy_rejected"
+    allowed = set(PATCH_REJECTION_CODES.values()) if kind == "patch" else {fallback}
+    return reason if isinstance(reason, str) and reason in allowed else fallback
+
+
+def correction_text(kind: "CallKind", hints: list[str]) -> str:
+    """Retry instruction built only from fixed codes.
+
+    A domain rejection means the JSON was well formed but its content was refused.
+    Preserve the envelope explicitly rather than suggesting a format change.
+    """
+    prefix = f"<{kind}>: "
+    hints = [
+        prefix + _domain_reason(kind, hint.removeprefix(prefix))
+        if hint.startswith(prefix)
+        else hint
+        for hint in hints
+    ]
+    domain = [hint.removeprefix(prefix) for hint in hints if hint.startswith(prefix)]
+    if hints and len(domain) == len(hints):
+        text = (
+            "\nThe previous output had the correct JSON format but its content was rejected "
+            f"({', '.join(domain)}). Keep exactly the same JSON object format"
+        )
+        if kind == "patch":
+            text += ' {"unified_diff": "..."}'
+            fixes = list(
+                dict.fromkeys(PATCH_REPAIR_HINTS[c] for c in domain if c in PATCH_REPAIR_HINTS)
+            )
+            if fixes:
+                text += "; " + "; ".join(fixes)
+        return text + "."
+    text = "\nPrevious output failed schema/scope validation; correct its format."
+    if hints:
+        text += " Rejected fields: " + "; ".join(hints) + "."
+    return text
+
+
+class _DomainRejected(ProviderError):
+    """Well-formed output refused by a domain check; `reason` is a fixed value-free code."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__("LLM_INVALID_OUTPUT", state="FAILED")
+        self.reason = _domain_reason("patch", reason)
 
 
 def correction_hints(diagnostics: "OutputDiagnostics | None") -> list[str]:
@@ -322,11 +389,9 @@ def invoke_sdk(
             timeout=request.timeout_seconds,
             max_retries=0,
         )
-        correction = ""
-        if request.attempt:
-            correction = "\nPrevious output failed schema/scope validation; correct its format."
-            if request.correction_hints:
-                correction += " Rejected fields: " + "; ".join(request.correction_hints) + "."
+        correction = (
+            correction_text(request.kind, request.correction_hints) if request.attempt else ""
+        )
         instructions = PROMPTS[request.kind] + correction
         common = {
             "model": request.model,
@@ -652,13 +717,14 @@ class OpenAIResponsesProvider:
                 if validate is not None:
                     try:
                         value = validate(value)
-                    except ProviderError:
+                    except ProviderError as rejected:
+                        reason = _domain_reason(
+                            kind, rejected.reason if isinstance(rejected, _DomainRejected) else None
+                        )
                         diagnostics = (diagnostics or OutputDiagnostics()).model_copy(
                             update={
                                 "failure_class": "DOMAIN_REJECTED",
-                                "issues": [
-                                    ValidationIssue(loc=f"<{kind}>", type=f"{kind}_policy_rejected")
-                                ],
+                                "issues": [ValidationIssue(loc=f"<{kind}>", type=reason)],
                             }
                         )
                         raise
@@ -740,8 +806,8 @@ class OpenAIResponsesProvider:
                 )
                 if self._diff_validator is not None:
                     self._diff_validator(normalized)
-            except ValueError:
-                raise ProviderError("LLM_INVALID_OUTPUT", state="FAILED") from None
+            except ValueError as exc:
+                raise _DomainRejected(patch_rejection_code(exc)) from None
             return value.model_copy(update={"unified_diff": normalized})
 
         return self._call(
