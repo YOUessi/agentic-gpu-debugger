@@ -33,6 +33,7 @@ def main() -> None:
     parser.add_argument("--knowledge-index", type=Path, required=True)
     parser.add_argument("--expected-corpus-hash", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--verification-mode", choices=("standard", "full"), default="full")
     args = parser.parse_args()
     repo = args.repository.resolve()
     snapshot = capture_repository_snapshot(repo)
@@ -76,6 +77,7 @@ def main() -> None:
             cost_policy="record_only",
             units=keys,
             attempts_per_unit=1,
+            verification_mode=args.verification_mode,
         ),
     )
     with (root / "results.jsonl").open("x") as stream:
@@ -116,7 +118,9 @@ def main() -> None:
             verification, verification_id = None, None
             if candidates:
                 print(f"GPU VERIFY run={run.id}", flush=True)
-                verification, verification_id = service.verify_exact(run.id)
+                verification, verification_id = service.verify_exact(
+                    run.id, strict=args.verification_mode == "full"
+                )
             calls = service.provider_invocations(run.id)
             row = dict(
                 case_id=case_id,

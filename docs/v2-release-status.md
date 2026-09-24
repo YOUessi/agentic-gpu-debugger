@@ -15,11 +15,31 @@ work. A passing unit test or a configured command is not counted as a live GPU/m
 - T10 foundation: native validation, crash-safe corpus ledger, registration gates, and public
   seed batch evidence. The current final family does not yet contain the required membership.
 
+## Development evidence is not the final release evidence
+
+- The 9d75699 development evaluation completed 240 units. Its failures remain part of
+  that baseline; selected regression successes from later code versions are not merged
+  into its scores.
+- At f81052a the remaining case_0006/C regression passed native verification, while
+  case_0015/E still failed. The v7 attempt at 0a56f08 diagnosed that unit but rejected both
+  generated patches under the new caller-mask source contract (8 calls / 24,443 tokens).
+- The subsequent v8 implementation adds controller-computed counterexamples to the existing
+  single patch retry. It does not supply a reference fix or add another repair loop.
+- At cdd629f, case_0015/E/repeat=1 passed both standard and full/strict native verification:
+  all four Sanitizers CLEAN, VERIFIED_FIXED. Diagnosis run 06b852e8d5a7423397d49fd66a3d4927;
+  strict verification run 3889794668a3aa5afeb1f919efc2fffa. The model produced the correct
+  candidate on its first patch call, so this run does not demonstrate the causal benefit of
+  counterexample feedback. Eight calls / 23,579 tokens; no previously successful unit rerun.
+- The current retrieval corpus is 2026-09-24.2 (79 unchanged verified chunks, cuda-lex-v3).
+  The five newly added queries now have chunk-level labels and achieve 5/5; overall lexical
+  retrieval remains 17/29, not a claim of perfect retrieval. Annotation provenance is mixed.
+- See [the sync/retrieval repair record](sync-participation-review-CN.md) for code boundaries,
+  historical disagreements, tests, and native regression evidence.
+
 ## Implemented release code awaiting final live evidence
 
-- Deterministic lexical, vector-cosine semantic, and hybrid retrieval comparison over 24
-  public development labels. Lexical remains the default because it scored highest on this
-  frozen development set.
+- Deterministic lexical, vector-cosine semantic, and hybrid retrieval comparison over 29
+  public development labels. Lexical remains the default; labels are never ranking inputs.
 - External Ed25519 schedule-authority client and production family public-key provisioning.
 - Reviewed pricing attestation bound to repository commit, provider, model, prompt, and source
   content hash.
@@ -35,7 +55,7 @@ work. A passing unit test or a configured command is not counted as a live GPU/m
 - Resumable evaluator-only scoring for one exact 120-record label package, canonical selection
   freezing from four explicit roots, and no-replace publication outside the checkout/RunStores.
 - A production operator sequence for the external Ed25519 signer, family provisioning, 16+8
-  registration, explicit budget approval, 240+120 execution, scoring, freezing, and release.
+  registration, authorized record-only provider use, 240+120 execution, scoring, freezing, and release.
 - Python 3.11/3.12 zero-cost CI, MIT distribution metadata, and verified sdist/wheel resources.
 
 The detailed sequence is [the V2 production evidence operator runbook](v2-operator-runbook.md).
@@ -44,12 +64,14 @@ no production signer or private key.
 
 ## Hard blockers before Portfolio Release
 
-- Freeze and real-GPU validate/register 16 public cases, at least four per Sanitizer family.
+- On the final frozen commit, real-GPU validate/register 16 public cases, at least four per
+  Sanitizer family. Earlier-commit registrations do not establish final-commit membership.
 - Create, validate, and register eight evaluator-only holdout cases using distinct private
   template/operator identities; no private source or identity may enter Git/public output.
 - Record at least one final-commit multi-step Agent investigation satisfying T08.
 - Freeze the clean repository commit, corpus cutoff, toolchain, prompt, model configuration,
-  reviewed price source, total cost cap, unit cap, and signed development/holdout schedules.
+  reviewed price source for accounting, record-only cost policy, and signed development/holdout
+  schedules. There are no dollar caps or balance-based stops.
 - Execute all 360 A–E units serially, retaining failures, timeouts, inconclusive results,
   provider usage, latency, and cost.
 - Supply the canonical 120-record evaluator label package, complete blind scoring/private score
