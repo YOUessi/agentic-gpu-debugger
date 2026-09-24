@@ -8,19 +8,24 @@ from typer.testing import CliRunner
 
 def test_fake_diagnose_single_candidate_verify_and_report(oob_service, monkeypatch):
     from gpu_agent.execution.isolated import IsolatedGPUBackend
-    from gpu_agent.execution.models import BackendInfrastructureError
+    from gpu_agent.execution.process import ProcessCapture
 
-    def unavailable(self):
-        raise BackendInfrastructureError("CONTAINER_UNAVAILABLE")
+    calls = []
 
-    # The diagnosis is synthetic. Make the verifier's unavailable runtime explicit,
-    # independent of whether the developer machine happens to have Docker/GPU.
-    monkeypatch.setattr(IsolatedGPUBackend, "_attest_runtime", unavailable)
+    def unavailable(self, path, operation, timeout, *, stdin=b"", cancel=None):
+        calls.append(operation)
+        return ProcessCapture(None, b"", b"", False, tool_error="CONTAINER_UNAVAILABLE"), b"", b""
+
     service, provider, source = oob_service
     run = service.diagnose(source)
     candidate_id = service.candidates(run.id)[0]
+    # This synthetic run is unbound, so prepare skips runtime attestation.
+    # Block the container boundary itself, after the fake diagnosis has finished,
+    # to ensure this offline test never starts a real GPU/container operation.
+    monkeypatch.setattr(IsolatedGPUBackend, "_container", unavailable)
     result = service.verify(run.id, candidate_id)
-    assert result.verdict.value == "INCONCLUSIVE"  # Fake baseline cannot attest GPU execution.
+    assert result.verdict.value == "INCONCLUSIVE"  # Explicitly unavailable verifier runtime.
+    assert calls == ["build"]
     assert len(service.candidates(run.id)) == 1
     assert provider.kinds.count("patch") == 1
     report = service.report(run.id)

@@ -387,6 +387,8 @@ def test_atomic_writer_rejects_missing_or_unsafe_parent(tmp_path, parent_state):
     elif parent_state == "public-mode":
         parent = tmp_path / "public-parent"
         parent.mkdir(mode=0o755)
+        # Exercise the unsafe permission state even under an owner-only umask.
+        parent.chmod(0o755)
     else:
         target = _secure_parent(tmp_path)
         parent = tmp_path / "linked-parent"
