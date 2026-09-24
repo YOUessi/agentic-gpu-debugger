@@ -33,10 +33,12 @@ from gpu_agent.contracts import new_id, now
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.patching import (
     PATCH_REJECTION_CODES,
+    SyncCallerViolation,
     normalize_unified_diff_offsets,
     patch_rejection_code,
 )
 from gpu_agent.store import RunStore
+from gpu_agent.sync_participation import SyncCounterexample
 
 __all__ = [
     "ProviderError",
@@ -134,7 +136,7 @@ def normalize_output_value(
 
 
 class OutputDiagnostics(ExecutionModel):
-    """Bounded, value-free telemetry for a rejected or accepted model output."""
+    """Bounded telemetry, with optional controller-computed numeric counterexample."""
 
     failure_class: (
         Literal["NO_OUTPUT_TEXT", "NOT_JSON", "SCHEMA_INVALID", "DOMAIN_REJECTED"] | None
@@ -145,6 +147,7 @@ class OutputDiagnostics(ExecutionModel):
     # Auditable wrapper repairs applied before validation. output_sha256 always hashes the
     # raw text as received; the full schema, scope and source-match checks still run after.
     normalizations: list[OutputNormalization] = Field(default_factory=list, max_length=4)
+    sync_counterexample: SyncCounterexample | None = None
 
 
 _CONSTRAINT_KEYS = ("max_length", "min_length", "pattern", "ge", "gt", "le", "lt", "expected")
@@ -244,9 +247,10 @@ def correction_text(kind: "CallKind", hints: list[str]) -> str:
 class _DomainRejected(ProviderError):
     """Well-formed output refused by a domain check; `reason` is a fixed value-free code."""
 
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, counterexample: SyncCounterexample | None = None) -> None:
         super().__init__("LLM_INVALID_OUTPUT", state="FAILED")
         self.reason = _domain_reason("patch", reason)
+        self.counterexample = counterexample
 
 
 def correction_hints(diagnostics: "OutputDiagnostics | None") -> list[str]:
@@ -840,6 +844,9 @@ class OpenAIResponsesProvider:
                             update={
                                 "failure_class": "DOMAIN_REJECTED",
                                 "issues": [ValidationIssue(loc=f"<{kind}>", type=reason)],
+                                "sync_counterexample": rejected.counterexample
+                                if isinstance(rejected, _DomainRejected)
+                                else None,
                             }
                         )
                         raise
@@ -873,6 +880,13 @@ class OpenAIResponsesProvider:
                 raise error
             previous = invocation.invocation_id
             hints = correction_hints(diagnostics)
+            if kind == "patch" and diagnostics is not None and diagnostics.sync_counterexample:
+                payload = {
+                    **payload,
+                    "patch_validation_counterexample": diagnostics.sync_counterexample.model_dump(
+                        mode="json"
+                    ),
+                }
         raise AssertionError("bounded request loop")
 
     def plan(
@@ -926,7 +940,10 @@ class OpenAIResponsesProvider:
                 if self._diff_validator is not None:
                     self._diff_validator(normalized)
             except ValueError as exc:
-                raise _DomainRejected(patch_rejection_code(exc)) from None
+                raise _DomainRejected(
+                    patch_rejection_code(exc),
+                    exc.counterexample if isinstance(exc, SyncCallerViolation) else None,
+                ) from None
             return value.model_copy(update={"unified_diff": normalized})
 
         return self._call(

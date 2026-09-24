@@ -373,6 +373,56 @@ def test_diff_scope_validator_runs_before_acceptance(provider_factory):
     assert "private host error details" not in str(calls)
 
 
+def test_patch_retry_receives_computed_counterexample_not_reference_fix(provider_factory, tmp_path):
+    import difflib
+    import hashlib
+    import json
+
+    from gpu_agent.agent.models import DiagnosisResult, PublicSource
+    from gpu_agent.patching import SourceSnapshot, apply_generated_candidate
+
+    original = (
+        "__global__ void k(){if(threadIdx.x < 8U) __syncwarp(15U);}\nvoid h(){k<<<1,32>>>();}\n"
+    )
+    bad = original.replace("< 8U", "< 16U")
+    good = original.replace("< 8U", "< 4U")
+
+    def diff(text):
+        return "".join(
+            difflib.unified_diff(
+                original.splitlines(True), text.splitlines(True), "a/kernel.cu", "b/kernel.cu"
+            )
+        )
+
+    (tmp_path / "kernel.cu").write_text(original)
+    snapshot = SourceSnapshot(
+        parent_run_id="a" * 32,
+        root=tmp_path,
+        hashes={"kernel.cu": hashlib.sha256(original.encode()).hexdigest()},
+    )
+    provider, calls, _ = provider_factory(
+        [
+            response({"unified_diff": diff(bad)}),
+            response({"unified_diff": diff(good)}),
+        ]
+    )
+    provider._diff_validator = lambda value: apply_generated_candidate(snapshot, value)
+    assert provider.propose_patch(
+        PublicSource(source_id="a" * 32, content=original), DiagnosisResult.inconclusive("TEST")
+    ) == diff(good)
+    first = json.loads(calls[0]["input"])["untrusted_data"]
+    retry = json.loads(calls[1]["input"])["untrusted_data"]
+    assert "patch_validation_counterexample" not in first
+    witness = retry["patch_validation_counterexample"]
+    assert witness["source_sha256"] == hashlib.sha256(bad.encode()).hexdigest()
+    assert witness["thread_index"] == witness["lane_id"] == 4
+    assert witness["mask"] == 15 and witness["mask"] & (1 << witness["lane_id"]) == 0
+    assert "fix" not in witness and "expected" not in witness and "case_id" not in witness
+    failed = [i for i in provider.invocations() if i.state == "FAILED"]
+    assert failed[0].output_diagnostics.sync_counterexample.model_dump() == witness
+    assert len(calls) == 2
+
+
 def test_model_patch_unique_context_repairs_only_hunk_offsets(provider_factory):
     from gpu_agent.agent.models import DiagnosisResult, PublicSource
 

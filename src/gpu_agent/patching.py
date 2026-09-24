@@ -12,7 +12,7 @@ from pydantic import Field
 from gpu_agent.contracts import new_id, now
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.store import read_regular, reject_symlinks
-from gpu_agent.sync_participation import caller_mask_violation
+from gpu_agent.sync_participation import SyncCounterexample, caller_mask_counterexample
 
 
 class SourceSnapshot(ExecutionModel):
@@ -315,6 +315,12 @@ def apply_candidate(
     )
 
 
+class SyncCallerViolation(ValueError):
+    def __init__(self, counterexample: SyncCounterexample) -> None:
+        super().__init__("executing sync caller is absent from its mask")
+        self.counterexample = counterexample
+
+
 def apply_generated_candidate(source_snapshot: SourceSnapshot, diff: str) -> PatchCandidate:
     """Apply agent output plus the public anti-overfitting contract for vector length."""
     candidate = apply_candidate(source_snapshot, diff, ["kernel.cu"])
@@ -323,8 +329,8 @@ def apply_generated_candidate(source_snapshot: SourceSnapshot, diff: str) -> Pat
     text = patched.decode("utf-8")
     if re.search(r"^[ \t]*if\s*\([^\n)]*\bn\s*!=\s*\d+[uUlL]*\b", text, re.MULTILINE):
         raise ValueError("generated patch retains a fixed input length")
-    if caller_mask_violation(text):
-        raise ValueError("executing sync caller is absent from its mask")
+    if counterexample := caller_mask_counterexample(text):
+        raise SyncCallerViolation(counterexample)
     return candidate
 
 

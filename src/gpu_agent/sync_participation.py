@@ -19,9 +19,12 @@ violation. Arrival/liveness uncertainty cannot reject a patch. GPU verification 
 independent, and compiler-eliminated calls can differ from the source contract.
 """
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 SiteStatus = Literal["CONSISTENT", "MISMATCH", "UNANALYZABLE"]
 
@@ -54,6 +57,30 @@ _FULL = 0xFFFFFFFF
 _MAX_BLOCK = 1024
 
 
+class SyncCounterexample(BaseModel):
+    """Controller-computed numeric witness; no repair, label or arbitrary text."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    line: int = Field(ge=1)
+    intrinsic: str = Field(max_length=32)
+    block_size: int = Field(ge=1, le=1024)
+    thread_index: int = Field(ge=0, lt=1024)
+    lane_id: int = Field(ge=0, lt=32)
+    mask: int = Field(ge=0, le=0xFFFFFFFF)
+
+    @model_validator(mode="after")
+    def valid_counterexample(self) -> "SyncCounterexample":
+        if (
+            self.intrinsic not in WARP_INTRINSICS
+            or self.thread_index >= self.block_size
+            or self.lane_id != self.thread_index % 32
+            or self.mask & (1 << self.lane_id)
+        ):
+            raise ValueError("not a caller-mask counterexample")
+        return self
+
+
 @dataclass(frozen=True)
 class SiteResult:
     function: str
@@ -61,6 +88,7 @@ class SiteResult:
     intrinsic: str
     status: SiteStatus
     reason: str = ""
+    counterexample: SyncCounterexample | None = None
 
 
 class _Unknown(Exception):
@@ -646,7 +674,12 @@ def _launch_blocks(toks: list[_Tok], constants: dict[str, int]) -> dict[str, lis
 
 
 def _judge(
-    fn: _Function, site: _Site, launches: list[int | None], consts: dict[str, int]
+    fn: _Function,
+    site: _Site,
+    launches: list[int | None],
+    consts: dict[str, int],
+    source_hash: str,
+    witnesses: list[SyncCounterexample],
 ) -> tuple[SiteStatus, str]:
     blocks = [block for block in launches if block is not None]
     if fn.opaque or not fn.is_kernel or not blocks or len(blocks) != len(launches):
@@ -666,6 +699,17 @@ def _judge(
             for t in executing:
                 mask = _Expr(site.mask, env, t).value()
                 if not mask >> (t % 32) & 1:
+                    witnesses.append(
+                        SyncCounterexample(
+                            source_sha256=source_hash,
+                            line=site.line,
+                            intrinsic=site.intrinsic,
+                            block_size=block,
+                            thread_index=t,
+                            lane_id=t % 32,
+                            mask=mask,
+                        )
+                    )
                     return "MISMATCH", "caller_not_in_mask"
                 for other in _warp_of(t, block):
                     if not mask >> (other % 32) & 1 or not env.alive(site.order, other):
@@ -710,8 +754,25 @@ def analyze(source: str) -> list[SiteResult]:
         except (_Unknown, IndexError, RecursionError):
             fn.opaque = True
         for site in fn.sites:
-            status, reason = _judge(fn, site, launches.get(fn.name, []), constants)
-            results.append(SiteResult(fn.name, site.line, site.intrinsic, status, reason))
+            witnesses: list[SyncCounterexample] = []
+            status, reason = _judge(
+                fn,
+                site,
+                launches.get(fn.name, []),
+                constants,
+                hashlib.sha256(source.encode()).hexdigest(),
+                witnesses,
+            )
+            results.append(
+                SiteResult(
+                    fn.name,
+                    site.line,
+                    site.intrinsic,
+                    status,
+                    reason,
+                    witnesses[0] if witnesses else None,
+                )
+            )
     return results
 
 
@@ -727,3 +788,7 @@ def caller_mask_violation(source: str) -> bool:
     dynamic liveness. This is independent of whether nvcc eliminates a call.
     """
     return any(r.reason == "caller_not_in_mask" for r in analyze(source))
+
+
+def caller_mask_counterexample(source: str) -> SyncCounterexample | None:
+    return next((r.counterexample for r in analyze(source) if r.counterexample is not None), None)

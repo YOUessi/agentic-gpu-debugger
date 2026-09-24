@@ -84,7 +84,17 @@ def audit(root: Path) -> dict[str, Any]:
                     "parent_run_id": manifest.get("parent_run_id"),
                     "original": _summary(source.decode("utf-8", errors="replace")),
                     "patched": _summary(patched) if patched is not None else "NOT_APPLICABLE",
-                    "sites": [asdict(site) for site in analyze(patched)] if patched else [],
+                    "sites": [
+                        {
+                            **asdict(site),
+                            "counterexample": site.counterexample.model_dump()
+                            if site.counterexample
+                            else None,
+                        }
+                        for site in analyze(patched)
+                    ]
+                    if patched
+                    else [],
                     "verdict": result.get("verdict") if result else None,
                     "synccheck": (result.get("check_outcomes") or {}).get("synccheck")
                     if result

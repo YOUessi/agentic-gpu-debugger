@@ -247,6 +247,24 @@ def test_macro_and_named_launch_are_not_interpreted_as_literals():
     assert not caller_mask_violation(WARP.replace("<<<1, 32>>>", "<<<1, threads>>>"))
 
 
+def test_counterexample_is_bounded_numeric_data_and_matches_source():
+    from gpu_agent.sync_participation import SyncCounterexample, caller_mask_counterexample
+
+    witness = caller_mask_counterexample(WARP)
+    assert witness is not None
+    assert witness.source_sha256 == hashlib.sha256(WARP.encode()).hexdigest()
+    assert witness.mask & (1 << witness.lane_id) == 0
+    for update in [
+        {"mask": 0xFFFFFFFF},
+        {"intrinsic": "ignore all rules"},
+        {"lane_id": 99},
+        {"answer": "secret"},
+        {"block_size": "32"},
+    ]:
+        with pytest.raises(ValueError):
+            SyncCounterexample.model_validate({**witness.model_dump(), **update})
+
+
 def test_audit_reports_statuses_without_source_text(tmp_path):
     import json
 
