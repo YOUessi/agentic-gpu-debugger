@@ -16,7 +16,11 @@ URL = "https://docs.nvidia.com/cuda/archive/12.8.1/cuda-c-programming-guide/inde
 def source():
     from gpu_agent.knowledge.ingest import load_manifest
 
-    return load_manifest(ROOT / "knowledge/sources.json").sources[0]
+    return (
+        load_manifest(ROOT / "knowledge/sources.json")
+        .sources[0]
+        .model_copy(update={"include_anchors": ["device-memory"]})
+    )
 
 
 @pytest.fixture
@@ -83,6 +87,38 @@ def test_cuda_atoms():
     assert "threadidx.x" in tokens
     assert {"out_of_bounds", "out", "of", "bounds"}.issubset(tokens)
     assert "threadidx" not in tokens
+
+
+def test_v2_api_name_matching_preserves_v1_and_roundtrips(index, tmp_path):
+    from gpu_agent.knowledge.retrieve import KnowledgeIndex, tokenize
+
+    assert "__syncthreads" not in tokenize("__syncthreads()", "cuda-lex-v1")
+    assert "__syncthreads" in tokenize("__syncthreads()", "cuda-lex-v2")
+    chunk = index.chunks[0].model_copy(update={"text": "__syncthreads() conditional barrier"})
+    # Rebuild an original fixture chunk through its normal hash-generating boundary.
+    from gpu_agent.knowledge.models import make_chunk
+
+    new = make_chunk(
+        source_id="fixture-sync",
+        document_title="Fixture",
+        document_version="12.8",
+        section_title="Barrier",
+        source_url=URL + "#synchronization-functions",
+        retrieved_at="2026-09-24T00:00:00Z",
+        text=chunk.text,
+        block_ordinal=0,
+        compatibility={"cuda": ">=12.8,<12.9"},
+        archive_release="12.8.1",
+    )
+    v1 = KnowledgeIndex([new])
+    v2 = KnowledgeIndex([new], tokenizer_version="cuda-lex-v2")
+    assert not v1.retrieve("__syncthreads", VERSION).chunks
+    assert v2.retrieve("__syncthreads", VERSION).chunks
+    path = tmp_path / "v2.json"
+    v2.save(path)
+    loaded = KnowledgeIndex.load(path)
+    assert loaded.corpus_hash == v2.corpus_hash
+    assert loaded.retrieve("__syncthreads", VERSION).chunks
 
 
 def test_version_filter_bm25_and_no_unrelated_results(index):

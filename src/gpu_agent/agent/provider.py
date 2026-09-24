@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from collections.abc import Callable
 from datetime import datetime
@@ -99,6 +100,39 @@ class ValidationIssue(ExecutionModel):
     constraint: str | None = Field(default=None, max_length=200)
 
 
+OutputNormalization = Literal["json_code_fence_removed", "diff_final_newline_added"]
+
+# One complete fence pair around the whole output (```json ... ``` or ``` ... ```).
+_SINGLE_FENCE = re.compile(r"\A\s*```(?:json)?[ \t]*\n(?P<body>.*)\n[ \t]*```\s*\Z", re.DOTALL)
+
+
+def unwrap_json_fence(text: str) -> str | None:
+    """Return the body of exactly one outer code fence that holds one JSON object."""
+    match = _SINGLE_FENCE.match(text)
+    if match is None or "```" in match["body"]:
+        return None
+    try:
+        decoded = json.loads(match["body"])
+    except json.JSONDecodeError:
+        return None
+    return match["body"] if isinstance(decoded, dict) else None
+
+
+def normalize_output_value(
+    kind: "CallKind", value: object
+) -> tuple[object, list[OutputNormalization]]:
+    """Repair only the diff's missing final newline; the diff content is never altered."""
+    if (
+        kind == "patch"
+        and isinstance(value, dict)
+        and isinstance(value.get("unified_diff"), str)
+        and value["unified_diff"]
+        and not value["unified_diff"].endswith("\n")
+    ):
+        return {**value, "unified_diff": value["unified_diff"] + "\n"}, ["diff_final_newline_added"]
+    return value, []
+
+
 class OutputDiagnostics(ExecutionModel):
     """Bounded, value-free telemetry for a rejected or accepted model output."""
 
@@ -108,6 +142,9 @@ class OutputDiagnostics(ExecutionModel):
     output_chars: int | None = Field(default=None, ge=0)
     output_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     issues: list[ValidationIssue] = Field(default_factory=list, max_length=10)
+    # Auditable wrapper repairs applied before validation. output_sha256 always hashes the
+    # raw text as received; the full schema, scope and source-match checks still run after.
+    normalizations: list[OutputNormalization] = Field(default_factory=list, max_length=4)
 
 
 _CONSTRAINT_KEYS = ("max_length", "min_length", "pattern", "ge", "gt", "le", "lt", "expected")
@@ -135,6 +172,11 @@ PATCH_REPAIR_HINTS = {
     "character for character, from the supplied kernel.cu",
     "hunk_line_invalid": "every hunk line must start with ' ', '+' or '-' and end with a "
     "newline, including the last line",
+    "diff_missing_final_newline": "end every diff line with a newline, including the last",
+    "hunk_blank_line_unprefixed": "an empty context line is written as a single space "
+    "followed by a newline",
+    "no_newline_marker": "do not emit the '\\ No newline at end of file' marker",
+    "hunk_line_no_prefix": "every hunk line must start with ' ', '+' or '-'",
     "hunk_header_invalid": "each hunk must start with a header like '@@ -12,3 +12,4 @@'",
     "diff_header_invalid": "the diff must start with '--- a/kernel.cu' then '+++ b/kernel.cu'",
     "include_changed": "do not add, remove or change #include lines",
@@ -399,8 +441,12 @@ def parse_wire_text(
     base = OutputDiagnostics(
         output_chars=len(text), output_sha256=hashlib.sha256(text.encode()).hexdigest()
     )
+    notes: list[OutputNormalization] = []
+    body = unwrap_json_fence(text)
+    if body is not None:
+        notes.append("json_code_fence_removed")
     try:
-        decoded = json.loads(text)
+        decoded = json.loads(text if body is None else body)
     except json.JSONDecodeError as exc:
         raise _OutputRejected(
             base.model_copy(
@@ -410,6 +456,8 @@ def parse_wire_text(
                 }
             )
         ) from None
+    decoded, repaired = normalize_output_value(kind, decoded)
+    base = base.model_copy(update={"normalizations": [*notes, *repaired]})
     try:
         value = output_model.model_validate(normalize_wire_value(kind, decoded))
     except ValidationError as exc:
@@ -502,13 +550,20 @@ def invoke_sdk(
             parsed = getattr(raw.parse(), "output_parsed", None)
             if isinstance(parsed, BaseModel):
                 parsed = parsed.model_dump(mode="json")
+            parsed, repaired = normalize_output_value(request.kind, parsed)
+            if repaired:
+                diagnostics = OutputDiagnostics(normalizations=repaired)
             try:
                 value = output_model.model_validate(
                     normalize_wire_value(request.kind, parsed)
                 ).model_dump(mode="json")
             except ValidationError as exc:
                 raise _OutputRejected(
-                    OutputDiagnostics(failure_class="SCHEMA_INVALID", issues=validation_issues(exc))
+                    OutputDiagnostics(
+                        failure_class="SCHEMA_INVALID",
+                        issues=validation_issues(exc),
+                        normalizations=repaired,
+                    )
                 ) from None
     except openai.APITimeoutError:
         error = ProviderError("LLM_TIMEOUT", state="UNCERTAIN")

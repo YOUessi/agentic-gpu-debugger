@@ -55,6 +55,18 @@ def read_snapshot(snapshot: SourceSnapshot) -> dict[str, bytes]:
     return sources
 
 
+def _check_hunk_line(line: str) -> None:
+    """Reject a malformed hunk line with a message that names which rule it broke."""
+    if not line.endswith("\n"):
+        raise ValueError("diff line lacks a final newline")
+    if line == "\n":
+        raise ValueError("blank hunk line lacks a leading space")
+    if line.startswith("\\"):
+        raise ValueError("no-newline marker is unsupported")
+    if line[:1] not in {" ", "+", "-"}:
+        raise ValueError("hunk line lacks a prefix")
+
+
 def _apply(source: bytes, diff: str) -> tuple[bytes, dict[int, int | None]]:
     if len(diff.encode()) > 4 * 1024 * 1024 or "\x00" in diff or "\r" in diff:
         raise ValueError("unsupported patch encoding or size")
@@ -100,8 +112,7 @@ def _apply(source: bytes, diff: str) -> tuple[bytes, dict[int, int | None]]:
         removed = added = 0
         while index < len(lines) and not lines[index].startswith("@@ "):
             line = lines[index]
-            if not line.endswith("\n") or line[:1] not in {" ", "+", "-"}:
-                raise ValueError("unsupported hunk content")
+            _check_hunk_line(line)
             prefix, text = line[0], line[1:]
             if prefix in {" ", "-"}:
                 if cursor >= len(original) or original[cursor] != text:
@@ -141,6 +152,10 @@ PATCH_REJECTION_CODES = {
     "invalid unified diff": "diff_header_invalid",
     "unsupported hunk header": "hunk_header_invalid",
     "unsupported hunk content": "hunk_line_invalid",
+    "diff line lacks a final newline": "diff_missing_final_newline",
+    "blank hunk line lacks a leading space": "hunk_blank_line_unprefixed",
+    "no-newline marker is unsupported": "no_newline_marker",
+    "hunk line lacks a prefix": "hunk_line_no_prefix",
     "hunk context does not have one unique exact location": "hunk_context_not_found",
     "hunk context mismatch": "hunk_context_mismatch",
     "hunk line count mismatch": "hunk_line_count_mismatch",
@@ -195,8 +210,7 @@ def normalize_unified_diff_offsets(source: str, diff: str) -> str:
         removed = added = 0
         while index < len(lines) and not lines[index].startswith("@@ "):
             line = lines[index]
-            if not line.endswith("\n") or line[:1] not in {" ", "+", "-"}:
-                raise ValueError("unsupported hunk content")
+            _check_hunk_line(line)
             if line[0] in {" ", "-"}:
                 old_chunk.append(line[1:])
                 removed += 1

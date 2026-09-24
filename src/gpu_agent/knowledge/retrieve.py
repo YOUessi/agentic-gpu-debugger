@@ -27,12 +27,16 @@ ATOM = re.compile(
 )
 
 
-def tokenize(text: str) -> list[str]:
+def tokenize(text: str, version: str = "cuda-lex-v1") -> list[str]:
     """Preserve display atoms plus case-folded lookup companions; explicit OOB alias."""
     tokens: list[str] = []
     for match in ATOM.finditer(text):
         atom = match.group()
         tokens.append(atom)
+        if version == "cuda-lex-v2" and atom.endswith("()"):
+            tokens.append(atom[:-2])
+            if atom[:-2] != atom[:-2].lower():
+                tokens.append(atom[:-2].lower())
         if atom != atom.lower():
             tokens.append(atom.lower())
         if "-" in atom:
@@ -86,6 +90,8 @@ class KnowledgeIndex:
         self.corpus_version = corpus_version
         self.normalizer_version = normalizer_version
         self.tokenizer_version = tokenizer_version
+        if tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2"}:
+            raise KnowledgeCorruptError("Unsupported tokenizer version")
         self.corpus_hash = corpus_digest(
             chunks, corpus_version, normalizer_version, tokenizer_version
         )
@@ -94,7 +100,10 @@ class KnowledgeIndex:
         vectorizer = SemanticVectorizer()
         self._semantic_vectors = []
         for ordinal, chunk in enumerate(chunks):
-            counts = Counter(tokenize(chunk.text) + tokenize(chunk.section_title) * 2)
+            counts = Counter(
+                tokenize(chunk.text, self.tokenizer_version)
+                + tokenize(chunk.section_title, self.tokenizer_version) * 2
+            )
             self._lengths.append(counts.total())
             self._semantic_vectors.append(
                 vectorizer.encode(f"{chunk.section_title} {chunk.section_title} {chunk.text}")
@@ -118,7 +127,7 @@ class KnowledgeIndex:
     def _lexical_scores(self, query: str, eligible: set[int]) -> dict[int, float]:
         average = sum(self._lengths[i] for i in eligible) / len(eligible)
         scores: dict[int, float] = defaultdict(float)
-        query_tokens = set(tokenize(query))
+        query_tokens = set(tokenize(query, self.tokenizer_version))
         for token in query_tokens:
             postings = self._postings.get(token, {})
             candidates = eligible.intersection(postings)
@@ -194,7 +203,7 @@ class KnowledgeIndex:
             if (
                 payload.schema_version != 1
                 or payload.normalizer_version != "nvidia-html-heading-v1"
-                or payload.tokenizer_version != "cuda-lex-v1"
+                or payload.tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2"}
             ):
                 raise ValueError("Unsupported index format")
             index = cls(

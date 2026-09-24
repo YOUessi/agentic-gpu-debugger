@@ -40,6 +40,10 @@
 - 格式重试额度按调用类别各一次（plan、diagnose、patch 互不占用），仍计入总调用次数边界。
   不可解析的输出只记录形状分类（`<json>: raw_diff` / `code_fence` / `truncated_json` /
   `invalid_escape` 等），不保存原文；重试提示按“格式错误”与“内容被拒”分别给出。
+- 可审计的包装规范化只有两种：整段输出恰好被一对 ```json 围栏包住且内部是一个 JSON
+  对象时去掉围栏；补丁 diff 缺末尾换行时补一个换行。`output_diagnostics.normalizations`
+  记录做了哪一种，`output_sha256` 始终是原始输出的哈希；之后照常执行完整 schema、补丁
+  范围与源码逐字匹配检查，不猜测或改写 diff 内容。
 
 ## 3. 补丁与验证
 

@@ -1,5 +1,6 @@
 """Planner wire contract and value-free output telemetry (no network, no SDK)."""
 
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -322,14 +323,42 @@ def test_rejected_patch_records_a_value_free_reason_and_retries_with_it(store):
     assert port.requests[1].correction_hints == ["<patch>: hunk_context_not_found"]
 
 
-def test_missing_final_newline_is_reported_as_a_hunk_line_problem():
+_HEAD = "--- a/kernel.cu\n+++ b/kernel.cu\n"
+
+
+@pytest.mark.parametrize(
+    "body,code",
+    [
+        # case_0006 retry: JSON was valid but a hunk line broke a rule; name which one.
+        ("@@ -3 +3 @@\n-    out[i] = 0;\n+    x;", "diff_missing_final_newline"),
+        ("@@ -2,2 +2,2 @@\n     int i = threadIdx.x;\n\n", "hunk_blank_line_unprefixed"),
+        (
+            "@@ -3 +3 @@\n-    out[i] = 0;\n+    x;\n\\ No newline at end of file\n",
+            "no_newline_marker",
+        ),
+        ("@@ -3 +3 @@\n*    out[i] = 0;\n", "hunk_line_no_prefix"),
+    ],
+)
+def test_malformed_hunk_lines_get_distinct_reason_codes(body, code):
     from gpu_agent.patching import normalize_unified_diff_offsets, patch_rejection_code
 
-    no_newline = "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -3 +3 @@\n-    out[i] = 0;\n+    x;"
     with pytest.raises(ValueError) as rejected:
-        normalize_unified_diff_offsets(_KERNEL, no_newline)
-    assert patch_rejection_code(rejected.value) == "hunk_line_invalid"
+        normalize_unified_diff_offsets(_KERNEL, _HEAD + body)
+    assert patch_rejection_code(rejected.value) == code
     assert patch_rejection_code(ValueError("anything else " + CANARY)) == "patch_invalid"
+
+
+def test_every_patch_reason_code_has_a_repair_hint():
+    from gpu_agent.agent.provider import PATCH_REPAIR_HINTS
+    from gpu_agent.patching import PATCH_REJECTION_CODES
+
+    hinted = {
+        "diff_missing_final_newline",
+        "hunk_blank_line_unprefixed",
+        "no_newline_marker",
+        "hunk_line_no_prefix",
+    }
+    assert hinted <= set(PATCH_REJECTION_CODES.values()) and hinted <= set(PATCH_REPAIR_HINTS)
 
 
 def test_domain_rejection_retry_keeps_the_json_envelope():
@@ -415,7 +444,8 @@ def test_unknown_validator_error_never_reaches_telemetry_or_retry(store):
     "text,code",
     [
         ("", "empty_output"),
-        ('```json\n{"unified_diff": "x"}\n```', "code_fence"),
+        ('```json\n{"unified_diff": "x"\n```', "code_fence"),
+        ('```json\n{"a": 1}\n```\n```json\n{"b": 2}\n```', "code_fence"),
         ("--- a/kernel.cu\n+++ b/kernel.cu\n", "raw_diff"),
         ('Here is the fix: {"unified_diff": "x"}', "prose_before_json"),
         ('{"unified_diff": "--- a/kernel.cu\\n', "truncated_json"),
@@ -443,3 +473,49 @@ def test_not_json_retry_asks_for_the_json_envelope_with_escaped_diff():
     assert "not parsable JSON (raw_diff)" in text
     assert "no bare diff" in text and "\\n" in text
     assert "correct its format" not in text
+
+
+def test_single_json_fence_is_removed_and_recorded():
+    """case_0006/case_0015: a complete ```json fence around one object is unwrapped."""
+    from gpu_agent.agent.models import PatchOutput
+    from gpu_agent.agent.provider import parse_wire_text
+
+    inner = json.dumps({"unified_diff": "--- a/kernel.cu\n+++ b/kernel.cu\n"})
+    raw = "```json\n" + inner + "\n```"
+    value, diagnostics = parse_wire_text("patch", raw, PatchOutput)
+    assert value == json.loads(inner)
+    assert diagnostics.normalizations == ["json_code_fence_removed"]
+    # The recorded hash is of the raw output as received, not the unwrapped body.
+    assert diagnostics.output_sha256 == hashlib.sha256(raw.encode()).hexdigest()
+    assert diagnostics.output_chars == len(raw)
+
+
+def test_missing_final_diff_newline_is_added_and_recorded():
+    from gpu_agent.agent.models import PatchOutput
+    from gpu_agent.agent.provider import parse_wire_text
+
+    raw = json.dumps({"unified_diff": "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -3 +3 @@\n-x\n+y"})
+    value, diagnostics = parse_wire_text("patch", raw, PatchOutput)
+    assert value["unified_diff"].endswith("+y\n")
+    assert diagnostics.normalizations == ["diff_final_newline_added"]
+
+
+def test_normalized_patch_still_faces_every_content_check(store):
+    """Wrapper repair never makes a mismatched diff acceptable."""
+    from gpu_agent.agent.models import DiagnosisResult, PublicSource
+    from gpu_agent.agent.provider import ProviderError
+
+    stale = "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -3 +3 @@\n-    out[i] = 9;\n+    x;"
+    port = _ScriptedPort([_patch_result(stale), _patch_result(stale)])
+    provider = _patch_provider(store, port)
+    with pytest.raises(ProviderError, match="LLM_INVALID_OUTPUT"):
+        provider.propose_patch(
+            PublicSource(source_id="a" * 32, content=_KERNEL), DiagnosisResult.inconclusive("T")
+        )
+
+
+def test_plan_output_is_never_newline_repaired():
+    from gpu_agent.agent.provider import normalize_output_value
+
+    value = {"unified_diff": "x"}
+    assert normalize_output_value("plan", value) == (value, [])
