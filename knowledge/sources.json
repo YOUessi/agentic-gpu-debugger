@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "corpus_id": "nvidia-cuda-debug-knowledge",
-  "corpus_version": "2026-09-24.1",
+  "corpus_version": "2026-09-24.2",
   "normalizer_version": "nvidia-html-heading-v1",
-  "tokenizer_version": "cuda-lex-v2",
+  "tokenizer_version": "cuda-lex-v3",
   "target_toolchain": {
     "cuda_toolkit": "12.8.1",
     "compute_sanitizer": "2025.1.0.0"

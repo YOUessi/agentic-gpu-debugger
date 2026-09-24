@@ -135,6 +135,34 @@ def test_version_filter_bm25_and_no_unrelated_results(index):
         index.retrieve("global memory", "latest")
 
 
+def test_v3_api_anchor_stopwords_fallback_and_versioning(index, tmp_path):
+    from gpu_agent.knowledge.models import make_chunk
+    from gpu_agent.knowledge.retrieve import KnowledgeIndex
+
+    def chunk(text, ordinal):
+        fields = index.chunks[0].model_dump(exclude={"chunk_id", "content_hash"})
+        fields.update(text=text, block_ordinal=ordinal)
+        return make_chunk(**fields)
+
+    chunks = [
+        chunk("cudaFree() releases an allocated buffer.", 0),
+        chunk("It is valid to call an unrelated operation inside a branch.", 1),
+        chunk("__syncthreads() requires consistent participation.", 2),
+    ]
+    v3 = KnowledgeIndex(chunks, tokenizer_version="cuda-lex-v3")
+    assert [
+        c.chunk_id
+        for c in v3.retrieve("Is it valid to call cudaFree inside a branch?", VERSION).chunks
+    ] == [chunks[0].chunk_id]
+    assert v3.retrieve("is it a the", VERSION).chunks == []
+    assert v3.retrieve("unknownFunction releases buffer", VERSION).chunks[0] == chunks[0]
+    assert v3.retrieve("__syncthreads", VERSION).chunks == [chunks[2]]
+    assert v3.corpus_hash != KnowledgeIndex(chunks, tokenizer_version="cuda-lex-v2").corpus_hash
+    path = tmp_path / "v3.json"
+    v3.save(path)
+    assert KnowledgeIndex.load(path).retrieve("cudaFree", VERSION).chunks == [chunks[0]]
+
+
 def test_both_version_dimensions_required(index):
     from gpu_agent.knowledge.models import KnowledgeVersionUnavailableError
     from gpu_agent.knowledge.retrieve import KnowledgeIndex

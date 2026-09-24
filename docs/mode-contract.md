@@ -60,6 +60,16 @@
 - 私有 holdout 从 evaluator store 的已提交 corpus、按 evaluation unit 的 cutoff 与
   case ID 解析 truth，并核对原始源码及 harness。支持已注册的 vector-add-cpu-v1 oracle；
   不支持的 oracle 保持 `ORACLE_OR_BASELINE_UNAVAILABLE`。私有描述不进入模型输入。
+- 同步源代码契约（`sync_participation.py`）：所有模式的候选统一检查调用线程自身是否
+  在 warp intrinsic 的 mask 中。仅支持同文件字面量 1-D launch、不可变 uint32 局部量及
+  支持的常量表达式；宏控制、未知调用、类型转换、动态 launch、循环等无法可靠求值时
+  放行给原有 GPU 验证。它不提供修复值，不读取案例标签或隐藏真值。
+- `sync_caller_not_in_mask` 使用原有补丁阶段的一次格式/内容重试，不添加修补循环。
+  其他线程未到达调用可能涉及退出或动态同步，返回 `UNANALYZABLE`，不能据此拒绝。
+  `CONSISTENT` 不等于完整程序安全。GPU 验证规则不变。
+- 这是观察开发集失败后新增的源码约束，可能拒绝因编译优化消除违规指令而得到
+  synccheck CLEAN 的源码。源代码契约与运行时结论必须分别报告；使用该版本的新评测
+  不与旧版本成绩拼接。未使用 holdout 设计此约束。详细分歧见同步分析审查文档。
 
 ## 3a. 输入、标签与 planner
 

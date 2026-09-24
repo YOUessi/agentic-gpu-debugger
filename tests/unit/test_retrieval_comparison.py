@@ -95,12 +95,12 @@ def test_hybrid_uses_stable_reciprocal_rank_fusion(comparison_index):
     assert len({chunk.chunk_id for chunk in result.chunks}) == len(result.chunks)
 
 
-def test_development_judgments_are_human_labeled_and_public_only():
+def test_development_judgments_disclose_mixed_review_and_are_public_only():
     from gpu_agent.knowledge.semantic import load_evaluation_suite
 
     suite = load_evaluation_suite(ROOT / "knowledge/retrieval-eval.json")
     assert suite.split == "development"
-    assert suite.annotation_method == "human_development"
+    assert suite.annotation_method == "mixed_development"
     assert len(suite.queries) >= 20
     assert len({query.query_id for query in suite.queries}) == len(suite.queries)
     assert all(query.relevant_source_ids for query in suite.queries)
@@ -109,6 +109,29 @@ def test_development_judgments_are_human_labeled_and_public_only():
         for query in suite.queries
         for source in query.relevant_source_ids
     )
+
+
+def test_chunk_judgments_do_not_accept_an_unrelated_paragraph_from_same_source(comparison_index):
+    from gpu_agent.knowledge.semantic import (
+        RetrievalEvaluationSuite,
+        RetrievalJudgment,
+        compare_retrieval_methods,
+    )
+
+    judgments = [
+        RetrievalJudgment(
+            query_id=f"content-{i}",
+            query="write-after-write hazard",
+            version=VERSION,
+            relevant_source_ids=["race-doc"],
+            relevant_chunk_ids=["different-paragraph"],
+            rationale="Source identity alone cannot prove paragraph relevance.",
+        )
+        for i in range(20)
+    ]
+    suite = RetrievalEvaluationSuite(schema_version=1, split="development", k=4, queries=judgments)
+    report = compare_retrieval_methods(comparison_index, suite)
+    assert all(method.hits == 0 for method in report.methods)
 
 
 def test_comparison_reports_hit_at_k_latency_and_dev_only_selection(comparison_index, tmp_path):

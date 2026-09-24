@@ -99,13 +99,14 @@ class RetrievalJudgment(StrictModel):
     query: str = Field(min_length=1)
     version: str = Field(min_length=1)
     relevant_source_ids: list[str] = Field(min_length=1)
+    relevant_chunk_ids: list[str] = Field(default_factory=list)
     rationale: str = Field(min_length=1)
 
 
 class RetrievalEvaluationSuite(StrictModel):
     schema_version: Literal[1]
     split: Literal["development"]
-    annotation_method: Literal["human_development"] = "human_development"
+    annotation_method: Literal["human_development", "mixed_development"] = "human_development"
     k: int = Field(ge=1, le=100)
     queries: list[RetrievalJudgment] = Field(min_length=20)
 
@@ -121,6 +122,7 @@ class RetrievalQueryOutcome(StrictModel):
     query_id: str
     relevant_source_ids: list[str]
     retrieved_source_ids: list[str]
+    retrieved_chunk_ids: list[str] = Field(default_factory=list)
     hit: bool
     latency_ms: float = Field(ge=0)
 
@@ -185,12 +187,17 @@ def compare_retrieval_methods(
             result = index.retrieve(judgment.query, judgment.version, k=suite.k, method=method)
             elapsed_ms = (time.perf_counter_ns() - started) / 1_000_000
             retrieved = [chunk.source_id for chunk in result.chunks]
+            retrieved_chunks = [chunk.chunk_id for chunk in result.chunks]
+            hit = bool(set(judgment.relevant_source_ids).intersection(retrieved))
+            if judgment.relevant_chunk_ids:
+                hit = hit and bool(set(judgment.relevant_chunk_ids).intersection(retrieved_chunks))
             outcomes.append(
                 RetrievalQueryOutcome(
                     query_id=judgment.query_id,
                     relevant_source_ids=judgment.relevant_source_ids,
                     retrieved_source_ids=retrieved,
-                    hit=bool(set(judgment.relevant_source_ids).intersection(retrieved)),
+                    retrieved_chunk_ids=retrieved_chunks,
+                    hit=hit,
                     latency_ms=elapsed_ms,
                 )
             )

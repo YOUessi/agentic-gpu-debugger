@@ -181,6 +181,9 @@ PATCH_REPAIR_HINTS = {
     "diff_header_invalid": "the diff must start with '--- a/kernel.cu' then '+++ b/kernel.cu'",
     "include_changed": "do not add, remove or change #include lines",
     "fixed_input_length": "do not restrict the accepted input length to a fixed value",
+    "sync_caller_not_in_mask": "the patched source has an executing warp intrinsic caller "
+    "whose own lane bit is absent from its mask; independently check the caller condition "
+    "and mask expression and preserve the unified_diff JSON field",
     "file_outside_scope": "change only kernel.cu",
 }
 

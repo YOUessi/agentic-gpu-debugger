@@ -26,6 +26,15 @@ ATOM = re.compile(
     r"(?:(?:::|\.)[A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?|[0-9]+(?:\.[0-9]+){1,3}"
 )
 
+# Query-only function-word filtering. No CUDA API, failure label, case identifier,
+# or expected document is promoted. Keep negations (not/no/without) meaningful.
+_QUERY_STOPWORDS = frozenset(
+    "a an the is are was were be been being am do does did to of for from in on at "
+    "by with as it its this that these those i you we they he she can could would "
+    "should may might must will shall how what which who when where why "
+    "and or if then than".split()
+)
+
 
 def tokenize(text: str, version: str = "cuda-lex-v1") -> list[str]:
     """Preserve display atoms plus case-folded lookup companions; explicit OOB alias."""
@@ -33,7 +42,7 @@ def tokenize(text: str, version: str = "cuda-lex-v1") -> list[str]:
     for match in ATOM.finditer(text):
         atom = match.group()
         tokens.append(atom)
-        if version == "cuda-lex-v2" and atom.endswith("()"):
+        if version in {"cuda-lex-v2", "cuda-lex-v3"} and atom.endswith("()"):
             tokens.append(atom[:-2])
             if atom[:-2] != atom[:-2].lower():
                 tokens.append(atom[:-2].lower())
@@ -90,7 +99,7 @@ class KnowledgeIndex:
         self.corpus_version = corpus_version
         self.normalizer_version = normalizer_version
         self.tokenizer_version = tokenizer_version
-        if tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2"}:
+        if tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3"}:
             raise KnowledgeCorruptError("Unsupported tokenizer version")
         self.corpus_hash = corpus_digest(
             chunks, corpus_version, normalizer_version, tokenizer_version
@@ -128,6 +137,8 @@ class KnowledgeIndex:
         average = sum(self._lengths[i] for i in eligible) / len(eligible)
         scores: dict[int, float] = defaultdict(float)
         query_tokens = set(tokenize(query, self.tokenizer_version))
+        if self.tokenizer_version == "cuda-lex-v3":
+            query_tokens = {t for t in query_tokens if t.casefold() not in _QUERY_STOPWORDS}
         for token in query_tokens:
             postings = self._postings.get(token, {})
             candidates = eligible.intersection(postings)
@@ -141,6 +152,17 @@ class KnowledgeIndex:
             for i in scores:
                 if "out_of_bounds" in tokenize(self.chunks[i].text):
                     scores[i] += 1.0
+        if self.tokenizer_version == "cuda-lex-v3":
+            # Exact, explicitly named APIs take precedence over incidental prose.
+            # Fall back to ordinary lexical matching if the corpus has no anchor.
+            apis = {
+                t.removesuffix("()")
+                for t in query_tokens
+                if re.fullmatch(r"__[A-Za-z_]\w*(?:\(\))?|cuda[A-Z]\w*(?:\(\))?", t)
+            }
+            anchored = {i for api in apis for i in self._postings.get(api, {}) if i in scores}
+            if anchored:
+                scores = {i: score for i, score in scores.items() if i in anchored}
         return scores
 
     def _semantic_scores(self, query: str, eligible: set[int]) -> dict[int, float]:
@@ -203,7 +225,7 @@ class KnowledgeIndex:
             if (
                 payload.schema_version != 1
                 or payload.normalizer_version != "nvidia-html-heading-v1"
-                or payload.tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2"}
+                or payload.tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3"}
             ):
                 raise ValueError("Unsupported index format")
             index = cls(

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "split": "development",
-  "annotation_method": "human_development",
+  "annotation_method": "mixed_development",
   "k": 5,
   "queries": [
     {
@@ -226,6 +226,7 @@
       "relevant_source_ids": [
         "programming-guide-12.8-u1"
       ],
+      "relevant_chunk_ids": ["nvcuda-cb67d3e31a6a15369f847578"],
       "rationale": "Warp synchronization participation rules are in the programming guide.",
       "version": "cuda=12.8.1;compute-sanitizer=2025.1.0.0"
     },
@@ -235,6 +236,7 @@
       "relevant_source_ids": [
         "programming-guide-12.8-u1"
       ],
+      "relevant_chunk_ids": ["nvcuda-28f5d3617c9ee0a2a117eb4b"],
       "rationale": "Block barrier participation rules are in the programming guide.",
       "version": "cuda=12.8.1;compute-sanitizer=2025.1.0.0"
     },
@@ -244,6 +246,7 @@
       "relevant_source_ids": [
         "sanitizer-approved-memcheck"
       ],
+      "relevant_chunk_ids": ["nvcuda-f46c4f3f475d40ce6009d310"],
       "rationale": "Synccheck behavior is documented in the Compute Sanitizer manual.",
       "version": "cuda=12.8.1;compute-sanitizer=2025.1.0.0"
     },
@@ -253,6 +256,7 @@
       "relevant_source_ids": [
         "sanitizer-approved-memcheck"
       ],
+      "relevant_chunk_ids": ["nvcuda-419a5274014f92dfacbe7491"],
       "rationale": "Racecheck behavior is documented in the Compute Sanitizer manual.",
       "version": "cuda=12.8.1;compute-sanitizer=2025.1.0.0"
     },
@@ -262,6 +266,7 @@
       "relevant_source_ids": [
         "sanitizer-approved-memcheck"
       ],
+      "relevant_chunk_ids": ["nvcuda-7b38f2d7f8292618284e26ea"],
       "rationale": "Initcheck behavior is documented in the Compute Sanitizer manual.",
       "version": "cuda=12.8.1;compute-sanitizer=2025.1.0.0"
     }

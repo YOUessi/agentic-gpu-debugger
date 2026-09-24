@@ -12,6 +12,7 @@ from pydantic import Field
 from gpu_agent.contracts import new_id, now
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.store import read_regular, reject_symlinks
+from gpu_agent.sync_participation import caller_mask_violation
 
 
 class SourceSnapshot(ExecutionModel):
@@ -165,6 +166,7 @@ PATCH_REJECTION_CODES = {
     "unsupported patch encoding or size": "diff_encoding_or_size",
     "include directives cannot change": "include_changed",
     "generated patch retains a fixed input length": "fixed_input_length",
+    "executing sync caller is absent from its mask": "sync_caller_not_in_mask",
     "M1 allows only kernel.cu": "file_outside_scope",
     "unsupported preprocessing syntax": "unsupported_syntax",
     "unterminated block comment": "unsupported_syntax",
@@ -321,6 +323,8 @@ def apply_generated_candidate(source_snapshot: SourceSnapshot, diff: str) -> Pat
     text = patched.decode("utf-8")
     if re.search(r"^[ \t]*if\s*\([^\n)]*\bn\s*!=\s*\d+[uUlL]*\b", text, re.MULTILINE):
         raise ValueError("generated patch retains a fixed input length")
+    if caller_mask_violation(text):
+        raise ValueError("executing sync caller is absent from its mask")
     return candidate
 
 

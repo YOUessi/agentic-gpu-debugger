@@ -139,7 +139,7 @@ class Manifest(StrictModel):
     corpus_id: str
     corpus_version: str
     normalizer_version: Literal["nvidia-html-heading-v1"]
-    tokenizer_version: Literal["cuda-lex-v1", "cuda-lex-v2"]
+    tokenizer_version: Literal["cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3"]
     target_toolchain: Toolchain
     fetch_policy: FetchPolicy
     sources: list[Source]
