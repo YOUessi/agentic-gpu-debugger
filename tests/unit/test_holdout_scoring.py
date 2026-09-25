@@ -1391,6 +1391,7 @@ def test_session_claim_rejects_unsafe_lock(scoring_fixture, unsafe):
         path.hardlink_to(other)
     else:
         path.touch(mode=0o644)
+        path.chmod(0o644)  # Preserve the unsafe test state under restrictive umasks.
     with pytest.raises(ValueError, match="claim"):
         f.score()
     assert not (f.evaluator.root / _session_id(f)).exists()

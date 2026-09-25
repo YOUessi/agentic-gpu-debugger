@@ -1,5 +1,6 @@
 """CLI workflows delegate to the same controller service and verification guard."""
 
+import hashlib
 import os
 from datetime import datetime
 from pathlib import Path
@@ -534,6 +535,17 @@ def _configured_evaluation_runner(
     sources = {case_id: source_root / case_id / "public_input" for case_id in cases}
     if not sources or any(not path.is_dir() for path in sources.values()):
         raise ValueError("registered evaluation source is unavailable")
+    # Check the entire selected corpus before reserving any aliases, unit or
+    # signed schedule. A valid registration can use a different source layout
+    # from the runtime snapshot (notably shared private harness/input files).
+    for case_id, source in sources.items():
+        case = cases[case_id]
+        if (
+            hashlib.sha256(read_regular(source / "kernel.cu", 4 * 1024 * 1024)).hexdigest()
+            != case.source_hash
+        ):
+            raise ValueError("registered evaluation source hash mismatch")
+        ApplicationService._public_input(source / "kernel.cu", case.input_set_hash, None)
     holdout_controller = None
     holdout_batch = None
     if split == "holdout":

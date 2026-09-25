@@ -169,11 +169,26 @@ gpu-agent benchmark evaluate \
 Record the completed development `run_id`. Then run the private holdout against only the
 evaluator-controlled source root. It must report `8 case × 5 mode × 3 repeats = 120 units`:
 
+The evaluation source root is a **runtime snapshot**, not necessarily the original private
+validation tree. Each `<case-id>/public_input/` directory must contain the exact registered
+`kernel.cu`, `vector_io.cpp`, `vector_api.h`, `json.hpp`, and `input.json` bytes. Private batch
+validation can resolve a shared harness and an input elsewhere through `source-manifests.json`;
+the evaluation service instead reads `input.json` adjacent to the kernel. Passing that original
+tree directly can therefore validate successfully and then fail before the first model call.
+
+Before scheduling, stage all eight snapshots in a new evaluator-owned directory (directories
+0700, files 0600), resolving files only through the validated private manifests. Check every
+source hash and the registered input hash before and after copying. Keep the original private
+tree unchanged, reject duplicate basenames, and never copy truth, reference implementations,
+alias maps, or labels into the runtime snapshot. Use that snapshot root as `--case-root` below.
+Do not fabricate default inputs, change registry hashes, or overwrite a started evaluation to
+recover from a layout error; retain the failed run and explicitly record any replacement run.
+
 ```bash
 gpu-agent benchmark evaluate \
   --mode all --split holdout --repeats 3 \
   --corpus-root /srv/gpu-agent-private/v2-evaluator/runs \
-  --case-root /srv/gpu-agent-private/cases-v2 \
+  --case-root /srv/gpu-agent-private/evaluation-snapshots-v2 \
   --repository /opt/releases/agentic-gpu-debugger \
   --commit "$FINAL_COMMIT" \
   --toolchain-hash REVIEWED_TOOLCHAIN_HASH \

@@ -4,8 +4,10 @@
 
 当前已实现证据驱动诊断、单一模型补丁、Docker GPU 隔离、四种 Compute
 Sanitizer、public/private Oracle、strict 验证、mutation 注册门、评测记录和 release
-gate。真实 DeepSeek OOB 闭环与四工具验收已通过；完整 16+8 corpus 和五模式付费评测
-尚未完成，因此当前不是可发布版本。
+gate。冻结版本 `e80ce75` 已完成 16 个公开案例和 8 个私有案例的原生验证、
+240 个开发集单元和 120 个 holdout 单元的真实 DeepSeek 评测，以及 18 项 GPU/隔离
+补充验收。当前工作区包含后续工程修复，不能把冻结实验算成这些修改的重新评测。
+实际结果、失败和验证边界见 [评测结果](docs/evaluation-report.md)。
 
 ## 独立环境
 
@@ -49,11 +51,11 @@ python -I -m mypy src/gpu_agent
 python -I -m pip check
 ```
 
-已注册 `gpu`、`container`、`live_llm`、`release` 标记。`--require-live` 将带这些标记的 skipped 测试变为失败；收集阶段 skip 也失败，防止缺少必需环境时假通过。完整的发布覆盖计数门禁留待 T12；目前单元测试通过不代表 GPU/模型功能通过。
+已注册 `gpu`、`container`、`live_llm`、`release` 标记。`--require-live` 将带这些标记的 skipped 测试变为失败；收集阶段 skip 也失败。单元测试、真实 GPU 验收与模型实验分别记录，不互相替代。
 
 ## 公开 Seed 批量验证
 
-已有四个公开 seed 可以通过同一个原生控制器串行执行、读取报告和导出证据：
+已有 16 个公开 seed（四种 Sanitizer 家族各四个）可以通过同一个原生控制器串行执行、读取报告和导出证据：
 
 ```bash
 gpu-agent benchmark run-seeds --repository "$PWD" --data-root /可信public_store的父目录 --preflight-only
@@ -73,7 +75,7 @@ URL 或验证器控制权。standalone 模式需要重新构建包含 `build_sta
 container runner 镜像；现有四文件 vector 协议保持不变。
 
 ```bash
-gpu-agent diagnose benchmarks/public/case_0001/public_input
+gpu-agent diagnose benchmarks/public/case_0001/public_input --allow-paid-calls --max-llm-calls 40
 # 将上一条命令输出的实际 run_id 用于下列命令：
 gpu-agent verify RUN_ID --generated-candidate --strict
 gpu-agent report RUN_ID
@@ -81,21 +83,23 @@ gpu-agent report RUN_ID
 gpu-agent verify RUN_ID /absolute/path/to/candidate.diff --strict
 ```
 
-远程 provider 使用官方 OpenAI Python SDK Responses structured outputs，必须显式配置
+远程 provider 通过 OpenAI-compatible 适配层调用模型，必须显式配置
 `OPENAI_BASE_URL`、`OPENAI_MODEL` 和控制器环境中的 `OPENAI_API_KEY`。本程序不自动读取
 `.env`，也不索取或打印密钥。缺少配置时保存 `LLM_UNAVAILABLE` 结果，LLM 调用数为零。
 兼容 endpoint（例如 DeepSeek）还须声明 `GPU_AGENT_STORE_FALSE_SUPPORTED=1`，否则 fail closed；所有
-实际请求发送 `store=false`，不声称这等于零数据保留。
+Responses 请求发送 `store=false`；兼容适配器按其协议处理，不声称这等于零数据保留。
 
 `GPU_AGENT_KNOWLEDGE_INDEX` 指向 T05 已 ingest 的本地索引，
 `GPU_AGENT_KNOWLEDGE_VERSION` 使用 `cuda=VERSION;compute-sanitizer=VERSION`。
 版本缺失或不兼容时返回知识证据不可用，不会猜测版本或联网搜索任意 URL。
-V2 已提供完全离线的 BM25、确定性向量余弦和 hybrid RRF 三种检索候选；24 条公开
+V2 已提供完全离线的 BM25、确定性向量余弦和 hybrid RRF 三种检索候选；29 条公开
 development 标注的 hit@k/延迟比较、默认方法选择边界和复现代码见
 [V2 本地检索比较](docs/retrieval-comparison.md)。该比较不读取 private holdout。
 
-每次诊断最多 6 次物理 LLM 请求（含整个 run 唯一一次格式重试），预留最终诊断和补丁，
-最多 4 次 planner 请求。SDK 自动重试关闭；timeout 记为 `UNCERTAIN`，不重放。
+每次诊断默认最多 40 次物理 LLM 请求、38 个 Agent 步骤，预留最终诊断和补丁。
+plan、diagnose、patch 各有一次格式/内容重试，均计入物理调用次数。
+CLI 需显式使用 `--allow-paid-calls`，否则不发送模型请求；只记录费用，没有美元上限。
+SDK 自动重试关闭；timeout 记为 `UNCERTAIN`，不盲目重放。
 最多注册一个 candidate；验证失败不再次生成补丁。未注册可信 Oracle 的 standalone
 程序验证结果为 `INCONCLUSIVE / ORACLE_UNAVAILABLE`。Fake 测试通过不能作为真实模型、
 GPU 或容器验收；M1 仍需通过带 `--require-live` 的真实 OOB 闭环。
@@ -112,11 +116,11 @@ GPU 或容器验收；M1 仍需通过带 `--require-live` 的真实 OOB 闭环�
 时才能注册。
 
 五组评测 A–E 的协议见 [evaluation/protocol.md](evaluation/protocol.md)。完整批次至少为
-`24×5×3=360` 个单元；没有显式 API 费用上限时 runner 在第一次外部调用前停止。
+`24×5×3=360` 个单元；模型调用必须经过显式授权，费用只记录，不设置金额上限。
 当前状态与边界见 [验收](docs/acceptance.md)、[评测](docs/evaluation-report.md) 和
 [限制](docs/limitations.md)。生产执行必须按
 [V2 操作员手册](docs/v2-operator-runbook.md) 依次完成外部 Ed25519 signer、16+8 注册、
-明确的总额/单元预算授权、240+120 评测、120 条盲评标签、score/collect/freeze/derive/check
+模型调用授权、240+120 评测、120 条盲评标签、score/collect/freeze/derive/check
 及构建发布。仓库不提供生产 signer，也不包含生产私钥；在真实原生证据通过最终 release
 check 之前，V2 仍为关闭状态，不得发布。
 

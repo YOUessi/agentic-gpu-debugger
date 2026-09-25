@@ -341,7 +341,12 @@ def test_production_evaluate_rejects_store_fault_before_side_effect(tmp_path, mo
 
 
 @pytest.mark.parametrize("split", ["development", "holdout"])
-def test_configured_evaluation_runner_builds_exact_split_services(tmp_path, monkeypatch, split):
+@pytest.mark.parametrize(
+    "input_fault", [None, "missing", "changed", "source_changed", "second_missing"]
+)
+def test_configured_evaluation_runner_builds_exact_split_services(
+    tmp_path, monkeypatch, split, input_fault
+):
     import shutil
     import subprocess
     from datetime import UTC, datetime
@@ -428,6 +433,11 @@ def test_configured_evaluation_runner_builds_exact_split_services(tmp_path, monk
     selected = case_root / "case_0100" / "public_input"
     selected.mkdir(parents=True)
     (selected / "kernel.cu").write_bytes(source)
+    input_bytes = b'{"n":1,"a":[1.0],"b":[2.0]}'
+    if input_fault != "missing":
+        (selected / "input.json").write_bytes(b"{}" if input_fault == "changed" else input_bytes)
+    if input_fault == "source_changed":
+        (selected / "kernel.cu").write_bytes(source + b"// changed\n")
     case = CaseManifest(
         id="case_0100",
         source_hash=hashlib.sha256(source).hexdigest(),
@@ -440,11 +450,18 @@ def test_configured_evaluation_runner_builds_exact_split_services(tmp_path, monk
         expected_finding="out of bounds",
         validation_run_ids=["a" * 32, "b" * 32],
         toolchain_hash=toolchain_hash,
-        input_set_hash="4" * 64,
+        input_set_hash=hashlib.sha256(input_bytes).hexdigest(),
     )
+    cases = {case.id: case}
+    if input_fault == "second_missing":
+        second = case.model_copy(update={"id": "case_0101"})
+        second_source = case_root / second.id / "public_input"
+        second_source.mkdir(parents=True)
+        (second_source / "kernel.cu").write_bytes(source)
+        cases[second.id] = second
     monkeypatch.setattr(
         "gpu_agent.benchmark.executor.registered_cases",
-        lambda *_args, **_kwargs: {case.id: case},
+        lambda *_args, **_kwargs: cases,
     )
     batch = HoldoutBatch(
         public_run_id="1" * 32,
@@ -460,6 +477,26 @@ def test_configured_evaluation_runner_builds_exact_split_services(tmp_path, monk
         "ensure_available",
         lambda _self: provider_ensures.append(True),
     )
+
+    if input_fault is not None:
+
+        def must_not_prepare(_self):
+            pytest.fail("invalid sources must fail before holdout alias reservation")
+
+        monkeypatch.setattr(HoldoutController, "prepare", must_not_prepare)
+        before = _tree_bytes(tmp_path)
+        with pytest.raises(ValueError, match="registered .* (unavailable|mismatch)"):
+            _configured_evaluation_runner(
+                repository=repository,
+                case_root=case_root,
+                corpus_root=public if split == "development" else evaluator,
+                split=split,
+                commit=snapshot.commit,
+                toolchain_hash=toolchain_hash,
+                model_config_hash=policy.sha256,
+            )
+        assert _tree_bytes(tmp_path) == before
+        return
 
     runner = _configured_evaluation_runner(
         repository=repository,

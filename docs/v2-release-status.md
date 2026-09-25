@@ -3,6 +3,14 @@
 This document separates implemented code, verified native evidence, and remaining release
 work. A passing unit test or a configured command is not counted as a live GPU/model result.
 
+## Latest recorded baseline: e80ce75
+
+The 16 public + eight private registrations and signed 240+120 evaluations are complete on
+e80ce75. All 120 holdout native chains and the staged-input hashes were checked; the failed
+initial holdout remains preserved. The frozen 18-test GPU/isolation suite passed as supplemental
+evidence. See [results](evaluation-report.md) and [closeout checks](e80ce75-closeout-CN.md).
+Later development changes are not automatically covered by that frozen experiment.
+
 ## Verified core
 
 - T01–T02: Python 3.11/CUDA 12.8 environment and trusted clean-kernel evidence.
@@ -13,7 +21,7 @@ work. A passing unit test or a configured command is not counted as a live GPU/m
 - T07: real clean/fault pairs for memcheck, racecheck, initcheck, and synccheck.
 - T09: strict four-tool verification with public and private inputs.
 - T10 foundation: native validation, crash-safe corpus ledger, registration gates, and public
-  seed batch evidence. The current final family does not yet contain the required membership.
+  seed batch evidence. The e80ce75 family contains all 16 public and eight private registrations.
 
 ## Development evidence is not the final release evidence
 
@@ -62,18 +70,15 @@ The detailed sequence is [the V2 production evidence operator runbook](v2-operat
 The repository contains only the external signer client and Ed25519 verification path; it ships
 no production signer or private key.
 
-## Hard blockers before Portfolio Release
+## Remaining formal evidence requirements
 
-- On the final frozen commit, real-GPU validate/register 16 public cases, at least four per
-  Sanitizer family. Earlier-commit registrations do not establish final-commit membership.
-- Create, validate, and register eight evaluator-only holdout cases using distinct private
-  template/operator identities; no private source or identity may enter Git/public output.
-- Record at least one final-commit multi-step Agent investigation satisfying T08.
+- For any proposed newer evaluated version, evidence must match that commit. The completed
+  e80ce75 corpus/evaluations are retained as a baseline, not a reason to rerun them implicitly.
 - Freeze the clean repository commit, corpus cutoff, toolchain, prompt, model configuration,
   reviewed price source for accounting, record-only cost policy, and signed development/holdout
   schedules. There are no dollar caps or balance-based stops.
-- Execute all 360 A–E units serially, retaining failures, timeouts, inconclusive results,
-  provider usage, latency, and cost.
+- Retain all 360 completed e80ce75 A–E unit outcomes, including failures, timeouts,
+  inconclusive results, provider usage, latency, and nullable cost.
 - Supply the canonical 120-record evaluator label package, complete blind scoring/private score
   bindings, and generate the real evaluation report.
 - Capture a zero-skip, zero-failure release-test run on the same commit/config/cutoff.

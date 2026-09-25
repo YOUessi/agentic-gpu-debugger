@@ -2,7 +2,7 @@
 
 ## 0. 这组命令是什么
 
-这组入口将仓库中已有的四个公开 seed 接入原生 clean/mutant 验证控制器：
+这组入口将仓库中已有的 16 个公开 seed（四种 Sanitizer 家族各四个）接入原生 clean/mutant 验证控制器：
 `benchmark run-seeds` 负责串行执行，`batch-report` 读取持久化摘要，
 `export-batch` 导出 summary 明确列出的公开运行。它不读取 private holdout，
 不调用模型，也不替代 Task 4 的 strict candidate verification。

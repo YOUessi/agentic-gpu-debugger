@@ -59,6 +59,7 @@ def test_production_family_rejects_unsafe_store_before_controller_mutation(tmp_p
     evaluator.mkdir(mode=0o700)
     if fault == "mode":
         public.mkdir(mode=0o755)
+        public.chmod(0o755)  # mkdir's requested mode is filtered by the host umask.
     elif fault == "file":
         public.write_bytes(b"not-a-directory")
     elif fault == "symlink":
