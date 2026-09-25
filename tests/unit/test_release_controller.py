@@ -4,6 +4,33 @@ from pathlib import Path
 import pytest
 
 
+def test_tracked_release_allowlist_accepts_real_parameter_ids():
+    from gpu_agent.release_controller import ReleaseTestAllowlist
+
+    root = Path(__file__).resolve().parents[2]
+    allowlist = ReleaseTestAllowlist.model_validate_json(
+        (root / "evaluation/release-test-allowlist.json").read_bytes()
+    )
+    assert any(" " in node.node_id for node in allowlist.nodes)
+    allowlist.validate_unique()
+
+
+@pytest.mark.parametrize("unsafe", ["\n", "\r", "\t", ";", "|", "$", "`", "\x00"])
+def test_release_allowlist_still_rejects_control_and_shell_characters(unsafe):
+    from gpu_agent.release_controller import ReleaseNodeRequirement, ReleaseTestAllowlist
+
+    allowlist = ReleaseTestAllowlist(
+        nodes=[
+            ReleaseNodeRequirement(
+                node_id=f"tests/test_live.py::test_positive[a{unsafe}b]",
+                required_markers=["release_evidence"],
+            )
+        ]
+    )
+    with pytest.raises(ValueError, match="unsafe node"):
+        allowlist.validate_unique()
+
+
 def _snapshot():
     from gpu_agent.contracts import RepositorySnapshot
 

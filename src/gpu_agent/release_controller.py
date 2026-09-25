@@ -36,7 +36,10 @@ _REPORT_LIMIT = 4 * 1024 * 1024
 _JUNIT_LIMIT = 16 * 1024 * 1024
 _ALLOWLIST_LIMIT = 1024 * 1024
 _ARCHIVE_LIMIT = 256 * 1024 * 1024
-_NODE_ID = re.compile(r"^[A-Za-z0-9_./:\[\],=+\-]+$")
+# Pytest parameter IDs include literal spaces (for example Sanitizer categories).
+# These identifiers are compared as data, never interpreted by a shell. Keep
+# control characters and shell metacharacters outside the accepted alphabet.
+_NODE_ID = re.compile(r"^[A-Za-z0-9_./:\[\],=+\- ]+$")
 _GIT = "/usr/bin/git"
 _RAW_ARTIFACTS = {
     "allowlist": "release/test-allowlist.json",
