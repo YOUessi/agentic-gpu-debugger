@@ -223,7 +223,10 @@ def test_call_persists_diagnostics_and_feeds_hints_into_the_single_retry(store):
     run = store.create_run("telemetry-test")
     provider = OpenAIResponsesProvider(
         OpenAIProviderSettings(
-            endpoint="https://api.openai.com/v1", model="m", api_key=SecretStr("k")
+            endpoint="https://api.openai.com/v1",
+            model="m",
+            api_key=SecretStr("k"),
+            timeout_seconds=120,
         ),
         LLMCallGate(),
         store,
@@ -236,6 +239,8 @@ def test_call_persists_diagnostics_and_feeds_hints_into_the_single_retry(store):
     failed = [i for i in provider.invocations() if i.state == "FAILED"]
     assert failed and failed[0].output_diagnostics is not None
     assert failed[0].output_diagnostics.issues[0].loc == "action.rationale"
+    assert all(60 < request.timeout_seconds <= 120 for request in port.requests)
+    assert all(i.request_timeout_seconds == 120 for i in provider.invocations())
 
 
 def _bounded_provider(store, port, max_llm_calls):

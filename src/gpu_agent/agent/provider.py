@@ -54,7 +54,7 @@ class OpenAIProviderSettings(ExecutionModel):
     endpoint: str | None = None
     model: str | None = Field(default=None, min_length=1)
     api_key: SecretStr | None = Field(default=None, repr=False, exclude=True)
-    timeout_seconds: float = Field(default=60, gt=0, le=60)
+    timeout_seconds: float = Field(default=60, gt=0, le=600, allow_inf_nan=False)
     supports_store_false: bool = False
 
     @field_validator("endpoint")
@@ -82,6 +82,7 @@ class OpenAIProviderSettings(ExecutionModel):
             model=os.environ.get("OPENAI_MODEL") or None,
             api_key=SecretStr(key) if key else None,
             supports_store_false=os.environ.get("GPU_AGENT_STORE_FALSE_SUPPORTED") == "1",
+            timeout_seconds=float(os.environ.get("GPU_AGENT_LLM_TIMEOUT_SECONDS", "60")),
         )
 
 
@@ -300,6 +301,8 @@ class Invocation(ExecutionModel):
     started_at: datetime
     finished_at: datetime | None = None
     elapsed_ms: float | None = None
+    # None denotes older records where the configured deadline was not persisted.
+    request_timeout_seconds: float | None = Field(default=None, gt=0, le=600)
     configured_model: str
     response_model: str | None = None
     endpoint_host: str
@@ -324,7 +327,7 @@ class WorkerRequest(ExecutionModel):
     kind: CallKind
     payload: dict[str, object]
     client_request_id: str
-    timeout_seconds: float = Field(gt=0, le=60)
+    timeout_seconds: float = Field(gt=0, le=600, allow_inf_nan=False)
     attempt: int = Field(ge=0, le=1)
     correction_hints: list[str] = Field(default_factory=list, max_length=10)
 
@@ -785,6 +788,7 @@ class OpenAIResponsesProvider:
                 kind=kind,
                 attempt=attempt,
                 state="STARTED",
+                request_timeout_seconds=timeout,
                 started_at=now(),
                 configured_model=self.settings.model or "",
                 client_request_id=(

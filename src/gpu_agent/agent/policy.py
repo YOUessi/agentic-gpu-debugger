@@ -157,7 +157,9 @@ class LLMCallGate:
             self._patched |= kind == "patch"
             if attempt == 1:
                 self._format_retried.add(kind)
-            return min(60.0, remaining)
+            # Provider settings choose the per-request deadline; this gate owns
+            # the overall task deadline, not a second hidden 60-second limit.
+            return remaining
 
 
 SUPPORTED = {
