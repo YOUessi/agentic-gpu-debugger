@@ -241,6 +241,14 @@ def correction_text(kind: "CallKind", hints: list[str]) -> str:
     text = "\nPrevious output failed schema/scope validation; correct its format."
     if hints:
         text += " Rejected fields: " + "; ".join(hints) + "."
+    if any(hint.endswith(": extra_forbidden") for hint in hints):
+        text += (
+            " Return a new JSON instance, not a JSON Schema definition. Remove the "
+            "unrecognized fields identified above; do not rename them or move them into "
+            "another object. Preserve the required fields and their declared types. "
+            "The schema describes the response; its metadata (such as $schema) is not "
+            "part of the response. Do not return the schema itself."
+        )
     return text
 
 

@@ -10,6 +10,39 @@ from pydantic import SecretStr
 CANARY = "VALUE-CANARY-7f3a"
 
 
+def test_extra_field_retry_explains_instance_contract_without_relaxing_validation():
+    from gpu_agent.agent.provider import (
+        PatchOutput,
+        _OutputRejected,
+        correction_hints,
+        correction_text,
+        parse_wire_text,
+    )
+
+    raw = json.dumps({"unified_diff": "diff\n", "$schema": CANARY})
+    with pytest.raises(_OutputRejected) as rejected:
+        parse_wire_text("patch", raw, PatchOutput)
+    diagnostics = rejected.value.diagnostics
+    assert diagnostics.failure_class == "SCHEMA_INVALID"
+    assert any(i.loc == "$schema" and i.type == "extra_forbidden" for i in diagnostics.issues)
+    feedback = correction_text("patch", correction_hints(diagnostics))
+    assert "Remove the unrecognized fields" in feedback
+    assert "not a JSON Schema definition" in feedback
+    assert CANARY not in feedback
+    assert CANARY not in diagnostics.model_dump_json()
+    # Repetition is still rejected, not silently normalized to a passing output.
+    with pytest.raises(_OutputRejected):
+        parse_wire_text("patch", raw, PatchOutput)
+
+
+def test_extra_field_instruction_does_not_replace_domain_retry():
+    from gpu_agent.agent.provider import correction_text
+
+    text = correction_text("patch", ["<patch>: hunk_context_not_found"])
+    assert "correct JSON format" in text
+    assert "not a JSON Schema definition" not in text
+
+
 def test_parse_wire_text_classifies_without_leaking_values():
     from gpu_agent.agent.provider import PlannerOutput, _OutputRejected, parse_wire_text
 
