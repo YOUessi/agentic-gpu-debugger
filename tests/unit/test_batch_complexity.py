@@ -202,3 +202,39 @@ def test_directory_inventory_detects_removal_and_move(store):
         assert lease.children() == []
         os.rename(moved, original)
         assert [item.id for item in lease.children()] == [child.id]
+
+
+def test_manifest_cache_observes_writes_with_identical_stat_timestamps(store, monkeypatch):
+    from types import SimpleNamespace
+
+    run = store.create_run("first")
+    path = store.root / run.id / "manifest.json"
+    fixed = path.stat()
+    real_stat = os.stat
+
+    def frozen_times(name, *args, **kwargs):
+        info = real_stat(name, *args, **kwargs)
+        if name == "manifest.json":
+            return SimpleNamespace(
+                st_dev=info.st_dev,
+                st_ino=info.st_ino,
+                st_mode=info.st_mode,
+                st_size=info.st_size,
+                st_mtime_ns=fixed.st_mtime_ns,
+                st_ctime_ns=fixed.st_ctime_ns,
+            )
+        return info
+
+    monkeypatch.setattr(os, "stat", frozen_times)
+    assert store.load(run.id).kind == "first"
+    path.write_bytes(path.read_bytes().replace(b'"first"', b'"other"'))
+    assert store.load(run.id).kind == "other"
+
+
+def test_manifest_cache_unavailable_watcher_reads_fresh(store, monkeypatch):
+    run = store.create_run("first")
+    assert store.load(run.id).kind == "first"
+    monkeypatch.setattr(store._file_changes, "version", lambda fd: None)
+    path = store.root / run.id / "manifest.json"
+    path.write_bytes(path.read_bytes().replace(b'"first"', b'"other"'))
+    assert store.load(run.id).kind == "other"

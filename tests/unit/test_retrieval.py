@@ -175,6 +175,27 @@ def test_both_version_dimensions_required(index):
         other.retrieve("global memory", VERSION)
 
 
+def test_v4_indexes_document_title_without_changing_v3(index, tmp_path):
+    from gpu_agent.knowledge.models import make_chunk
+    from gpu_agent.knowledge.retrieve import KnowledgeIndex
+
+    fields = index.chunks[0].model_dump(exclude={"chunk_id", "content_hash"})
+    fields.update(
+        document_title="Allocation handbook",
+        section_title="Chapter",
+        text="A short independently authored paragraph.",
+    )
+    chunk = make_chunk(**fields)
+    old = KnowledgeIndex([chunk], tokenizer_version="cuda-lex-v3")
+    new = KnowledgeIndex([chunk], tokenizer_version="cuda-lex-v4")
+    assert old.retrieve("allocation", VERSION).chunks == []
+    assert new.retrieve("allocation", VERSION).chunks == [chunk]
+    assert new.corpus_hash != old.corpus_hash
+    path = tmp_path / "title-index.json"
+    new.save(path)
+    assert KnowledgeIndex.load(path).retrieve("allocation", VERSION).chunks == [chunk]
+
+
 def test_citation_existence_does_not_assert_relevance(index):
     from gpu_agent.knowledge.models import InvalidCitationError, validate_citations
 

@@ -42,7 +42,7 @@ def tokenize(text: str, version: str = "cuda-lex-v1") -> list[str]:
     for match in ATOM.finditer(text):
         atom = match.group()
         tokens.append(atom)
-        if version in {"cuda-lex-v2", "cuda-lex-v3"} and atom.endswith("()"):
+        if version in {"cuda-lex-v2", "cuda-lex-v3", "cuda-lex-v4"} and atom.endswith("()"):
             tokens.append(atom[:-2])
             if atom[:-2] != atom[:-2].lower():
                 tokens.append(atom[:-2].lower())
@@ -99,7 +99,7 @@ class KnowledgeIndex:
         self.corpus_version = corpus_version
         self.normalizer_version = normalizer_version
         self.tokenizer_version = tokenizer_version
-        if tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3"}:
+        if tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3", "cuda-lex-v4"}:
             raise KnowledgeCorruptError("Unsupported tokenizer version")
         self.corpus_hash = corpus_digest(
             chunks, corpus_version, normalizer_version, tokenizer_version
@@ -112,6 +112,11 @@ class KnowledgeIndex:
             counts = Counter(
                 tokenize(chunk.text, self.tokenizer_version)
                 + tokenize(chunk.section_title, self.tokenizer_version) * 2
+                + (
+                    tokenize(chunk.document_title, self.tokenizer_version)
+                    if self.tokenizer_version == "cuda-lex-v4"
+                    else []
+                )
             )
             self._lengths.append(counts.total())
             self._semantic_vectors.append(
@@ -137,7 +142,7 @@ class KnowledgeIndex:
         average = sum(self._lengths[i] for i in eligible) / len(eligible)
         scores: dict[int, float] = defaultdict(float)
         query_tokens = set(tokenize(query, self.tokenizer_version))
-        if self.tokenizer_version == "cuda-lex-v3":
+        if self.tokenizer_version in {"cuda-lex-v3", "cuda-lex-v4"}:
             query_tokens = {t for t in query_tokens if t.casefold() not in _QUERY_STOPWORDS}
         for token in query_tokens:
             postings = self._postings.get(token, {})
@@ -152,7 +157,7 @@ class KnowledgeIndex:
             for i in scores:
                 if "out_of_bounds" in tokenize(self.chunks[i].text):
                     scores[i] += 1.0
-        if self.tokenizer_version == "cuda-lex-v3":
+        if self.tokenizer_version in {"cuda-lex-v3", "cuda-lex-v4"}:
             # Exact, explicitly named APIs take precedence over incidental prose.
             # Fall back to ordinary lexical matching if the corpus has no anchor.
             apis = {
@@ -225,7 +230,8 @@ class KnowledgeIndex:
             if (
                 payload.schema_version != 1
                 or payload.normalizer_version != "nvidia-html-heading-v1"
-                or payload.tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3"}
+                or payload.tokenizer_version
+                not in {"cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3", "cuda-lex-v4"}
             ):
                 raise ValueError("Unsupported index format")
             index = cls(

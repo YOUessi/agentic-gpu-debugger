@@ -30,6 +30,7 @@ from gpu_agent.contracts import (
     Visibility,
     new_id,
 )
+from gpu_agent.file_changes import FileChanges
 from gpu_agent.store_inventory import DirectoryInventory
 
 if TYPE_CHECKING:
@@ -484,12 +485,11 @@ class RunStore:
             sync_directory(created.parent)
         self.visibility = visibility
         self._evaluation_verifier: EvaluationScheduleVerifier | None = None
-        # Parsed-manifest caches keyed by the manifest file's (dev, inode, mtime_ns, size).
-        # Manifests are only ever replaced atomically (new inode), so a matching key means
-        # the same bytes; any change is a cache miss and a full, checked re-read.
+        # Include observed write generations: equal timestamps do not prove equal bytes.
         self._ref_cache: dict[str, tuple[tuple[int, ...], frozenset[ArtifactRef]]] = {}
         self._manifest_cache: dict[str, tuple[tuple[int, ...], RunManifest]] = {}
         self._directory_inventory = DirectoryInventory()
+        self._file_changes = FileChanges()
 
     @property
     def identity(self) -> RunStoreIdentity:
@@ -720,21 +720,36 @@ class RunStore:
     def _load_at(self, run_id: str, directory_fd: int) -> RunManifest:
         """Cache all parsed manifests, including the current parent's children.
 
-        ctime catches in-place changes even if mtime and size are restored. Copies keep
-        callers from mutating the cached authority object. Reads still check file identity.
+        Write events catch in-place edits even when timestamps and size collide.
+        Copies prevent caller mutation; unavailable watchers disable cache hits.
         """
+        generation = self._file_changes.version(directory_fd)
         info = os.stat("manifest.json", dir_fd=directory_fd, follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
             raise ValueError("not a bounded regular file")
-        key = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+        key = (
+            info.st_dev,
+            info.st_ino,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+            info.st_size,
+            *(generation or ()),
+        )
         known = self._manifest_cache.get(run_id)
-        if known is not None and known[0] == key:
+        if generation is not None and known is not None and known[0] == key:
             return _copy_manifest(known[1])
         manifest = RunManifest.model_validate_json(
             _read_regular_at(directory_fd, "manifest.json", 8 * 1024 * 1024)
         )
         after = os.stat("manifest.json", dir_fd=directory_fd, follow_symlinks=False)
-        if key != (after.st_dev, after.st_ino, after.st_mtime_ns, after.st_ctime_ns, after.st_size):
+        if key != (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+            after.st_size,
+            *(self._file_changes.version(directory_fd) or ()),
+        ):
             raise ValueError("manifest changed while reading")
         if manifest.id != run_id:
             raise ValueError("manifest ID mismatch")
@@ -980,9 +995,21 @@ class RunStore:
         path = self._run_dir(run_id) / "manifest.json"
         reject_symlinks(path)
         info = os.stat(path, follow_symlinks=False)
-        key = (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, info.st_size)
+        fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            generation = self._file_changes.version(fd)
+        finally:
+            os.close(fd)
+        key = (
+            info.st_dev,
+            info.st_ino,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+            info.st_size,
+            *(generation or ()),
+        )
         cached = self._ref_cache.get(run_id)
-        if cached is not None and cached[0] == key:
+        if generation is not None and cached is not None and cached[0] == key:
             return cached[1]
         refs = frozenset(self.load(run_id).artifact_refs)
         if len(self._ref_cache) >= 4096:

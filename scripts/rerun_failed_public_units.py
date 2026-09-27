@@ -17,6 +17,7 @@ from gpu_agent.execution.models import SanitizerTool
 from gpu_agent.knowledge.retrieve import KnowledgeIndex
 from gpu_agent.provenance import capture_repository_snapshot, runtime_code_fingerprint
 from gpu_agent.service import ApplicationService
+from gpu_agent.usage_accounting import AccountingRates, summarize_calls
 
 
 def save(path: Path, value: object) -> None:
@@ -34,7 +35,13 @@ def main() -> None:
     parser.add_argument("--expected-corpus-hash", required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--verification-mode", choices=("standard", "full"), default="full")
+    parser.add_argument("--accounting-rates", type=Path, help="Optional explicit rates; no caps")
     args = parser.parse_args()
+    rates = (
+        AccountingRates.model_validate_json(args.accounting_rates.read_bytes())
+        if args.accounting_rates
+        else None
+    )
     repo = args.repository.resolve()
     snapshot = capture_repository_snapshot(repo)
     runtime_hash = runtime_code_fingerprint(repo)
@@ -78,6 +85,7 @@ def main() -> None:
             units=keys,
             attempts_per_unit=1,
             verification_mode=args.verification_mode,
+            accounting_rates=rates.model_dump(mode="json") if rates else None,
         ),
     )
     with (root / "results.jsonl").open("x") as stream:
@@ -137,9 +145,12 @@ def main() -> None:
                 known_total_tokens=sum(c.usage.total_tokens or 0 for c in calls if c.usage),
                 unknown_usage_calls=sum(c.usage is None for c in calls),
                 cost_usd=None,
+                accounting=summarize_calls(calls, rates),
                 calls=[
                     dict(
                         kind=c.kind,
+                        invocation_id=c.invocation_id,
+                        usage=c.usage.model_dump(mode="json") if c.usage else None,
                         attempt=c.attempt,
                         state=c.state,
                         error_code=c.error_code,
