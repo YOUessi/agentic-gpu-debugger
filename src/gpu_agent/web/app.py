@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import csv
+import io
 import os
 from pathlib import Path
 from typing import Annotated
@@ -25,6 +27,7 @@ from gpu_agent.web.models import (
     AnalyticsOverview,
     BatchDetail,
     CaseSummary,
+    EvaluationComparison,
     EvaluationDetail,
     RepairJob,
     RepairRequest,
@@ -35,6 +38,68 @@ from gpu_agent.web.models import (
     VerifyRequest,
     VerifyResponse,
 )
+
+
+def _csv_safe(value: object) -> str:
+    text = "" if value is None else str(value)
+    if text.startswith(("=", "+", "-", "@", "\t", "\r")):
+        return "'" + text
+    return text
+
+
+def _evaluation_csv(detail: EvaluationDetail) -> str:
+    stream = io.StringIO(newline="")
+    writer = csv.writer(stream)
+    writer.writerow(
+        [
+            "ordinal",
+            "record_id",
+            "case_id",
+            "template_id",
+            "mode",
+            "repeat",
+            "status",
+            "diagnosis_run_id",
+            "candidate_run_id",
+            "verification_run_id",
+            "diagnosis_outcome",
+            "failure_family",
+            "verdict",
+            "oracle_passed",
+            "latency_ms",
+            "physical_calls",
+            "sanitizer_calls",
+            "total_tokens",
+            "cost_usd",
+            "failure_reason",
+        ]
+    )
+    for record in detail.records:
+        writer.writerow(
+            [
+                record.ordinal,
+                _csv_safe(record.record_id),
+                _csv_safe(record.case_id),
+                _csv_safe(record.template_id),
+                _csv_safe(record.mode),
+                record.repeat,
+                _csv_safe(record.status),
+                _csv_safe(record.diagnosis_run_id),
+                _csv_safe(record.candidate_run_id),
+                _csv_safe(record.verification_run_id),
+                _csv_safe(record.diagnosis_outcome),
+                _csv_safe(record.failure_family),
+                _csv_safe(record.verdict),
+                record.oracle_passed,
+                record.latency_ms,
+                record.physical_calls,
+                record.sanitizer_calls,
+                record.total_tokens,
+                record.cost_usd,
+                _csv_safe(record.failure_reason),
+            ]
+        )
+    return stream.getvalue()
 
 
 def _repository_root() -> Path:
@@ -112,6 +177,19 @@ def create_app(
         except (OSError, ValueError):
             raise HTTPException(status_code=503, detail="ANALYTICS_STORE_UNSAFE") from None
 
+    @app.get("/api/analytics/evaluations/compare", response_model=EvaluationComparison)
+    def analytics_compare(
+        baseline: str,
+        candidate: str,
+    ) -> EvaluationComparison:
+        try:
+            return analytics.compare_evaluations(baseline, candidate)
+        except (OSError, ValueError):
+            raise HTTPException(
+                status_code=404,
+                detail="EVALUATION_COMPARISON_UNAVAILABLE",
+            ) from None
+
     @app.get("/api/analytics/evaluations/{run_id}", response_model=EvaluationDetail)
     def analytics_evaluation(
         run_id: str,
@@ -132,6 +210,38 @@ def create_app(
             )
         except (OSError, ValueError):
             raise HTTPException(status_code=404, detail="EVALUATION_NOT_FOUND") from None
+
+    @app.get("/api/analytics/evaluations/{run_id}/export.json", response_model=None)
+    def analytics_evaluation_json(run_id: str) -> Response:
+        try:
+            detail = analytics.evaluation_export(run_id)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail="EVALUATION_EXPORT_UNAVAILABLE") from None
+        return Response(
+            content=detail.model_dump_json(indent=2),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="evaluation-{run_id[:12]}.json"'
+                )
+            },
+        )
+
+    @app.get("/api/analytics/evaluations/{run_id}/export.csv", response_model=None)
+    def analytics_evaluation_csv(run_id: str) -> Response:
+        try:
+            detail = analytics.evaluation_export(run_id)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail="EVALUATION_EXPORT_UNAVAILABLE") from None
+        return Response(
+            content="\ufeff" + _evaluation_csv(detail),
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="evaluation-{run_id[:12]}.csv"'
+                )
+            },
+        )
 
     @app.get("/api/analytics/batches/{run_id}", response_model=BatchDetail)
     def analytics_batch(run_id: str) -> BatchDetail:

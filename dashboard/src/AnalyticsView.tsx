@@ -2,6 +2,8 @@ import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   getAnalyticsArtifact,
   getAnalyticsOverview,
+  compareEvaluations,
+  evaluationExportUrl,
   getAnalyticsRun,
   getBatchDetail,
   getEvaluationDetail,
@@ -12,6 +14,7 @@ import type {
   BatchCard,
   BatchDetail,
   EvaluationCard,
+  EvaluationComparison,
   EvaluationDetail,
   EvaluationModeSummary,
   EvaluationRecordRow,
@@ -517,7 +520,23 @@ function EvaluationDrawer({
             <h2>{shortId(run.run_id, 14)}</h2>
             <p>{humanize(run.split)} · {run.executed_units} executed units</p>
           </div>
-          <button className="icon-button" onClick={onClose} aria-label="Close analytics">×</button>
+          <div className="analytics-header-actions">
+            <a
+              className="ghost-button export-link"
+              href={evaluationExportUrl(run.run_id, 'csv')}
+              download
+            >
+              Export CSV
+            </a>
+            <a
+              className="ghost-button export-link"
+              href={evaluationExportUrl(run.run_id, 'json')}
+              download
+            >
+              Export JSON
+            </a>
+            <button className="icon-button" onClick={onClose} aria-label="Close analytics">×</button>
+          </div>
         </header>
         <div className="analytics-drawer-scroll">
           <section className="analytics-summary-strip">
@@ -794,10 +813,358 @@ function BatchDrawer({ run, onClose }: { run: BatchCard; onClose: () => void }) 
   )
 }
 
+function EvaluationTrend({ evaluations }: { evaluations: EvaluationCard[] }) {
+  const ordered = [...evaluations].sort((left, right) => {
+    const leftTime = left.last_event_at ? new Date(left.last_event_at).getTime() : 0
+    const rightTime = right.last_event_at ? new Date(right.last_event_at).getTime() : 0
+    return leftTime - rightTime
+  })
+  const maxLatency = Math.max(
+    ...ordered.map((item) => item.latency_mean_ms ?? 0),
+    1,
+  )
+
+  return (
+    <section className="panel analytics-panel trend-panel">
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">History</span>
+          <h2>Evaluation trend</h2>
+        </div>
+        <span className="panel-count">{ordered.length}</span>
+      </div>
+      <div className="trend-note">
+        Timeline only. Direct regression comparison is gated by split/corpus/mode/repeat compatibility.
+      </div>
+      <div className="trend-scroll">
+        {ordered.length === 0 && <div className="table-message">No evaluation history.</div>}
+        {ordered.map((item) => (
+          <article className="trend-card" key={item.run_id}>
+            <div className="trend-card-head">
+              <strong>{shortId(item.run_id, 10)}</strong>
+              <StatusPill value={item.status} />
+            </div>
+            <span className="trend-date">{formatTime(item.last_event_at)}</span>
+            <div className="trend-population">
+              <span>{humanize(item.split)}</span>
+              <span>cutoff {item.corpus_cutoff ?? '—'}</span>
+              <span>{item.executed_units} units</span>
+            </div>
+            <div className="trend-measure">
+              <div><span>Verified</span><strong>{percent(item.verified_rate)}</strong></div>
+              <div className="trend-track">
+                <i style={{ width: Math.max(2, (item.verified_rate ?? 0) * 100) + '%' }} />
+              </div>
+            </div>
+            <div className="trend-measure latency">
+              <div><span>Latency</span><strong>{seconds(item.latency_mean_ms)}</strong></div>
+              <div className="trend-track">
+                <i
+                  style={{
+                    width:
+                      Math.max(
+                        2,
+                        ((item.latency_mean_ms ?? 0) / maxLatency) * 100,
+                      ) + '%',
+                  }}
+                />
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function deltaPercent(value: number | null): string {
+  if (value === null) return '—'
+  const points = value * 100
+  return (points >= 0 ? '+' : '') + points.toFixed(1) + ' pp'
+}
+
+function deltaNumber(value: number | null, suffix = ''): string {
+  if (value === null) return '—'
+  return (value >= 0 ? '+' : '') + value.toFixed(1) + suffix
+}
+
+function ComparisonWorkbench({
+  evaluations,
+  onOpenDiagnosis,
+}: {
+  evaluations: EvaluationCard[]
+  onOpenDiagnosis: (runId: string) => void
+}) {
+  const [baseline, setBaseline] = useState('')
+  const [candidate, setCandidate] = useState('')
+  const [comparison, setComparison] = useState<EvaluationComparison | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const ordered = [...evaluations].sort((left, right) => {
+    const leftTime = left.last_event_at ? new Date(left.last_event_at).getTime() : 0
+    const rightTime = right.last_event_at ? new Date(right.last_event_at).getTime() : 0
+    return rightTime - leftTime
+  })
+  const effectiveCandidate = candidate || ordered[0]?.run_id || ''
+  const effectiveBaseline = baseline || ordered[1]?.run_id || ''
+
+  async function compare() {
+    if (
+      !effectiveBaseline ||
+      !effectiveCandidate ||
+      effectiveBaseline === effectiveCandidate
+    ) {
+      return
+    }
+    setLoading(true)
+    setError('')
+    try {
+      setComparison(await compareEvaluations(effectiveBaseline, effectiveCandidate))
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Comparison unavailable')
+      setComparison(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <section className="panel analytics-panel comparison-panel">
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">Regression analysis</span>
+          <h2>Evaluation comparison</h2>
+        </div>
+        <span className="panel-count">public records</span>
+      </div>
+      <div className="comparison-controls">
+        <label>
+          Baseline
+          <select
+            value={effectiveBaseline}
+            onChange={(event) => setBaseline(event.target.value)}
+          >
+            <option value="">Select run</option>
+            {evaluations.map((item) => (
+              <option key={item.run_id} value={item.run_id}>
+                {shortId(item.run_id, 10)} · {item.split ?? 'unknown'} · cutoff {item.corpus_cutoff ?? '—'}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="comparison-arrow">→</span>
+        <label>
+          Candidate
+          <select
+            value={effectiveCandidate}
+            onChange={(event) => setCandidate(event.target.value)}
+          >
+            <option value="">Select run</option>
+            {evaluations.map((item) => (
+              <option key={item.run_id} value={item.run_id}>
+                {shortId(item.run_id, 10)} · {item.split ?? 'unknown'} · cutoff {item.corpus_cutoff ?? '—'}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="primary-button"
+          disabled={
+            loading ||
+            evaluations.length < 2 ||
+            !effectiveBaseline ||
+            !effectiveCandidate ||
+            effectiveBaseline === effectiveCandidate
+          }
+          onClick={() => void compare()}
+        >
+          {loading ? 'Comparing…' : 'Compare'}
+        </button>
+      </div>
+
+      {evaluations.length < 2 && (
+        <div className="comparison-empty">
+          At least two public evaluation runs are required for regression comparison.
+        </div>
+      )}
+      {error && <div className="error-banner comparison-error">{error}</div>}
+
+      {comparison && (
+        <div className="comparison-body">
+          {!comparison.comparable && (
+            <div className="comparison-incompatible">
+              <strong>Comparison blocked</strong>
+              <p>
+                Unit-level regression classification is disabled because these runs do not
+                represent the same complete population.
+              </p>
+              <div>
+                {comparison.reasons.map((reason) => (
+                  <span key={reason}>{humanize(reason)}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {comparison.comparable && (
+            <>
+              <div className="comparison-metrics">
+                <Metric
+                  label="Verified Δ"
+                  value={deltaPercent(comparison.overall_delta.verified_rate_delta)}
+                  hint="candidate − baseline"
+                />
+                <Metric
+                  label="Latency Δ"
+                  value={deltaNumber(
+                    comparison.overall_delta.latency_mean_ms_delta === null
+                      ? null
+                      : comparison.overall_delta.latency_mean_ms_delta / 1000,
+                    's',
+                  )}
+                  hint="mean / unit"
+                />
+                <Metric
+                  label="LLM calls Δ"
+                  value={deltaNumber(comparison.overall_delta.llm_calls_mean_delta)}
+                  hint="mean / unit"
+                />
+                <Metric
+                  label="Tokens Δ"
+                  value={deltaNumber(comparison.overall_delta.tokens_mean_delta)}
+                  hint="mean / unit"
+                />
+                <Metric
+                  label="Cost Δ"
+                  value={
+                    comparison.overall_delta.known_cost_usd_delta === null
+                      ? '—'
+                      : (comparison.overall_delta.known_cost_usd_delta >= 0 ? '+' : '') +
+                        '$' +
+                        comparison.overall_delta.known_cost_usd_delta.toFixed(4)
+                  }
+                  hint="known public records"
+                />
+              </div>
+
+              <div className="regression-counts">
+                <div><span>Matched units</span><strong>{comparison.matched_units}</strong></div>
+                <div className="regression"><span>Regressions</span><strong>{comparison.regressions}</strong></div>
+                <div className="improvement"><span>Improvements</span><strong>{comparison.improvements}</strong></div>
+                <div><span>Unchanged</span><strong>{comparison.unchanged}</strong></div>
+              </div>
+
+              <div className="analytics-table-wrap comparison-mode-table">
+                <table className="analytics-table">
+                  <thead>
+                    <tr>
+                      <th>Mode</th>
+                      <th>Baseline verified</th>
+                      <th>Candidate verified</th>
+                      <th>Verified Δ</th>
+                      <th>Baseline latency</th>
+                      <th>Candidate latency</th>
+                      <th>Latency Δ</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {comparison.mode_comparisons.map((item) => (
+                      <tr key={item.mode}>
+                        <td><span className="mode-badge">{item.mode}</span></td>
+                        <td>{percent(item.baseline?.verified_rate ?? null)}</td>
+                        <td>{percent(item.candidate?.verified_rate ?? null)}</td>
+                        <td>{deltaPercent(item.delta.verified_rate_delta)}</td>
+                        <td>{seconds(item.baseline?.latency_mean_ms ?? null)}</td>
+                        <td>{seconds(item.candidate?.latency_mean_ms ?? null)}</td>
+                        <td>
+                          {deltaNumber(
+                            item.delta.latency_mean_ms_delta === null
+                              ? null
+                              : item.delta.latency_mean_ms_delta / 1000,
+                            's',
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <section className="regression-list">
+                <div className="analytics-section-head">
+                  <div>
+                    <span className="eyebrow">Fixed → not fixed</span>
+                    <h3>Regression signals</h3>
+                  </div>
+                  <span className="section-count">{comparison.regressions}</span>
+                </div>
+                {comparison.regression_rows.length === 0 ? (
+                  <div className="comparison-empty">No unit changed from VERIFIED_FIXED to another verdict.</div>
+                ) : (
+                  <div className="analytics-table-wrap">
+                    <table className="analytics-table">
+                      <thead>
+                        <tr>
+                          <th>Case</th>
+                          <th>Mode</th>
+                          <th>Repeat</th>
+                          <th>Baseline</th>
+                          <th>Candidate</th>
+                          <th>Lineage</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {comparison.regression_rows.map((row) => (
+                          <tr key={row.case_id + row.mode + row.repeat}>
+                            <td><strong>{row.case_id}</strong><small>{row.template_id}</small></td>
+                            <td><span className="mode-badge">{row.mode}</span></td>
+                            <td>{row.repeat}</td>
+                            <td><StatusPill value={row.baseline_verdict} /></td>
+                            <td><StatusPill value={row.candidate_verdict} /></td>
+                            <td>
+                              <div className="regression-lineage-actions">
+                                <button
+                                  disabled={!row.baseline_diagnosis_run_id}
+                                  onClick={() => {
+                                    if (row.baseline_diagnosis_run_id) {
+                                      onOpenDiagnosis(row.baseline_diagnosis_run_id)
+                                    }
+                                  }}
+                                >
+                                  Baseline run
+                                </button>
+                                <button
+                                  disabled={!row.candidate_diagnosis_run_id}
+                                  onClick={() => {
+                                    if (row.candidate_diagnosis_run_id) {
+                                      onOpenDiagnosis(row.candidate_diagnosis_run_id)
+                                    }
+                                  }}
+                                >
+                                  Candidate run
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
 export default function AnalyticsView() {
   const [overview, setOverview] = useState<AnalyticsOverview | null>(null)
   const [selectedEvaluation, setSelectedEvaluation] = useState<EvaluationCard | null>(null)
   const [selectedBatch, setSelectedBatch] = useState<BatchCard | null>(null)
+  const [selectedComparisonDiagnosis, setSelectedComparisonDiagnosis] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
@@ -873,6 +1240,13 @@ export default function AnalyticsView() {
         <Metric label="Known cost" value={money(totals.cost)} hint="public records only" />
         <Metric label="Seed batches" value={overview?.batch_count ?? 0} hint="public validation runs" />
       </section>
+
+      <EvaluationTrend evaluations={overview?.evaluations ?? []} />
+
+      <ComparisonWorkbench
+        evaluations={overview?.evaluations ?? []}
+        onOpenDiagnosis={setSelectedComparisonDiagnosis}
+      />
 
       <section className="analytics-layout">
         <section className="panel analytics-panel">
@@ -973,6 +1347,12 @@ export default function AnalyticsView() {
       )}
       {selectedBatch && (
         <BatchDrawer run={selectedBatch} onClose={() => setSelectedBatch(null)} />
+      )}
+      {selectedComparisonDiagnosis && (
+        <AnalyticsDiagnosisDrawer
+          runId={selectedComparisonDiagnosis}
+          onClose={() => setSelectedComparisonDiagnosis(null)}
+        />
       )}
     </main>
   )

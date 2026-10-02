@@ -306,6 +306,69 @@
 
 ---
 
+## 2026-10-03 / Full-stack Round 6
+
+### FS-025：跨 Evaluation 不能只看 verified rate 差值就叫 regression
+
+**现象：** 历史 public store 里同时存在 development、holdout、失败未执行完成的 evaluation。若直接把两个 verified rate 相减，会把不同 split、不同 corpus 或不完整执行误写成回归/提升。
+
+**原因：** 指标只有在同一完整 population 上才具备 unit-level 可比性；历史 run 的 `split/corpus_cutoff/expected_units/modes/repeats` 可能不同。
+
+**修复：** Comparison 先检查 run status、split、corpus cutoff、expected units、repeats、mode 集合与 execution completeness。任何不一致都返回 `comparable=false` 和明确 reason，不计算 unit regression 或 metric delta。
+
+**验证：** Tang 的 release public store 中，completed holdout 对 failed holdout 被阻止，返回 `RUN_NOT_COMPLETED/CANDIDATE_INCOMPLETE/UNIT_KEY_MISMATCH`；development 对 holdout 也因 population mismatch 被阻止。
+
+### FS-026：Evaluation schedule ordinal 不能作为跨 run 对齐主键
+
+**现象：** Evaluation schedule 会随机化 ordinal；同一个 case/mode/repeat 在不同 evaluation 中不保证 ordinal 相同。按表格行号比较会把不同 unit 错配。
+
+**原因：** `ordinal` 是执行顺序，不是 benchmark unit 身份。
+
+**修复：** Regression comparison 用稳定 tuple `(case_id, template_id, mode, repeat)` 建索引；发现 duplicate key 或两边 unit key 集合不一致时直接标记不可比。只有匹配 population 中 `VERIFIED_FIXED → 非 VERIFIED_FIXED` 才记为 regression，反向记为 improvement。
+
+**验证：** Synthetic API 测试构造 3 个相同 unit，确认 1 regression + 1 improvement + 1 unchanged，并保留 baseline/candidate diagnosis lineage。
+
+### FS-027：失败或部分执行 Evaluation 不能贡献“0%”假统计
+
+**现象：** 真实 failed holdout evaluation 持久化了 `expected_units=120` 但 `executed_units=0`。若按空 records 算成 verified rate=0%，页面会把“没有执行”误读成“全部失败”。
+
+**原因：** 未执行与执行后未修复是不同状态。
+
+**修复：** EvaluationCard 对空 records 保持 `verified_rate=null`；comparison 对 incomplete run 返回 `BASELINE_INCOMPLETE/CANDIDATE_INCOMPLETE`，matched/regression 统计清零。Trend 可以显示该 run，但不会把它和完整 run 自动解释为性能下降。
+
+**验证：** 真实 failed holdout 在 overview 中显示 0/120 executed 且 verified rate 为空；与 completed holdout 比较被 compatibility gate 拦截。
+
+### FS-028：CSV 导出需要防 spreadsheet formula injection
+
+**现象：** Evaluation record 中 template/failure reason 等文本来自持久化数据；若单元格以 `= + - @` 等开头，直接下载 CSV 后用 Excel/Sheets 打开可能被解释为公式。
+
+**原因：** CSV 是数据格式，但常见消费者会主动执行公式语法。
+
+**修复：** 导出字符串字段统一经过 `_csv_safe()`，危险前缀加单引号；CSV 带 UTF-8 BOM，并设置 attachment filename。导出限制最多 10,000 records，避免无界内存构造。
+
+**验证：** API 测试注入 template `=SUM(A1:A2)`，导出 CSV 中变为 `'` + `=SUM(A1:A2)`；JSON export 保持结构化数据。
+
+### FS-029：Trend 与 Regression 必须在 UI 上分成两种语义
+
+**现象：** 用户需要“趋势”，但历史 timeline 可能同时包含 development/holdout/cutoff 变化。把折线或柱条连接起来容易暗示这些 run 可直接比较。
+
+**原因：** 时间顺序不等于实验 population 一致。
+
+**修复：** `Evaluation trend` 仅逐 run 展示时间、split、cutoff、units、verified/latency 的描述值，并明确提示 direct comparison 需要 compatibility gate；真正的 Regression Analysis 放在独立 comparison workbench 中。
+
+**验证：** Playwright 覆盖 2-run trend + compatible comparison + regression lineage；真实 3-run release store 能展示 timeline，同时不自动生成跨 population regression。
+
+### Round 6 验证摘要
+
+- Python targeted regression：55 passed；Ruff 通过；`mypy --strict src/gpu_agent`：83 个 source file 无问题。
+- Vitest：4 passed；TypeScript/Vite production build：通过；Oxlint：0 warnings / 0 errors；Playwright：6 passed。
+- Playwright 新增完整 compatible comparison：2 个同 population run → regression workbench → 1 regression / 1 improvement / 1 unchanged → baseline diagnosis lineage drill-down。
+- Tang 真实 release public store 挂载 3 个 evaluation：120-unit completed holdout、240-unit development、0/120 failed holdout。Trend 正常显示 3 个历史点；completed holdout → failed holdout 被 gate 拦截，未产生假 regression 数字。
+- 真实 development export：JSON 约 178 KB、CSV 约 60 KB，均带 attachment filename；页面 Export CSV/JSON 链接指向对应 historical public evaluation。
+- 本轮没有新增付费模型调用或真实 GPU 实验；comparison/trend/export 均使用既有 public evidence。
+
+---
+
 ## 模板：后续问题
 
 ### FS-XXX：标题

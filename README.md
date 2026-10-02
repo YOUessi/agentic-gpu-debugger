@@ -41,7 +41,8 @@ RunManifest timeline，同时提供 Original Source / Selected Candidate Diff �
 新增 Batch & Evaluation Analytics，可对 public seed batch 和 A–E evaluation 做服务端投影、
 mode 对比、大规模记录表、failure-family 分布、latency/调用量/token/cost 分析；可单独挂载
 历史 public RunStore，且不会读取 evaluator/private evidence。Round 5 又补充了 mode 可视化图表
-和 evaluation record → diagnosis run → evidence/candidate/verification 的只读 lineage drill-down。
+和 evaluation record → diagnosis run → evidence/candidate/verification 的只读 lineage drill-down；
+Round 6 增加 evaluation trend、兼容性门控的 regression comparison，以及 CSV/JSON export。
 设计与安全边界见
 [Full-stack Console](docs/fullstack-console.md)，开发中遇到的问题与修复过程持续记录在
 [Full-stack 开发日志](docs/fullstack-development-log.md)。

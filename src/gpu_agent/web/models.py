@@ -150,6 +150,7 @@ class EvaluationModeSummary(BaseModel):
 class EvaluationCard(BaseModel):
     run_id: str
     status: str
+    last_event_at: datetime | None = None
     split: str | None = None
     corpus_cutoff: int | None = None
     expected_units: int | None = None
@@ -229,3 +230,42 @@ class BatchDetail(BaseModel):
     register_requested: bool
     stopped_reason: str | None = None
     cases: list[BatchCaseRow]
+
+class EvaluationDelta(BaseModel):
+    verified_rate_delta: float | None = None
+    latency_mean_ms_delta: float | None = None
+    llm_calls_mean_delta: float | None = None
+    tokens_mean_delta: float | None = None
+    known_cost_usd_delta: float | None = None
+
+
+class EvaluationModeComparison(BaseModel):
+    mode: str
+    baseline: EvaluationModeSummary | None = None
+    candidate: EvaluationModeSummary | None = None
+    delta: EvaluationDelta
+
+
+class EvaluationRegressionRow(BaseModel):
+    case_id: str
+    template_id: str
+    mode: str
+    repeat: int
+    baseline_verdict: str | None = None
+    candidate_verdict: str | None = None
+    baseline_diagnosis_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    candidate_diagnosis_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+
+
+class EvaluationComparison(BaseModel):
+    comparable: bool
+    reasons: list[str] = Field(default_factory=list)
+    baseline: EvaluationCard
+    candidate: EvaluationCard
+    overall_delta: EvaluationDelta
+    mode_comparisons: list[EvaluationModeComparison] = Field(default_factory=list)
+    matched_units: int
+    regressions: int
+    improvements: int
+    unchanged: int
+    regression_rows: list[EvaluationRegressionRow] = Field(default_factory=list)

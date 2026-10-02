@@ -47,6 +47,7 @@ test.beforeEach(async ({ page }) => {
         evaluations: [{
           run_id: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
           status: 'COMPLETED',
+          last_event_at: '2026-09-23T19:00:00Z',
           split: 'development',
           corpus_cutoff: 16,
           expected_units: 240,
@@ -84,6 +85,7 @@ test.beforeEach(async ({ page }) => {
         summary: {
           run_id: 'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee',
           status: 'COMPLETED',
+          last_event_at: '2026-09-23T19:00:00Z',
           split: 'development',
           corpus_cutoff: 16,
           expected_units: 240,
@@ -447,6 +449,14 @@ test('opens evaluation analytics and renders the A-E data grid', async ({ page }
   await expect(page.getByText('case_0006')).toBeVisible()
   await expect(page.getByText('Vector-Add-Oob-Load')).toBeVisible()
   await expect(page.getByText('Out Of Bounds')).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Export CSV' })).toHaveAttribute(
+    'href',
+    '/api/analytics/evaluations/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/export.csv',
+  )
+  await expect(page.getByRole('link', { name: 'Export JSON' })).toHaveAttribute(
+    'href',
+    '/api/analytics/evaluations/eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee/export.json',
+  )
 
   await page.getByText('case_0006').click()
   await expect(page.getByRole('heading', { name: /case_0006 · Mode C/ })).toBeVisible()
@@ -469,4 +479,128 @@ test('opens seed batch analytics and shows clean-mutant evidence summary', async
   await expect(page.getByRole('cell', { name: 'Memcheck' })).toBeVisible()
   await expect(page.getByRole('cell').filter({ hasText: 'REGISTERED' })).toBeVisible()
   await expect(page.getByText('1/1')).toBeVisible()
+})
+
+
+test('compares compatible evaluations and drills into a regression lineage', async ({ page }) => {
+  const baselineId = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+  const candidateId = 'ffffffffffffffffffffffffffffffff'
+  const card = (runId: string, lastEvent: string, verified: number) => ({
+    run_id: runId,
+    status: 'COMPLETED',
+    last_event_at: lastEvent,
+    split: 'development',
+    corpus_cutoff: 16,
+    expected_units: 3,
+    executed_units: 3,
+    modes: ['D'],
+    repeats: 1,
+    verified_fixed: verified,
+    verified_rate: verified / 3,
+    diagnosed: 3,
+    latency_mean_ms: 1000,
+    llm_calls_mean: 2,
+    tokens_mean: 1200,
+    known_cost_usd: 0.03,
+  })
+
+  await page.route('**/api/analytics/overview', async (route) => {
+    await route.fulfill({
+      json: {
+        store_root: '/public/analytics',
+        batch_count: 0,
+        evaluation_count: 2,
+        projection_errors: [],
+        batches: [],
+        evaluations: [
+          card(candidateId, '2026-10-03T02:00:00Z', 2),
+          card(baselineId, '2026-10-03T01:00:00Z', 2),
+        ],
+      },
+    })
+  })
+
+  await page.route('**/api/analytics/evaluations/compare?**', async (route) => {
+    await route.fulfill({
+      json: {
+        comparable: true,
+        reasons: [],
+        baseline: card(baselineId, '2026-10-03T01:00:00Z', 2),
+        candidate: card(candidateId, '2026-10-03T02:00:00Z', 2),
+        overall_delta: {
+          verified_rate_delta: 0,
+          latency_mean_ms_delta: 100,
+          llm_calls_mean_delta: 0.5,
+          tokens_mean_delta: 200,
+          known_cost_usd_delta: 0.01,
+        },
+        mode_comparisons: [{
+          mode: 'D',
+          baseline: {
+            mode: 'D',
+            record_count: 3,
+            diagnosed: 3,
+            verified_fixed: 2,
+            verified_rate: 2 / 3,
+            latency_mean_ms: 1000,
+            llm_calls_mean: 2,
+            tokens_mean: 1200,
+            known_cost_usd: 0.03,
+          },
+          candidate: {
+            mode: 'D',
+            record_count: 3,
+            diagnosed: 3,
+            verified_fixed: 2,
+            verified_rate: 2 / 3,
+            latency_mean_ms: 1100,
+            llm_calls_mean: 2.5,
+            tokens_mean: 1400,
+            known_cost_usd: 0.04,
+          },
+          delta: {
+            verified_rate_delta: 0,
+            latency_mean_ms_delta: 100,
+            llm_calls_mean_delta: 0.5,
+            tokens_mean_delta: 200,
+            known_cost_usd_delta: 0.01,
+          },
+        }],
+        matched_units: 3,
+        regressions: 1,
+        improvements: 1,
+        unchanged: 1,
+        regression_rows: [{
+          case_id: 'case_0006',
+          template_id: 'vector-add-oob-load',
+          mode: 'D',
+          repeat: 0,
+          baseline_verdict: 'VERIFIED_FIXED',
+          candidate_verdict: 'NOT_FIXED',
+          baseline_diagnosis_run_id: analyticsDiagnosisId,
+          candidate_diagnosis_run_id: null,
+        }],
+      },
+    })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Analytics' }).click()
+  const comparison = page.locator('.comparison-panel')
+  await expect(page.locator('.trend-card')).toHaveCount(2)
+  await expect(comparison.getByLabel('Baseline')).toHaveValue(baselineId)
+  await expect(comparison.getByLabel('Candidate')).toHaveValue(candidateId)
+  await comparison.getByRole('button', { name: 'Compare' }).click()
+
+  await expect(comparison.getByText('Regression signals')).toBeVisible()
+  await expect(comparison.getByText('case_0006')).toBeVisible()
+  await expect(
+    comparison.locator('.regression-counts .regression').getByText('1', { exact: true }),
+  ).toBeVisible()
+  await expect(
+    comparison.locator('.regression-counts .improvement').getByText('1', { exact: true }),
+  ).toBeVisible()
+  await comparison.getByRole('button', { name: 'Baseline run' }).click()
+  await expect(page.getByText('Historical public diagnosis')).toBeVisible()
+  await expect(page.getByText('Read only')).toBeVisible()
 })

@@ -126,6 +126,7 @@ export type EvaluationModeSummary = {
 export type EvaluationCard = {
   run_id: string
   status: string
+  last_event_at: string | null
   split: string | null
   corpus_cutoff: number | null
   expected_units: number | null
@@ -205,4 +206,45 @@ export type BatchDetail = {
   register_requested: boolean
   stopped_reason: string | null
   cases: BatchCaseRow[]
+}
+
+
+export type EvaluationDelta = {
+  verified_rate_delta: number | null
+  latency_mean_ms_delta: number | null
+  llm_calls_mean_delta: number | null
+  tokens_mean_delta: number | null
+  known_cost_usd_delta: number | null
+}
+
+export type EvaluationModeComparison = {
+  mode: string
+  baseline: EvaluationModeSummary | null
+  candidate: EvaluationModeSummary | null
+  delta: EvaluationDelta
+}
+
+export type EvaluationRegressionRow = {
+  case_id: string
+  template_id: string
+  mode: string
+  repeat: number
+  baseline_verdict: string | null
+  candidate_verdict: string | null
+  baseline_diagnosis_run_id: string | null
+  candidate_diagnosis_run_id: string | null
+}
+
+export type EvaluationComparison = {
+  comparable: boolean
+  reasons: string[]
+  baseline: EvaluationCard
+  candidate: EvaluationCard
+  overall_delta: EvaluationDelta
+  mode_comparisons: EvaluationModeComparison[]
+  matched_units: number
+  regressions: number
+  improvements: number
+  unchanged: number
+  regression_rows: EvaluationRegressionRow[]
 }

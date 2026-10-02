@@ -18,9 +18,13 @@ from gpu_agent.web.models import (
     BatchCaseRow,
     BatchDetail,
     EvaluationCard,
+    EvaluationComparison,
+    EvaluationDelta,
     EvaluationDetail,
+    EvaluationModeComparison,
     EvaluationModeSummary,
     EvaluationRecordRow,
+    EvaluationRegressionRow,
 )
 
 _RUN_ID = re.compile(r"^[a-f0-9]{32}$")
@@ -209,6 +213,7 @@ class AnalyticsCatalog:
         return EvaluationCard(
             run_id=run.id,
             status=run.status.value,
+            last_event_at=run.events[-1].at if run.events else None,
             split=str(payload.get("split")) if payload.get("split") is not None else None,
             corpus_cutoff=self._integer(payload.get("corpus_cutoff")),
             expected_units=self._integer(payload.get("expected_units")),
@@ -392,6 +397,237 @@ class AnalyticsCatalog:
             total=total,
             page=page,
             page_size=page_size,
+        )
+
+
+    @staticmethod
+    def _delta_value(candidate: float | None, baseline: float | None) -> float | None:
+        if candidate is None or baseline is None:
+            return None
+        return candidate - baseline
+
+    @classmethod
+    def _metric_delta(
+        cls,
+        candidate: EvaluationModeSummary | EvaluationCard,
+        baseline: EvaluationModeSummary | EvaluationCard,
+        *,
+        enabled: bool,
+    ) -> EvaluationDelta:
+        if not enabled:
+            return EvaluationDelta()
+        return EvaluationDelta(
+            verified_rate_delta=cls._delta_value(
+                candidate.verified_rate,
+                baseline.verified_rate,
+            ),
+            latency_mean_ms_delta=cls._delta_value(
+                candidate.latency_mean_ms,
+                baseline.latency_mean_ms,
+            ),
+            llm_calls_mean_delta=cls._delta_value(
+                candidate.llm_calls_mean,
+                baseline.llm_calls_mean,
+            ),
+            tokens_mean_delta=cls._delta_value(
+                candidate.tokens_mean,
+                baseline.tokens_mean,
+            ),
+            known_cost_usd_delta=cls._delta_value(
+                candidate.known_cost_usd,
+                baseline.known_cost_usd,
+            ),
+        )
+
+    @staticmethod
+    def _record_key(record: dict[str, Any]) -> tuple[str, str, str, int]:
+        repeat_value = record.get("repeat")
+        repeat = repeat_value if isinstance(repeat_value, int) else 0
+        return (
+            str(record.get("case_id", "")),
+            str(record.get("template_id", "")),
+            str(record.get("mode", "")),
+            repeat,
+        )
+
+    @staticmethod
+    def _lineage_run_id(record: dict[str, Any], name: str) -> str | None:
+        lineage = record.get("lineage")
+        if not isinstance(lineage, dict):
+            return None
+        value = lineage.get(name)
+        if isinstance(value, str) and _RUN_ID.fullmatch(value):
+            return value
+        return None
+
+    def compare_evaluations(
+        self,
+        baseline_run_id: str,
+        candidate_run_id: str,
+    ) -> EvaluationComparison:
+        if baseline_run_id == candidate_run_id:
+            raise ValueError("comparison requires two distinct evaluation runs")
+        baseline_run = self.store.load(baseline_run_id)
+        candidate_run = self.store.load(candidate_run_id)
+        baseline_payload = self._evaluation_payload(baseline_run)
+        candidate_payload = self._evaluation_payload(candidate_run)
+        baseline_card = self._evaluation_card(baseline_run, baseline_payload)
+        candidate_card = self._evaluation_card(candidate_run, candidate_payload)
+        baseline_records = self._evaluation_records(baseline_payload)
+        candidate_records = self._evaluation_records(candidate_payload)
+
+        reasons: list[str] = []
+        if baseline_card.status != "COMPLETED" or candidate_card.status != "COMPLETED":
+            reasons.append("RUN_NOT_COMPLETED")
+        if baseline_card.split != candidate_card.split:
+            reasons.append("SPLIT_MISMATCH")
+        if baseline_card.corpus_cutoff != candidate_card.corpus_cutoff:
+            reasons.append("CORPUS_CUTOFF_MISMATCH")
+        if baseline_card.expected_units != candidate_card.expected_units:
+            reasons.append("EXPECTED_UNITS_MISMATCH")
+        if baseline_card.repeats != candidate_card.repeats:
+            reasons.append("REPEATS_MISMATCH")
+        if set(baseline_card.modes) != set(candidate_card.modes):
+            reasons.append("MODES_MISMATCH")
+        if (
+            baseline_card.expected_units is not None
+            and baseline_card.executed_units != baseline_card.expected_units
+        ):
+            reasons.append("BASELINE_INCOMPLETE")
+        if (
+            candidate_card.expected_units is not None
+            and candidate_card.executed_units != candidate_card.expected_units
+        ):
+            reasons.append("CANDIDATE_INCOMPLETE")
+
+        baseline_map: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+        candidate_map: dict[tuple[str, str, str, int], dict[str, Any]] = {}
+        for record in baseline_records:
+            key = self._record_key(record)
+            if key in baseline_map:
+                reasons.append("BASELINE_DUPLICATE_UNIT")
+                break
+            baseline_map[key] = record
+        for record in candidate_records:
+            key = self._record_key(record)
+            if key in candidate_map:
+                reasons.append("CANDIDATE_DUPLICATE_UNIT")
+                break
+            candidate_map[key] = record
+
+        common = sorted(set(baseline_map) & set(candidate_map))
+        if len(common) != len(baseline_map) or len(common) != len(candidate_map):
+            reasons.append("UNIT_KEY_MISMATCH")
+        reasons = list(dict.fromkeys(reasons))
+        comparable = not reasons
+
+        baseline_grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        candidate_grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for record in baseline_records:
+            baseline_grouped[str(record.get("mode", ""))].append(record)
+        for record in candidate_records:
+            candidate_grouped[str(record.get("mode", ""))].append(record)
+
+        mode_comparisons: list[EvaluationModeComparison] = []
+        for mode_name in sorted(set(baseline_grouped) | set(candidate_grouped)):
+            baseline_mode = (
+                self._mode_summary(mode_name, baseline_grouped[mode_name])
+                if mode_name in baseline_grouped
+                else None
+            )
+            candidate_mode = (
+                self._mode_summary(mode_name, candidate_grouped[mode_name])
+                if mode_name in candidate_grouped
+                else None
+            )
+            delta = (
+                self._metric_delta(candidate_mode, baseline_mode, enabled=comparable)
+                if baseline_mode is not None and candidate_mode is not None
+                else EvaluationDelta()
+            )
+            mode_comparisons.append(
+                EvaluationModeComparison(
+                    mode=mode_name,
+                    baseline=baseline_mode,
+                    candidate=candidate_mode,
+                    delta=delta,
+                )
+            )
+
+        regressions = 0
+        improvements = 0
+        unchanged = 0
+        regression_rows: list[EvaluationRegressionRow] = []
+        if comparable:
+            for key in common:
+                baseline_record = baseline_map[key]
+                candidate_record = candidate_map[key]
+                baseline_verdict = (
+                    str(baseline_record.get("verdict"))
+                    if baseline_record.get("verdict") is not None
+                    else None
+                )
+                candidate_verdict = (
+                    str(candidate_record.get("verdict"))
+                    if candidate_record.get("verdict") is not None
+                    else None
+                )
+                baseline_fixed = baseline_verdict == "VERIFIED_FIXED"
+                candidate_fixed = candidate_verdict == "VERIFIED_FIXED"
+                if baseline_fixed and not candidate_fixed:
+                    regressions += 1
+                    if len(regression_rows) < 500:
+                        regression_rows.append(
+                            EvaluationRegressionRow(
+                                case_id=key[0],
+                                template_id=key[1],
+                                mode=key[2],
+                                repeat=key[3],
+                                baseline_verdict=baseline_verdict,
+                                candidate_verdict=candidate_verdict,
+                                baseline_diagnosis_run_id=self._lineage_run_id(
+                                    baseline_record,
+                                    "diagnosis_run_id",
+                                ),
+                                candidate_diagnosis_run_id=self._lineage_run_id(
+                                    candidate_record,
+                                    "diagnosis_run_id",
+                                ),
+                            )
+                        )
+                elif not baseline_fixed and candidate_fixed:
+                    improvements += 1
+                else:
+                    unchanged += 1
+
+        return EvaluationComparison(
+            comparable=comparable,
+            reasons=reasons,
+            baseline=baseline_card,
+            candidate=candidate_card,
+            overall_delta=self._metric_delta(
+                candidate_card,
+                baseline_card,
+                enabled=comparable,
+            ),
+            mode_comparisons=mode_comparisons,
+            matched_units=len(common) if comparable else 0,
+            regressions=regressions,
+            improvements=improvements,
+            unchanged=unchanged,
+            regression_rows=regression_rows,
+        )
+
+    def evaluation_export(self, run_id: str, *, max_records: int = 10_000) -> EvaluationDetail:
+        run = self.store.load(run_id)
+        payload = self._evaluation_payload(run)
+        records = self._evaluation_records(payload)
+        if len(records) > max_records:
+            raise ValueError("evaluation export exceeds record limit")
+        return self.evaluation_detail(
+            run_id,
+            page=1,
+            page_size=max(len(records), 1),
         )
 
     def batch_detail(self, run_id: str) -> BatchDetail:

@@ -36,6 +36,8 @@ FastAPI Web Adapter
 - `GET /api/stats`：诊断、修复与 verification 汇总。
 - `GET /api/analytics/overview`：只读投影 public seed batch / evaluation manifests。
 - `GET /api/analytics/evaluations/{run_id}`：A–E mode、failure family、latency、tool/model usage 与分页记录表。
+- `GET /api/analytics/evaluations/compare?baseline=...&candidate=...`：仅在 split/corpus/modes/repeats/unit key 与执行完整性一致时计算 unit-level regression/improvement；否则返回明确不可比原因。
+- `GET /api/analytics/evaluations/{run_id}/export.csv|json`：导出完整 public Analytics projection；CSV 对 spreadsheet formula 前缀做安全转义，并限制最大导出记录数。
 - `GET /api/analytics/batches/{run_id}`：public seed batch 的 clean/mutant、Sanitizer detection 与注册状态。
 - `GET /api/analytics/runs/{run_id}`：从 evaluation lineage 回到同一 public analytics store 中的 diagnosis run，只读展示 controller timeline、diagnosis、candidate、verification 与 evidence。
 - `GET /api/analytics/runs/{run_id}/artifacts/{artifact_id}`：只读访问该 historical public diagnosis run 已注册 artifact；不会落到当前 operational store。
@@ -60,6 +62,8 @@ Round 3 将 Repair 改为异步 Web Job：HTTP 提交立即返回，job 在 `App
 Round 4 增加独立 Analytics 页：读取 public seed batch summary 与 public evaluation manifest，展示大表格、A–E mode 对比、failure-family 分布、verified rate、latency、LLM/Sanitizer 调用、token 与已知 cost。它不读取 evaluator/private store，也不调用 `metrics.aggregate()` 伪造带私有标签的正式评测；这里只做 public operational projection。可通过 `GPU_AGENT_ANALYTICS_RUN_ROOT` 指向一个历史 public RunStore，同时保持当前 operational RunStore 不变。Analytics 会重新检查持久化 ArtifactRef 的 visibility；若配置目录包含 evaluator artifact，overview fail closed 为 `ANALYTICS_STORE_UNSAFE`。
 
 Round 5 在 Analytics 内加入三组无第三方图表依赖的 mode 可视化（verified rate、mean latency、LLM calls），并把每条 evaluation record 的 immutable lineage 暴露为只读导航：record → diagnosis_run_id → historical public diagnosis run → evidence/candidate/verification。这个 drill-down 使用独立 `/api/analytics/runs/...` 命名空间，不复用当前 operational `/api/runs/...`，因此不会把历史 run 误接到当前 Strict Verify 等写操作。
+
+Round 6 增加 Evaluation History Timeline、跨 evaluation 比较和 CSV/JSON 导出。趋势卡片只展示每个 run 自身的 public 描述统计；真正的 regression comparison 先验证 population compatibility，并按 `(case_id, template_id, mode, repeat)` 对齐 unit，禁止用 ordinal 或不同 split/corpus 的结果直接做“回归”判断。可比时显示 fixed→not-fixed regressions、not-fixed→fixed improvements、mode delta 与对应 diagnosis lineage；不可比时只返回原因，不计算 unit-level regression。
 
 持续遇到的问题与修复过程记录在 [Full-stack 开发问题与修复记录](fullstack-development-log.md)。
 

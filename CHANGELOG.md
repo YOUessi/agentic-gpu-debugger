@@ -29,6 +29,10 @@ Versioning and the structure of Keep a Changelog.
 - Descriptive mode charts for verified rate, latency, and model-call volume, plus immutable
   evaluation-record lineage drill-down into historical public diagnosis/evidence/candidate/
   verification runs without enabling operational write actions.
+- Evaluation history timeline and compatibility-gated cross-run regression comparison using stable
+  `(case_id, template_id, mode, repeat)` unit keys rather than schedule ordinals.
+- Full public Analytics projection export as JSON/CSV, with bounded record counts and CSV formula
+  injection protection for spreadsheet consumers.
 
 ### Security
 

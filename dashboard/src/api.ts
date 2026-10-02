@@ -2,6 +2,7 @@ import type {
   AnalyticsOverview,
   BatchDetail,
   CaseSummary,
+  EvaluationComparison,
   EvaluationDetail,
   RepairJob,
   RepairRequest,
@@ -131,4 +132,25 @@ export function getAnalyticsArtifact(runId: string, artifactId: string): Promise
       return response.text()
     },
   )
+}
+
+
+export function compareEvaluations(
+  baselineRunId: string,
+  candidateRunId: string,
+): Promise<EvaluationComparison> {
+  const search = new URLSearchParams({
+    baseline: baselineRunId,
+    candidate: candidateRunId,
+  })
+  return request<EvaluationComparison>(
+    '/api/analytics/evaluations/compare?' + search.toString(),
+  )
+}
+
+export function evaluationExportUrl(
+  runId: string,
+  format: 'csv' | 'json',
+): string {
+  return '/api/analytics/evaluations/' + runId + '/export.' + format
 }

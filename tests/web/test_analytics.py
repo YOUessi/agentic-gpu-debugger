@@ -300,3 +300,197 @@ def test_analytics_rejects_root_containing_evaluator_visibility_artifacts(tmp_pa
 
     assert response.status_code == 503
     assert response.json()["detail"] == "ANALYTICS_STORE_UNSAFE"
+
+
+def test_evaluation_comparison_detects_unit_regressions_and_improvements(tmp_path):
+    service = _service(tmp_path)
+    store = RunStore(tmp_path / "analytics")
+
+    def add_eval(verdicts):
+        run = store.create_run("evaluation")
+        store.transition(run.id, "RUNNING", "PREPARING")
+        records = []
+        for index, verdict in enumerate(verdicts):
+            records.append(
+                {
+                    "record_id": f"{index + 1:032x}",
+                    "lineage": {
+                        "diagnosis_run_id": f"{index + 10:032x}",
+                    },
+                    "case_id": f"case_{index + 1:04d}",
+                    "template_id": f"template-{index + 1}",
+                    "mode": "D",
+                    "repeat": 0,
+                    "status": "COMPLETED",
+                    "diagnosis": {
+                        "diagnostic_outcome": "DIAGNOSED",
+                        "failure_family": "out_of_bounds",
+                    },
+                    "oracle_passed": verdict == "VERIFIED_FIXED",
+                    "verdict": verdict,
+                    "usage": {
+                        "physical_calls": 2 + index,
+                        "sanitizer_calls": 1,
+                        "total_tokens": 1000 + 100 * index,
+                    },
+                    "latency_ms": 1000.0 + 100.0 * index,
+                    "cost_usd": 0.01 + 0.001 * index,
+                    "failure_reason": None,
+                }
+            )
+        store.put(
+            run.id,
+            "evaluation/manifest.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": run.id,
+                    "split": "development",
+                    "corpus_cutoff": 16,
+                    "expected_units": len(records),
+                    "executed_units": len(records),
+                    "modes": ["D"],
+                    "repeats": 1,
+                    "records": records,
+                }
+            ).encode(),
+            "public",
+        )
+        store.transition(run.id, "RUNNING", "FINALIZING")
+        store.transition(run.id, "COMPLETED", None)
+        return run.id
+
+    baseline_id = add_eval(["VERIFIED_FIXED", "NOT_FIXED", "VERIFIED_FIXED"])
+    candidate_id = add_eval(["NOT_FIXED", "VERIFIED_FIXED", "VERIFIED_FIXED"])
+    client = TestClient(create_app(service, repository=tmp_path, analytics_store=store))
+
+    response = client.get(
+        "/api/analytics/evaluations/compare",
+        params={"baseline": baseline_id, "candidate": candidate_id},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["comparable"] is True
+    assert body["reasons"] == []
+    assert body["matched_units"] == 3
+    assert body["regressions"] == 1
+    assert body["improvements"] == 1
+    assert body["unchanged"] == 1
+    assert body["regression_rows"][0]["case_id"] == "case_0001"
+    assert body["regression_rows"][0]["baseline_diagnosis_run_id"] == f"{10:032x}"
+    assert body["regression_rows"][0]["candidate_diagnosis_run_id"] == f"{10:032x}"
+    assert len(body["mode_comparisons"]) == 1
+
+
+def test_evaluation_comparison_refuses_different_populations(tmp_path):
+    service = _service(tmp_path)
+    store = RunStore(tmp_path / "analytics")
+
+    def add_eval(split, cutoff):
+        run = store.create_run("evaluation")
+        store.transition(run.id, "RUNNING", "PREPARING")
+        store.put(
+            run.id,
+            "evaluation/manifest.json",
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "run_id": run.id,
+                    "split": split,
+                    "corpus_cutoff": cutoff,
+                    "expected_units": 1,
+                    "executed_units": 1,
+                    "modes": ["D"],
+                    "repeats": 1,
+                    "records": [
+                        {
+                            "record_id": "a" * 32,
+                            "case_id": "case_0001",
+                            "template_id": "template",
+                            "mode": "D",
+                            "repeat": 0,
+                            "status": "COMPLETED",
+                            "diagnosis": {
+                                "diagnostic_outcome": "DIAGNOSED",
+                                "failure_family": "out_of_bounds",
+                            },
+                            "verdict": "VERIFIED_FIXED",
+                            "usage": {},
+                        }
+                    ],
+                }
+            ).encode(),
+            "public",
+        )
+        store.transition(run.id, "RUNNING", "FINALIZING")
+        store.transition(run.id, "COMPLETED", None)
+        return run.id
+
+    baseline_id = add_eval("development", 16)
+    candidate_id = add_eval("holdout", 24)
+    client = TestClient(create_app(service, repository=tmp_path, analytics_store=store))
+
+    body = client.get(
+        "/api/analytics/evaluations/compare",
+        params={"baseline": baseline_id, "candidate": candidate_id},
+    ).json()
+    assert body["comparable"] is False
+    assert "SPLIT_MISMATCH" in body["reasons"]
+    assert "CORPUS_CUTOFF_MISMATCH" in body["reasons"]
+    assert body["matched_units"] == 0
+    assert body["regressions"] == 0
+    assert body["overall_delta"]["verified_rate_delta"] is None
+
+
+def test_evaluation_exports_full_public_records_and_sanitizes_csv_cells(tmp_path):
+    service = _service(tmp_path)
+    store = RunStore(tmp_path / "analytics")
+    run = store.create_run("evaluation")
+    store.transition(run.id, "RUNNING", "PREPARING")
+    store.put(
+        run.id,
+        "evaluation/manifest.json",
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_id": run.id,
+                "split": "development",
+                "corpus_cutoff": 1,
+                "expected_units": 1,
+                "executed_units": 1,
+                "modes": ["D"],
+                "repeats": 1,
+                "records": [
+                    {
+                        "record_id": "a" * 32,
+                        "case_id": "case_0001",
+                        "template_id": "=SUM(A1:A2)",
+                        "mode": "D",
+                        "repeat": 0,
+                        "status": "COMPLETED",
+                        "diagnosis": {
+                            "diagnostic_outcome": "DIAGNOSED",
+                            "failure_family": "out_of_bounds",
+                        },
+                        "verdict": "VERIFIED_FIXED",
+                        "usage": {"physical_calls": 2},
+                    }
+                ],
+            }
+        ).encode(),
+        "public",
+    )
+    store.transition(run.id, "RUNNING", "FINALIZING")
+    store.transition(run.id, "COMPLETED", None)
+    client = TestClient(create_app(service, repository=tmp_path, analytics_store=store))
+
+    json_export = client.get(f"/api/analytics/evaluations/{run.id}/export.json")
+    assert json_export.status_code == 200
+    assert "attachment;" in json_export.headers["content-disposition"]
+    assert json_export.json()["total"] == 1
+
+    csv_export = client.get(f"/api/analytics/evaluations/{run.id}/export.csv")
+    assert csv_export.status_code == 200
+    assert "attachment;" in csv_export.headers["content-disposition"]
+    assert "template_id" in csv_export.text
+    assert "'=SUM(A1:A2)" in csv_export.text
