@@ -17,6 +17,10 @@ Versioning and the structure of Keep a Changelog.
   click-through diagnosis citations that resolve both RunStore artifacts and RAG chunk IDs.
 - A persistent full-stack development log that records reproduced issues, confirmed causes,
   fixes, validation, and remaining boundaries across development rounds.
+- Persistent asynchronous repair jobs with immediate HTTP 202 responses, controller run binding,
+  restart recovery, and live RunManifest pipeline timelines.
+- Original-source / selected-candidate diff review without reimplementing the controller patcher
+  in the browser.
 
 ### Security
 

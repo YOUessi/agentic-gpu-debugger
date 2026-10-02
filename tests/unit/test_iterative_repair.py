@@ -299,3 +299,26 @@ def test_repair_refuses_bound_evaluation_and_ablations(oob_service):
     with pytest.raises(ValueError, match="non-evaluation"):
         service.repair(source)
     assert not provider.kinds
+
+
+def test_repair_reports_run_id_before_external_work(oob_service, monkeypatch):
+    service, _, source = oob_service
+    observed = []
+
+    monkeypatch.setattr(
+        "gpu_agent.repair.self_check",
+        lambda *args: PublicCheck(
+            run_id="a" * 32,
+            status="UNAVAILABLE",
+            checks={},
+            feedback=[],
+        ),
+    )
+
+    run, verdict = service.repair(source, on_run_created=observed.append)
+
+    assert verdict is None
+    assert len(observed) == 1
+    assert observed[0].id == run.id
+    assert observed[0].status == "QUEUED"
+    assert service.store.load(run.id).status == "COMPLETED"

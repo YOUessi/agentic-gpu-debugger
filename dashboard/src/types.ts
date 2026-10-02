@@ -59,6 +59,7 @@ export type ArtifactSummary = {
 
 export type RunDetail = {
   summary: RunSummary
+  events: Array<Record<string, unknown>>
   diagnosis: Record<string, unknown> | null
   repair_summary: Record<string, unknown> | null
   repair_rounds: Array<Record<string, unknown>>
@@ -67,6 +68,18 @@ export type RunDetail = {
   actions: Array<Record<string, unknown>>
   citations: Record<string, CitationTarget>
   artifacts: ArtifactSummary[]
+}
+
+export type RepairJob = {
+  id: string
+  status: 'QUEUED' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+  case_id: string
+  mode: 'D' | 'E'
+  created_at: string
+  updated_at: string
+  run_id: string | null
+  verification_verdict: string | null
+  error_code: string | null
 }
 
 export type RepairRequest = {

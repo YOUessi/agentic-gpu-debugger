@@ -126,6 +126,69 @@
 
 ---
 
+## 2026-10-03 / Full-stack Round 3
+
+### FS-011：同步 Repair API 无法支持“启动后立即看进度”
+
+**现象：** Round 2 的 `POST /api/repair` 会一直等待 `ApplicationService.repair()` 完成；前端只有请求结束后才拿到 run ID，因此无法从 PREPARING/COMPILING 阶段开始展示实时进度。
+
+**原因：** HTTP 请求生命周期与 GPU/LLM 长任务生命周期绑定在一起。
+
+**修复：** 新增持久化 Web Repair Job：`POST /api/jobs/repair` 立即返回 202 + job ID，由受限线程池执行原 `ApplicationService.repair()`；`GET /api/jobs/{job_id}` 只返回编排状态。原同步接口保留兼容，但前端切换到 async job。
+
+**验证：** FastAPI/Job Manager 测试确认提交响应先返回 QUEUED，随后 job 绑定 diagnosis run 并进入 COMPLETED；Playwright 从 New Repair → Background Job → 自动打开 Run Detail 的流程通过。
+
+### FS-012：异步 Job 元数据不能成为第二套“执行真相”
+
+**现象：** 引入 background job 后，如果把阶段/结果直接记录在 job 对象里，会和 RunStore 形成双事实源；服务重启还可能留下永远 RUNNING 的 UI job。
+
+**原因：** Job 是 Web 编排状态，不是 GPU 执行证据；最终 diagnosis/repair/verification 必须继续由 RunStore 定义。
+
+**修复：** job 只持久化 `QUEUED/RUNNING/COMPLETED/FAILED`、case、run_id、错误码和最终 public verdict 引用；实际 pipeline 仍读取 RunManifest/events/artifacts。job JSON 使用 controller-owned 0700 目录和 0600 文件、原子 replace；启动时把遗留 QUEUED/RUNNING 标记为 `WEB_CONTROLLER_RESTARTED`。
+
+**验证：** job persistence/recovery 单测通过；重启恢复不会改写对应 RunStore run。
+
+### FS-013：异步 Job 需要在外部 GPU/LLM 工作前拿到 diagnosis run_id
+
+**现象：** `ApplicationService.repair()` 原本只在全部流程完成后返回 `RunManifest`，background job 无法可靠知道自己对应哪个 run；通过“扫描新目录猜 run”在并发情况下存在歧义。
+
+**原因：** service 内部创建 run，但没有非权威观察接口。
+
+**修复：** `repair()` 增加可选 `on_run_created` observer，并在 diagnosis run 创建完成、进入 PREPARING/任何 provider/GPU 外部工作之前调用。observer 只接收 manifest copy，不获得 shell、verifier 或 evaluator capability；默认 `None`，旧调用路径不变。
+
+**验证：** 单测确认 observer 看到同一 run ID 且初始状态为 QUEUED，随后真实 RunStore 状态正常完成。
+
+### FS-014：源码对比不能在浏览器重新实现一套 CUDA patch 语义
+
+**现象：** “Original vs Candidate” 需要展示候选修改，但把 unified diff 在 React 里重新应用会复制 Python patcher 的规则，可能与 controller 的合法 candidate 不一致。
+
+**原因：** patch application、路径白名单和 provenance 校验属于核心后端语义。
+
+**修复：** 当前 UI 并排展示 RunStore 注册的原始 `sources/kernel.cu` 与已验证/注册 candidate 的 `unified_diff`，明确标为 `Selected candidate diff`；不在前端推导新的 patched source。后续若需要完整 patched source，应调用核心 `materialize_candidate` 的服务端只读 projection，而不是 JS 重写 patcher。
+
+**验证：** Tang 真实 OOB run 可显示 2012 字符原始 kernel 与 713 字符 candidate diff，无前端 console error。
+
+### FS-015：React polling/source effect 依赖必须保持稳定
+
+**现象：** Round 3 首次 lint 对 source artifact 与 repair job effect 报 `exhaustive-deps` 警告。
+
+**原因：** effect 捕获了对象引用，但依赖数组只列对象字段，静态分析无法证明闭包稳定。
+
+**修复：** 在 render 阶段提取稳定 primitive（`sourceArtifactId`、`repairJobId`、`repairJobStatus`），effect 只依赖这些值。
+
+**验证：** `npm run lint` 恢复 0 warnings / 0 errors。
+
+### Round 3 验证摘要
+
+- Python targeted regression：48 passed（Web API/Job Store + service + iterative/public repair）。
+- Ruff：通过；`mypy --strict src/gpu_agent`：82 个 source file 无问题。
+- Vitest：4 passed；TypeScript/Vite production build：通过。
+- Oxlint：0 warnings / 0 errors；Playwright：3 passed（Run Detail、Case Catalog、Async Repair Job）。
+- Tang 真实历史 OOB run：8 个 RunManifest timeline event、2 个 source/diff pane、6 个 citation；原始 kernel 2012 字符，candidate diff 713 字符，浏览器无 console error。
+- 本轮没有新增付费模型调用或真实 GPU 实验；async/job/UI 测试不替代原 CUDA/LLM 证据。
+
+---
+
 ## 模板：后续问题
 
 ### FS-XXX：标题

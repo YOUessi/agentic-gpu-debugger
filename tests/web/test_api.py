@@ -1,5 +1,6 @@
 import hashlib
 import json
+import time
 
 from fastapi.testclient import TestClient
 
@@ -214,3 +215,53 @@ def test_dashboard_api_lists_repair_ready_public_cases(tmp_path):
             "repair_ready": True,
         }
     ]
+
+
+def test_async_repair_api_returns_before_workflow_finishes(tmp_path, monkeypatch):
+    repository = tmp_path / "repository"
+    source = repository / "benchmarks" / "public" / "case_0021" / "public_input"
+    source.mkdir(parents=True)
+    service = _service(tmp_path)
+
+    def fake_repair(selected, *, policy, mode, on_run_created):
+        assert selected == source
+        assert policy.max_candidates == 2
+        assert mode == "E"
+        run = service.store.create_run("diagnosis")
+        on_run_created(run)
+        service.store.transition(run.id, "RUNNING", "FINALIZING")
+        completed = service.store.transition(run.id, "COMPLETED", None)
+        return completed, None
+
+    monkeypatch.setattr(service, "repair", fake_repair)
+    client = TestClient(create_app(service, repository=repository))
+
+    submitted = client.post(
+        "/api/jobs/repair",
+        json={
+            "case_id": "case_0021",
+            "mode": "E",
+            "max_candidates": 2,
+            "max_llm_calls": 8,
+            "allow_paid_calls": False,
+        },
+    )
+    assert submitted.status_code == 202
+    job = submitted.json()
+    assert job["status"] == "QUEUED"
+    assert job["run_id"] is None
+
+    deadline = time.monotonic() + 2
+    current = job
+    while current["status"] not in {"COMPLETED", "FAILED"}:
+        assert time.monotonic() < deadline
+        time.sleep(0.01)
+        response = client.get(f"/api/jobs/{job['id']}")
+        assert response.status_code == 200
+        current = response.json()
+
+    assert current["status"] == "COMPLETED"
+    assert current["run_id"] is not None
+    run = client.get(f"/api/runs/{current['run_id']}")
+    assert run.status_code == 200
+    assert run.json()["summary"]["status"] == "COMPLETED"

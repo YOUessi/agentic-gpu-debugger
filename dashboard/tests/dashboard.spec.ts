@@ -83,6 +83,12 @@ test.beforeEach(async ({ page }) => {
           repair_stop_reason: 'PUBLIC_CHECKS_PASSED',
           verification_verdict: 'VERIFIED_FIXED',
         },
+        events: [
+          { at: '2026-10-03T00:00:00Z', status: 'QUEUED', phase: null },
+          { at: '2026-10-03T00:00:01Z', status: 'RUNNING', phase: 'PREPARING' },
+          { at: '2026-10-03T00:00:02Z', status: 'RUNNING', phase: 'DIAGNOSING' },
+          { at: '2026-10-03T00:00:03Z', status: 'COMPLETED', phase: null },
+        ],
         diagnosis: {
           root_cause: 'Shared-memory writes race before synchronization.',
           recommended_change: 'Separate writers and synchronize before consuming values.',
@@ -154,4 +160,54 @@ test('loads the public case catalog into the repair selector', async ({ page }) 
   await expect(page.getByLabel('Public case').locator('option')).toHaveCount(1)
   await expect(page.getByText('Apply the five-point stencil to the row-major grid.')).toBeVisible()
   await expect(page.getByText(/Mutation: Omit-Top-Boundary/)).toBeVisible()
+})
+
+
+test('starts repair asynchronously and attaches the run when the controller binds it', async ({ page }) => {
+  const jobId = 'dddddddddddddddddddddddddddddddd'
+  let polls = 0
+
+  await page.route('**/api/jobs/repair', async (route) => {
+    await route.fulfill({
+      status: 202,
+      json: {
+        id: jobId,
+        status: 'QUEUED',
+        case_id: 'case_0021',
+        mode: 'E',
+        created_at: '2026-10-03T00:00:00Z',
+        updated_at: '2026-10-03T00:00:00Z',
+        run_id: null,
+        verification_verdict: null,
+        error_code: null,
+      },
+    })
+  })
+
+  await page.route('**/api/jobs/' + jobId, async (route) => {
+    polls += 1
+    await route.fulfill({
+      json: {
+        id: jobId,
+        status: polls > 1 ? 'COMPLETED' : 'RUNNING',
+        case_id: 'case_0021',
+        mode: 'E',
+        created_at: '2026-10-03T00:00:00Z',
+        updated_at: '2026-10-03T00:00:0' + Math.min(polls, 9) + 'Z',
+        run_id: runId,
+        verification_verdict: polls > 1 ? 'VERIFIED_FIXED' : null,
+        error_code: null,
+      },
+    })
+  })
+
+  await page.goto('/')
+  await page.getByRole('button', { name: '+ New repair' }).click()
+  await expect(page.getByLabel('Public case')).toHaveValue('case_0021')
+  await page.getByRole('button', { name: 'Start repair' }).click()
+
+  await expect(page.getByText('Background repair job')).toBeVisible()
+  await expect(page.getByRole('heading', { name: 'Diagnosis' })).toBeVisible({ timeout: 5000 })
+  await expect(page.getByText('Live pipeline timeline')).toBeVisible()
+  await expect(page.locator('.job-banner').getByText('VERIFIED FIXED')).toBeVisible({ timeout: 5000 })
 })

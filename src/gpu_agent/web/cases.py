@@ -20,6 +20,14 @@ class PublicCaseCatalog:
         self.repository = repository.absolute()
         self.public_root = self.repository / "benchmarks" / "public"
 
+    def resolve_case(self, case_id: str) -> Path:
+        if not _CASE_ID.fullmatch(case_id):
+            raise ValueError("invalid public case ID")
+        selected = (self.public_root / case_id / "public_input").absolute()
+        if selected.parent.parent != self.public_root.absolute() or not selected.is_dir():
+            raise ValueError("public case is unavailable")
+        return selected
+
     @staticmethod
     def _registry_cases(path: Path) -> dict[str, dict[str, Any]]:
         if not path.is_file():

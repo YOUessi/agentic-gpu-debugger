@@ -66,6 +66,7 @@ from gpu_agent.verification.engine import (
 from gpu_agent.verification.models import VerificationResult, VerificationVerdict
 
 BackendFactory = Callable[[RunStore, Path, Path], ExecutionBackend]
+RunCreatedObserver = Callable[[RunManifest], None]
 BENCHMARK_ROOT = Path(__file__).resolve().parents[2] / "benchmarks"
 
 if TYPE_CHECKING:
@@ -322,6 +323,7 @@ class ApplicationService:
         *,
         policy: RepairPolicy | None = None,
         mode: EvaluationMode = "E",
+        on_run_created: RunCreatedObserver | None = None,
     ) -> tuple[RunManifest, VerificationResult | None]:
         """Public-only iterative repair, then one independent verification; not evaluation."""
         if self._binding is not None or self.store.visibility != "public":
@@ -335,6 +337,7 @@ class ApplicationService:
             expected_source_hash=None,
             evaluation_unit=None,
             repair_policy=policy or RepairPolicy(),
+            _on_run_created=on_run_created,
         )
         summaries = [ref for ref in run.artifact_refs if ref.name == "repair/summary.json"]
         verified = None
@@ -415,6 +418,7 @@ class ApplicationService:
         _reserved_batch: object | None = None,
         _reserved_prepared: object | None = None,
         repair_policy: RepairPolicy | None = None,
+        _on_run_created: RunCreatedObserver | None = None,
     ) -> RunManifest:
         if mode not in {"A", "B", "C", "D", "E"}:
             raise ValueError("invalid acquisition mode")
@@ -485,6 +489,8 @@ class ApplicationService:
             run = self.store.create_run("diagnosis", binding=self._binding)
         if run is None:
             raise ValueError("diagnosis run authorization is missing")
+        if _on_run_created is not None:
+            _on_run_created(run.model_copy(deep=True))
         if not reserved_started:
             self.store.transition(run.id, "RUNNING", "PREPARING")
         self.store.put(

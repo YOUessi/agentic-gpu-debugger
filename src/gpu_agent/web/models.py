@@ -1,6 +1,7 @@
 """Public web API contracts for the operator console."""
 
 from datetime import datetime
+from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -67,6 +68,7 @@ class RunStats(BaseModel):
 
 class RunDetail(BaseModel):
     summary: RunSummary
+    events: list[dict[str, Any]] = Field(default_factory=list)
     diagnosis: dict[str, Any] | None = None
     repair_summary: dict[str, Any] | None = None
     repair_rounds: list[dict[str, Any]] = Field(default_factory=list)
@@ -75,6 +77,25 @@ class RunDetail(BaseModel):
     actions: list[dict[str, Any]] = Field(default_factory=list)
     citations: dict[str, CitationTarget] = Field(default_factory=dict)
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
+
+
+class RepairJobStatus(StrEnum):
+    QUEUED = "QUEUED"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+
+class RepairJob(BaseModel):
+    id: str = Field(pattern=r"^[a-f0-9]{32}$")
+    status: RepairJobStatus
+    case_id: str = Field(pattern=r"^case_\d{4}$")
+    mode: Literal["D", "E"]
+    created_at: datetime
+    updated_at: datetime
+    run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    verification_verdict: str | None = None
+    error_code: str | None = None
 
 
 class RepairRequest(BaseModel):

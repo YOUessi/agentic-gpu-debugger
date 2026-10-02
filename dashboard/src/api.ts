@@ -1,5 +1,6 @@
 import type {
   CaseSummary,
+  RepairJob,
   RepairRequest,
   RepairResponse,
   RunDetail,
@@ -56,6 +57,18 @@ export function getArtifact(runId: string, artifactId: string): Promise<string> 
     if (!response.ok) throw new Error('ARTIFACT_NOT_FOUND')
     return response.text()
   })
+}
+
+export function startRepairJob(payload: RepairRequest): Promise<RepairJob> {
+  return request<RepairJob>('/api/jobs/repair', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function getRepairJob(jobId: string): Promise<RepairJob> {
+  return request<RepairJob>('/api/jobs/' + jobId)
 }
 
 export function startRepair(payload: RepairRequest): Promise<RepairResponse> {

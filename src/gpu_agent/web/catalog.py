@@ -302,6 +302,7 @@ class RunCatalog:
         ]
         return RunDetail(
             summary=self.summary(run, children),
+            events=[event.model_dump(mode="json") for event in run.events],
             diagnosis=diagnosis,
             repair_summary=self._json(run, "repair/summary.json"),
             repair_rounds=repair_rounds,

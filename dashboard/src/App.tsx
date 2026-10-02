@@ -1,12 +1,22 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
-import { getArtifact, getCases, getRun, getRuns, getStats, startRepair, verifyRun } from './api'
+import {
+  getArtifact,
+  getCases,
+  getRepairJob,
+  getRun,
+  getRuns,
+  getStats,
+  startRepairJob,
+  verifyRun,
+} from './api'
 import { formatBytes, formatTime, humanize, shortId, statusTone } from './format'
 import type {
   ArtifactSummary,
   CaseSummary,
   CitationTarget,
+  RepairJob,
   RepairRequest,
   RunDetail,
   RunStats,
@@ -334,6 +344,87 @@ function EvidenceClaims({
   )
 }
 
+function ControllerTimeline({ events }: { events: JsonObject[] }) {
+  if (events.length === 0) {
+    return <div className="empty-mini">No controller state events persisted.</div>
+  }
+  return (
+    <div className="controller-timeline">
+      {events.map((event, index) => {
+        const status = asString(event.status)
+        const phase = asString(event.phase)
+        const at = asString(event.at)
+        return (
+          <div className="timeline-event" key={at + index}>
+            <div className={'timeline-dot ' + statusTone(status)} />
+            <div className="timeline-event-copy">
+              <div>
+                <strong>{phase ? humanize(phase) : humanize(status)}</strong>
+                <StatusPill value={status} />
+              </div>
+              <span>{formatTime(at || null)}</span>
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function SourceCompare({
+  runId,
+  artifacts,
+  candidate,
+}: {
+  runId: string
+  artifacts: ArtifactSummary[]
+  candidate: JsonObject | null
+}) {
+  const sourceArtifact = artifacts.find((item) => item.name === 'sources/kernel.cu')
+  const sourceArtifactId = sourceArtifact?.id
+  const [source, setSource] = useState('')
+  const [error, setError] = useState('')
+  const diff = asString(candidate?.unified_diff)
+
+  useEffect(() => {
+    let cancelled = false
+    if (!sourceArtifactId) return undefined
+    void getArtifact(runId, sourceArtifactId)
+      .then((value) => {
+        if (!cancelled) setSource(value)
+      })
+      .catch((caught) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : 'Source unavailable')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [runId, sourceArtifactId])
+
+  if (!sourceArtifact && !diff) {
+    return <div className="empty-mini">No source/candidate comparison is available.</div>
+  }
+
+  return (
+    <div className="source-compare">
+      <div className="source-pane">
+        <div className="source-pane-head">
+          <span>Original kernel.cu</span>
+          <small>{sourceArtifact ? formatBytes(sourceArtifact.byte_count) : '—'}</small>
+        </div>
+        <pre>{error || source || 'Loading original source…'}</pre>
+      </div>
+      <div className="source-pane">
+        <div className="source-pane-head">
+          <span>Selected candidate diff</span>
+          <small>{shortId(asString(candidate?.patched_source_hash), 12)}</small>
+        </div>
+        <pre className="candidate-diff">{diff || 'No registered candidate diff.'}</pre>
+      </div>
+    </div>
+  )
+}
+
 function RunDrawer({
   detail,
   onClose,
@@ -397,6 +488,14 @@ function RunDrawer({
 
           <section className="detail-section">
             <div className="section-title">
+              <div><span className="eyebrow">Controller state</span><h3>Live pipeline timeline</h3></div>
+              <span className="section-count">{detail.events.length} events</span>
+            </div>
+            <ControllerTimeline events={detail.events as JsonObject[]} />
+          </section>
+
+          <section className="detail-section">
+            <div className="section-title">
               <div><span className="eyebrow">Grounded analysis</span><h3>Diagnosis</h3></div>
               <StatusPill value={detail.summary.confidence} />
             </div>
@@ -444,6 +543,18 @@ function RunDrawer({
 
           <section className="detail-section">
             <div className="section-title">
+              <div><span className="eyebrow">Source review</span><h3>Original vs candidate</h3></div>
+              <span className="section-count">kernel.cu</span>
+            </div>
+            <SourceCompare
+              runId={detail.summary.id}
+              artifacts={detail.artifacts}
+              candidate={detail.candidate as JsonObject | null}
+            />
+          </section>
+
+          <section className="detail-section">
+            <div className="section-title">
               <div><span className="eyebrow">Independent gate</span><h3>Verification</h3></div>
               <button className="secondary-button" onClick={() => void verify()} disabled={verifying}>
                 {verifying ? 'Verifying…' : 'Strict verify'}
@@ -479,10 +590,10 @@ function RunDrawer({
 
 function RepairModal({
   onClose,
-  onCreated,
+  onSubmitted,
 }: {
   onClose: () => void
-  onCreated: (runId: string) => Promise<void>
+  onSubmitted: (job: RepairJob) => void
 }) {
   const [form, setForm] = useState<RepairRequest>({
     case_id: 'case_0021',
@@ -529,8 +640,8 @@ function RepairModal({
     setSubmitting(true)
     setError('')
     try {
-      const result = await startRepair(form)
-      await onCreated(result.run_id)
+      const job = await startRepairJob(form)
+      onSubmitted(job)
       onClose()
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Repair could not start')
@@ -601,6 +712,53 @@ function RepairModal({
   )
 }
 
+function RepairJobBanner({
+  job,
+  onOpenRun,
+  onDismiss,
+}: {
+  job: RepairJob
+  onOpenRun: (runId: string) => void
+  onDismiss: () => void
+}) {
+  const terminal = job.status === 'COMPLETED' || job.status === 'FAILED'
+  return (
+    <section className={'job-banner ' + statusTone(job.status)}>
+      <div className="job-banner-main">
+        <div className="job-pulse" />
+        <div>
+          <span className="eyebrow">Background repair job</span>
+          <strong>
+            {job.case_id} · Mode {job.mode}
+          </strong>
+          <small>
+            {job.run_id
+              ? 'Run ' + shortId(job.run_id, 12)
+              : job.status === 'QUEUED'
+                ? 'Queued before controller execution'
+                : 'Starting controller run…'}
+          </small>
+        </div>
+      </div>
+      <div className="job-banner-actions">
+        <StatusPill value={job.status} />
+        {job.verification_verdict && <StatusPill value={job.verification_verdict} />}
+        {job.error_code && <span className="job-error">{humanize(job.error_code)}</span>}
+        {job.run_id && (
+          <button className="secondary-button" onClick={() => onOpenRun(job.run_id!)}>
+            Open run
+          </button>
+        )}
+        {terminal && (
+          <button className="icon-button small" onClick={onDismiss} aria-label="Dismiss job">
+            ×
+          </button>
+        )}
+      </div>
+    </section>
+  )
+}
+
 export default function App() {
   const [stats, setStats] = useState<RunStats | null>(null)
   const [runs, setRuns] = useState<RunSummary[]>([])
@@ -610,8 +768,12 @@ export default function App() {
   const [status, setStatus] = useState('')
   const [loading, setLoading] = useState(true)
   const [selected, setSelected] = useState<RunDetail | null>(null)
+  const [repairJob, setRepairJob] = useState<RepairJob | null>(null)
+  const [jobRunOpened, setJobRunOpened] = useState<string | null>(null)
   const [showRepair, setShowRepair] = useState(false)
   const [error, setError] = useState('')
+  const repairJobId = repairJob?.id
+  const repairJobStatus = repairJob?.status
   const pageSize = 20
 
   const load = useCallback(async () => {
@@ -650,6 +812,40 @@ export default function App() {
     }, 2500)
     return () => window.clearInterval(timer)
   }, [load, selected?.summary.id, selected?.summary.status, stats?.active])
+
+  useEffect(() => {
+    if (!repairJobId || repairJobStatus === 'COMPLETED' || repairJobStatus === 'FAILED') {
+      return undefined
+    }
+    const jobId = repairJobId
+    let cancelled = false
+
+    async function pollJob() {
+      try {
+        const latest = await getRepairJob(jobId)
+        if (cancelled) return
+        setRepairJob(latest)
+        if (latest.run_id && latest.run_id !== jobRunOpened) {
+          setJobRunOpened(latest.run_id)
+          void getRun(latest.run_id).then(setSelected).catch(() => undefined)
+        }
+        if (latest.status === 'COMPLETED' || latest.status === 'FAILED') {
+          void load()
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : 'Repair job polling failed')
+        }
+      }
+    }
+
+    void pollJob()
+    const timer = window.setInterval(() => void pollJob(), 1000)
+    return () => {
+      cancelled = true
+      window.clearInterval(timer)
+    }
+  }, [jobRunOpened, load, repairJobId, repairJobStatus])
 
   async function openRun(runId: string) {
     setError('')
@@ -703,6 +899,17 @@ export default function App() {
             <div><i style={{ width: completion + '%' }} /></div>
           </div>
         </section>
+
+        {repairJob && (
+          <RepairJobBanner
+            job={repairJob}
+            onOpenRun={(runId) => void openRun(runId)}
+            onDismiss={() => {
+              setRepairJob(null)
+              setJobRunOpened(null)
+            }}
+          />
+        )}
 
         <section className="metrics">
           <MetricCard label="Diagnosis runs" value={stats?.total_diagnoses ?? 0} hint="public RunStore workflows" />
@@ -779,9 +986,9 @@ export default function App() {
       {showRepair && (
         <RepairModal
           onClose={() => setShowRepair(false)}
-          onCreated={async (runId) => {
-            await load()
-            await openRun(runId)
+          onSubmitted={(job) => {
+            setRepairJob(job)
+            setJobRunOpened(null)
           }}
         />
       )}

@@ -18,8 +18,10 @@ from gpu_agent.repair import RepairPolicy
 from gpu_agent.service import ApplicationService
 from gpu_agent.web.cases import PublicCaseCatalog
 from gpu_agent.web.catalog import RunCatalog
+from gpu_agent.web.jobs import RepairJobManager
 from gpu_agent.web.models import (
     CaseSummary,
+    RepairJob,
     RepairRequest,
     RepairResponse,
     RunDetail,
@@ -35,14 +37,6 @@ def _repository_root() -> Path:
     return Path(configured).absolute() if configured else Path.cwd().absolute()
 
 
-def _case_path(repository: Path, case_id: str) -> Path:
-    root = repository / "benchmarks" / "public"
-    selected = (root / case_id / "public_input").absolute()
-    if selected.parent.parent != root.absolute() or not selected.is_dir():
-        raise ValueError("public case is unavailable")
-    return selected
-
-
 def create_app(
     service: ApplicationService | None = None,
     *,
@@ -52,6 +46,18 @@ def create_app(
     catalog = RunCatalog(runtime.store)
     repo = (repository or _repository_root()).absolute()
     case_catalog = PublicCaseCatalog(repo)
+    service_factory = ApplicationService.configured if service is None else (lambda: runtime)
+    job_root = Path(
+        os.environ.get(
+            "GPU_AGENT_WEB_JOB_ROOT",
+            str(runtime.store.root.parent / "web-jobs"),
+        )
+    ).absolute()
+    job_manager = RepairJobManager(
+        job_root=job_root,
+        service_factory=service_factory,
+        source_resolver=case_catalog.resolve_case,
+    )
 
     app = FastAPI(
         title="Agentic GPU Debugger Operator Console",
@@ -113,10 +119,24 @@ def create_app(
         except (OSError, ValueError):
             raise HTTPException(status_code=404, detail="ARTIFACT_NOT_FOUND") from None
 
+    @app.post("/api/jobs/repair", response_model=RepairJob, status_code=202)
+    def submit_repair_job(request: RepairRequest) -> RepairJob:
+        try:
+            return job_manager.submit(request)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=400, detail="REPAIR_INPUT_INVALID") from None
+
+    @app.get("/api/jobs/{job_id}", response_model=RepairJob)
+    def repair_job(job_id: str) -> RepairJob:
+        try:
+            return job_manager.get(job_id)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail="JOB_NOT_FOUND") from None
+
     @app.post("/api/repair", response_model=RepairResponse)
     async def repair(request: RepairRequest) -> RepairResponse:
         try:
-            source = _case_path(repo, request.case_id)
+            source = case_catalog.resolve_case(request.case_id)
             worker = ApplicationService.configured() if service is None else runtime
             if request.allow_paid_calls:
                 worker.allow_development_paid_calls(

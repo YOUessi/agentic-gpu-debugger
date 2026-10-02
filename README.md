@@ -35,9 +35,11 @@ gpu-agent web --host 127.0.0.1 --port 8000
 Dashboard 展示 RunStore 分页/筛选、Agent investigation trajectory、grounded diagnosis、
 多轮 repair candidate/diff、public self-check、strict verification 和注册 artifact/log。
 前端使用 Vitest 与 Playwright；API 使用临时 RunStore 测试。Round 2 增加 public case
-catalog、运行中自动轮询和可点击 evidence citation。设计与安全边界见
-[Full-stack Console](docs/fullstack-console.md)，开发中遇到的问题与修复过程持续记录在
-[Full-stack 开发日志](docs/fullstack-development-log.md)。
+catalog、运行中自动轮询和可点击 evidence citation；Round 3 将 Repair 改为持久化异步
+Web Job，提交后立即返回 job ID，并在 controller 创建 diagnosis run 后自动挂接实时
+RunManifest timeline，同时提供 Original Source / Selected Candidate Diff 并排查看。设计与
+安全边界见 [Full-stack Console](docs/fullstack-console.md)，开发中遇到的问题与修复过程持续
+记录在 [Full-stack 开发日志](docs/fullstack-development-log.md)。
 
 ## 实验证据与版本边界
 
