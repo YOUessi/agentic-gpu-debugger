@@ -95,3 +95,111 @@ export type RepairResponse = {
   status: string
   verification_verdict: string | null
 }
+
+
+export type BatchCard = {
+  run_id: string
+  status: string
+  started_at: string | null
+  finished_at: string | null
+  case_count: number
+  registered: number
+  validated: number
+  failed: number
+  running: number
+  not_run: number
+  target_tools: Record<string, number>
+}
+
+export type EvaluationModeSummary = {
+  mode: string
+  record_count: number
+  diagnosed: number
+  verified_fixed: number
+  verified_rate: number | null
+  latency_mean_ms: number | null
+  llm_calls_mean: number | null
+  tokens_mean: number | null
+  known_cost_usd: number | null
+}
+
+export type EvaluationCard = {
+  run_id: string
+  status: string
+  split: string | null
+  corpus_cutoff: number | null
+  expected_units: number | null
+  executed_units: number
+  modes: string[]
+  repeats: number | null
+  verified_fixed: number
+  verified_rate: number | null
+  diagnosed: number
+  latency_mean_ms: number | null
+  llm_calls_mean: number | null
+  tokens_mean: number | null
+  known_cost_usd: number | null
+}
+
+export type AnalyticsOverview = {
+  store_root: string
+  batch_count: number
+  evaluation_count: number
+  projection_errors: string[]
+  batches: BatchCard[]
+  evaluations: EvaluationCard[]
+}
+
+export type EvaluationRecordRow = {
+  ordinal: number
+  record_id: string
+  case_id: string
+  template_id: string
+  mode: string
+  repeat: number
+  status: string
+  diagnosis_outcome: string | null
+  failure_family: string | null
+  verdict: string | null
+  oracle_passed: boolean | null
+  latency_ms: number | null
+  physical_calls: number | null
+  sanitizer_calls: number | null
+  total_tokens: number | null
+  cost_usd: number | null
+  failure_reason: string | null
+}
+
+export type EvaluationDetail = {
+  summary: EvaluationCard
+  mode_metrics: EvaluationModeSummary[]
+  failure_families: Record<string, number>
+  records: EvaluationRecordRow[]
+  total: number
+  page: number
+  page_size: number
+}
+
+export type BatchCaseRow = {
+  case_id: string
+  target_tool: string
+  repetitions: number
+  status: string
+  clean_run_id: string | null
+  clean_runtime_status: string | null
+  clean_oracle_passed: boolean | null
+  clean_sanitizer_outcomes: string[]
+  mutant_run_id: string | null
+  mutant_runtime_status: string | null
+  mutant_oracle_passed: boolean | null
+  mutant_sanitizer_outcomes: string[]
+  target_detections: boolean[]
+  reason_code: string | null
+}
+
+export type BatchDetail = {
+  summary: BatchCard
+  register_requested: boolean
+  stopped_reason: string | null
+  cases: BatchCaseRow[]
+}

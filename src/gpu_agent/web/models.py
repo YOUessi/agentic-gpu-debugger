@@ -119,3 +119,110 @@ class VerifyRequest(BaseModel):
 class VerifyResponse(BaseModel):
     verification_run_id: str
     result: dict[str, Any]
+
+
+class BatchCard(BaseModel):
+    run_id: str
+    status: str
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    case_count: int
+    registered: int
+    validated: int
+    failed: int
+    running: int
+    not_run: int
+    target_tools: dict[str, int] = Field(default_factory=dict)
+
+
+class EvaluationModeSummary(BaseModel):
+    mode: str
+    record_count: int
+    diagnosed: int
+    verified_fixed: int
+    verified_rate: float | None = None
+    latency_mean_ms: float | None = None
+    llm_calls_mean: float | None = None
+    tokens_mean: float | None = None
+    known_cost_usd: float | None = None
+
+
+class EvaluationCard(BaseModel):
+    run_id: str
+    status: str
+    split: str | None = None
+    corpus_cutoff: int | None = None
+    expected_units: int | None = None
+    executed_units: int
+    modes: list[str] = Field(default_factory=list)
+    repeats: int | None = None
+    verified_fixed: int
+    verified_rate: float | None = None
+    diagnosed: int
+    latency_mean_ms: float | None = None
+    llm_calls_mean: float | None = None
+    tokens_mean: float | None = None
+    known_cost_usd: float | None = None
+
+
+class AnalyticsOverview(BaseModel):
+    store_root: str
+    batch_count: int
+    evaluation_count: int
+    projection_errors: list[str] = Field(default_factory=list)
+    batches: list[BatchCard]
+    evaluations: list[EvaluationCard]
+
+
+class EvaluationRecordRow(BaseModel):
+    ordinal: int
+    record_id: str
+    case_id: str
+    template_id: str
+    mode: str
+    repeat: int
+    status: str
+    diagnosis_outcome: str | None = None
+    failure_family: str | None = None
+    verdict: str | None = None
+    oracle_passed: bool | None = None
+    latency_ms: float | None = None
+    physical_calls: int | None = None
+    sanitizer_calls: int | None = None
+    total_tokens: int | None = None
+    cost_usd: float | None = None
+    failure_reason: str | None = None
+
+
+class EvaluationDetail(BaseModel):
+    summary: EvaluationCard
+    mode_metrics: list[EvaluationModeSummary]
+    failure_families: dict[str, int]
+    records: list[EvaluationRecordRow]
+    total: int
+    page: int
+    page_size: int
+
+
+class BatchCaseRow(BaseModel):
+    case_id: str
+    target_tool: str
+    repetitions: int
+    status: str
+    clean_run_id: str | None = None
+    clean_runtime_status: str | None = None
+    clean_oracle_passed: bool | None = None
+    clean_sanitizer_outcomes: list[str] = Field(default_factory=list)
+    mutant_run_id: str | None = None
+    mutant_runtime_status: str | None = None
+    mutant_oracle_passed: bool | None = None
+    mutant_sanitizer_outcomes: list[str] = Field(default_factory=list)
+    target_detections: list[bool] = Field(default_factory=list)
+    reason_code: str | None = None
+
+
+class BatchDetail(BaseModel):
+    summary: BatchCard
+    register_requested: bool
+    stopped_reason: str | None = None
+    cases: list[BatchCaseRow]

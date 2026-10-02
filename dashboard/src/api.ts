@@ -1,5 +1,8 @@
 import type {
+  AnalyticsOverview,
+  BatchDetail,
   CaseSummary,
+  EvaluationDetail,
   RepairJob,
   RepairRequest,
   RepairResponse,
@@ -85,4 +88,34 @@ export function verifyRun(runId: string, strict = true): Promise<Record<string, 
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ strict }),
   })
+}
+
+export function getAnalyticsOverview(): Promise<AnalyticsOverview> {
+  return request<AnalyticsOverview>('/api/analytics/overview')
+}
+
+export function getEvaluationDetail(
+  runId: string,
+  params: {
+    page: number
+    pageSize: number
+    mode?: string
+    verdict?: string
+    query?: string
+  },
+): Promise<EvaluationDetail> {
+  const search = new URLSearchParams({
+    page: String(params.page),
+    page_size: String(params.pageSize),
+  })
+  if (params.mode) search.set('mode', params.mode)
+  if (params.verdict) search.set('verdict', params.verdict)
+  if (params.query) search.set('query', params.query)
+  return request<EvaluationDetail>(
+    '/api/analytics/evaluations/' + runId + '?' + search.toString(),
+  )
+}
+
+export function getBatchDetail(runId: string): Promise<BatchDetail> {
+  return request<BatchDetail>('/api/analytics/batches/' + runId)
 }

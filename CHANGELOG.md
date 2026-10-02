@@ -21,6 +21,11 @@ Versioning and the structure of Keep a Changelog.
   restart recovery, and live RunManifest pipeline timelines.
 - Original-source / selected-candidate diff review without reimplementing the controller patcher
   in the browser.
+- Read-only Batch & Evaluation Analytics for public seed batches and A–E evaluation manifests,
+  including mode comparison, large record grids, failure-family distribution, latency, model/tool
+  usage, token counts, and known public costs.
+- Optional `GPU_AGENT_ANALYTICS_RUN_ROOT` for mounting a historical public RunStore without
+  changing the operational RunStore or exposing evaluator/private evidence.
 
 ### Security
 

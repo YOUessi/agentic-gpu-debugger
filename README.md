@@ -37,9 +37,12 @@ Dashboard 展示 RunStore 分页/筛选、Agent investigation trajectory、groun
 前端使用 Vitest 与 Playwright；API 使用临时 RunStore 测试。Round 2 增加 public case
 catalog、运行中自动轮询和可点击 evidence citation；Round 3 将 Repair 改为持久化异步
 Web Job，提交后立即返回 job ID，并在 controller 创建 diagnosis run 后自动挂接实时
-RunManifest timeline，同时提供 Original Source / Selected Candidate Diff 并排查看。设计与
-安全边界见 [Full-stack Console](docs/fullstack-console.md)，开发中遇到的问题与修复过程持续
-记录在 [Full-stack 开发日志](docs/fullstack-development-log.md)。
+RunManifest timeline，同时提供 Original Source / Selected Candidate Diff 并排查看。Round 4
+新增 Batch & Evaluation Analytics，可对 public seed batch 和 A–E evaluation 做服务端投影、
+mode 对比、大规模记录表、failure-family 分布、latency/调用量/token/cost 分析；可单独挂载
+历史 public RunStore，且不会读取 evaluator/private evidence。设计与安全边界见
+[Full-stack Console](docs/fullstack-console.md)，开发中遇到的问题与修复过程持续记录在
+[Full-stack 开发日志](docs/fullstack-development-log.md)。
 
 ## 实验证据与版本边界
 

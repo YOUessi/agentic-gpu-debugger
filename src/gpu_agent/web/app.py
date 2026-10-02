@@ -16,11 +16,16 @@ from gpu_agent.agent.provider import DevelopmentCallPolicy
 from gpu_agent.public_task import PublicRepairInputError
 from gpu_agent.repair import RepairPolicy
 from gpu_agent.service import ApplicationService
+from gpu_agent.store import RunStore
+from gpu_agent.web.analytics import AnalyticsCatalog
 from gpu_agent.web.cases import PublicCaseCatalog
 from gpu_agent.web.catalog import RunCatalog
 from gpu_agent.web.jobs import RepairJobManager
 from gpu_agent.web.models import (
+    AnalyticsOverview,
+    BatchDetail,
     CaseSummary,
+    EvaluationDetail,
     RepairJob,
     RepairRequest,
     RepairResponse,
@@ -41,11 +46,22 @@ def create_app(
     service: ApplicationService | None = None,
     *,
     repository: Path | None = None,
+    analytics_store: RunStore | None = None,
 ) -> FastAPI:
     runtime = service or ApplicationService.configured()
     catalog = RunCatalog(runtime.store)
     repo = (repository or _repository_root()).absolute()
     case_catalog = PublicCaseCatalog(repo)
+    if analytics_store is None:
+        configured_analytics = os.environ.get("GPU_AGENT_ANALYTICS_RUN_ROOT")
+        if configured_analytics:
+            analytics_root = Path(configured_analytics).absolute()
+            if not analytics_root.is_dir():
+                raise ValueError("configured analytics RunStore does not exist")
+            analytics_store = RunStore(analytics_root)
+        else:
+            analytics_store = runtime.store
+    analytics = AnalyticsCatalog(analytics_store)
     service_factory = ApplicationService.configured if service is None else (lambda: runtime)
     job_root = Path(
         os.environ.get(
@@ -74,7 +90,11 @@ def create_app(
 
     @app.get("/api/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "store": str(runtime.store.root)}
+        return {
+            "status": "ok",
+            "store": str(runtime.store.root),
+            "analytics_store": str(analytics.store.root),
+        }
 
     @app.get("/api/cases", response_model=list[CaseSummary])
     def cases() -> list[CaseSummary]:
@@ -83,6 +103,41 @@ def create_app(
     @app.get("/api/stats", response_model=RunStats)
     def stats() -> RunStats:
         return catalog.stats()
+
+    @app.get("/api/analytics/overview", response_model=AnalyticsOverview)
+    def analytics_overview() -> AnalyticsOverview:
+        try:
+            return analytics.overview()
+        except (OSError, ValueError):
+            raise HTTPException(status_code=503, detail="ANALYTICS_STORE_UNSAFE") from None
+
+    @app.get("/api/analytics/evaluations/{run_id}", response_model=EvaluationDetail)
+    def analytics_evaluation(
+        run_id: str,
+        page: Annotated[int, Query(ge=1)] = 1,
+        page_size: Annotated[int, Query(ge=1, le=200)] = 50,
+        mode: str | None = None,
+        verdict: str | None = None,
+        query: str | None = None,
+    ) -> EvaluationDetail:
+        try:
+            return analytics.evaluation_detail(
+                run_id,
+                page=page,
+                page_size=page_size,
+                mode=mode,
+                verdict=verdict,
+                query=query,
+            )
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail="EVALUATION_NOT_FOUND") from None
+
+    @app.get("/api/analytics/batches/{run_id}", response_model=BatchDetail)
+    def analytics_batch(run_id: str) -> BatchDetail:
+        try:
+            return analytics.batch_detail(run_id)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail="BATCH_NOT_FOUND") from None
 
     @app.get("/api/runs", response_model=RunListResponse)
     def runs(

@@ -189,6 +189,70 @@
 
 ---
 
+## 2026-10-03 / Full-stack Round 4
+
+### FS-016：当前 operational RunStore 没有历史 batch/evaluation 数据
+
+**现象：** 当前 `.gpu-agent/runs` 只有 diagnosis/candidate/verification；真实 seed batch 和 A–E evaluation 证据保存在历史 public RunStore。直接把主服务切到历史 store 会让当前 Repair 操作与历史分析数据耦合。
+
+**原因：** Operational workflow 与历史 benchmark/evaluation 本来就是不同生命周期的数据域。
+
+**修复：** 增加可选 `GPU_AGENT_ANALYTICS_RUN_ROOT`。Run/Repair 继续使用当前 public RunStore；AnalyticsCatalog 只读另一个 public RunStore。未配置时才复用当前 store。接口和 UI 明确显示 analytics store 路径。
+
+**验证：** Tang 实际以当前 `.gpu-agent/runs` 作为 operational store，同时挂载 `/home/you/gpu-agent-v21-9d75699/public` 作为 analytics store；两套页面数据可同时读取。
+
+### FS-017：Analytics 不能越过 public/evaluator 边界重新计算正式私有指标
+
+**现象：** 项目已有 `metrics.aggregate()`，但它需要 evaluator/private labels。若 Dashboard 为了“指标更全”直接接 evaluator store，会破坏项目原有隐藏评测边界。
+
+**原因：** 正式 benchmark scoring 与运营可视化不是同一个权限域。
+
+**修复：** AnalyticsCatalog 构造时强制 `visibility=public`；只读取 public `batch/summary.json`、`evaluation/manifest.json`/public records。页面展示的是 descriptive public operational metrics（verified rate、latency、调用量、token、已知 cost），不声称是新的 release/holdout score。
+
+**验证：** API 单测确认空 public analytics store 不会回退读取 evaluator store；真实历史 public evaluation 可以独立投影。
+
+### FS-018：240 个 evaluation unit 不应在每次刷新时逐 artifact 读取
+
+**现象：** 一个真实 development evaluation 含 240 个 record，run 中约 963 个 artifact。逐 `evaluation/records/*.json` 读取会制造大量小文件 I/O。
+
+**原因：** Evaluation 已经持久化了聚合 `evaluation/manifest.json`，其中含 public records；Dashboard 不需要重新走 EvaluationRunner 的验证路径。
+
+**修复：** Analytics 优先一次读取 `evaluation/manifest.json`，按 artifact SHA 缓存在只读 projection 层；只有旧 run 缺 manifest 时才回退读取 individual records。分页/筛选在已验证 public projection 上执行。
+
+**验证：** Tang 的真实 evaluation manifest 约 598 KB，单次投影得到 240 records、5 个 mode 汇总；生产页面可一次打开并服务端分页。
+
+### FS-019：损坏的历史 analytics run 不能被静默忽略
+
+**现象：** 初版 overview 在 JSON/schema 读取失败时直接 `continue`，可能让一个损坏 evaluation 从分母中消失，看起来像“没有这次运行”。
+
+**原因：** 可视化层的容错不应改变统计语义。
+
+**修复：** Overview 新增 `projection_errors`，失败 run 不进入成功统计，同时返回 `<run_id>:ANALYTICS_PROJECTION_INVALID`。前端显示黄色 Projection Warning，不把失败投影当 0 值或成功 run。
+
+**验证：** 注入非法 `evaluation/manifest.json` 的 API 测试确认 evaluation_count 保持 0 且明确返回 projection error。
+
+### FS-020：仅把 RunStore 对象标成 public 不能证明底层目录真的是 public store
+
+**现象：** `GPU_AGENT_ANALYTICS_RUN_ROOT` 是路径配置；如果误指向 evaluator 目录，再用默认 `RunStore(path)` 打开，对象的 `visibility` 字段会是 public，但历史 manifest 中的 ArtifactRef 实际仍标记为 evaluator。
+
+**原因：** Store 对象的运行时标签不能替代持久化 artifact 自身的可见性证据。
+
+**修复：** AnalyticsCatalog 在枚举和读取 batch/evaluation 前检查每个 RunManifest 的所有 ArtifactRef，任何 `visibility != public` 都 fail closed；overview 返回 503 `ANALYTICS_STORE_UNSAFE`，而不是投影或泄露 private 内容。
+
+**验证：** 单测创建真实 evaluator-visibility artifact 后用默认 public label 重新打开同一路径，Analytics overview 被 503 拒绝。
+
+### Round 4 验证摘要
+
+- Python targeted regression：52 passed（全部 Web + service + iterative/public repair 相关测试）。
+- Ruff：通过；`mypy --strict src/gpu_agent`：83 个 source file 无问题。
+- Vitest：4 passed；TypeScript/Vite production build：通过。
+- Oxlint：0 warnings / 0 errors；Playwright：5 passed，其中新增 Evaluation Analytics 与 Seed Batch 两条流程。
+- Tang 真实双-store 演示：operational 仍为当前 `.gpu-agent/runs`，analytics 挂载历史 `/home/you/gpu-agent-v21-9d75699/public`。页面读取到 1 个 240-unit public development evaluation、5 个 A–E mode 汇总和 1 个 16-case seed batch；batch 16 行均可展开，浏览器 console error 为 0。
+- 历史 public evaluation 页面显示 83/240 `VERIFIED_FIXED`、public-record mean latency 约 39.4s、known public cost 约 $2.6858；这些是挂载历史快照的描述性数据，不作为当前 HEAD 的重新评测结果。
+- 本轮没有新增付费模型调用或真实 GPU 实验；Analytics 是既有 public evidence 的只读投影。
+
+---
+
 ## 模板：后续问题
 
 ### FS-XXX：标题

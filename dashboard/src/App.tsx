@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
+import AnalyticsView from './AnalyticsView'
 import {
   getArtifact,
   getCases,
@@ -772,6 +773,7 @@ export default function App() {
   const [jobRunOpened, setJobRunOpened] = useState<string | null>(null)
   const [showRepair, setShowRepair] = useState(false)
   const [error, setError] = useState('')
+  const [view, setView] = useState<'runs' | 'analytics'>('runs')
   const repairJobId = repairJob?.id
   const repairJobStatus = repairJob?.status
   const pageSize = 20
@@ -877,15 +879,37 @@ export default function App() {
             <span>CUDA Test & Repair Console</span>
           </div>
         </div>
+        <nav className="top-nav" aria-label="Console sections">
+          <button
+            className={view === 'runs' ? 'active' : ''}
+            onClick={() => {
+              setView('runs')
+            }}
+          >
+            Runs
+          </button>
+          <button
+            className={view === 'analytics' ? 'active' : ''}
+            onClick={() => {
+              setSelected(null)
+              setView('analytics')
+            }}
+          >
+            Analytics
+          </button>
+        </nav>
         <div className="top-actions">
           <div className="system-health">
             <span className="signal-dot" />
             {(stats?.active ?? 0) > 0 ? `${stats?.active} active · live polling` : 'Controller online'}
           </div>
-          <button className="primary-button" onClick={() => setShowRepair(true)}>+ New repair</button>
+          {view === 'runs' && (
+            <button className="primary-button" onClick={() => setShowRepair(true)}>+ New repair</button>
+          )}
         </div>
       </header>
 
+      {view === 'runs' ? (
       <main>
         <section className="hero">
           <div>
@@ -975,15 +999,18 @@ export default function App() {
           <FailureFamilies stats={stats} />
         </section>
       </main>
+      ) : (
+        <AnalyticsView />
+      )}
 
-      {selected && (
+      {view === 'runs' && selected && (
         <RunDrawer
           detail={selected}
           onClose={() => setSelected(null)}
           onChanged={refreshSelected}
         />
       )}
-      {showRepair && (
+      {view === 'runs' && showRepair && (
         <RepairModal
           onClose={() => setShowRepair(false)}
           onSubmitted={(job) => {
