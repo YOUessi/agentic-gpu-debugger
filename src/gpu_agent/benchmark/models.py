@@ -7,6 +7,7 @@ from pydantic import Field, model_validator
 from gpu_agent.contracts import ArtifactRef
 from gpu_agent.execution.models import ExecutionModel, SanitizerTool
 from gpu_agent.verification.models import OracleResult
+from gpu_agent.verification.oracle import OracleId
 
 
 class CaseExecution(ExecutionModel):
@@ -78,7 +79,7 @@ class CaseExecutionPlan(ExecutionModel):
     role: Literal["clean", "mutant"]
     split: Literal["public", "private"]
     source_manifest: dict[str, str] = Field(min_length=4, max_length=4)
-    oracle_id: Literal["vector-add-cpu-v1"] = "vector-add-cpu-v1"
+    oracle_id: OracleId = "vector-add-cpu-v1"
     target_tool: SanitizerTool
     expected_finding: str = Field(min_length=1, max_length=256)
     sanitizer_repetitions: int = Field(default=1, ge=1, le=10)
@@ -94,7 +95,7 @@ class CaseExecutionPlan(ExecutionModel):
 
 
 class CaseOracleObservation(ExecutionModel):
-    oracle_id: Literal["vector-add-cpu-v1"]
+    oracle_id: OracleId
     channel: Literal["ordinary", "instrumented"]
     input_ref: ArtifactRef
     output_ref: ArtifactRef
@@ -112,7 +113,7 @@ class CaseExecutionObservation(ExecutionModel):
     harness_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     input_set_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     toolchain_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
-    oracle_id: Literal["vector-add-cpu-v1"]
+    oracle_id: OracleId
     target_tool: SanitizerTool
     expected_finding: str = Field(min_length=1, max_length=256)
     case_spec_ref: ArtifactRef
@@ -133,7 +134,7 @@ class AuthoritativeCaseSpec(ExecutionModel):
     mutant_source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     harness_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     input_set_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
-    oracle_id: Literal["vector-add-cpu-v1"]
+    oracle_id: OracleId
     target_tool: SanitizerTool
     expected_finding: str = Field(min_length=1, max_length=256)
     sanitizer_repetitions: int = Field(ge=1, le=10)

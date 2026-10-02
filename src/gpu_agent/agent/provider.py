@@ -29,6 +29,7 @@ from gpu_agent.agent.models import (
 )
 from gpu_agent.agent.policy import CallKind, LLMCallGate, validate_diagnosis
 from gpu_agent.agent.prompts import PROMPT_VERSION, PROMPTS
+from gpu_agent.agent.transport import TransportError, classify_transport_error
 from gpu_agent.contracts import new_id, now
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.patching import (
@@ -293,6 +294,7 @@ WIRE_MODELS: "dict[CallKind, type[BaseModel]]" = {}
 
 
 class Invocation(ExecutionModel):
+    transport_error: TransportError | None = None
     invocation_id: str
     run_id: str
     kind: CallKind
@@ -333,6 +335,7 @@ class WorkerRequest(ExecutionModel):
 
 
 class ResponseMetadata(ExecutionModel):
+    transport_error: TransportError | None = None
     response_id: str | None = Field(default=None, max_length=1024)
     provider_request_id: str | None = Field(default=None, max_length=1024)
     response_model: str | None = Field(default=None, max_length=1024)
@@ -583,9 +586,11 @@ def invoke_sdk(
                         normalizations=repaired,
                     )
                 ) from None
-    except openai.APITimeoutError:
+    except openai.APITimeoutError as exc:
+        metadata["transport_error"] = classify_transport_error(exc)
         error = ProviderError("LLM_TIMEOUT", state="UNCERTAIN")
-    except openai.APIConnectionError:
+    except openai.APIConnectionError as exc:
+        metadata["transport_error"] = classify_transport_error(exc)
         error = ProviderError("LLM_CONNECTION_ERROR", state="UNCERTAIN")
     except openai.APIStatusError as exc:
         codes = {
@@ -642,6 +647,9 @@ class LLMProvider(Protocol):
     ) -> AgentAction: ...
     def diagnose(self, evidence: PublicEvidence) -> DiagnosisResult: ...
     def propose_patch(self, public_source: PublicSource, diagnosis: DiagnosisResult) -> str: ...
+    def revise_patch(
+        self, public_source: PublicSource, diagnosis: DiagnosisResult, feedback: dict[str, object]
+    ) -> str: ...
 
 
 MAX_OUTPUT_TOKENS = 4096
@@ -940,6 +948,19 @@ class OpenAIResponsesProvider:
         )
 
     def propose_patch(self, public_source: PublicSource, diagnosis: DiagnosisResult) -> str:
+        return self._patch(public_source, diagnosis)
+
+    def revise_patch(
+        self, public_source: PublicSource, diagnosis: DiagnosisResult, feedback: dict[str, object]
+    ) -> str:
+        return self._patch(public_source, diagnosis, feedback)
+
+    def _patch(
+        self,
+        public_source: PublicSource,
+        diagnosis: DiagnosisResult,
+        feedback: dict[str, object] | None = None,
+    ) -> str:
         def validate(value: PatchOutput) -> PatchOutput:
             try:
                 if not value.unified_diff.startswith(
@@ -963,6 +984,7 @@ class OpenAIResponsesProvider:
             {
                 "public_source": public_source.model_dump(mode="json"),
                 "diagnosis": diagnosis.model_dump(mode="json"),
+                **({"public_repair_feedback": feedback} if feedback is not None else {}),
             },
             PatchOutput,
             validate,
@@ -1029,6 +1051,19 @@ class FakeProvider:
             {
                 "public_source": public_source.model_dump(mode="json"),
                 "diagnosis": diagnosis.model_dump(mode="json"),
+            },
+        )
+        return self.diff
+
+    def revise_patch(
+        self, public_source: PublicSource, diagnosis: DiagnosisResult, feedback: dict[str, object]
+    ) -> str:
+        self._record(
+            "patch",
+            {
+                "public_source": public_source.model_dump(mode="json"),
+                "diagnosis": diagnosis.model_dump(mode="json"),
+                "public_repair_feedback": feedback,
             },
         )
         return self.diff

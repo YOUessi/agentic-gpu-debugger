@@ -62,13 +62,14 @@ def test_parse_wire_text_classifies_without_leaking_values():
 
 
 def test_constraint_names_are_recorded_for_bounded_fields():
-    from gpu_agent.agent.provider import PlannerOutput, _OutputRejected, parse_wire_text
+    from gpu_agent.agent.models import LegacyPlannerOutput
+    from gpu_agent.agent.provider import _OutputRejected, parse_wire_text
 
     text = json.dumps(
         {"action": {"action_type": "inspect_source", "typed_arguments": {"source_id": "x"}}}
     )
     with pytest.raises(_OutputRejected) as rejected:
-        parse_wire_text("plan", text, PlannerOutput)
+        parse_wire_text("plan", text, LegacyPlannerOutput)
     issues = rejected.value.diagnostics.issues
     assert any(
         "source_id" in issue.loc and issue.constraint and "pattern" in issue.constraint
@@ -103,7 +104,12 @@ def test_planner_schema_exposes_only_supported_actions_and_no_controller_fields(
 
     schema = json.dumps(PlannerOutput.model_json_schema())
     assert "action_id" not in schema and "budget_snapshot" not in schema
-    for unsupported in ("run_program", "inspect_environment", "request_more_evidence"):
+    for unsupported in (
+        "run_program",
+        "inspect_environment",
+        "request_more_evidence",
+        "inspect_source",
+    ):
         assert unsupported not in schema
     for supported in SUPPORTED:
         assert supported in schema

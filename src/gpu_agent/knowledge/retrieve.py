@@ -42,7 +42,13 @@ def tokenize(text: str, version: str = "cuda-lex-v1") -> list[str]:
     for match in ATOM.finditer(text):
         atom = match.group()
         tokens.append(atom)
-        if version in {"cuda-lex-v2", "cuda-lex-v3", "cuda-lex-v4"} and atom.endswith("()"):
+        if version in {
+            "cuda-lex-v2",
+            "cuda-lex-v3",
+            "cuda-lex-v4",
+            "cuda-lex-v5",
+            "cuda-lex-v6",
+        } and atom.endswith("()"):
             tokens.append(atom[:-2])
             if atom[:-2] != atom[:-2].lower():
                 tokens.append(atom[:-2].lower())
@@ -52,8 +58,21 @@ def tokenize(text: str, version: str = "cuda-lex-v1") -> list[str]:
             tokens.extend([atom.lower().replace("-", "_"), *atom.lower().split("-")])
         if atom.lower() == "oob":
             tokens.append("out_of_bounds")
+        if version in {"cuda-lex-v5", "cuda-lex-v6"}:
+            # Keep exact symbols, additionally index identifier components for prose queries.
+            spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", atom)
+            parts = re.findall(r"[A-Za-z]+", spaced)
+            if len(parts) > 1:
+                tokens.extend(part.lower() for part in parts)
     if re.search(r"\bout of bounds\b", text, re.I):
         tokens.append("out_of_bounds")
+    if version == "cuda-lex-v6":
+        # Conservative English plural/third-person inflection companion; preserve originals.
+        tokens.extend(
+            t[:-1]
+            for t in list(tokens)
+            if re.fullmatch(r"[a-z]{3,}s", t) and not t.endswith(("ss", "us", "is"))
+        )
     return tokens
 
 
@@ -99,7 +118,14 @@ class KnowledgeIndex:
         self.corpus_version = corpus_version
         self.normalizer_version = normalizer_version
         self.tokenizer_version = tokenizer_version
-        if tokenizer_version not in {"cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3", "cuda-lex-v4"}:
+        if tokenizer_version not in {
+            "cuda-lex-v1",
+            "cuda-lex-v2",
+            "cuda-lex-v3",
+            "cuda-lex-v4",
+            "cuda-lex-v5",
+            "cuda-lex-v6",
+        }:
             raise KnowledgeCorruptError("Unsupported tokenizer version")
         self.corpus_hash = corpus_digest(
             chunks, corpus_version, normalizer_version, tokenizer_version
@@ -114,7 +140,7 @@ class KnowledgeIndex:
                 + tokenize(chunk.section_title, self.tokenizer_version) * 2
                 + (
                     tokenize(chunk.document_title, self.tokenizer_version)
-                    if self.tokenizer_version == "cuda-lex-v4"
+                    if self.tokenizer_version in {"cuda-lex-v4", "cuda-lex-v5", "cuda-lex-v6"}
                     else []
                 )
             )
@@ -142,7 +168,7 @@ class KnowledgeIndex:
         average = sum(self._lengths[i] for i in eligible) / len(eligible)
         scores: dict[int, float] = defaultdict(float)
         query_tokens = set(tokenize(query, self.tokenizer_version))
-        if self.tokenizer_version in {"cuda-lex-v3", "cuda-lex-v4"}:
+        if self.tokenizer_version in {"cuda-lex-v3", "cuda-lex-v4", "cuda-lex-v5", "cuda-lex-v6"}:
             query_tokens = {t for t in query_tokens if t.casefold() not in _QUERY_STOPWORDS}
         for token in query_tokens:
             postings = self._postings.get(token, {})
@@ -157,7 +183,7 @@ class KnowledgeIndex:
             for i in scores:
                 if "out_of_bounds" in tokenize(self.chunks[i].text):
                     scores[i] += 1.0
-        if self.tokenizer_version in {"cuda-lex-v3", "cuda-lex-v4"}:
+        if self.tokenizer_version in {"cuda-lex-v3", "cuda-lex-v4", "cuda-lex-v5", "cuda-lex-v6"}:
             # Exact, explicitly named APIs take precedence over incidental prose.
             # Fall back to ordinary lexical matching if the corpus has no anchor.
             apis = {
@@ -181,6 +207,23 @@ class KnowledgeIndex:
     def _ordered(self, scores: dict[int, float]) -> list[int]:
         return sorted(scores, key=lambda i: (-scores[i], self.chunks[i].chunk_id))
 
+    def _select_lexical(self, scores: dict[int, float], k: int) -> list[int]:
+        ordered = self._ordered(scores)
+        if self.tokenizer_version != "cuda-lex-v6" or k < 3:
+            return ordered[:k]
+        # Avoid filling a small context with fragments from one document. Backfill
+        # deferred fragments when fewer sources match; never insert a nonmatch.
+        counts: Counter[str] = Counter()
+        primary, deferred = [], []
+        for ordinal in ordered:
+            source = self.chunks[ordinal].source_id
+            if counts[source] < 2:
+                primary.append(ordinal)
+                counts[source] += 1
+            else:
+                deferred.append(ordinal)
+        return (primary + deferred)[:k]
+
     def retrieve(
         self,
         query: str,
@@ -194,7 +237,7 @@ class KnowledgeIndex:
         eligible = self._eligible(version)
         lexical = self._lexical_scores(query, eligible)
         if method == "lexical":
-            selected = self._ordered(lexical)[:k]
+            selected = self._select_lexical(lexical, k)
         elif method == "semantic":
             selected = self._ordered(self._semantic_scores(query, eligible))[:k]
         elif method == "hybrid":
@@ -231,7 +274,14 @@ class KnowledgeIndex:
                 payload.schema_version != 1
                 or payload.normalizer_version != "nvidia-html-heading-v1"
                 or payload.tokenizer_version
-                not in {"cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3", "cuda-lex-v4"}
+                not in {
+                    "cuda-lex-v1",
+                    "cuda-lex-v2",
+                    "cuda-lex-v3",
+                    "cuda-lex-v4",
+                    "cuda-lex-v5",
+                    "cuda-lex-v6",
+                }
             ):
                 raise ValueError("Unsupported index format")
             index = cls(

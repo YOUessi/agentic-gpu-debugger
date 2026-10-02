@@ -163,7 +163,6 @@ class LLMCallGate:
 
 
 SUPPORTED = {
-    "inspect_source",
     "run_memcheck",
     "run_racecheck",
     "run_initcheck",
@@ -172,6 +171,21 @@ SUPPORTED = {
     "finish_diagnosis",
     "declare_inconclusive",
 }
+
+LEGACY_SUPPORTED = SUPPORTED | {"inspect_source"}
+ActionPolicyVersion = Literal["diagnosis-m1-v1", "diagnosis-full-source-v2"]
+CURRENT_ACTION_POLICY: ActionPolicyVersion = "diagnosis-full-source-v2"
+
+
+def action_policy_for_prompt(prompt_version: str | None) -> ActionPolicyVersion:
+    # Replay is bound to the recorded prompt, never a model-supplied policy field.
+    if not prompt_version:
+        raise ValueError("action replay requires a bound prompt version")
+    return (
+        CURRENT_ACTION_POLICY
+        if prompt_version in {"m3-2026-09-29-v10", "m3-2026-09-30-v11", "m3-2026-10-01-v12"}
+        else "diagnosis-m1-v1"
+    )
 
 
 def missing_evidence(evidence: PublicEvidence) -> list[MissingEvidence]:
@@ -192,6 +206,8 @@ def decide_action(
     budget: AgentBudget,
     phase: CurrentPhase,
     seen: set[str],
+    *,
+    policy_version: ActionPolicyVersion = CURRENT_ACTION_POLICY,
 ) -> PolicyDecision:
     mandatory = []
     if "memcheck" not in evidence.sanitizer_outcomes:
@@ -204,7 +220,11 @@ def decide_action(
         reason = "ACTION_PHASE_INVALID"
     elif budget.agent_steps >= budget.max_agent_steps or budget.remaining_seconds <= 0:
         reason = "AGENT_BUDGET_EXHAUSTED"
-    elif action.action_type not in SUPPORTED:
+    elif policy_version == CURRENT_ACTION_POLICY and action.action_type == "inspect_source":
+        reason = "SOURCE_ALREADY_AVAILABLE"
+    elif action.action_type not in (
+        LEGACY_SUPPORTED if policy_version == "diagnosis-m1-v1" else SUPPORTED
+    ):
         reason = "ACTION_UNSUPPORTED"
     elif signature in seen:
         reason = "DUPLICATE_NO_BENEFIT"
@@ -234,6 +254,7 @@ def decide_action(
             reason = "AGENT_BUDGET_EXHAUSTED"
     action_content = AgentActionOutput(action=action).model_dump_json().encode()
     return PolicyDecision(
+        policy_version=policy_version,
         action_type=action.action_type,
         action_hash=hashlib.sha256(action_content).hexdigest(),
         allowed=reason is None,

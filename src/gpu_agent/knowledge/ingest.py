@@ -77,6 +77,8 @@ class Source(StrictModel):
     chunk_strategy: Literal[
         "heading_blocks", "cuda_error", "approved_paragraphs", "evidence", "vector_add"
     ]
+    retrievable_evidence: bool = False
+    include_attached_comment: bool = False
     version_regex: str | None = None
     version_selector: str | None = None
     version_probe_source: str | None = None
@@ -90,6 +92,10 @@ class Source(StrictModel):
 
     @model_validator(mode="after")
     def source_contract(self) -> "Source":
+        if self.retrievable_evidence and self.chunk_strategy != "evidence":
+            raise ValueError("Retrievable evidence requires evidence strategy")
+        if self.include_attached_comment and self.chunk_strategy != "vector_add":
+            raise ValueError("Attached comment requires sample extraction")
         if not self.allowed_path_regex.startswith("^") or not self.allowed_path_regex.endswith("$"):
             raise ValueError("Path allowlist must be anchored")
         if re.search(r"[\[\]()*+?{}|]", self.allowed_path_regex) or re.search(
@@ -139,7 +145,9 @@ class Manifest(StrictModel):
     corpus_id: str
     corpus_version: str
     normalizer_version: Literal["nvidia-html-heading-v1"]
-    tokenizer_version: Literal["cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3", "cuda-lex-v4"]
+    tokenizer_version: Literal[
+        "cuda-lex-v1", "cuda-lex-v2", "cuda-lex-v3", "cuda-lex-v4", "cuda-lex-v5", "cuda-lex-v6"
+    ]
     target_toolchain: Toolchain
     fetch_policy: FetchPolicy
     sources: list[Source]
@@ -433,10 +441,12 @@ def extract_chunks(
         raise KnowledgeVersionUnavailableError(f"Source version mismatch: {source.source_id}")
     soup = _soup(source, text) if source.kind == "html" else None
     sections = {anchor: _section(soup, anchor) for anchor in source.include_anchors} if soup else {}
-    if source.chunk_strategy == "evidence":
+    if source.chunk_strategy == "evidence" and not source.retrievable_evidence:
         return []
     blocks: list[tuple[str, str, str]] = []
-    if source.chunk_strategy == "vector_add":
+    if source.chunk_strategy == "evidence" and source.kind == "text":
+        blocks.append(("", source.document_title, normalize_text(text, code=True)))
+    elif source.chunk_strategy == "vector_add":
         match = re.search(r"__global__\s+void\s+vectorAdd\b[^\{]*\{", text)
         if not match:
             raise KnowledgeSourceError("Missing vectorAdd kernel")
@@ -446,6 +456,12 @@ def extract_chunks(
             end += 1
         if depth:
             raise KnowledgeSourceError("Incomplete vectorAdd kernel")
+        if source.include_attached_comment:
+            # Preserve only a directly attached block comment, never synthesize prose.
+            prefix = text[:start].rstrip()
+            comment_start = prefix.rfind("/*")
+            if prefix.endswith("*/") and comment_start >= 0:
+                start = comment_start
         blocks.append(("vectorAdd", "vectorAdd", normalize_text(text[start:end], code=True)))
     elif source.chunk_strategy == "cuda_error" and soup:
         definition = next(
@@ -507,7 +523,7 @@ def extract_chunks(
                     document_title=source.document_title,
                     document_version=source.document_version,
                     section_title=title,
-                    source_url=source.canonical_url + "#" + anchor,
+                    source_url=source.canonical_url + ("#" + anchor if anchor else ""),
                     retrieved_at=retrieved_at,
                     text=content,
                     block_ordinal=ordinal,

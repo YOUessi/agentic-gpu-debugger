@@ -54,6 +54,8 @@ from gpu_agent.patching import (
     apply_generated_candidate,
 )
 from gpu_agent.provenance import capture_repository_snapshot, runtime_code_fingerprint
+from gpu_agent.public_task import PublicRepairInputError, load_public_task, public_expected_output
+from gpu_agent.repair import RepairPolicy, repair_candidates
 from gpu_agent.store import RunStore, read_regular
 from gpu_agent.verification.engine import (
     VerificationEngine,
@@ -314,6 +316,35 @@ class ApplicationService:
             evaluation_unit=evaluation_unit,
         )
 
+    def repair(
+        self,
+        source: Path,
+        *,
+        policy: RepairPolicy | None = None,
+        mode: EvaluationMode = "E",
+    ) -> tuple[RunManifest, VerificationResult | None]:
+        """Public-only iterative repair, then one independent verification; not evaluation."""
+        if self._binding is not None or self.store.visibility != "public":
+            raise ValueError("iterative repair is a public, non-evaluation workflow")
+        if mode not in {"D", "E"}:
+            raise ValueError("iterative repair supports D/E; A-C ablations remain single-candidate")
+        run = self._diagnose(
+            source,
+            mode=mode,
+            required_tools=(SanitizerTool.MEMCHECK,),
+            expected_source_hash=None,
+            evaluation_unit=None,
+            repair_policy=policy or RepairPolicy(),
+        )
+        summaries = [ref for ref in run.artifact_refs if ref.name == "repair/summary.json"]
+        verified = None
+        if (
+            summaries
+            and json.loads(self.store.read(summaries[-1]))["stop_reason"] == "PUBLIC_CHECKS_PASSED"
+        ):
+            verified = self.verify_exact(run.id, strict=True)[0]
+        return run, verified
+
     @staticmethod
     def _public_input(
         kernel: Path, expected_hash: str | None, evaluation_unit: EvaluationUnitBinding | None
@@ -383,6 +414,7 @@ class ApplicationService:
         _reserved_controller: object | None = None,
         _reserved_batch: object | None = None,
         _reserved_prepared: object | None = None,
+        repair_policy: RepairPolicy | None = None,
     ) -> RunManifest:
         if mode not in {"A", "B", "C", "D", "E"}:
             raise ValueError("invalid acquisition mode")
@@ -426,6 +458,20 @@ class ApplicationService:
         ):
             raise ValueError("registered source hash mismatch")
         public_input = self._public_input(selected, expected_input_hash, evaluation_unit)
+        public_task = None
+        if repair_policy is not None:
+            try:
+                public_task = load_public_task(selected, data)
+            except (ValueError, OSError):
+                raise PublicRepairInputError("PUBLIC_TASK_INVALID") from None
+            if public_task is None:
+                raise PublicRepairInputError("PUBLIC_TASK_UNAVAILABLE")
+            if '#include "vector_api.h"' not in data.decode("utf-8"):
+                raise PublicRepairInputError("PUBLIC_INTERFACE_UNSUPPORTED")
+            try:
+                public_expected_output(public_task, public_input)
+            except (ValueError, OverflowError):
+                raise PublicRepairInputError("PUBLIC_INPUT_INVALID") from None
         text = data.decode("utf-8")
         if evaluation_unit is not None and not reserved_started:
             if self._evaluation_schedule_verifier is None:
@@ -462,7 +508,13 @@ class ApplicationService:
                 self.store.visibility,
             )
         ref = self.store.put(run.id, "sources/kernel.cu", data, self.store.visibility)
-        _evidence(self.store).save(run.id, EvidenceBundle(source_snapshot=[ref]))
+        if public_task is not None:
+            self.store.put(
+                run.id, "public-task.json", public_task.model_dump_json().encode(), "public"
+            )
+        _evidence(self.store).save(
+            run.id, EvidenceBundle(source_snapshot=[ref], public_task=public_task)
+        )
         gate = LLMCallGate()
         handle: WorkspaceHandle | None = None
         backend: ExecutionBackend | None = None
@@ -570,12 +622,19 @@ class ApplicationService:
                         )
                         source_refs.append(source_ref)
                         hashes[name] = source_ref.sha256
-                _evidence(self.store).save(run.id, EvidenceBundle(source_snapshot=source_refs))
+                _evidence(self.store).save(
+                    run.id, EvidenceBundle(source_snapshot=source_refs, public_task=public_task)
+                )
                 snapshot = snapshot.model_copy(update={"hashes": hashes})
                 backend = self._backend_factory(self.store, root, root / "tasks")
                 handle = backend.prepare(
                     WorkspaceRequest(run_id=run.id, source_manifest=hashes, trust_level="UNTRUSTED")
                 )
+                if public_task is not None:
+                    prepared = _evidence(self.store).view(run.id)
+                    _evidence(self.store).save(
+                        run.id, prepared.model_copy(update={"public_task": public_task})
+                    )
                 self.store.transition(run.id, "RUNNING", "COMPILING")
                 build = backend.build(
                     BuildRequest(workspace_id=handle.id, timeout_seconds=gate.timeout(120))
@@ -621,6 +680,19 @@ class ApplicationService:
                             "prompt_version": PROMPT_VERSION,
                         }
                     )
+                    if repair_policy is not None:
+                        candidate = repair_candidates(
+                            self.store,
+                            snapshot,
+                            candidate,
+                            public_source,
+                            result,
+                            stdin,
+                            provider,
+                            self._backend_factory,
+                            repair_policy,
+                            public_task,
+                        )
                     register_candidate(self.store, candidate)
             except (ProviderError, BackendInfrastructureError) as exc:
                 code = (

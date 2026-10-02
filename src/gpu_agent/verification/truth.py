@@ -1,11 +1,10 @@
 """Evaluator-owned verification truth, resolved per case instead of hard-wired to case_0001.
 
-Every public development case is a mutation of the same vector-add template, so they share
-one oracle, harness and reference. What differs per case is the registered mutant source,
-the sanitizer that must observe the defect (`target_tool`) and the registered finding
-category (`expected_finding`). Those come from the corpus registry; the shared numeric
-parameters come from the development truth file. Nothing here reads agent evidence, so the
-verdict for a candidate is independent of the mode that produced it.
+Legacy cases use vector-add; the separate diversity extension selects a trusted algorithm
+oracle and reference per case. Source hashes, target tool and expected finding are fixed
+by local case definitions, never by agent evidence. The shared harness and numeric test
+parameters retain their existing contract. This does not register extension cases in a
+corpus family or change the frozen evaluation schedule.
 """
 
 import hashlib
@@ -18,6 +17,7 @@ from pydantic import Field
 from gpu_agent._resources import runtime_resource
 from gpu_agent.execution.models import ExecutionModel, SanitizerTool
 from gpu_agent.store import RunStore, read_regular
+from gpu_agent.verification.oracle import ORACLE_IDS, OracleId
 
 BASE_TRUTH = runtime_resource("benchmarks/development_truth/case_0001/case.json")
 REFERENCE = runtime_resource("benchmarks/development_truth/case_0001/reference.cu")
@@ -27,7 +27,7 @@ REGISTRY = runtime_resource("benchmarks/corpus-registry.json")
 class VerificationTruth(ExecutionModel):
     schema_version: Literal[2] = 2
     case_id: str = Field(pattern=r"^case_[0-9]{4}$")
-    oracle: Literal["vector-add-cpu-v1"]
+    oracle: OracleId
     atol: float = Field(ge=0)
     rtol: float = Field(ge=0)
     private_seed: int
@@ -54,6 +54,12 @@ def resolve_truth(
     """Return the truth for exactly one registered public case, else None (no oracle)."""
     base = _load(base_path or BASE_TRUTH)
     registry = _load(registry_path or REGISTRY)
+    if registry_path is None:
+        extra = _load(runtime_resource("benchmarks/diverse-registry.json"))
+        original_cases, extra_cases = registry.get("cases"), extra.get("cases")
+        if not isinstance(original_cases, list) or not isinstance(extra_cases, list):
+            raise ValueError("verification truth resource is malformed")
+        registry = {**registry, "cases": [*original_cases, *extra_cases]}
     base_hashes = base.get("source_hashes")
     cases = registry.get("cases")
     if not isinstance(base_hashes, dict) or not isinstance(cases, list):
@@ -67,7 +73,7 @@ def resolve_truth(
         for case in cases
         if isinstance(case, dict)
         and case.get("mutant_source_hash") == kernel
-        and case.get("oracle_id") == base.get("oracle")
+        and case.get("oracle_id") in ORACLE_IDS
         and case.get("split") == "public"
     ]
     if len(matches) != 1:
@@ -81,7 +87,7 @@ def resolve_truth(
     seed = int(hashlib.sha256(f"{base_seed}:{case_id}".encode()).hexdigest()[:12], 16)
     return VerificationTruth(
         case_id=case_id,
-        oracle=base["oracle"],  # type: ignore[arg-type]
+        oracle=case["oracle_id"],
         atol=base["atol"],  # type: ignore[arg-type]
         rtol=base["rtol"],  # type: ignore[arg-type]
         private_seed=seed,
@@ -93,8 +99,21 @@ def resolve_truth(
     )
 
 
-def reference_source() -> bytes:
-    return read_regular(REFERENCE, 65536)
+def reference_source(oracle_id: str = "vector-add-cpu-v1") -> bytes:
+    if oracle_id == "vector-add-cpu-v1":
+        return read_regular(REFERENCE, 65536)
+    names = dict(
+        zip(
+            ORACLE_IDS[1:],
+            ("rotate", "stencil", "histogram", "warp_reduce", "stencil2d", "segment_scan"),
+            strict=True,
+        )
+    )
+    if oracle_id not in names:
+        raise ValueError("oracle implementation is not registered")
+    return read_regular(
+        runtime_resource(f"benchmarks/diverse_clean/{names[oracle_id]}/kernel.cu"), 65536
+    )
 
 
 def resolve_run_truth(

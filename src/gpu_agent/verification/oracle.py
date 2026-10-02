@@ -4,7 +4,7 @@ import json
 import math
 import struct
 from collections.abc import Callable, Sequence
-from typing import Protocol
+from typing import Literal, Protocol
 
 from gpu_agent.verification.models import OracleResult
 
@@ -100,6 +100,89 @@ def _float32(value: float) -> float:
 
 def reference_add(a: list[float], b: list[float]) -> list[float]:
     return [_float32(_float32(x) + _float32(y)) for x, y in zip(a, b, strict=True)]
+
+
+OracleId = Literal[
+    "vector-add-cpu-v1",
+    "rotate-add-cpu-v1",
+    "stencil-cpu-v1",
+    "histogram-cpu-v1",
+    "warp-reduce-cpu-v1",
+    "stencil2d-cpu-v1",
+    "segment-scan-cpu-v1",
+]
+ORACLE_IDS = (
+    "vector-add-cpu-v1",
+    "rotate-add-cpu-v1",
+    "stencil-cpu-v1",
+    "histogram-cpu-v1",
+    "warp-reduce-cpu-v1",
+    "stencil2d-cpu-v1",
+    "segment-scan-cpu-v1",
+)
+
+
+def reference_output(oracle_id: str, a: list[float], b: list[float]) -> list[float]:
+    """Controller-owned algorithm selection; never execute a model-supplied checker."""
+    if not a or len(a) != len(b):
+        raise ValueError("invalid reference input shape")
+    a, b = [_float32(x) for x in a], [_float32(x) for x in b]
+    n = len(a)
+    if oracle_id == "vector-add-cpu-v1":
+        return reference_add(a, b)
+    if oracle_id == "rotate-add-cpu-v1":
+        return [_float32(a[(i + 1) % n] + b[i]) for i in range(n)]
+    if oracle_id == "stencil-cpu-v1":
+        return [
+            _float32(
+                _float32(
+                    _float32((a[i - 1] if i else 0.0) + a[i]) + (a[i + 1] if i + 1 < n else 0.0)
+                )
+                + b[i]
+            )
+            for i in range(n)
+        ]
+    if oracle_id == "histogram-cpu-v1":
+        result = [0.0] * n
+        for x, y in zip(a, b, strict=True):
+            result[int(math.fmod(abs(x), min(n, 32)))] += int(math.fmod(abs(y), 5)) + 1
+        return result
+    if oracle_id == "warp-reduce-cpu-v1":
+        result = []
+        for start in range(0, n, 32):
+            total = 0.0
+            for i in range(start, min(start + 32, n)):
+                total = _float32(total + _float32(a[i] + b[i]))
+            result.extend([total] * min(32, n - start))
+        return result
+    if oracle_id == "stencil2d-cpu-v1":
+        result = []
+        for i in range(n):
+            total = a[i]
+            for neighbor in (
+                a[i - 1] if i % 32 else 0.0,
+                a[i + 1] if i % 32 < 31 and i + 1 < n else 0.0,
+                a[i - 32] if i >= 32 else 0.0,
+                a[i + 32] if i + 32 < n else 0.0,
+                b[i],
+            ):
+                total = _float32(total + neighbor)
+            result.append(total)
+        return result
+    if oracle_id == "segment-scan-cpu-v1":
+        result = []
+        for start in range(0, n, 128):
+            values = reference_add(a[start : start + 128], b[start : start + 128])
+            offset = 1
+            while offset < len(values):
+                values = [
+                    _float32(value + (values[i - offset] if i >= offset else 0.0))
+                    for i, value in enumerate(values)
+                ]
+                offset *= 2
+            result.extend(values)
+        return result
+    raise ValueError("oracle implementation is not registered")
 
 
 class TrustedChecker(Protocol):

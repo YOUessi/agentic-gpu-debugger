@@ -40,7 +40,13 @@ def test_memcheck_retrieve_finish_flow(oob_service):
 
 def test_provider_public_projection_excludes_private_and_controller_data(oob_service):
     service, provider, source = oob_service
-    service.diagnose(source)
+    run = service.diagnose(source)
+    source_ref = next(ref for ref in run.artifact_refs if ref.name == "sources/kernel.cu")
+    full_source = service.store.read(source_ref).decode()
+    for payload in provider.inputs:
+        if "evidence" in payload:
+            assert payload["evidence"]["sources"][0]["content"] == full_source
+    assert not any(ref.name.startswith("source-reads/") for ref in run.artifact_refs)
     wire = json.dumps(provider.inputs)
     for forbidden in [
         "reference.cu",
@@ -262,7 +268,7 @@ def test_planner_sees_missing_evidence_executed_actions_and_last_rejection(oob_s
     assert "MANDATORY_EVIDENCE_MISSING" in service.diagnosis(run.id).limitations
 
 
-def test_planner_state_lists_source_ranges_already_read(oob_service):
+def test_full_source_contract_rejects_injected_obsolete_read(oob_service):
     from gpu_agent.agent.models import InspectSourceAction, MemcheckAction, SourceArguments
 
     service, provider, source = oob_service
@@ -282,8 +288,67 @@ def test_planner_state_lists_source_ranges_already_read(oob_service):
     provider.actions = [MemcheckAction()]
     service.diagnose(source)
     ranges = states[1].source_ranges_read
-    assert [(r.start_line, r.end_line) for r in ranges] == [(1, 8)]
-    assert [a.action_type for a in states[1].executed_actions] == ["inspect_source"]
+    assert ranges == []
+    assert states[1].executed_actions == []
+    assert states[1].rejected_previous_action == ["SOURCE_ALREADY_AVAILABLE"]
+
+
+def test_legacy_source_action_remains_parseable_and_replayable():
+    from gpu_agent.agent.models import (
+        ACTION_ADAPTER,
+        AgentBudget,
+        PublicEvidence,
+        PublicSource,
+    )
+    from gpu_agent.agent.policy import action_policy_for_prompt, decide_action
+    from gpu_agent.contracts import CurrentPhase
+
+    action = ACTION_ADAPTER.validate_python(
+        {
+            "action_type": "inspect_source",
+            "typed_arguments": {"source_id": "a" * 32, "start_line": 1, "end_line": 2},
+        }
+    )
+    evidence = PublicEvidence(sources=[PublicSource(source_id="a" * 32, content="line1\nline2\n")])
+    old = decide_action(
+        action,
+        evidence,
+        AgentBudget(),
+        CurrentPhase.DIAGNOSING,
+        set(),
+        policy_version=action_policy_for_prompt("m3-2026-09-26-v9"),
+    )
+    new = decide_action(action, evidence, AgentBudget(), CurrentPhase.DIAGNOSING, set())
+    assert old.allowed and old.policy_version == "diagnosis-m1-v1"
+    assert not new.allowed and new.reason_codes == ["SOURCE_ALREADY_AVAILABLE"]
+
+
+def test_current_prompt_selects_current_action_policy():
+    from gpu_agent.agent.policy import CURRENT_ACTION_POLICY, action_policy_for_prompt
+    from gpu_agent.agent.prompts import PROMPT_VERSION
+
+    assert action_policy_for_prompt(PROMPT_VERSION) == CURRENT_ACTION_POLICY
+    with pytest.raises(ValueError, match="bound prompt"):
+        action_policy_for_prompt(None)
+
+
+def test_current_wire_rejects_obsolete_read_and_retains_full_source():
+    from pydantic import ValidationError
+
+    from gpu_agent.agent.models import PlannerOutput, PublicEvidence, PublicSource
+
+    with pytest.raises(ValidationError):
+        PlannerOutput.model_validate(
+            {
+                "action": {
+                    "action_type": "inspect_source",
+                    "typed_arguments": {"source_id": "a" * 32, "start_line": 1, "end_line": 2},
+                }
+            }
+        )
+    # Public evidence serialization remains full-source, not a hidden partial-source variant.
+    evidence = PublicEvidence(sources=[PublicSource(source_id="a" * 32, content="entire kernel")])
+    assert evidence.model_dump(mode="json")["sources"][0]["content"] == "entire kernel"
 
 
 def test_missing_evidence_matches_the_finish_gate():

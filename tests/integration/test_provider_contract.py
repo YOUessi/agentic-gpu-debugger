@@ -175,6 +175,31 @@ def test_timeout_is_uncertain_and_never_replayed(provider_factory):
     assert provider.invocations()[-1].client_request_id
 
 
+def test_connection_classification_persisted_without_secrets_or_retries(provider_factory):
+    import socket
+
+    import httpx2
+    import openai
+
+    from gpu_agent.agent.models import AgentBudget, PublicEvidence
+    from gpu_agent.agent.provider import Invocation, ProviderError
+
+    error = openai.APIConnectionError(
+        message="secret-canary", request=httpx2.Request("POST", "https://api.openai.com")
+    )
+    error.__cause__ = socket.gaierror(-2, "secret-canary")
+    provider, calls, clients = provider_factory([error])
+    with pytest.raises(ProviderError, match="LLM_CONNECTION_ERROR"):
+        provider.plan(PublicEvidence(), AgentBudget())
+    record = provider.invocations()[-1]
+    assert record.transport_error == "DNS_ERROR"
+    assert record.state == "UNCERTAIN" and record.usage is None and not record.retryable
+    assert len(calls) == 1 and clients[0]["max_retries"] == 0
+    assert "secret-canary" not in record.model_dump_json()
+    old = record.model_dump(exclude={"transport_error"})
+    assert Invocation.model_validate(old).transport_error is None
+
+
 @pytest.mark.parametrize(
     "changes,code",
     [

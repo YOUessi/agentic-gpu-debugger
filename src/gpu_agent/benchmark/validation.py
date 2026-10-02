@@ -27,9 +27,9 @@ from gpu_agent.execution.models import (
 from gpu_agent.provenance import capture_repository_snapshot
 from gpu_agent.store import RunStore, read_regular
 from gpu_agent.verification.models import OracleResult
-from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
+from gpu_agent.verification.oracle import ORACLE_IDS, NumericOracle, parse_output, reference_output
 
-ORACLE_POLICIES = {"vector-add-cpu-v1": (1e-5, 1e-5)}
+ORACLE_POLICIES = {name: (1e-5, 1e-5) for name in ORACLE_IDS}
 
 
 class CaseExecutionAttestationUnavailable(ValueError):
@@ -103,7 +103,7 @@ def derive_oracle(input_bytes: bytes, output_bytes: bytes, oracle_id: str) -> Or
         vector_input = _VectorInput.model_validate_json(input_bytes)
         actual = parse_output(output_bytes)
         return NumericOracle(atol, rtol, False, False).check(
-            actual, reference_add(vector_input.a, vector_input.b)
+            actual, reference_output(oracle_id, vector_input.a, vector_input.b)
         )
     except ValueError:
         return OracleResult(

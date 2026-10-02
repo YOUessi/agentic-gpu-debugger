@@ -20,7 +20,7 @@ from gpu_agent.agent.models import (
     PublicEvidence,
 )
 from gpu_agent.agent.orchestrator import derive_final_diagnosis, public_evidence_from_bundle
-from gpu_agent.agent.policy import decide_action
+from gpu_agent.agent.policy import action_policy_for_prompt, decide_action
 from gpu_agent.agent.provider import Invocation
 from gpu_agent.agent.rule_router import RuleRouter
 from gpu_agent.benchmark.evaluation import (
@@ -713,6 +713,7 @@ def _validate_evaluation_record_against_case(
                 step_budget,
                 CurrentPhase.DIAGNOSING,
                 seen,
+                policy_version=action_policy_for_prompt(binding.prompt_version),
             )
             if PolicyDecision.model_validate_json(store.read(decision_ref)) != expected_decision:
                 raise ValueError("rule controller policy decision is invalid")
@@ -1066,6 +1067,7 @@ def _validate_evaluation_record_against_case(
                 step_budget,
                 CurrentPhase.DIAGNOSING,
                 agent_seen,
+                policy_version=action_policy_for_prompt(binding.prompt_version),
             )
             if decisions[index] != expected_decision:
                 raise ValueError("agent controller decision differs from policy replay")

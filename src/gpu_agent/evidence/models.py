@@ -10,9 +10,11 @@ from gpu_agent.execution.models import (
     SanitizerResult,
     SourceLocation,
 )
+from gpu_agent.public_task import PublicTask
 
 
 class EvidenceBundle(ExecutionModel):
+    public_task: PublicTask | None = None
     environment: dict[str, str] = Field(default_factory=dict)
     source_snapshot: list[ArtifactRef] = Field(default_factory=list)
     build_result: BuildResult | None = None

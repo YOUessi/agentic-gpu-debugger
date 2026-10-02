@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--expected-corpus-hash", required=True)
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--tokenizer-version", choices=[f"cuda-lex-v{i}" for i in range(1, 7)])
     args = parser.parse_args()
     prior = KnowledgeIndex.load(args.cache)
     if prior.corpus_hash != args.expected_corpus_hash:
@@ -32,7 +33,7 @@ def main() -> None:
         prior.chunks,
         corpus_version=manifest.corpus_version,
         normalizer_version=manifest.normalizer_version,
-        tokenizer_version=manifest.tokenizer_version,
+        tokenizer_version=args.tokenizer_version or manifest.tokenizer_version,
     )
     suite = load_evaluation_suite(args.repository / "knowledge/retrieval-eval.json")
     report = compare_retrieval_methods(current, suite)

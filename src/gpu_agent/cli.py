@@ -29,6 +29,53 @@ benchmark_app = typer.Typer(no_args_is_help=True)
 release_app = typer.Typer(no_args_is_help=True)
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(release_app, name="release")
+knowledge_app = typer.Typer(no_args_is_help=True, help="Offline knowledge inspection.")
+app.add_typer(knowledge_app, name="knowledge")
+
+
+@benchmark_app.command("validate-diversity")
+def validate_diversity(
+    output: Annotated[Path, typer.Option()],
+    repository: Annotated[Path, typer.Option()] = Path("."),
+    case: Annotated[list[str] | None, typer.Option("--case")] = None,
+    role: Annotated[list[str] | None, typer.Option("--role")] = None,
+) -> None:
+    """Run native acceptance for new public algorithms; no model or registration."""
+    from gpu_agent.benchmark.diversity import run_diversity
+
+    try:
+        report = run_diversity(
+            repository,
+            output,
+            tuple(case or ()),
+            tuple(role) if role is not None else ("clean", "mutant", "ablation"),
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(f"DIVERSITY_INPUT_INVALID: {exc}", err=True)
+        raise typer.Exit(2) from None
+    typer.echo(f"Report: {output / 'report.json'}")
+    if not report["passed"]:
+        raise typer.Exit(1)
+
+
+@knowledge_app.command("metadata")
+def knowledge_metadata(
+    manifest: Annotated[Path, typer.Option()],
+    receipts: Annotated[Path, typer.Option()],
+    expected_receipts_sha256: Annotated[str, typer.Option()],
+    source_id: Annotated[str | None, typer.Option()] = None,
+) -> None:
+    """Read recorded source versions and provenance; never infer release-note contents."""
+    import json
+
+    from gpu_agent.knowledge.metadata import lookup_metadata
+
+    try:
+        result = lookup_metadata(manifest, receipts, expected_receipts_sha256, source_id)
+    except (ValueError, OSError):
+        typer.echo("KNOWLEDGE_METADATA_INVALID", err=True)
+        raise typer.Exit(2) from None
+    typer.echo(json.dumps(result, ensure_ascii=False, indent=2))
 
 
 def _release_artifact_context() -> tuple["CorpusFamily", tuple[Path, Path]]:
@@ -841,6 +888,45 @@ def verify_command(
             "Run/candidate is unavailable or failed the registration guard."
         ) from None
     typer.echo(result.model_dump_json(indent=2))
+
+
+@app.command("repair")
+def repair_command(
+    source: Path,
+    allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    max_candidates: Annotated[int, typer.Option("--max-candidates", min=1, max=20)] = 3,
+    max_llm_calls: Annotated[int, typer.Option("--max-llm-calls", min=1, max=40)] = 40,
+) -> None:
+    """Investigate, self-check/revise using public inputs, then independently verify."""
+    from gpu_agent.agent.provider import DevelopmentCallPolicy
+    from gpu_agent.public_task import PublicRepairInputError
+    from gpu_agent.repair import RepairPolicy
+    from gpu_agent.service import ApplicationService
+
+    try:
+        service = ApplicationService.configured()
+        if allow_paid_calls:
+            service.allow_development_paid_calls(DevelopmentCallPolicy(max_llm_calls=max_llm_calls))
+        run, verified = service.repair(source, policy=RepairPolicy(max_candidates=max_candidates))
+        typer.echo(f"run_id {run.id}")
+        for ref in run.artifact_refs:
+            if ref.name == "repair/summary.json":
+                typer.echo(service.store.read(ref).decode())
+        if verified is not None:
+            typer.echo(verified.model_dump_json(indent=2))
+        else:
+            typer.echo("Independent verification not run: public repair did not pass.")
+            for limitation in service.diagnosis(run.id).limitations:
+                typer.echo(limitation)
+    except PublicRepairInputError as exc:
+        raise typer.BadParameter(
+            f"{exc.code}: repair requires a supported, source-bound task.json "
+            "and valid public input."
+        ) from None
+    except (OSError, ValueError):
+        raise typer.BadParameter("Repair input or controller configuration is invalid.") from None
+    if verified is None or verified.verdict != "VERIFIED_FIXED":
+        raise typer.Exit(1)
 
 
 @app.command("report")

@@ -183,7 +183,7 @@ class PlanInspectSourceAction(_PlannerChoice):
 PlannerChoice = PlanNoArgumentAction | PlanRetrieveDocsAction | PlanInspectSourceAction
 
 
-class PlannerOutput(ExecutionModel):
+class LegacyPlannerOutput(ExecutionModel):
     """What the planner model returns; converted to a full AgentAction by the controller."""
 
     action: PlannerChoice
@@ -210,10 +210,17 @@ class PlannerOutput(ExecutionModel):
         return AgentActionOutput(action=action)
 
 
+class PlannerOutput(LegacyPlannerOutput):
+    """Full-source contract: source inspection supplies no additional information."""
+
+    action: PlanNoArgumentAction | PlanRetrieveDocsAction
+
+
 class PublicSource(ExecutionModel):
     source_id: Identifier
     path: Literal["kernel.cu"] = "kernel.cu"
     content: str = Field(max_length=4 * 1024 * 1024)
+    functional_requirement: str | None = Field(default=None, max_length=4000)
 
 
 class EvidenceClaim(ExecutionModel):
@@ -288,7 +295,7 @@ class PolicyDecision(ExecutionModel):
     mandatory_actions: list[str] = Field(default_factory=list)
     prohibited_actions: list[str] = Field(default_factory=list)
     reason_codes: list[str] = Field(default_factory=list)
-    policy_version: Literal["diagnosis-m1-v1"] = "diagnosis-m1-v1"
+    policy_version: Literal["diagnosis-m1-v1", "diagnosis-full-source-v2"] = "diagnosis-m1-v1"
 
 
 class PatchOutput(ExecutionModel):

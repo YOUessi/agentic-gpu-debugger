@@ -47,6 +47,10 @@ where = ["src"]
 gpu_agent = ["execution/trusted_sources.json"]
 
 [tool.setuptools.data-files]
+"share/agentic-gpu-debugger/benchmarks/diverse_clean/stencil2d" = ["benchmarks/diverse_clean/stencil2d/kernel.cu"]
+"share/agentic-gpu-debugger/benchmarks/diverse_clean/segment_scan" = ["benchmarks/diverse_clean/segment_scan/kernel.cu"]
+"share/agentic-gpu-debugger/benchmarks/public/case_0021/public_input" = ["benchmarks/public/case_0021/public_input/kernel.cu", "benchmarks/public/case_0021/public_input/input.json", "benchmarks/public/case_0021/public_input/task.json"]
+"share/agentic-gpu-debugger/benchmarks/public/case_0022/public_input" = ["benchmarks/public/case_0022/public_input/kernel.cu", "benchmarks/public/case_0022/public_input/input.json", "benchmarks/public/case_0022/public_input/task.json"]
 "share/agentic-gpu-debugger/docs" = [
   "docs/v2-operator-runbook.md",
 ]
@@ -57,6 +61,8 @@ gpu_agent = ["execution/trusted_sources.json"]
 ]
 "share/agentic-gpu-debugger/benchmarks" = [
   "benchmarks/corpus-registry.json",
+  "benchmarks/diverse-registry.json",
+  "benchmarks/diverse-mutations.json",
   "benchmarks/seed-batch.json",
 ]
 "share/agentic-gpu-debugger/benchmarks/development_truth/case_0001" = [
@@ -73,75 +79,100 @@ gpu_agent = ["execution/trusted_sources.json"]
   "benchmarks/harness/vendor/json.hpp",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0000/public_input" = [
+  "benchmarks/public/case_0000/public_input/task.json",
   "benchmarks/public/case_0000/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0001/public_input" = [
+  "benchmarks/public/case_0001/public_input/task.json",
   "benchmarks/public/case_0001/public_input/input.json",
   "benchmarks/public/case_0001/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0002/public_input" = [
+  "benchmarks/public/case_0002/public_input/task.json",
   "benchmarks/public/case_0002/public_input/input.json",
   "benchmarks/public/case_0002/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0003/public_input" = [
+  "benchmarks/public/case_0003/public_input/task.json",
   "benchmarks/public/case_0003/public_input/input.json",
   "benchmarks/public/case_0003/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0004/public_input" = [
+  "benchmarks/public/case_0004/public_input/task.json",
   "benchmarks/public/case_0004/public_input/input.json",
   "benchmarks/public/case_0004/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0005/public_input" = [
+  "benchmarks/public/case_0005/public_input/task.json",
   "benchmarks/public/case_0005/public_input/input.json",
   "benchmarks/public/case_0005/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0006/public_input" = [
+  "benchmarks/public/case_0006/public_input/task.json",
   "benchmarks/public/case_0006/public_input/input.json",
   "benchmarks/public/case_0006/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0007/public_input" = [
+  "benchmarks/public/case_0007/public_input/task.json",
   "benchmarks/public/case_0007/public_input/input.json",
   "benchmarks/public/case_0007/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0008/public_input" = [
+  "benchmarks/public/case_0008/public_input/task.json",
   "benchmarks/public/case_0008/public_input/input.json",
   "benchmarks/public/case_0008/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0009/public_input" = [
+  "benchmarks/public/case_0009/public_input/task.json",
   "benchmarks/public/case_0009/public_input/input.json",
   "benchmarks/public/case_0009/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0010/public_input" = [
+  "benchmarks/public/case_0010/public_input/task.json",
   "benchmarks/public/case_0010/public_input/input.json",
   "benchmarks/public/case_0010/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0011/public_input" = [
+  "benchmarks/public/case_0011/public_input/task.json",
   "benchmarks/public/case_0011/public_input/input.json",
   "benchmarks/public/case_0011/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0012/public_input" = [
+  "benchmarks/public/case_0012/public_input/task.json",
   "benchmarks/public/case_0012/public_input/input.json",
   "benchmarks/public/case_0012/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0013/public_input" = [
+  "benchmarks/public/case_0013/public_input/task.json",
   "benchmarks/public/case_0013/public_input/input.json",
   "benchmarks/public/case_0013/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0014/public_input" = [
+  "benchmarks/public/case_0014/public_input/task.json",
   "benchmarks/public/case_0014/public_input/input.json",
   "benchmarks/public/case_0014/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0015/public_input" = [
+  "benchmarks/public/case_0015/public_input/task.json",
   "benchmarks/public/case_0015/public_input/input.json",
   "benchmarks/public/case_0015/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/public/case_0016/public_input" = [
+  "benchmarks/public/case_0016/public_input/task.json",
   "benchmarks/public/case_0016/public_input/input.json",
   "benchmarks/public/case_0016/public_input/kernel.cu",
 ]
 "share/agentic-gpu-debugger/benchmarks/templates" = [
   "benchmarks/templates/mutations.json",
 ]
+"share/agentic-gpu-debugger/benchmarks/diverse_clean/rotate" = ["benchmarks/diverse_clean/rotate/kernel.cu"]
+"share/agentic-gpu-debugger/benchmarks/diverse_clean/stencil" = ["benchmarks/diverse_clean/stencil/kernel.cu"]
+"share/agentic-gpu-debugger/benchmarks/diverse_clean/histogram" = ["benchmarks/diverse_clean/histogram/kernel.cu"]
+"share/agentic-gpu-debugger/benchmarks/diverse_clean/warp_reduce" = ["benchmarks/diverse_clean/warp_reduce/kernel.cu"]
+"share/agentic-gpu-debugger/benchmarks/public/case_0017/public_input" = ["benchmarks/public/case_0017/public_input/task.json", "benchmarks/public/case_0017/public_input/kernel.cu", "benchmarks/public/case_0017/public_input/input.json"]
+"share/agentic-gpu-debugger/benchmarks/public/case_0018/public_input" = ["benchmarks/public/case_0018/public_input/task.json", "benchmarks/public/case_0018/public_input/kernel.cu", "benchmarks/public/case_0018/public_input/input.json"]
+"share/agentic-gpu-debugger/benchmarks/public/case_0019/public_input" = ["benchmarks/public/case_0019/public_input/task.json", "benchmarks/public/case_0019/public_input/kernel.cu", "benchmarks/public/case_0019/public_input/input.json"]
+"share/agentic-gpu-debugger/benchmarks/public/case_0020/public_input" = ["benchmarks/public/case_0020/public_input/task.json", "benchmarks/public/case_0020/public_input/kernel.cu", "benchmarks/public/case_0020/public_input/input.json"]
 "share/agentic-gpu-debugger/evaluation" = [
   "evaluation/development-labels.json",
   "evaluation/modes.json",

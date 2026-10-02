@@ -40,7 +40,7 @@ from gpu_agent.verification.models import (
     VerificationResult,
     VerificationSuiteSpec,
 )
-from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
+from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_output
 from gpu_agent.verification.policy import decide_verdict, plan_checks
 from gpu_agent.verification.truth import VerificationTruth, required_tools, resolve_run_truth
 
@@ -379,7 +379,7 @@ def derive_verification(
             or (index > 0 and input_payload != holdouts[index - 1])
         ):
             raise ValueError("evaluation verification input differs from frozen suite")
-        expected = reference_add(input_payload["a"], input_payload["b"])
+        expected = reference_output(trusted.oracle, input_payload["a"], input_payload["b"])
         provenance = json.loads(evaluator.read(_one_ref(child, "provenance.json")))
         result_refs = [
             ref

@@ -55,7 +55,7 @@ from gpu_agent.verification.models import (
     VerificationResult,
     VerificationSuiteSpec,
 )
-from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_add
+from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_output
 from gpu_agent.verification.policy import (
     decide_verdict,
     plan_checks,
@@ -373,7 +373,7 @@ class VerificationEngine:
             self._private.put(
                 audit.id,
                 "reference.cu",
-                reference_source(),
+                reference_source(case.oracle),
                 "evaluator",
             )
             self._private.put(
@@ -439,7 +439,7 @@ class VerificationEngine:
                         break
                     if build.binary_ref is None:
                         raise ValueError("successful build lacks binary provenance")
-                    expected = reference_add(input_data.a, input_data.b)
+                    expected = reference_output(case.oracle, input_data.a, input_data.b)
                     ordinary = backend.run(
                         ExecutionRequest(workspace_id=handle.id, stdin_ref=stdin)
                     )

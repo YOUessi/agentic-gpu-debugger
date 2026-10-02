@@ -89,5 +89,11 @@ def test_operator_runbook_is_in_built_distributions(tmp_path: Path) -> None:
     expected = "share/agentic-gpu-debugger/docs/v2-operator-runbook.md"
     with zipfile.ZipFile(wheel) as archive:
         assert any(name.endswith(expected) for name in archive.namelist())
+        for number in range(23):
+            task = (
+                f"share/agentic-gpu-debugger/benchmarks/public/case_{number:04d}/"
+                "public_input/task.json"
+            )
+            assert any(name.endswith(task) for name in archive.namelist())
     with tarfile.open(source, "r:gz") as archive:
         assert any(member.name.endswith("docs/v2-operator-runbook.md") for member in archive)

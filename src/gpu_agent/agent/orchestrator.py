@@ -62,7 +62,11 @@ def _deduplicate_findings(findings: list[PublicFinding]) -> list[PublicFinding]:
 
 def public_evidence_from_bundle(store: RunStore, bundle: EvidenceBundle) -> PublicEvidence:
     sources = [
-        PublicSource(source_id=ref.id, content=store.read(ref).decode("utf-8"))
+        PublicSource(
+            source_id=ref.id,
+            content=store.read(ref).decode("utf-8"),
+            functional_requirement=bundle.public_task.requirement if bundle.public_task else None,
+        )
         for ref in bundle.source_snapshot
         if PurePosixPath(ref.name).name == "kernel.cu"
     ]
@@ -153,7 +157,6 @@ class AgentOrchestrator:
             "run_initcheck": self._sanitizer,
             "run_synccheck": self._sanitizer,
             "retrieve_official_docs": self._docs,
-            "inspect_source": self._source,
         }
 
     def _memcheck(self, action: AgentAction) -> None:

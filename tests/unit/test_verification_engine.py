@@ -1271,3 +1271,48 @@ def test_target_tool_decides_a_race_case_not_the_numeric_oracle(
     required = {item.tool.value for item in result.check_requirements if item.required}
     assert required == {"memcheck", "racecheck"}
     assert result.original_finding_present is (not fixed)
+
+
+@pytest.mark.parametrize("case", [f"case_{n:04d}" for n in range(17, 23)])
+def test_new_algorithm_oracle_is_used_by_engine_and_replay(
+    store, tmp_path, monkeypatch, container_boundary, case
+):
+    """Only container output is simulated; truth selection and replay are real code."""
+    from gpu_agent.execution.isolated import IsolatedGPUBackend
+    from gpu_agent.execution.process import ProcessCapture
+    from gpu_agent.patching import apply_candidate
+    from gpu_agent.verification.engine import register_candidate
+    from gpu_agent.verification.oracle import reference_output
+    from gpu_agent.verification.truth import reference_source, resolve_truth
+
+    original = _original(store, tmp_path, case=case, n=33)
+    run_id, snapshot = original
+    truth = resolve_truth(snapshot.hashes)
+    assert truth is not None
+    native = IsolatedGPUBackend._container
+
+    def algorithm(self, path, operation, timeout, *, stdin=b"", cancel=None):
+        if operation == "build":
+            return native(self, path, operation, timeout, stdin=stdin, cancel=cancel)
+        data = json.loads(stdin)
+        values = reference_output(truth.oracle, data["a"], data["b"])
+        output = json.dumps({"dtype": "float32", "shape": [data["n"]], "values": values}).encode()
+        log = (
+            b"========= RACECHECK SUMMARY: 0 hazards displayed (0 errors, 0 warnings)\n"
+            if operation == "racecheck"
+            else b"========= ERROR SUMMARY: 0 errors\n"
+        )
+        return ProcessCapture(0, output, b"", False), b"", log
+
+    monkeypatch.setattr(IsolatedGPUBackend, "_container", algorithm)
+    before = (snapshot.root / "kernel.cu").read_text()
+    after = reference_source(truth.oracle).decode()
+    diff = "".join(
+        difflib.unified_diff(
+            before.splitlines(True), after.splitlines(True), "a/kernel.cu", "b/kernel.cu"
+        )
+    )
+    candidate_id = register_candidate(store, apply_candidate(snapshot, diff, ["kernel.cu"]))
+    result = _engine(store, tmp_path).verify(run_id, candidate_id, "full")
+    assert result.verdict.value == "VERIFIED_FIXED"
+    assert _engine(store, tmp_path).verify(run_id, candidate_id, "full") == result

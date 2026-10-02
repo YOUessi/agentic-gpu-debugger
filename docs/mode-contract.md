@@ -1,5 +1,41 @@
 # A–E 评测模式契约（V2.1）
 
+2026-10-02工程补充：repair在创建诊断run之前检查公开task、源码绑定、支持的接口及
+公开输入有效性；诊断模型和GPU尚未启动时即拒绝不满足条件的任务。连接异常增加可选
+transport_error原因码，保留UNCERTAIN、不自动重发、不推断未知费用；提示词仍v12。
+实现和实验对应关系见[当前版本状态](current-status-CN.md)。
+
+## 2026-09-30：多轮公开修复（独立工作流）
+
+新增 `gpu-agent repair`，默认E，服务层允许D/E采用同一RepairPolicy。
+它不是改变旧A–E评测协议；旧 `diagnose`/`benchmark evaluate`仍为单次候选。
+默认3个候选，可配置1–20，任务全部物理调用共享既有总边界；无美元上限。
+每轮相对原始源码生成diff，公开输入编译/运行/四Sanitizer失败时反馈给模型
+修订；仅公开检查通过后调用一次独立strict验证，隐藏结果不回流。
+2026-10-01起，repair v2从与原始源码hash绑定的公开task.json获得功能需求，
+同一需求进入调查、诊断与补丁上下文。只用公开input.json执行固定算法的数值比较，
+正常及可取得输出的instrumented运行均检查。功能失败或明确的程序退出失败可继续修订；
+缺少规格、工具故障、超时等不冒充通过。最终独立验证仍只在公开自检通过后执行一次，
+其结果不回流模型。旧repair v1无功能自检的实验保留，不与v2拼接。
+重复候选/基础设施失败/模型异常/轮数或调用耗尽停止，失败完整留档。
+格式重试仍沿用任务内patch类别的一次额度，不因修订重置总账。
+v1的prompt为m3-2026-09-30-v11；v2使用m3-2026-10-01-v12，补充功能规格语义；动作政策仍为
+diagnosis-full-source-v2。v10及旧策略历史回放保留，不拼接新旧成绩。
+
+## 2026-09-29：完整源码动作合同 v10
+
+当前诊断输入继续完整提供 kernel.cu；因此新 planner 的结构化输出 schema 不再
+提供 inspect_source，也不再注册这个运行时工具。模型直接分析已有源码，仍自主
+选择四种 Sanitizer、检索、finish 或无法判断，不自动替它选择调查路线或结束。
+新控制器策略 diagnosis-full-source-v2 对注入旧动作返回 SOURCE_ALREADY_AVAILABLE。
+缺少证据不能 finish，正常输出不能否定 Sanitizer finding，补丁和 GPU 验证标准不变。
+
+PROMPT_VERSION 为 m3-2026-09-29-v10。旧动作类型保留用于历史读取；原生复核
+按记录受绑定的 prompt version 选择旧 diagnosis-m1-v1，不相信模型选择策略版本。
+新旧结果必须分开。这是删除无新增信息的动作，不是让 Agent 使用更强模型或获取
+额外证据；是否减少调用且保持修复率，需要独立开发复测，不能由离线通过直接宣称。
+完整过程见 [自主调查修复记录](repair-log/2026-09-29-agent-investigation.md)。
+
 本文件是模式语义、证据门禁、补丁权限、记录状态与 Release Gate 的唯一来源。代码、
 测试与 `evaluation/protocol.md` 必须与此表一致；修改任一列需同时修改其余各处。
 离线端到端检查见 `tests/unit/test_mode_contract.py`。

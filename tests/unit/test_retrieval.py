@@ -196,6 +196,34 @@ def test_v4_indexes_document_title_without_changing_v3(index, tmp_path):
     assert KnowledgeIndex.load(path).retrieve("allocation", VERSION).chunks == [chunk]
 
 
+@pytest.mark.parametrize(
+    "symbol,query",
+    [
+        ("particleScatter", "particle scatter"),
+        ("histogram_update", "histogram update"),
+        ("neighbourhood.gather", "neighbourhood gather"),
+        ("cudaAllocateThing()", "allocate thing"),
+    ],
+)
+def test_v5_identifier_components_on_separate_synthetic_queries(index, tmp_path, symbol, query):
+    from gpu_agent.knowledge.models import make_chunk
+    from gpu_agent.knowledge.retrieve import KnowledgeIndex, tokenize
+
+    fields = index.chunks[0].model_dump(exclude={"chunk_id", "content_hash"})
+    fields.update(document_title="Function reference", section_title="Entry", text=symbol)
+    chunk = make_chunk(**fields)
+    prior = KnowledgeIndex([chunk], tokenizer_version="cuda-lex-v4")
+    current = KnowledgeIndex([chunk], tokenizer_version="cuda-lex-v5")
+    assert prior.retrieve(query, VERSION).chunks == []
+    assert current.retrieve(query, VERSION, k=1).chunks == [chunk]
+    assert symbol in tokenize(symbol, "cuda-lex-v5")
+    assert current.retrieve("spectral photon astronomy", VERSION).chunks == []
+    path = tmp_path / "components.json"
+    current.save(path)
+    assert KnowledgeIndex.load(path).corpus_hash == current.corpus_hash
+    assert KnowledgeIndex.load(path).retrieve(query, VERSION).chunks == [chunk]
+
+
 def test_citation_existence_does_not_assert_relevance(index):
     from gpu_agent.knowledge.models import InvalidCitationError, validate_citations
 

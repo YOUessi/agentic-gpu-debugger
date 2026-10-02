@@ -1,15 +1,64 @@
 # Agentic GPU Debugger
 
-面向 CUDA 故障的证据驱动诊断工具。Python 负责 Agent/CLI/证据与验证编排，CUDA C++ 负责真实 kernel 和可信 host harness。
+An evidence-grounded CUDA debugging agent: investigate with GPU tools, propose a patch,
+self-check and revise using public evidence, then verify independently.
 
-当前已实现证据驱动诊断、单一模型补丁、Docker GPU 隔离、四种 Compute
+面向 CUDA 故障的调试工程作品。Python 编排模型、CLI、工具与证据；CUDA C++提供真实
+工作负载，候选代码在隔离GPU后端执行。最终结果由数值检查和Compute Sanitizer判断，
+不是模型自评。
+
+## 核心能力与演示
+
+- 调查：模型在受控动作空间选择四种Sanitizer与官方文档检索。
+- 修复：生成受限diff，公开GPU自检失败后修订，拒绝重复候选空转。
+- 验证：公开检查通过后执行独立strict验证，隐藏测试结果不反馈给模型。
+- 可核查：保存源码、输入、补丁和工具产物哈希，以及实际调用与失败原因。
+
+同一快照 `0d7db80` 的真实E实验：二维stencil经5次模型调用修复并通过独立验证；
+分段scan经8次调用仍有竞争，重复候选后停止，未被误报成功。不宣称E已优于固定规则D。
+
+[演示与复现](docs/demo.md) · [公开证据摘要与补丁](docs/evidence/portfolio-summary.json) ·
+[项目介绍与讲解](docs/portfolio-CN.md) · [能力边界](docs/limitations.md)
+
+## 实验证据与版本边界
+
+当前已实现证据驱动诊断、单候选与多轮补丁修订、Docker GPU 隔离、四种 Compute
 Sanitizer、public/private Oracle、strict 验证、mutation 注册门、评测记录和 release
 gate。冻结版本 `e80ce75` 已完成 16 个公开案例和 8 个私有案例的原生验证、
 240 个开发集单元和 120 个 holdout 单元的真实 DeepSeek 评测，以及 18 项 GPU/隔离
 补充验收。当前工作区包含后续工程修复，不能把冻结实验算成这些修改的重新评测。
 实际结果、失败和验证边界见 [评测结果](docs/evaluation-report.md)。
 
+后续新增了四种独立算法的公开开发扩展（循环移位、stencil、加权直方图、分组
+归约），各自有 CPU Oracle 与核心路径故障。入口、验收范围和未覆盖能力见
+[案例多样性说明](docs/case-diversity-CN.md)，逐轮测试见
+[详细记录](docs/repair-log/2026-09-29-case-diversity.md)。它们不计入旧实验成绩。
+
+2026-10-03进一步加入二维五点stencil与128元素分段inclusive scan，共6个扩展案例。
+新增两例的原生GPU验收已通过；真实E修复中二维stencil通过最终验证，分段scan未修好，
+公开自检检出残留竞争，重复候选后停止。这是保留的模型失败，不计作通过。
+见[本轮工作负载记录](docs/repair-log/2026-10-03-real-workloads.md)。
+
 ## 独立环境
+
+当前实现与各批实验不是同一个版本；以[当前版本状态](docs/current-status-CN.md)为准。
+当前代码包含连接原因分类和repair前置规格检查；历史实验证据绑定各自快照，不混用版本。
+
+多轮修复新入口（需既有provider与知识库配置）：
+
+```bash
+gpu-agent repair benchmarks/public/case_0009/public_input --allow-paid-calls --max-candidates 3
+```
+
+公开GPU自检失败后修订，公开检查通过后独立strict验证；保存每轮候选和反馈。
+这不是旧评测的重跑，也不保证每个模型候选都能修好。默认3个候选可配置，
+共享总调用边界，无美元限额。`diagnose`仍保留单候选入口。
+详见[实现与测试记录](docs/repair-log/2026-09-30-iterative-repair.md)。
+
+repair v2还要求源码目录中的公开 `task.json`：固定算法标识、版本及原始kernel的SHA256。
+自带公开案例已经提供该文件。功能需求送入模型，自检使用同目录公开输入检查数值与
+Sanitizer；缺少规格不能判自检通过。支持的功能定义在 `src/gpu_agent/public_task.py`，
+不是从隐藏验证推导需求。详见[本轮修复记录](docs/repair-log/2026-10-01-public-repair-correctness.md)。
 
 使用 Conda 同时固定 Python 和原生 CUDA 开发工具，环境内的 Python 依赖用 pip 锁定。不叠加 venv，不复用其他项目的 PyTorch 环境。Conda **不是**安全沙箱；候选代码只能在后续的 Docker 隔离后端执行。
 
