@@ -253,6 +253,59 @@
 
 ---
 
+## 2026-10-03 / Full-stack Round 5
+
+### FS-021：Evaluation record 必须保留 immutable lineage，不能只显示统计字段
+
+**现象：** Round 4 的数据表能看到 case/mode/verdict/latency，但无法从一个异常 unit 回到实际 diagnosis run，因此“统计异常 → 原始证据”链路断开。
+
+**原因：** Evaluation public record 本来就持久化了 `lineage.diagnosis_run_id / candidate_run_id / verification_run_id`，Web projection 当时没有暴露这些 ID。
+
+**修复：** `EvaluationRecordRow` 增加三类 lineage ID；record inspector 只展示这些不可变 run ID，并提供 `Open diagnosis run`。不通过 case_id/template 猜测对应 run。
+
+**验证：** Tang 历史 240-unit evaluation 的首个 VERIFIED_FIXED record 成功映射到 diagnosis `40e7b46a...`、candidate `04c688d...`、verification `a69cda8...`，与原 public record 完全一致。
+
+### FS-022：历史 Analytics diagnosis run 不能复用当前 operational `/api/runs` 写路径
+
+**现象：** Analytics store 与当前 operational RunStore 可不同；如果点击历史 record 后直接调用 `/api/runs/{id}`，要么 404，要么未来可能错误连接当前 Strict Verify 等写操作。
+
+**原因：** 历史 analytics drill-down 是只读证据浏览，当前 run console 是可操作 workflow，两者权限语义不同。
+
+**修复：** 新增独立 `/api/analytics/runs/{run_id}` 和 `/api/analytics/runs/{run_id}/artifacts/{artifact_id}`。后端先再次检查 public ArtifactRef visibility，再用 analytics RunCatalog 读取；前端 drawer 明确标记 `Read only`，不提供 Strict Verify 或 Repair 按钮。
+
+**验证：** 真实历史 diagnosis `40e7b46a...` 可读取 47 个 public artifact、3 个 resolved citation、candidate diff 和 1 个 public verification child；当前 operational store 未被切换或修改。
+
+### FS-023：Mode 图表必须是描述性可视化，不能暗示统计显著性
+
+**现象：** A–E mode 的 verified rate/latency/LLM calls 很适合画图，但这些 unit 是固定 benchmark attempts，不应把简单柱状图解释成独立样本置信区间或模型优劣统计结论。
+
+**原因：** Dashboard 这里只有 public records 的描述统计，没有额外的独立性假设、bootstrap 或 significance test。
+
+**修复：** 图表只显示 verified rate、mean latency、mean LLM calls，并在每个 chart 标记 `descriptive · public records`；不绘制置信区间、不输出 winner/ranking 结论。
+
+**验证：** Tang 真实 evaluation 正确生成 3 个 chart、5 个 mode bar group，数值与 public manifest 投影一致。
+
+### FS-024：跨 store evidence 点击必须使用 Analytics artifact namespace
+
+**现象：** 从历史 diagnosis drawer 点击 citation 时，如果仍调用 operational `getArtifact()`，会从当前 RunStore 查找相同 artifact ID，产生 404 或错误数据域。
+
+**原因：** Artifact ID 只在其 RunStore/Run 上有意义，不能跨 operational/analytics store 混用。
+
+**修复：** Analytics drawer 使用独立 `getAnalyticsArtifact()`，路径固定为 `/api/analytics/runs/{run_id}/artifacts/{artifact_id}`；后端只允许该 historical public run 已注册 artifact。
+
+**验证：** Playwright 可从 evaluation record → historical diagnosis → citation chip 打开 persisted memcheck evidence；真实浏览器 drill-down 中 citation 数 3、artifact 数 47、console error 为 0。
+
+### Round 5 验证摘要
+
+- Python targeted regression：52 passed；Ruff 通过；`mypy --strict src/gpu_agent`：83 个 source file 无问题。
+- Vitest：4 passed；TypeScript/Vite production build：通过；Oxlint：0 warnings / 0 errors。
+- Playwright：5 passed；Evaluation Analytics 流程新增 charts → record inspector → diagnosis lineage → citation artifact 的完整 E2E。
+- Tang 真实历史 evaluation `f7a7b393...`：3 个 mode chart 正常渲染；首个 VERIFIED_FIXED record 的 diagnosis/candidate/verification lineage 与 public manifest 一致。
+- 真实 diagnosis `40e7b46a...` drill-down：failure family=`out_of_bounds`、47 个 public artifact、3 个 resolved citation、candidate diff、1 个 verification child；浏览器 console error 为 0。
+- 本轮没有新增付费模型调用或真实 GPU 实验；图表与 drill-down 均是既有 public evidence 的只读展示。
+
+---
+
 ## 模板：后续问题
 
 ### FS-XXX：标题

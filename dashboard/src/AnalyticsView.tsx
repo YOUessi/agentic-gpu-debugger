@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { getAnalyticsOverview, getBatchDetail, getEvaluationDetail } from './api'
+import {
+  getAnalyticsArtifact,
+  getAnalyticsOverview,
+  getAnalyticsRun,
+  getBatchDetail,
+  getEvaluationDetail,
+} from './api'
 import { formatTime, humanize, shortId, statusTone } from './format'
 import type {
   AnalyticsOverview,
@@ -8,6 +14,8 @@ import type {
   EvaluationCard,
   EvaluationDetail,
   EvaluationModeSummary,
+  EvaluationRecordRow,
+  RunDetail,
 } from './types'
 
 function StatusPill({ value }: { value: string | null | undefined }) {
@@ -31,6 +39,65 @@ function compact(value: number | null): string {
 
 function money(value: number | null): string {
   return value === null ? '—' : '$' + value.toFixed(4)
+}
+
+type JsonObject = Record<string, unknown>
+
+function asObject(value: unknown): JsonObject {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as JsonObject)
+    : {}
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+type ModeMetricKey = 'verified_rate' | 'latency_mean_ms' | 'llm_calls_mean'
+
+function ModeBarChart({
+  metrics,
+  metric,
+  title,
+}: {
+  metrics: EvaluationModeSummary[]
+  metric: ModeMetricKey
+  title: string
+}) {
+  const values = metrics
+    .map((item) => item[metric])
+    .filter((value): value is number => typeof value === 'number')
+  const max = metric === 'verified_rate' ? 1 : Math.max(...values, 1)
+
+  function format(value: number | null): string {
+    if (metric === 'verified_rate') return percent(value)
+    if (metric === 'latency_mean_ms') return seconds(value)
+    return compact(value)
+  }
+
+  return (
+    <article className="mode-chart">
+      <div className="mode-chart-head">
+        <span>{title}</span>
+        <small>descriptive · public records</small>
+      </div>
+      <div className="mode-chart-bars">
+        {metrics.map((item) => {
+          const value = item[metric]
+          const width = value === null ? 0 : Math.max(2, (value / max) * 100)
+          return (
+            <div className="mode-chart-row" key={item.mode}>
+              <span className="mode-chart-label">{item.mode}</span>
+              <div className="mode-chart-track">
+                <i style={{ width: width + '%' }} />
+              </div>
+              <strong>{format(value)}</strong>
+            </div>
+          )
+        })}
+      </div>
+    </article>
+  )
 }
 
 function Metric({
@@ -86,6 +153,316 @@ function FailureDistribution({ families }: { families: Record<string, number> })
   )
 }
 
+function EvaluationRecordInspector({
+  record,
+  onClose,
+  onOpenDiagnosis,
+}: {
+  record: EvaluationRecordRow
+  onClose: () => void
+  onOpenDiagnosis: (runId: string) => void
+}) {
+  return (
+    <div className="record-inspector-backdrop" onMouseDown={onClose}>
+      <aside className="record-inspector" onMouseDown={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <span className="eyebrow">Evaluation unit</span>
+            <h3>{record.case_id} · Mode {record.mode}</h3>
+            <p>{record.template_id} · repeat {record.repeat}</p>
+          </div>
+          <button className="icon-button small" onClick={onClose} aria-label="Close record">×</button>
+        </header>
+
+        <div className="record-inspector-body">
+          <div className="record-inspector-grid">
+            <div><span>Verdict</span><StatusPill value={record.verdict} /></div>
+            <div><span>Diagnosis</span><StatusPill value={record.diagnosis_outcome} /></div>
+            <div><span>Failure family</span><strong>{humanize(record.failure_family)}</strong></div>
+            <div><span>Latency</span><strong>{seconds(record.latency_ms)}</strong></div>
+            <div><span>LLM calls</span><strong>{record.physical_calls ?? '—'}</strong></div>
+            <div><span>Sanitizer calls</span><strong>{record.sanitizer_calls ?? '—'}</strong></div>
+            <div><span>Tokens</span><strong>{compact(record.total_tokens)}</strong></div>
+            <div><span>Cost</span><strong>{money(record.cost_usd)}</strong></div>
+          </div>
+
+          {record.failure_reason && (
+            <div className="record-failure-reason">
+              <span>Failure reason</span>
+              <strong>{humanize(record.failure_reason)}</strong>
+            </div>
+          )}
+
+          <section className="lineage-card">
+            <div className="analytics-section-head">
+              <div><span className="eyebrow">Immutable lineage</span><h3>Public run links</h3></div>
+            </div>
+            <div className="lineage-row">
+              <span>Diagnosis</span>
+              <code>{record.diagnosis_run_id ?? '—'}</code>
+            </div>
+            <div className="lineage-row">
+              <span>Candidate</span>
+              <code>{record.candidate_run_id ?? '—'}</code>
+            </div>
+            <div className="lineage-row">
+              <span>Verification</span>
+              <code>{record.verification_run_id ?? '—'}</code>
+            </div>
+          </section>
+
+          <button
+            className="primary-button record-open-button"
+            disabled={!record.diagnosis_run_id}
+            onClick={() => {
+              if (record.diagnosis_run_id) onOpenDiagnosis(record.diagnosis_run_id)
+            }}
+          >
+            Open diagnosis run
+          </button>
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function AnalyticsDiagnosisDrawer({
+  runId,
+  onClose,
+}: {
+  runId: string
+  onClose: () => void
+}) {
+  const [detail, setDetail] = useState<RunDetail | null>(null)
+  const [error, setError] = useState('')
+  const [artifactContent, setArtifactContent] = useState('')
+  const [selectedArtifact, setSelectedArtifact] = useState('')
+  const [artifactLoading, setArtifactLoading] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void getAnalyticsRun(runId)
+      .then((value) => {
+        if (!cancelled) setDetail(value)
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : 'Diagnosis run unavailable')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [runId])
+
+  async function openArtifact(artifactId: string) {
+    setSelectedArtifact(artifactId)
+    setArtifactLoading(true)
+    try {
+      setArtifactContent(await getAnalyticsArtifact(runId, artifactId))
+    } catch (caught) {
+      setArtifactContent(caught instanceof Error ? caught.message : 'Artifact unavailable')
+    } finally {
+      setArtifactLoading(false)
+    }
+  }
+
+  const diagnosis = asObject(detail?.diagnosis)
+  const candidate = asObject(detail?.candidate)
+  const claimGroups = [
+    ['Observed facts', diagnosis.observed_facts],
+    ['Tool findings', diagnosis.tool_findings],
+    ['Documentation', diagnosis.documentation_evidence],
+  ] as const
+
+  return (
+    <div className="analytics-run-backdrop" onMouseDown={onClose}>
+      <aside className="analytics-run-drawer" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="drawer-header">
+          <div>
+            <span className="eyebrow">Historical public diagnosis</span>
+            <h2>{shortId(runId, 14)}</h2>
+            <p>Read-only drill-down from the evaluation record</p>
+          </div>
+          <div className="analytics-run-head-actions">
+            <span className="readonly-badge">Read only</span>
+            <button className="icon-button" onClick={onClose} aria-label="Close diagnosis run">×</button>
+          </div>
+        </header>
+
+        <div className="analytics-drawer-scroll">
+          {error && <div className="error-banner">{error}</div>}
+          {!detail && !error && <div className="table-message">Loading diagnosis run…</div>}
+
+          {detail && (
+            <>
+              <section className="analytics-run-summary">
+                <div>
+                  <span>Status</span>
+                  <StatusPill value={detail.summary.status} />
+                </div>
+                <div>
+                  <span>Failure family</span>
+                  <strong>{humanize(detail.summary.failure_family)}</strong>
+                </div>
+                <div>
+                  <span>Confidence</span>
+                  <strong>{humanize(detail.summary.confidence)}</strong>
+                </div>
+                <div>
+                  <span>Artifacts</span>
+                  <strong>{detail.summary.artifact_count}</strong>
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Controller</span><h3>Run timeline</h3></div>
+                  <span className="section-count">{detail.events.length} events</span>
+                </div>
+                <div className="analytics-run-timeline">
+                  {detail.events.map((raw, index) => {
+                    const event = asObject(raw)
+                    return (
+                      <div className="analytics-run-event" key={asString(event.at) + index}>
+                        <i className={'timeline-dot ' + statusTone(asString(event.status))} />
+                        <div>
+                          <strong>{humanize(asString(event.phase) || asString(event.status))}</strong>
+                          <span>{formatTime(asString(event.at) || null)}</span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Grounded analysis</span><h3>Diagnosis</h3></div>
+                  <StatusPill value={detail.summary.diagnosis_outcome} />
+                </div>
+                <div className="analytics-diagnosis-copy">
+                  <div>
+                    <span>Root cause</span>
+                    <p>{asString(diagnosis.root_cause) || 'No root cause persisted.'}</p>
+                  </div>
+                  <div>
+                    <span>Recommended change</span>
+                    <p>{asString(diagnosis.recommended_change) || 'No change persisted.'}</p>
+                  </div>
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Evidence</span><h3>Claims & citations</h3></div>
+                  <span className="section-count">{Object.keys(detail.citations).length} resolved</span>
+                </div>
+                <div className="analytics-evidence-grid">
+                  <div className="analytics-evidence-claims">
+                    {claimGroups.map(([label, value]) => {
+                      const claims = Array.isArray(value) ? value : []
+                      if (claims.length === 0) return null
+                      return (
+                        <div className="analytics-claim-group" key={label}>
+                          <h4>{label}</h4>
+                          {claims.map((rawClaim, index) => {
+                            const claim = asObject(rawClaim)
+                            const ids = Array.isArray(claim.citation_ids)
+                              ? claim.citation_ids.filter(
+                                  (item): item is string => typeof item === 'string',
+                                )
+                              : []
+                            return (
+                              <article key={label + index}>
+                                <p>{asString(claim.text)}</p>
+                                <div>
+                                  {ids.map((id) => {
+                                    const target = detail.citations[id]
+                                    return target ? (
+                                      <button
+                                        className="citation-chip"
+                                        key={id}
+                                        onClick={() => void openArtifact(target.artifact_id)}
+                                      >
+                                        {target.kind === 'document' ? 'DOC' : 'ART'} · {shortId(id, 10)}
+                                      </button>
+                                    ) : (
+                                      <span className="citation-chip unresolved" key={id}>
+                                        UNRESOLVED · {shortId(id, 10)}
+                                      </span>
+                                    )
+                                  })}
+                                </div>
+                              </article>
+                            )
+                          })}
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <pre className="analytics-evidence-preview">
+                    {artifactLoading
+                      ? 'Loading persisted evidence…'
+                      : selectedArtifact
+                        ? artifactContent
+                        : 'Select a citation to inspect the public persisted artifact.'}
+                  </pre>
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Patch lineage</span><h3>Candidate & verification</h3></div>
+                </div>
+                <div className="analytics-candidate-grid">
+                  <div>
+                    <span>Candidate diff</span>
+                    <pre>{asString(candidate.unified_diff) || 'No candidate diff registered.'}</pre>
+                  </div>
+                  <div>
+                    <span>Verification records</span>
+                    <div className="analytics-verification-stack">
+                      {detail.verifications.length === 0 && (
+                        <div className="empty-mini">No public verification child.</div>
+                      )}
+                      {detail.verifications.map((item) => (
+                        <div key={asString(item.run_id)}>
+                          <StatusPill value={asString(item.verdict)} />
+                          <span>{humanize(asString(item.reason_code))}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Public RunStore</span><h3>Artifacts</h3></div>
+                  <span className="section-count">{detail.artifacts.length}</span>
+                </div>
+                <div className="analytics-artifact-list">
+                  {detail.artifacts.map((artifact) => (
+                    <button
+                      key={artifact.id}
+                      className={selectedArtifact === artifact.id ? 'active' : ''}
+                      onClick={() => void openArtifact(artifact.id)}
+                    >
+                      <span>{artifact.name}</span>
+                      <small>{compact(artifact.byte_count)} B</small>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </>
+          )}
+        </div>
+      </aside>
+    </div>
+  )
+}
+
 function EvaluationDrawer({
   run,
   onClose,
@@ -100,6 +477,8 @@ function EvaluationDrawer({
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [selectedRecord, setSelectedRecord] = useState<EvaluationRecordRow | null>(null)
+  const [selectedDiagnosisRun, setSelectedDiagnosisRun] = useState<string | null>(null)
   const pageSize = 40
 
   const load = useCallback(async () => {
@@ -158,6 +537,23 @@ function EvaluationDrawer({
             </div>
             <div className="mode-grid">
               {(detail?.mode_metrics ?? []).map((metric) => <ModeCard key={metric.mode} metric={metric} />)}
+            </div>
+            <div className="mode-chart-grid">
+              <ModeBarChart
+                metrics={detail?.mode_metrics ?? []}
+                metric="verified_rate"
+                title="Verified rate by mode"
+              />
+              <ModeBarChart
+                metrics={detail?.mode_metrics ?? []}
+                metric="latency_mean_ms"
+                title="Mean latency by mode"
+              />
+              <ModeBarChart
+                metrics={detail?.mode_metrics ?? []}
+                metric="llm_calls_mean"
+                title="LLM calls by mode"
+              />
             </div>
           </section>
 
@@ -241,7 +637,11 @@ function EvaluationDrawer({
                     <tr><td colSpan={11} className="table-message">No records match the filters.</td></tr>
                   )}
                   {!loading && detail?.records.map((record) => (
-                    <tr key={record.record_id}>
+                    <tr
+                      key={record.record_id}
+                      className="analytics-record-row"
+                      onClick={() => setSelectedRecord(record)}
+                    >
                       <td>{record.ordinal}</td>
                       <td>
                         <strong>{record.case_id}</strong>
@@ -275,6 +675,22 @@ function EvaluationDrawer({
           </section>
         </div>
       </aside>
+      {selectedRecord && (
+        <EvaluationRecordInspector
+          record={selectedRecord}
+          onClose={() => setSelectedRecord(null)}
+          onOpenDiagnosis={(diagnosisRunId) => {
+            setSelectedRecord(null)
+            setSelectedDiagnosisRun(diagnosisRunId)
+          }}
+        />
+      )}
+      {selectedDiagnosisRun && (
+        <AnalyticsDiagnosisDrawer
+          runId={selectedDiagnosisRun}
+          onClose={() => setSelectedDiagnosisRun(null)}
+        />
+      )}
     </div>
   )
 }

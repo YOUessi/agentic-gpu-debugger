@@ -182,6 +182,9 @@ class EvaluationRecordRow(BaseModel):
     mode: str
     repeat: int
     status: str
+    diagnosis_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    candidate_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    verification_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     diagnosis_outcome: str | None = None
     failure_family: str | None = None
     verdict: str | None = None

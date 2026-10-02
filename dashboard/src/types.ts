@@ -158,6 +158,9 @@ export type EvaluationRecordRow = {
   mode: string
   repeat: number
   status: string
+  diagnosis_run_id: string | null
+  candidate_run_id: string | null
+  verification_run_id: string | null
   diagnosis_outcome: string | null
   failure_family: string | null
   verdict: string | null

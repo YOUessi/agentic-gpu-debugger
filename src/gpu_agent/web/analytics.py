@@ -41,6 +41,11 @@ class AnalyticsCatalog:
         if any(ref.visibility != "public" for ref in run.artifact_refs):
             raise ValueError("analytics RunStore contains non-public artifacts")
 
+    def require_public_run(self, run_id: str) -> RunManifest:
+        run = self.store.load(run_id)
+        self._require_public_run(run)
+        return run
+
     def _manifests(self) -> list[RunManifest]:
         result: list[RunManifest] = []
         for path in sorted(self.store.root.iterdir()):
@@ -320,6 +325,8 @@ class AnalyticsCatalog:
         for record in page_records:
             diagnosis = self._record_diagnosis(record)
             usage = self._record_usage(record)
+            lineage_value = record.get("lineage")
+            lineage = lineage_value if isinstance(lineage_value, dict) else {}
             rows.append(
                 EvaluationRecordRow(
                     ordinal=ordinal_lookup[id(record)],
@@ -329,6 +336,21 @@ class AnalyticsCatalog:
                     mode=str(record.get("mode", "")),
                     repeat=int(record.get("repeat", 0)),
                     status=str(record.get("status", "")),
+                    diagnosis_run_id=(
+                        str(lineage.get("diagnosis_run_id"))
+                        if lineage.get("diagnosis_run_id") is not None
+                        else None
+                    ),
+                    candidate_run_id=(
+                        str(lineage.get("candidate_run_id"))
+                        if lineage.get("candidate_run_id") is not None
+                        else None
+                    ),
+                    verification_run_id=(
+                        str(lineage.get("verification_run_id"))
+                        if lineage.get("verification_run_id") is not None
+                        else None
+                    ),
                     diagnosis_outcome=(
                         str(diagnosis.get("diagnostic_outcome"))
                         if diagnosis.get("diagnostic_outcome") is not None

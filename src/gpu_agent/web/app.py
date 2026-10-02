@@ -62,6 +62,7 @@ def create_app(
         else:
             analytics_store = runtime.store
     analytics = AnalyticsCatalog(analytics_store)
+    analytics_runs = RunCatalog(analytics_store)
     service_factory = ApplicationService.configured if service is None else (lambda: runtime)
     job_root = Path(
         os.environ.get(
@@ -138,6 +139,31 @@ def create_app(
             return analytics.batch_detail(run_id)
         except (OSError, ValueError):
             raise HTTPException(status_code=404, detail="BATCH_NOT_FOUND") from None
+
+    @app.get("/api/analytics/runs/{run_id}", response_model=RunDetail)
+    def analytics_run_detail(run_id: str) -> RunDetail:
+        try:
+            run = analytics.require_public_run(run_id)
+            if run.kind != "diagnosis":
+                raise ValueError("analytics drill-down requires a diagnosis run")
+            return analytics_runs.detail(run_id)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail="ANALYTICS_RUN_NOT_FOUND") from None
+
+    @app.get(
+        "/api/analytics/runs/{run_id}/artifacts/{artifact_id}",
+        response_class=PlainTextResponse,
+    )
+    def analytics_artifact(
+        run_id: str,
+        artifact_id: str,
+        max_bytes: Annotated[int, Query(ge=1024, le=1024 * 1024)] = 256 * 1024,
+    ) -> str:
+        try:
+            analytics.require_public_run(run_id)
+            return analytics_runs.artifact_text(run_id, artifact_id, max_bytes)
+        except (OSError, ValueError):
+            raise HTTPException(status_code=404, detail="ANALYTICS_ARTIFACT_NOT_FOUND") from None
 
     @app.get("/api/runs", response_model=RunListResponse)
     def runs(

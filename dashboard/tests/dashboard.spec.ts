@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 const runId = '0123456789abcdef0123456789abcdef'
+const analyticsDiagnosisId = '99999999999999999999999999999999'
 
 test.beforeEach(async ({ page }) => {
   await page.route('**/api/cases', async (route) => {
@@ -112,6 +113,9 @@ test.beforeEach(async ({ page }) => {
           mode: 'C',
           repeat: 1,
           status: 'COMPLETED',
+          diagnosis_run_id: analyticsDiagnosisId,
+          candidate_run_id: 'cccccccccccccccccccccccccccccccc',
+          verification_run_id: 'dddddddddddddddddddddddddddddddd',
           diagnosis_outcome: 'DIAGNOSED',
           failure_family: 'out_of_bounds',
           verdict: 'VERIFIED_FIXED',
@@ -163,6 +167,87 @@ test.beforeEach(async ({ page }) => {
           mutant_sanitizer_outcomes: ['FINDING'],
           target_detections: [true],
           reason_code: null,
+        }],
+      },
+    })
+  })
+
+
+  await page.route('**/api/analytics/runs/' + analyticsDiagnosisId + '/artifacts/**', async (route) => {
+    await route.fulfill({
+      contentType: 'text/plain',
+      body: '========= MEMCHECK finding: invalid global read in kernel.cu:7',
+    })
+  })
+
+  await page.route('**/api/analytics/runs/' + analyticsDiagnosisId, async (route) => {
+    await route.fulfill({
+      json: {
+        summary: {
+          id: analyticsDiagnosisId,
+          kind: 'diagnosis',
+          parent_run_id: null,
+          status: 'COMPLETED',
+          phase: null,
+          last_event_at: '2026-09-23T18:31:00Z',
+          artifact_count: 4,
+          diagnosis_outcome: 'DIAGNOSED',
+          failure_family: 'out_of_bounds',
+          confidence: 'high',
+          repair_stop_reason: null,
+          verification_verdict: 'VERIFIED_FIXED',
+        },
+        events: [
+          { at: '2026-09-23T18:30:59Z', status: 'QUEUED', phase: null },
+          { at: '2026-09-23T18:31:00Z', status: 'RUNNING', phase: 'DIAGNOSING' },
+          { at: '2026-09-23T18:31:01Z', status: 'COMPLETED', phase: null },
+        ],
+        diagnosis: {
+          diagnostic_outcome: 'DIAGNOSED',
+          failure_family: 'out_of_bounds',
+          root_cause: 'The load marker reads input[n + 16], beyond the allocated buffer.',
+          recommended_change: 'Restrict the load marker to the valid allocation range.',
+          confidence_label: 'high',
+          observed_facts: [{
+            text: 'Build succeeded and runtime completed.',
+            citation_ids: ['analyticsartifact'],
+          }],
+          tool_findings: [{
+            text: 'Invalid __global__ read',
+            citation_ids: ['analyticsartifact'],
+          }],
+          documentation_evidence: [],
+        },
+        repair_summary: null,
+        repair_rounds: [],
+        candidate: {
+          run_id: 'cccccccccccccccccccccccccccccccc',
+          unified_diff: '--- a/kernel.cu\n+++ b/kernel.cu\n- input[n + 16]\n+ input[n - 1]\n',
+          patched_source_hash: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        },
+        verifications: [{
+          run_id: 'dddddddddddddddddddddddddddddddd',
+          verdict: 'VERIFIED_FIXED',
+          reason_code: 'ALL_REQUIRED_CHECKS_PASSED',
+          public_passed_count: 1,
+        }],
+        actions: [],
+        citations: {
+          analyticsartifact: {
+            citation_id: 'analyticsartifact',
+            artifact_id: 'analyticsartifact',
+            artifact_name: 'sanitizer/memcheck.log',
+            kind: 'artifact',
+            label: 'sanitizer/memcheck.log',
+            preview: null,
+            source_url: null,
+          },
+        },
+        artifacts: [{
+          id: 'analyticsartifact',
+          name: 'sanitizer/memcheck.log',
+          byte_count: 128,
+          sha256: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
         }],
       },
     })
@@ -356,10 +441,22 @@ test('opens evaluation analytics and renders the A-E data grid', async ({ page }
 
   await page.getByRole('table').getByText('eeeeeeeeee').click()
   await expect(page.getByRole('heading', { name: 'Mode comparison' })).toBeVisible()
-  await expect(page.getByText('75.0%')).toBeVisible()
+  await expect(page.getByText('Verified rate by mode')).toBeVisible()
+  await expect(page.getByText('Mean latency by mode')).toBeVisible()
+  await expect(page.locator('.mode-card').filter({ hasText: 'Mode C' }).getByText('75.0%')).toBeVisible()
   await expect(page.getByText('case_0006')).toBeVisible()
   await expect(page.getByText('Vector-Add-Oob-Load')).toBeVisible()
   await expect(page.getByText('Out Of Bounds')).toBeVisible()
+
+  await page.getByText('case_0006').click()
+  await expect(page.getByRole('heading', { name: /case_0006 · Mode C/ })).toBeVisible()
+  await expect(page.getByText(analyticsDiagnosisId)).toBeVisible()
+  await page.getByRole('button', { name: 'Open diagnosis run' }).click()
+  await expect(page.getByText('Historical public diagnosis')).toBeVisible()
+  await expect(page.getByText('The load marker reads input[n + 16], beyond the allocated buffer.')).toBeVisible()
+  await page.locator('.analytics-run-drawer .citation-chip').first().click()
+  await expect(page.getByText('========= MEMCHECK finding: invalid global read in kernel.cu:7')).toBeVisible()
+  await expect(page.getByText('Read only')).toBeVisible()
 })
 
 test('opens seed batch analytics and shows clean-mutant evidence summary', async ({ page }) => {

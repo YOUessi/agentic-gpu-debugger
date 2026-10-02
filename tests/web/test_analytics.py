@@ -65,6 +65,39 @@ def _analytics_store(tmp_path):
     store.transition(batch.id, "RUNNING", "FINALIZING")
     store.transition(batch.id, "COMPLETED", None)
 
+    diagnosis = store.create_run("diagnosis")
+    store.transition(diagnosis.id, "RUNNING", "DIAGNOSING")
+    source_ref = store.put(
+        diagnosis.id,
+        "sources/kernel.cu",
+        b'extern "C" __global__ void kernel(float *x) { x[threadIdx.x] = 1.0f; }\n',
+        "public",
+    )
+    store.put(
+        diagnosis.id,
+        "diagnosis.json",
+        json.dumps(
+            {
+                "diagnostic_outcome": "DIAGNOSED",
+                "failure_family": "shared_memory_race",
+                "root_cause": "Two threads update the same location without synchronization.",
+                "recommended_change": "Separate writes and synchronize before reuse.",
+                "confidence_label": "high",
+                "observed_facts": [
+                    {
+                        "text": "CUDA source was captured for the evaluation run.",
+                        "citation_ids": [source_ref.id],
+                    }
+                ],
+                "tool_findings": [],
+                "documentation_evidence": [],
+            }
+        ).encode(),
+        "public",
+    )
+    store.transition(diagnosis.id, "RUNNING", "FINALIZING")
+    store.transition(diagnosis.id, "COMPLETED", None)
+
     records = [
         {
             "record_id": "a" * 32,
@@ -90,6 +123,12 @@ def _analytics_store(tmp_path):
         },
         {
             "record_id": "b" * 32,
+            "lineage": {
+                "kind": "native",
+                "diagnosis_run_id": diagnosis.id,
+                "candidate_run_id": "c" * 32,
+                "verification_run_id": "d" * 32,
+            },
             "case_id": "case_0002",
             "template_id": "vector-add-shared",
             "mode": "E",
@@ -132,12 +171,14 @@ def _analytics_store(tmp_path):
     )
     store.transition(evaluation.id, "RUNNING", "FINALIZING")
     store.transition(evaluation.id, "COMPLETED", None)
-    return store, batch.id, evaluation.id
+    return store, batch.id, evaluation.id, diagnosis.id, source_ref.id
 
 
 def test_analytics_overview_and_details(tmp_path):
     service = _service(tmp_path)
-    analytics_store, batch_id, evaluation_id = _analytics_store(tmp_path)
+    analytics_store, batch_id, evaluation_id, diagnosis_id, source_artifact_id = _analytics_store(
+        tmp_path
+    )
     client = TestClient(
         create_app(service, repository=tmp_path, analytics_store=analytics_store)
     )
@@ -163,6 +204,9 @@ def test_analytics_overview_and_details(tmp_path):
     assert eval_body["total"] == 1
     assert eval_body["records"][0]["case_id"] == "case_0002"
     assert eval_body["records"][0]["verdict"] == "NOT_FIXED"
+    assert eval_body["records"][0]["diagnosis_run_id"] == diagnosis_id
+    assert eval_body["records"][0]["candidate_run_id"] == "c" * 32
+    assert eval_body["records"][0]["verification_run_id"] == "d" * 32
     assert {item["mode"] for item in eval_body["mode_metrics"]} == {"D", "E"}
 
     batch = client.get(f"/api/analytics/batches/{batch_id}")
@@ -171,6 +215,19 @@ def test_analytics_overview_and_details(tmp_path):
     assert batch_body["register_requested"] is True
     assert batch_body["cases"][0]["target_detections"] == [True]
     assert batch_body["cases"][1]["reason_code"] == "TARGET_FINDING_MISSING"
+
+    run_detail = client.get(f"/api/analytics/runs/{diagnosis_id}")
+    assert run_detail.status_code == 200
+    run_body = run_detail.json()
+    assert run_body["summary"]["id"] == diagnosis_id
+    assert run_body["summary"]["failure_family"] == "shared_memory_race"
+    assert "Two threads update the same location" in run_body["diagnosis"]["root_cause"]
+
+    artifact = client.get(
+        f"/api/analytics/runs/{diagnosis_id}/artifacts/{source_artifact_id}"
+    )
+    assert artifact.status_code == 200
+    assert "__global__ void kernel" in artifact.text
 
 
 def test_analytics_endpoints_do_not_fall_back_to_evaluator_store(tmp_path):

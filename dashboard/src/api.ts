@@ -119,3 +119,16 @@ export function getEvaluationDetail(
 export function getBatchDetail(runId: string): Promise<BatchDetail> {
   return request<BatchDetail>('/api/analytics/batches/' + runId)
 }
+
+export function getAnalyticsRun(runId: string): Promise<RunDetail> {
+  return request<RunDetail>('/api/analytics/runs/' + runId)
+}
+
+export function getAnalyticsArtifact(runId: string, artifactId: string): Promise<string> {
+  return fetch('/api/analytics/runs/' + runId + '/artifacts/' + artifactId).then(
+    async (response) => {
+      if (!response.ok) throw new Error('ANALYTICS_ARTIFACT_NOT_FOUND')
+      return response.text()
+    },
+  )
+}

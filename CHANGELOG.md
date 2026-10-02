@@ -26,6 +26,9 @@ Versioning and the structure of Keep a Changelog.
   usage, token counts, and known public costs.
 - Optional `GPU_AGENT_ANALYTICS_RUN_ROOT` for mounting a historical public RunStore without
   changing the operational RunStore or exposing evaluator/private evidence.
+- Descriptive mode charts for verified rate, latency, and model-call volume, plus immutable
+  evaluation-record lineage drill-down into historical public diagnosis/evidence/candidate/
+  verification runs without enabling operational write actions.
 
 ### Security
 
