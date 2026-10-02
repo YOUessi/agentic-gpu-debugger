@@ -929,6 +929,27 @@ def repair_command(
         raise typer.Exit(1)
 
 
+@app.command("web")
+def web_command(
+    host: Annotated[str, typer.Option("--host")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", min=1, max=65535)] = 8000,
+    reload: Annotated[bool, typer.Option("--reload")] = False,
+) -> None:
+    """Serve the optional FastAPI + React operator console."""
+    try:
+        import uvicorn
+    except ImportError:
+        message = "Install the optional web dependencies with pip install -e '.[web]'."
+        raise typer.BadParameter(message) from None
+    uvicorn.run(
+        "gpu_agent.web.app:create_app",
+        host=host,
+        port=port,
+        reload=reload,
+        factory=True,
+    )
+
+
 @app.command("report")
 def report_command(run_id: str) -> None:
     """Render public evidence, candidate, coverage and provider usage."""

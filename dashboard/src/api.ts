@@ -1,0 +1,70 @@
+import type {
+  RepairRequest,
+  RepairResponse,
+  RunDetail,
+  RunListResponse,
+  RunStats,
+} from './types'
+
+async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, init)
+  if (!response.ok) {
+    let detail = response.statusText
+    try {
+      const body = (await response.json()) as { detail?: string }
+      detail = body.detail || detail
+    } catch {
+      // Keep HTTP status text when the response is not JSON.
+    }
+    throw new Error(detail)
+  }
+  return (await response.json()) as T
+}
+
+export function getStats(): Promise<RunStats> {
+  return request<RunStats>('/api/stats')
+}
+
+export function getRuns(params: {
+  page: number
+  pageSize: number
+  query?: string
+  status?: string
+  kind?: string
+}): Promise<RunListResponse> {
+  const search = new URLSearchParams({
+    page: String(params.page),
+    page_size: String(params.pageSize),
+  })
+  if (params.query) search.set('query', params.query)
+  if (params.status) search.set('status', params.status)
+  if (params.kind) search.set('kind', params.kind)
+  return request<RunListResponse>('/api/runs?' + search.toString())
+}
+
+export function getRun(runId: string): Promise<RunDetail> {
+  return request<RunDetail>('/api/runs/' + runId)
+}
+
+export function getArtifact(runId: string, artifactId: string): Promise<string> {
+  return fetch('/api/runs/' + runId + '/artifacts/' + artifactId).then(async (response) => {
+    if (!response.ok) throw new Error('ARTIFACT_NOT_FOUND')
+    return response.text()
+  })
+}
+
+export function startRepair(payload: RepairRequest): Promise<RepairResponse> {
+  return request<RepairResponse>('/api/repair', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+}
+
+export function verifyRun(runId: string, strict = true): Promise<Record<string, unknown>> {
+  return request<Record<string, unknown>>('/api/runs/' + runId + '/verify', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ strict }),
+  })
+}

@@ -36,6 +36,7 @@ Changelog = "https://github.com/YOUessi/agentic-gpu-debugger/blob/main/CHANGELOG
 
 [project.optional-dependencies]
 dev = ["build>=1.2,<2", "pytest>=8,<10", "ruff>=0.12,<1", "mypy>=1.16,<2"]
+web = ["fastapi>=0.115,<1", "uvicorn[standard]>=0.34,<1"]
 
 [project.scripts]
 gpu-agent = "gpu_agent.cli:app"

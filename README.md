@@ -20,6 +20,23 @@ self-check and revise using public evidence, then verify independently.
 [演示与复现](docs/demo.md) · [公开证据摘要与补丁](docs/evidence/portfolio-summary.json) ·
 [项目介绍与讲解](docs/portfolio-CN.md) · [能力边界](docs/limitations.md)
 
+## Full-stack CUDA Test & Repair Console（V3 分支）
+
+`feat/v3-fullstack-ai-test-console` 在现有 Agent 核心上增加 React/TypeScript 操作台与
+FastAPI adapter。Web 层直接读取 public RunStore，并通过 `ApplicationService` 发起
+repair/strict verification；不会复制 Agent、执行器或 verifier，也不接受任意宿主机路径。
+
+```bash
+python -I -m pip install -e '.[web]'
+cd dashboard && npm install && npm run build && cd ..
+gpu-agent web --host 127.0.0.1 --port 8000
+```
+
+Dashboard 展示 RunStore 分页/筛选、Agent investigation trajectory、grounded diagnosis、
+多轮 repair candidate/diff、public self-check、strict verification 和注册 artifact/log。
+前端使用 Vitest 与 Playwright；API 使用临时 RunStore 测试。设计与安全边界见
+[Full-stack Console](docs/fullstack-console.md)。
+
 ## 实验证据与版本边界
 
 当前已实现证据驱动诊断、单候选与多轮补丁修订、Docker GPU 隔离、四种 Compute

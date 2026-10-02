@@ -5,6 +5,21 @@ Versioning and the structure of Keep a Changelog.
 
 ## [Unreleased]
 
+### Added
+
+- React/TypeScript CUDA Test & Repair Console with server-side run filtering,
+  iterative repair timeline, diff/evidence inspection, and strict-verification actions.
+- Optional FastAPI/uvicorn web adapter that reuses `ApplicationService` and the public
+  RunStore instead of duplicating Agent or verifier logic.
+- Vitest and Playwright coverage for the operator workflow, plus FastAPI tests backed by
+  a temporary real RunStore.
+
+### Security
+
+- Web repair requests resolve allowlisted public case IDs instead of arbitrary host paths.
+- Artifact reads are limited to registered public RunStore refs with bounded response size.
+- Paid model calls remain explicit opt-in and are still constrained by controller policy.
+
 - Final V2 release evidence and the frozen paid evaluation remain gated by the
   repository's acceptance policy.
 
