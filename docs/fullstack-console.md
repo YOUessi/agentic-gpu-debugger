@@ -25,6 +25,7 @@ FastAPI Web Adapter
 ## API
 
 - `GET /api/health`：服务与 public RunStore 状态。
+- `GET /api/cases`：合并 public case registry，返回已校验的 task/algorithm/tool metadata。
 - `GET /api/stats`：诊断、修复与 verification 汇总。
 - `GET /api/runs`：服务端分页、搜索、status/kind 过滤。
 - `GET /api/runs/{run_id}`：Diagnosis、Agent trajectory、repair rounds、candidate、verification 与 artifact inventory。
@@ -37,6 +38,10 @@ FastAPI Web Adapter
 ## 前端
 
 Dashboard 展示工程闭环，而不是聊天 UI：RunStore 运行、failure family、Agent trajectory、evidence-grounded diagnosis、多轮 candidate self-check/diff、四种 Sanitizer、strict verification 与 public artifact/log viewer。
+
+Round 2 增加了 public case catalog selector、运行中自动轮询，以及可点击的 diagnosis evidence citation。citation resolver 同时支持 RunStore artifact ID 与 NVIDIA 文档 `DocumentChunk.chunk_id`，不会把 UI 链接当作新的证据来源。
+
+持续遇到的问题与修复过程记录在 [Full-stack 开发问题与修复记录](fullstack-development-log.md)。
 
 历史 RunStore 可能含旧 schema。Web projection 对展示字段采用向后兼容读取，不修改或迁移原 artifact；核心 `ApplicationService` 仍使用当前严格模型。
 

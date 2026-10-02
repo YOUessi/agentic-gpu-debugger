@@ -13,6 +13,27 @@ class ArtifactSummary(BaseModel):
     sha256: str
 
 
+class CitationTarget(BaseModel):
+    citation_id: str
+    artifact_id: str
+    artifact_name: str
+    kind: Literal["artifact", "document"]
+    label: str
+    preview: str | None = None
+    source_url: str | None = None
+
+
+class CaseSummary(BaseModel):
+    case_id: str
+    algorithm: str
+    requirement: str
+    template_id: str | None = None
+    mutation_id: str | None = None
+    target_tool: str | None = None
+    expected_finding: str | None = None
+    repair_ready: bool
+
+
 class RunSummary(BaseModel):
     id: str
     kind: str
@@ -52,6 +73,7 @@ class RunDetail(BaseModel):
     candidate: dict[str, Any] | None = None
     verifications: list[dict[str, Any]] = Field(default_factory=list)
     actions: list[dict[str, Any]] = Field(default_factory=list)
+    citations: dict[str, CitationTarget] = Field(default_factory=dict)
     artifacts: list[ArtifactSummary] = Field(default_factory=list)
 
 

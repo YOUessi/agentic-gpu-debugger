@@ -1,3 +1,24 @@
+export type CaseSummary = {
+  case_id: string
+  algorithm: string
+  requirement: string
+  template_id: string | null
+  mutation_id: string | null
+  target_tool: string | null
+  expected_finding: string | null
+  repair_ready: boolean
+}
+
+export type CitationTarget = {
+  citation_id: string
+  artifact_id: string
+  artifact_name: string
+  kind: 'artifact' | 'document'
+  label: string
+  preview: string | null
+  source_url: string | null
+}
+
 export type RunSummary = {
   id: string
   kind: string
@@ -44,6 +65,7 @@ export type RunDetail = {
   candidate: Record<string, unknown> | null
   verifications: Array<Record<string, unknown>>
   actions: Array<Record<string, unknown>>
+  citations: Record<string, CitationTarget>
   artifacts: ArtifactSummary[]
 }
 

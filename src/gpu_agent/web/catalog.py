@@ -9,7 +9,13 @@ from typing import Any
 
 from gpu_agent.contracts import ArtifactRef, RunManifest
 from gpu_agent.store import RunStore
-from gpu_agent.web.models import ArtifactSummary, RunDetail, RunStats, RunSummary
+from gpu_agent.web.models import (
+    ArtifactSummary,
+    CitationTarget,
+    RunDetail,
+    RunStats,
+    RunSummary,
+)
 
 _RUN_ID = re.compile(r"^[a-f0-9]{32}$")
 _ACTION = re.compile(r"^actions/(\d+)/step\.json$")
@@ -163,6 +169,71 @@ class RunCatalog:
             failure_families=dict(families),
         )
 
+    @staticmethod
+    def _citation_ids(diagnosis: dict[str, Any] | None) -> set[str]:
+        if diagnosis is None:
+            return set()
+        ids: set[str] = set()
+        for section in ("observed_facts", "tool_findings", "documentation_evidence"):
+            claims = diagnosis.get(section, [])
+            if not isinstance(claims, list):
+                continue
+            for claim in claims:
+                if not isinstance(claim, dict):
+                    continue
+                citations = claim.get("citation_ids", [])
+                if isinstance(citations, list):
+                    ids.update(item for item in citations if isinstance(item, str))
+        return ids
+
+    def _citations(
+        self,
+        run: RunManifest,
+        diagnosis: dict[str, Any] | None,
+    ) -> dict[str, CitationTarget]:
+        wanted = self._citation_ids(diagnosis)
+        if not wanted:
+            return {}
+        resolved: dict[str, CitationTarget] = {}
+        by_artifact_id = {ref.id: ref for ref in run.artifact_refs}
+        for citation_id in wanted:
+            ref = by_artifact_id.get(citation_id)
+            if ref is not None:
+                resolved[citation_id] = CitationTarget(
+                    citation_id=citation_id,
+                    artifact_id=ref.id,
+                    artifact_name=ref.name,
+                    kind="artifact",
+                    label=ref.name,
+                )
+        for ref in run.artifact_refs:
+            if not ref.name.startswith("docs/") or not ref.name.endswith(".json"):
+                continue
+            try:
+                payload = json.loads(self.store.read(ref))
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                continue
+            if not isinstance(payload, dict):
+                continue
+            chunk_id = payload.get("chunk_id")
+            if not isinstance(chunk_id, str) or chunk_id not in wanted:
+                continue
+            title = str(payload.get("document_title", "NVIDIA documentation"))
+            section = str(payload.get("section_title", ""))
+            label = f"{title} · {section}" if section else title
+            text = payload.get("text")
+            source_url = payload.get("source_url")
+            resolved[chunk_id] = CitationTarget(
+                citation_id=chunk_id,
+                artifact_id=ref.id,
+                artifact_name=ref.name,
+                kind="document",
+                label=label,
+                preview=text[:360] if isinstance(text, str) else None,
+                source_url=source_url if isinstance(source_url, str) else None,
+            )
+        return resolved
+
     def detail(self, run_id: str) -> RunDetail:
         run = self.store.load(run_id)
         children = self.store.children(run_id)
@@ -219,6 +290,7 @@ class RunCatalog:
             )
         actions.sort(key=lambda item: item["step"])
         repair_rounds.sort(key=lambda item: item["round"])
+        diagnosis = self._json(run, "diagnosis.json")
         artifacts = [
             ArtifactSummary(
                 id=ref.id,
@@ -230,12 +302,13 @@ class RunCatalog:
         ]
         return RunDetail(
             summary=self.summary(run, children),
-            diagnosis=self._json(run, "diagnosis.json"),
+            diagnosis=diagnosis,
             repair_summary=self._json(run, "repair/summary.json"),
             repair_rounds=repair_rounds,
             candidate=self._candidate(run_id, children),
             verifications=self._verification_results(run_id, children),
             actions=actions,
+            citations=self._citations(run, diagnosis),
             artifacts=artifacts,
         )
 

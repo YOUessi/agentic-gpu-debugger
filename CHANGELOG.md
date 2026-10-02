@@ -13,6 +13,10 @@ Versioning and the structure of Keep a Changelog.
   RunStore instead of duplicating Agent or verifier logic.
 - Vitest and Playwright coverage for the operator workflow, plus FastAPI tests backed by
   a temporary real RunStore.
+- Public case catalog across the core/diverse registries, live polling for active runs, and
+  click-through diagnosis citations that resolve both RunStore artifacts and RAG chunk IDs.
+- A persistent full-stack development log that records reproduced issues, confirmed causes,
+  fixes, validation, and remaining boundaries across development rounds.
 
 ### Security
 

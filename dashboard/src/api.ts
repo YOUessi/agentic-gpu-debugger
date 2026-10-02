@@ -1,4 +1,5 @@
 import type {
+  CaseSummary,
   RepairRequest,
   RepairResponse,
   RunDetail,
@@ -19,6 +20,10 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     throw new Error(detail)
   }
   return (await response.json()) as T
+}
+
+export function getCases(): Promise<CaseSummary[]> {
+  return request<CaseSummary[]>('/api/cases')
 }
 
 export function getStats(): Promise<RunStats> {

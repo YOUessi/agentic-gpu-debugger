@@ -16,8 +16,10 @@ from gpu_agent.agent.provider import DevelopmentCallPolicy
 from gpu_agent.public_task import PublicRepairInputError
 from gpu_agent.repair import RepairPolicy
 from gpu_agent.service import ApplicationService
+from gpu_agent.web.cases import PublicCaseCatalog
 from gpu_agent.web.catalog import RunCatalog
 from gpu_agent.web.models import (
+    CaseSummary,
     RepairRequest,
     RepairResponse,
     RunDetail,
@@ -49,6 +51,7 @@ def create_app(
     runtime = service or ApplicationService.configured()
     catalog = RunCatalog(runtime.store)
     repo = (repository or _repository_root()).absolute()
+    case_catalog = PublicCaseCatalog(repo)
 
     app = FastAPI(
         title="Agentic GPU Debugger Operator Console",
@@ -66,6 +69,10 @@ def create_app(
     @app.get("/api/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "store": str(runtime.store.root)}
+
+    @app.get("/api/cases", response_model=list[CaseSummary])
+    def cases() -> list[CaseSummary]:
+        return case_catalog.list_cases()
 
     @app.get("/api/stats", response_model=RunStats)
     def stats() -> RunStats:

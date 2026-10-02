@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { FormEvent } from 'react'
 import './App.css'
-import { getArtifact, getRun, getRuns, getStats, startRepair, verifyRun } from './api'
+import { getArtifact, getCases, getRun, getRuns, getStats, startRepair, verifyRun } from './api'
 import { formatBytes, formatTime, humanize, shortId, statusTone } from './format'
-import type { ArtifactSummary, RepairRequest, RunDetail, RunStats, RunSummary } from './types'
+import type {
+  ArtifactSummary,
+  CaseSummary,
+  CitationTarget,
+  RepairRequest,
+  RunDetail,
+  RunStats,
+  RunSummary,
+} from './types'
 
 type JsonObject = Record<string, unknown>
 
@@ -226,6 +234,106 @@ function ArtifactViewer({
   )
 }
 
+function EvidenceClaims({
+  runId,
+  diagnosis,
+  citations,
+}: {
+  runId: string
+  diagnosis: JsonObject
+  citations: Record<string, CitationTarget>
+}) {
+  const [selected, setSelected] = useState<CitationTarget | null>(null)
+  const [content, setContent] = useState('')
+  const [loading, setLoading] = useState(false)
+  const groups = [
+    ['Observed facts', diagnosis.observed_facts],
+    ['Tool findings', diagnosis.tool_findings],
+    ['Documentation', diagnosis.documentation_evidence],
+  ] as const
+
+  async function openCitation(target: CitationTarget) {
+    setSelected(target)
+    setContent(target.preview || '')
+    setLoading(true)
+    try {
+      setContent(await getArtifact(runId, target.artifact_id))
+    } catch (caught) {
+      setContent(
+        target.preview ||
+          (caught instanceof Error ? caught.message : 'Citation artifact is unavailable'),
+      )
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const hasClaims = groups.some(([, value]) => Array.isArray(value) && value.length > 0)
+  if (!hasClaims) return <div className="empty-mini">No structured evidence claims persisted.</div>
+
+  return (
+    <div className="evidence-claims">
+      <div className="claim-groups">
+        {groups.map(([label, value]) => {
+          const claims = Array.isArray(value) ? value : []
+          if (claims.length === 0) return null
+          return (
+            <div className="claim-group" key={label}>
+              <h4>{label}</h4>
+              {claims.map((raw, index) => {
+                const claim = asObject(raw)
+                const ids = Array.isArray(claim.citation_ids)
+                  ? claim.citation_ids.filter((item): item is string => typeof item === 'string')
+                  : []
+                return (
+                  <article className="claim-card" key={label + index}>
+                    <p>{asString(claim.text) || 'Evidence claim'}</p>
+                    <div className="citation-row">
+                      {ids.map((id) => {
+                        const target = citations[id]
+                        return target ? (
+                          <button
+                            type="button"
+                            className="citation-chip"
+                            key={id}
+                            onClick={() => void openCitation(target)}
+                          >
+                            {target.kind === 'document' ? 'DOC' : 'ART'} · {shortId(id, 12)}
+                          </button>
+                        ) : (
+                          <span className="citation-chip unresolved" key={id}>
+                            UNRESOLVED · {shortId(id, 12)}
+                          </span>
+                        )
+                      })}
+                    </div>
+                  </article>
+                )
+              })}
+            </div>
+          )
+        })}
+      </div>
+      <aside className="citation-preview">
+        {selected ? (
+          <>
+            <div className="citation-preview-head">
+              <div>
+                <span className="eyebrow">{selected.kind}</span>
+                <strong>{selected.label}</strong>
+              </div>
+              <span>{shortId(selected.citation_id, 14)}</span>
+            </div>
+            <pre>{loading ? 'Loading persisted citation…' : content}</pre>
+          </>
+        ) : (
+          <div className="citation-empty">Select a citation to inspect its persisted evidence.</div>
+        )}
+      </aside>
+    </div>
+  )
+}
+
 function RunDrawer({
   detail,
   onClose,
@@ -302,6 +410,17 @@ function RunDrawer({
                 <p>{asString(diagnosis.recommended_change) || 'No recommendation persisted.'}</p>
               </div>
             </div>
+            <div className="evidence-block">
+              <div className="evidence-block-title">
+                <span>Evidence & citations</span>
+                <small>{Object.keys(detail.citations).length} resolved</small>
+              </div>
+              <EvidenceClaims
+                runId={detail.summary.id}
+                diagnosis={diagnosis}
+                citations={detail.citations}
+              />
+            </div>
           </section>
 
           <section className="detail-section">
@@ -374,6 +493,36 @@ function RepairModal({
   })
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
+  const [cases, setCases] = useState<CaseSummary[]>([])
+  const [casesLoading, setCasesLoading] = useState(true)
+
+  useEffect(() => {
+    let cancelled = false
+    void getCases()
+      .then((items) => {
+        if (cancelled) return
+        setCases(items)
+        setForm((current) => {
+          const ready = items.some(
+            (item) => item.case_id === current.case_id && item.repair_ready,
+          )
+          if (ready) return current
+          const fallback = items.find((item) => item.repair_ready)
+          return fallback ? { ...current, case_id: fallback.case_id } : current
+        })
+      })
+      .catch((caught) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : 'Case catalog unavailable')
+      })
+      .finally(() => {
+        if (!cancelled) setCasesLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  const selectedCase = cases.find((item) => item.case_id === form.case_id)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
@@ -398,8 +547,32 @@ function RepairModal({
           <button type="button" className="icon-button" onClick={onClose}>×</button>
         </div>
         <label>Public case
-          <input value={form.case_id} onChange={(event) => setForm({ ...form, case_id: event.target.value })} placeholder="case_0021" />
+          <select
+            value={form.case_id}
+            disabled={casesLoading || cases.length === 0}
+            onChange={(event) => setForm({ ...form, case_id: event.target.value })}
+          >
+            {casesLoading && <option>Loading cases…</option>}
+            {!casesLoading && cases.length === 0 && <option>No repair-ready cases</option>}
+            {cases.map((item) => (
+              <option key={item.case_id} value={item.case_id} disabled={!item.repair_ready}>
+                {item.case_id} · {humanize(item.algorithm)} · {humanize(item.target_tool)}
+              </option>
+            ))}
+          </select>
         </label>
+        {selectedCase && (
+          <div className="case-preview">
+            <div className="case-preview-head">
+              <strong>{humanize(selectedCase.template_id || selectedCase.algorithm)}</strong>
+              <StatusPill value={selectedCase.target_tool} />
+            </div>
+            <p>{selectedCase.requirement}</p>
+            <small>
+              Mutation: {humanize(selectedCase.mutation_id)} · Expected: {selectedCase.expected_finding || '—'}
+            </small>
+          </div>
+        )}
         <div className="form-split">
           <label>Investigation mode
             <select value={form.mode} onChange={(event) => setForm({ ...form, mode: event.target.value as 'D' | 'E' })}>
@@ -465,6 +638,19 @@ export default function App() {
     void load()
   }, [load])
 
+  useEffect(() => {
+    const selectedId = selected?.summary.id
+    const needsPolling = (stats?.active ?? 0) > 0 || selected?.summary.status === 'RUNNING'
+    if (!needsPolling) return undefined
+    const timer = window.setInterval(() => {
+      void load()
+      if (selectedId) {
+        void getRun(selectedId).then(setSelected).catch(() => undefined)
+      }
+    }, 2500)
+    return () => window.clearInterval(timer)
+  }, [load, selected?.summary.id, selected?.summary.status, stats?.active])
+
   async function openRun(runId: string) {
     setError('')
     try {
@@ -496,7 +682,10 @@ export default function App() {
           </div>
         </div>
         <div className="top-actions">
-          <div className="system-health"><span className="signal-dot" />Controller online</div>
+          <div className="system-health">
+            <span className="signal-dot" />
+            {(stats?.active ?? 0) > 0 ? `${stats?.active} active · live polling` : 'Controller online'}
+          </div>
           <button className="primary-button" onClick={() => setShowRepair(true)}>+ New repair</button>
         </div>
       </header>
