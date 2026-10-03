@@ -91,3 +91,4 @@
 - [2026-10-03：二维邻域与前缀和案例接入完整修复](2026-10-03-real-workloads.md)
 - [2026-10-03：投递收尾](2026-10-03-portfolio-handoff.md)
 - [2026-10-03：CI同名测试模块收集修复](2026-10-03-ci-collection.md)
+- [2026-10-04：GitHub第二次CI失败核查与日志缺口](2026-10-04-github-ci-second-run.md)

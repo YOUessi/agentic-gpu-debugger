@@ -30,9 +30,18 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: requirements.lock
 
       - name: Install project and development checks
-        run: python -m pip install --disable-pip-version-check -e '.[dev]'
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.lock
+          python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e '.[dev]'
+          python -m pip check
+
+      - name: Check dependency lock, CLI help and packaging first
+        run: >-
+          python -m pytest -q tests/unit/test_distribution_resources.py
+          tests/unit/test_retrieval.py::test_lock_covers_declared_dependencies_and_runtime_closure
 
       - name: Lint and format
         run: |

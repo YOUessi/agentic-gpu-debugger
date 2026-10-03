@@ -668,7 +668,10 @@ def test_lock_covers_declared_dependencies_and_runtime_closure():
         assert requirement.url is None and str(requirement.specifier).startswith("==")
         locked[canonicalize_name(requirement.name)] = next(iter(requirement.specifier)).version
     project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
-    pending = [Requirement(value) for value in project["dependencies"]]
+    pending = [
+        Requirement(value)
+        for value in project["dependencies"] + project["optional-dependencies"]["dev"]
+    ]
     visited = set()
     while pending:
         requirement = pending.pop()
@@ -677,6 +680,10 @@ def test_lock_covers_declared_dependencies_and_runtime_closure():
         name = canonicalize_name(requirement.name)
         assert name in locked, f"Missing dependency from install lock: {name}"
         assert locked[name] in requirement.specifier, f"Incompatible locked version: {name}"
+        assert importlib.metadata.version(requirement.name) == locked[name], (
+            f"Installed dependency differs from install lock: {name}; "
+            "install requirements.lock before running this check"
+        )
         if name not in visited:
             visited.add(name)
             metadata = importlib.metadata.requires(requirement.name) or []

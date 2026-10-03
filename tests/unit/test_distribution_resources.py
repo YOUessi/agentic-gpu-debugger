@@ -5,6 +5,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
+from rich.text import Text
+from typer.main import get_command
 from typer.testing import CliRunner
 
 from gpu_agent._resources import runtime_resource
@@ -63,26 +65,40 @@ def test_runtime_resource_uses_distribution_namespace() -> None:
     )
 
 
-def test_operator_commands_are_exposed() -> None:
-    scoring = runner.invoke(app, ["benchmark", "score-holdout", "--help"])
-    freezing = runner.invoke(app, ["release", "freeze-selection", "--help"])
+@pytest.mark.parametrize("color", [False, True])
+def test_operator_commands_are_exposed(color: bool, monkeypatch) -> None:
+    monkeypatch.setenv("COLUMNS", "160")
+    scoring = runner.invoke(app, ["benchmark", "score-holdout", "--help"], color=color)
+    freezing = runner.invoke(app, ["release", "freeze-selection", "--help"], color=color)
+
+    # Verify real registered options independently of Rich's terminal rendering.
+    root = get_command(app)
+    for group, command, expected in (
+        ("benchmark", "score-holdout", {"--labels", "--private-binding-run-id"}),
+        ("release", "freeze-selection", {"--release-test-run-id", "--output"}),
+    ):
+        params = root.commands[group].commands[command].params
+        assert expected <= {option for param in params for option in param.opts}
 
     assert scoring.exit_code == 0
-    assert "--labels" in scoring.output and "--private-binding-run-id" in scoring.output
+    scoring_text = Text.from_ansi(scoring.output).plain
+    assert "--labels" in scoring_text and "--private-binding-run-id" in scoring_text
     assert freezing.exit_code == 0
-    assert "--release-test-run-id" in freezing.output and "--output" in freezing.output
+    freezing_text = Text.from_ansi(freezing.output).plain
+    assert "--release-test-run-id" in freezing_text and "--output" in freezing_text
 
 
 def test_operator_runbook_is_in_built_distributions(tmp_path: Path) -> None:
     repository = Path(__file__).resolve().parents[2]
     output = tmp_path / "dist"
-    subprocess.run(
+    build = subprocess.run(
         [sys.executable, "-m", "build", "--no-isolation", "--outdir", str(output)],
         cwd=repository,
-        check=True,
+        check=False,
         capture_output=True,
         text=True,
     )
+    assert build.returncode == 0, f"Distribution build failed:\n{build.stdout}\n{build.stderr}"
 
     wheel = next(output.glob("*.whl"))
     source = next(output.glob("*.tar.gz"))
