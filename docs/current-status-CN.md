@@ -3,6 +3,8 @@
 ## 当前工作区
 
 路径 `/home/you/.codex/worktrees/a352/agentic-gpu-debugger`。
+后续CI核查修正测试模块重名，并修复manifest监听器轮换误报；属于离线工程修复，
+没有重新运行冻结GPU/API实验，详细结果见[CI逐轮记录](repair-log/2026-10-03-ci-collection.md)。
 Git基底87fa492；后续实现与投递材料一并保存在包含本文件的投递收尾提交中，
 不能把87fa492当成当前全部源码。实验仍以各自的冻结快照为准。
 包版本仍0.2.0；修复流程public-repair-v2，提示词m3-2026-10-01-v12。

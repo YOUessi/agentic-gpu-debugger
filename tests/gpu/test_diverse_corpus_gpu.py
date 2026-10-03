@@ -1,4 +1,4 @@
-"""Explicit GPU acceptance; not part of the historical frozen release allowlist."""
+"""GPU acceptance with a unique module name for pytest's default import mode."""
 
 from pathlib import Path
 

@@ -723,40 +723,47 @@ class RunStore:
         Write events catch in-place edits even when timestamps and size collide.
         Copies prevent caller mutation; unavailable watchers disable cache hits.
         """
-        generation = self._file_changes.version(directory_fd)
-        info = os.stat("manifest.json", dir_fd=directory_fd, follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
-            raise ValueError("not a bounded regular file")
-        key = (
-            info.st_dev,
-            info.st_ino,
-            info.st_mtime_ns,
-            info.st_ctime_ns,
-            info.st_size,
-            *(generation or ()),
-        )
-        known = self._manifest_cache.get(run_id)
-        if generation is not None and known is not None and known[0] == key:
-            return _copy_manifest(known[1])
-        manifest = RunManifest.model_validate_json(
-            _read_regular_at(directory_fd, "manifest.json", 8 * 1024 * 1024)
-        )
-        after = os.stat("manifest.json", dir_fd=directory_fd, follow_symlinks=False)
-        if key != (
-            after.st_dev,
-            after.st_ino,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-            after.st_size,
-            *(self._file_changes.version(directory_fd) or ()),
-        ):
-            raise ValueError("manifest changed while reading")
-        if manifest.id != run_id:
-            raise ValueError("manifest ID mismatch")
-        if len(self._manifest_cache) >= 4096:
-            self._manifest_cache.clear()
-        self._manifest_cache[run_id] = (key, _copy_manifest(manifest))
-        return manifest
+        for _attempt in range(3):
+            generation = self._file_changes.version(directory_fd)
+            info = os.stat("manifest.json", dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 8 * 1024 * 1024:
+                raise ValueError("not a bounded regular file")
+            key = (
+                info.st_dev,
+                info.st_ino,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+                info.st_size,
+                *(generation or ()),
+            )
+            known = self._manifest_cache.get(run_id)
+            if generation is not None and known is not None and known[0] == key:
+                return _copy_manifest(known[1])
+            manifest = RunManifest.model_validate_json(
+                _read_regular_at(directory_fd, "manifest.json", 8 * 1024 * 1024)
+            )
+            after = os.stat("manifest.json", dir_fd=directory_fd, follow_symlinks=False)
+            if key[:5] != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+                after.st_size,
+            ):
+                raise ValueError("manifest changed while reading")
+            if generation != self._file_changes.version(directory_fd):
+                # Watcher rotation/overflow can change the generation without a
+                # file write. Discard this read and require a fresh stable pair;
+                # never cache bytes observed across a generation boundary.
+                self._manifest_cache.pop(run_id, None)
+                continue
+            if manifest.id != run_id:
+                raise ValueError("manifest ID mismatch")
+            if len(self._manifest_cache) >= 4096:
+                self._manifest_cache.clear()
+            self._manifest_cache[run_id] = (key, _copy_manifest(manifest))
+            return manifest
+        raise ValueError("manifest changed while reading")
 
     def recoverable_runs(self) -> list[RunManifest]:
         """Return interrupted controller runs without resuming native processes."""
