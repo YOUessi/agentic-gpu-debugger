@@ -1,0 +1,923 @@
+"""ID-only verification against evaluator-owned references and private evidence.
+
+Controller APIs register candidates; verification never accepts a command, source
+path, input suite, oracle configuration, or backend from the agent. Every input
+gets a fresh isolated workspace/build/run/memcheck and a private provenance record.
+"""
+
+import fcntl
+import hashlib
+import json
+import math
+import os
+import random
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Literal, TypeVar
+
+from pydantic import Field, StrictFloat, model_validator
+
+from gpu_agent.contracts import (
+    ArtifactRef,
+    CurrentPhase,
+    ExternalRunOrigin,
+    RunBinding,
+    RunManifest,
+    RunStatus,
+    ToolResult,
+)
+from gpu_agent.evidence.models import EvidenceBundle
+from gpu_agent.evidence.repository import _evidence
+from gpu_agent.execution.isolated import IsolatedGPUBackend
+from gpu_agent.execution.models import (
+    BuildRequest,
+    ExecutionModel,
+    ExecutionPayload,
+    ExecutionRequest,
+    Finding,
+    SanitizerRequest,
+    SanitizerResult,
+    SanitizerTool,
+    WorkspaceRequest,
+)
+from gpu_agent.patching import (
+    PatchCandidate,
+    SourceSnapshot,
+    materialize_candidate,
+)
+from gpu_agent.store import RunStore, read_regular, reject_symlinks
+from gpu_agent.verification.derivation import derive_verification, validate_persisted_derivation
+from gpu_agent.verification.models import (
+    OracleResult,
+    VerificationAuditResult,
+    VerificationObservation,
+    VerificationResult,
+    VerificationSuiteSpec,
+)
+from gpu_agent.verification.oracle import NumericOracle, parse_output, reference_output
+from gpu_agent.verification.policy import (
+    decide_verdict,
+    plan_checks,
+)
+from gpu_agent.verification.truth import (
+    VerificationTruth,
+    reference_source,
+    required_tools,
+    resolve_run_truth,
+)
+
+Payload = TypeVar("Payload")
+
+
+def candidate_run_id(parent_run_id: str) -> str:
+    """Return the single parent-owned candidate slot without enumerating a store."""
+    return hashlib.sha256(f"candidate-v1:{parent_run_id}".encode()).hexdigest()[:32]
+
+
+def verification_run_id(
+    original_run_id: str,
+    candidate_hash: str,
+    mode: Literal["standard", "full"] = "standard",
+) -> str:
+    """Return the exact public verification slot for one candidate and public plan."""
+    if mode not in {"standard", "full"}:
+        raise ValueError("invalid verification mode")
+    mode_suffix = "" if mode == "standard" else ":full"
+    return hashlib.sha256(
+        f"verification-v1:{original_run_id}:{candidate_hash}{mode_suffix}".encode()
+    ).hexdigest()[:32]
+
+
+def verification_audit_run_id(
+    original_run_id: str,
+    candidate_hash: str,
+    mode: Literal["standard", "full"] = "standard",
+) -> str:
+    """Return the evaluator-owned audit slot for one candidate and plan."""
+    if mode not in {"standard", "full"}:
+        raise ValueError("invalid verification mode")
+    return hashlib.sha256(
+        f"verification-audit-v1:{original_run_id}:{candidate_hash}:{mode}".encode()
+    ).hexdigest()[:32]
+
+
+class _Input(ExecutionModel):
+    n: int = Field(strict=True, ge=1, le=65536)
+    a: list[StrictFloat]
+    b: list[StrictFloat]
+
+    @model_validator(mode="after")
+    def shape(self) -> "_Input":
+        if len(self.a) != self.n or len(self.b) != self.n:
+            raise ValueError("invalid input shape")
+        if any(not math.isfinite(v) or abs(v) > 3.4028234663852886e38 for v in self.a + self.b):
+            raise ValueError("invalid float32 input")
+        return self
+
+
+def register_candidate(store: RunStore, candidate: PatchCandidate) -> str:
+    """Controller registration returns the candidate's immutable RunStore ID.
+
+    A separate registration lock makes the one-candidate rule atomic across controllers;
+    the run/artifact itself is still persisted exclusively through RunStore.
+    """
+    store.load(candidate.parent_run_id)
+    lock_path = store.root / candidate.parent_run_id / ".candidate-lock"
+    reject_symlinks(lock_path)
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        run_id = candidate_run_id(candidate.parent_run_id)
+        if (store.root / run_id).exists():
+            raise ValueError("only one candidate is allowed per diagnosis")
+        run = store.create_run("candidate", candidate.parent_run_id, _run_id=run_id)
+        store.put(
+            run.id,
+            "candidate.json",
+            candidate.model_dump_json().encode(),
+            store.visibility,
+        )
+        store.transition(run.id, "RUNNING", "FINALIZING")
+        store.transition(run.id, "COMPLETED", None)
+        return run.id
+    finally:
+        os.close(fd)
+
+
+def _infrastructure_failure(result: ToolResult[Payload]) -> bool:
+    return bool(result.tool_error or result.timed_out or result.cancelled or result.truncated)
+
+
+class VerificationEngine:
+    def __init__(self, store: RunStore, evaluator_store: RunStore) -> None:
+        if evaluator_store.visibility != "evaluator":
+            raise ValueError("verification requires an evaluator RunStore")
+        self._store = store
+        self._root = evaluator_store.root
+        reject_symlinks(self._root)
+        if store.visibility == "public":
+            public = store.root.resolve()
+            private = evaluator_store.root.resolve()
+            if private.is_relative_to(public) or public.is_relative_to(private):
+                raise ValueError("evaluator store must be independent from public RunStore")
+        elif store.visibility == "evaluator":
+            if store.identity != evaluator_store.identity:
+                raise ValueError("evaluator verification must use the diagnosis RunStore")
+        else:
+            raise ValueError("verification store has invalid visibility")
+        self._private = evaluator_store
+
+    def _candidate(
+        self, original_run_id: str, candidate_id: str, binding: RunBinding | None
+    ) -> PatchCandidate:
+        registration = self._store.load(candidate_id)
+        if registration.kind != "candidate" or registration.parent_run_id != original_run_id:
+            raise ValueError("candidate does not belong to original run")
+        if registration.binding != binding:
+            raise ValueError("candidate and original release bindings differ")
+        refs = [r for r in registration.artifact_refs if r.name == "candidate.json"]
+        if len(refs) != 1:
+            raise ValueError("candidate registration must be unique")
+        candidate = PatchCandidate.model_validate_json(self._store.read(refs[0]))
+        if candidate.parent_run_id != original_run_id:
+            raise ValueError("candidate parent mismatch")
+        return candidate
+
+    def _snapshot(self, original_run_id: str, bundle: EvidenceBundle, root: Path) -> SourceSnapshot:
+        hashes: dict[str, str] = {}
+        for ref in bundle.source_snapshot:
+            name = Path(ref.name).name
+            if (
+                name not in {"kernel.cu", "vector_io.cpp", "vector_api.h", "json.hpp"}
+                or name in hashes
+            ):
+                raise ValueError("ambiguous source snapshot")
+            data = self._store.read(ref)
+            IsolatedGPUBackend._write_snapshot(root / name, data)
+            hashes[name] = ref.sha256
+        if len(hashes) != 4:
+            raise ValueError("incomplete source snapshot")
+        return SourceSnapshot(parent_run_id=original_run_id, root=root, hashes=hashes)
+
+    def _registered_tool(self, run_id: str, tool: ToolResult[Payload]) -> bool:
+        """Bind bundle metadata to the immutable record written during execution."""
+        refs = [
+            ref
+            for ref in self._store.load(run_id).artifact_refs
+            if ref.name == f"{tool.tool_name}/{tool.request_id}/result.json"
+        ]
+        return len(refs) == 1 and self._store.read(refs[0]) == tool.model_dump_json().encode()
+
+    def _baseline(
+        self, run_id: str, bundle: EvidenceBundle, source_hashes: dict[str, str]
+    ) -> tuple[list[Finding], ArtifactRef | None]:
+        if len(bundle.source_snapshot) != 4 or set(source_hashes) != {
+            "kernel.cu",
+            "vector_io.cpp",
+            "vector_api.h",
+            "json.hpp",
+        }:
+            return [], None
+        build = bundle.build_result
+        if build is None or not build.success or build.binary_ref is None:
+            return [], None
+        built = build.tool_result
+        if (
+            built.tool_name != "build"
+            or built.exit_code != 0
+            or _infrastructure_failure(built)
+            or built.typed_payload.binary_ref != build.binary_ref
+            or built.typed_payload.source_manifest != source_hashes
+            or not self._registered_tool(run_id, built)
+        ):
+            return [], None
+        # The public input is the one the diagnosis run executed. It must not depend on
+        # which sanitizers the agent chose: modes A/B run none, and non-memcheck cases
+        # never have a memcheck finding. Original-finding truth comes from the registered
+        # case (verification.truth), never from agent evidence.
+        execution = bundle.execution_result
+        if execution is None:
+            return [], None
+        ran = execution.tool_result
+        if (
+            ran.tool_name != "run"
+            or _infrastructure_failure(ran)
+            or ran.typed_payload.binary_ref != build.binary_ref
+            or not self._registered_tool(run_id, ran)
+        ):
+            return [], None
+        return [], ran.typed_payload.stdin_ref
+
+    @staticmethod
+    def _suite(case: VerificationTruth) -> list[_Input]:
+        rng = random.Random(case.private_seed)
+        sizes = [*case.boundary_sizes, *(rng.randint(2, 2048) for _ in range(case.random_cases))]
+        return [
+            _Input(
+                n=n,
+                a=[rng.randint(-8192, 8192) / 8 for _ in range(n)],
+                b=[rng.randint(-8192, 8192) / 8 for _ in range(n)],
+            )
+            for n in sizes
+        ]
+
+    def verify(
+        self,
+        original_run_id: str,
+        candidate_id: str,
+        mode: Literal["standard", "full"] = "standard",
+    ) -> VerificationResult:
+        """Verify once per deterministic mode slot, with exact replay semantics."""
+        if mode not in {"standard", "full"}:
+            raise ValueError("M1 requires full public/private verification")
+        # This pre-existing controller authority serializes the evaluator audit and
+        # public projection as one operation.  It works across threads/processes and
+        # does not create any state on a conflict path.
+        with self._store._lock(original_run_id):
+            original = self._store.load(original_run_id)
+            candidate = self._candidate(original_run_id, candidate_id, original.binding)
+            replay = self._load_exact_replay(original, candidate, mode)
+            if replay is not None:
+                return replay
+            return self._verify_locked(original_run_id, candidate_id, mode)
+
+    def _verify_locked(
+        self,
+        original_run_id: str,
+        candidate_id: str,
+        mode: Literal["standard", "full"] = "standard",
+    ) -> VerificationResult:
+        if mode not in {"standard", "full"}:
+            raise ValueError("M1 requires full public/private verification")
+        original_manifest = self._store.load(original_run_id)
+        binding = original_manifest.binding
+        candidate = self._candidate(original_run_id, candidate_id, binding)
+        origin = (
+            ExternalRunOrigin(run_id=original_run_id, visibility="public")
+            if self._store.visibility == "public"
+            else original_manifest.external_origin
+        )
+        audit = self._private.create_run(
+            "verification_audit",
+            original_run_id if self._store.visibility == "evaluator" else None,
+            binding=binding,
+            external_origin=origin,
+            _run_id=verification_audit_run_id(original_run_id, candidate.patched_source_hash, mode),
+        )
+        self._private.transition(audit.id, "RUNNING", "PREPARING")
+        bundle = _evidence(self._store).view(original_run_id)
+        baseline_hashes = {Path(ref.name).name: ref.sha256 for ref in bundle.source_snapshot}
+        _, input_ref = self._baseline(original_run_id, bundle, baseline_hashes)
+        if input_ref is None:
+            self._finish_audit(
+                audit.id,
+                self._precondition_audit(mode),
+            )
+            return self._publish(
+                original_run_id,
+                VerificationObservation(),
+                candidate,
+                {},
+                [],
+                0,
+                "ORACLE_OR_BASELINE_UNAVAILABLE",
+                mode,
+                audit.id,
+            )
+        directory = Path(tempfile.mkdtemp(prefix="verification-", dir=self._root))
+        base = directory / "base"
+        base.mkdir()
+        try:
+            snapshot = self._snapshot(original_run_id, bundle, base)
+            sources = materialize_candidate(snapshot, candidate)
+            case = resolve_run_truth(self._store, original_run_id, snapshot.hashes)
+            if case is None:
+                self._finish_audit(
+                    audit.id,
+                    self._precondition_audit(mode),
+                )
+                return self._publish(
+                    original_run_id,
+                    VerificationObservation(),
+                    candidate,
+                    {},
+                    [],
+                    0,
+                    "ORACLE_OR_BASELINE_UNAVAILABLE",
+                    mode,
+                    audit.id,
+                )
+            public_input = _Input.model_validate_json(self._store.read(input_ref))
+            holdouts = self._suite(case)
+            suite = [public_input, *holdouts]
+            suite_bytes = json.dumps(
+                [item.model_dump() for item in holdouts], sort_keys=True
+            ).encode()
+            suite_hash = hashlib.sha256(suite_bytes).hexdigest()
+            self._private.put(audit.id, "private-suite.json", suite_bytes, "evaluator")
+            self._private.put(
+                audit.id,
+                "verification/suite-spec.json",
+                VerificationSuiteSpec(
+                    mode=mode,
+                    candidate_hash=candidate.patched_source_hash,
+                    expected_child_count=len(suite),
+                    suite_hash=suite_hash,
+                )
+                .model_dump_json()
+                .encode(),
+                "evaluator",
+            )
+            self._private.put(audit.id, "case.json", case.model_dump_json().encode(), "evaluator")
+            self._private.put(
+                audit.id,
+                "reference.cu",
+                reference_source(case.oracle),
+                "evaluator",
+            )
+            self._private.put(
+                audit.id,
+                "oracle-implementation.py",
+                read_regular(Path(__file__).with_name("oracle.py"), 65536),
+                "evaluator",
+            )
+            # Only the current a/b/n is sent on stdin; no reference/checker or suite is mounted.
+            source_root = directory / "sources"
+            source_root.mkdir()
+            for name, content in sources.items():
+                IsolatedGPUBackend._write_snapshot(source_root / name, content)
+            backend = IsolatedGPUBackend(self._private, source_root, directory / "tasks")
+            manifest = {
+                name: hashlib.sha256(content).hexdigest() for name, content in sources.items()
+            }
+            oracle = NumericOracle(case.atol, case.rtol, False, False)
+            child_run_ids: list[str] = []
+            for index, input_data in enumerate(suite):
+                run = self._private.create_run(
+                    "verification_input",
+                    parent_run_id=audit.id,
+                    binding=binding,
+                    external_origin=origin,
+                )
+                child_run_ids.append(run.id)
+                self._private.put(
+                    run.id,
+                    "input-index.json",
+                    json.dumps({"index": index}, separators=(",", ":")).encode(),
+                    "evaluator",
+                )
+                input_content = (
+                    self._store.read(input_ref)
+                    if index == 0
+                    else input_data.model_dump_json().encode()
+                )
+                stdin = self._private.put(run.id, "input.json", input_content, "evaluator")
+                handle = backend.prepare(
+                    WorkspaceRequest(
+                        run_id=run.id, source_manifest=manifest, trust_level="UNTRUSTED"
+                    )
+                )
+                try:
+                    build = backend.build(BuildRequest(workspace_id=handle.id))
+                    self._private.put(
+                        run.id,
+                        "provenance.json",
+                        json.dumps(
+                            {
+                                "candidate_hash": candidate.patched_source_hash,
+                                "source_manifest": manifest,
+                                "binary_ref": (
+                                    build.binary_ref.model_dump() if build.binary_ref else None
+                                ),
+                                "input_ref": stdin.model_dump(),
+                            }
+                        ).encode(),
+                        "evaluator",
+                    )
+                    if not build.success:
+                        break
+                    if build.binary_ref is None:
+                        raise ValueError("successful build lacks binary provenance")
+                    expected = reference_output(case.oracle, input_data.a, input_data.b)
+                    ordinary = backend.run(
+                        ExecutionRequest(workspace_id=handle.id, stdin_ref=stdin)
+                    )
+                    sanitizer = backend.run_sanitizer(
+                        SanitizerRequest(
+                            workspace_id=handle.id, stdin_ref=stdin, timeout_seconds=120
+                        )
+                    )
+                    # Memcheck, then the case's target tool, then (full mode, memcheck
+                    # clean) the rest: derivation replays exactly this order.
+                    tools = required_tools(
+                        case.target_tool,
+                        mode,
+                        sanitizer.completed and sanitizer.check_outcome == "CLEAN",
+                    )
+                    sanitizers = [sanitizer]
+                    sanitizers.extend(
+                        backend.run_sanitizer(
+                            SanitizerRequest(
+                                workspace_id=handle.id,
+                                stdin_ref=stdin,
+                                tool=tool.value,
+                                timeout_seconds=120,
+                            )
+                        )
+                        for tool in tools[1:]
+                    )
+                    for checked in sanitizers:
+                        self._check_provenance(
+                            build.binary_ref, stdin, ordinary.tool_result, checked
+                        )
+                    runtime_ok = ordinary.runtime_status == "SUCCESS"
+                    runtime_infra = _infrastructure_failure(ordinary.tool_result)
+                    sanitizer_infra = any(
+                        not checked.completed
+                        or checked.tool_result is None
+                        or _infrastructure_failure(checked.tool_result)
+                        for checked in sanitizers
+                    )
+                    infra = runtime_infra or sanitizer_infra
+                    numeric_ok: bool | None = None
+                    if runtime_ok and not infra:
+                        try:
+                            regular_check = oracle.check(
+                                parse_output(self._private.read(ordinary.output_ref)), expected
+                            )
+                            if sanitizer.program_output_ref is None:
+                                raise ValueError("missing instrumented output")
+                            instrumented_checks: list[dict[str, object]] = []
+                            instrumented_results: list[OracleResult] = []
+                            for checked in sanitizers:
+                                if (
+                                    checked.program_output_ref is None
+                                    or checked.tool_result is None
+                                ):
+                                    raise ValueError("missing instrumented output")
+                                checked_oracle = oracle.check(
+                                    parse_output(self._private.read(checked.program_output_ref)),
+                                    expected,
+                                )
+                                instrumented_results.append(checked_oracle)
+                                instrumented_checks.append(
+                                    {
+                                        "tool": checked.tool_result.typed_payload.tool,
+                                        "result": checked_oracle.model_dump(),
+                                    }
+                                )
+                            numeric_ok = regular_check.passed and all(
+                                item.passed for item in instrumented_results
+                            )
+                            self._private.put(
+                                run.id,
+                                "oracle.json",
+                                json.dumps(
+                                    {
+                                        "expected": expected,
+                                        "ordinary": regular_check.model_dump(),
+                                        "instrumented": instrumented_checks,
+                                    }
+                                ).encode(),
+                                "evaluator",
+                            )
+                        except ValueError:
+                            numeric_ok = False
+                    passed = (
+                        runtime_ok
+                        and numeric_ok is True
+                        and all(
+                            checked.completed and checked.check_outcome == "CLEAN"
+                            for checked in sanitizers
+                        )
+                    )
+                    if not passed or infra:
+                        break
+                finally:
+                    backend.cleanup(handle)
+                    self._private.transition(run.id, "RUNNING", "FINALIZING")
+                    self._private.transition(run.id, "COMPLETED", None)
+            self._private.put(
+                audit.id,
+                "verification/child-index.json",
+                json.dumps(
+                    {"schema_version": 1, "child_run_ids": child_run_ids},
+                    separators=(",", ":"),
+                ).encode(),
+                "evaluator",
+            )
+            derived = derive_verification(
+                self._store,
+                self._private,
+                audit.id,
+                original_run_id,
+                binding,
+            )
+            self._finish_audit(audit.id, derived.audit)
+            return self._persist_public_locked(original_run_id, derived.public, mode)
+        finally:
+            shutil.rmtree(directory)
+
+    @staticmethod
+    def _check_provenance(
+        binary: ArtifactRef,
+        stdin: ArtifactRef,
+        ordinary: ToolResult[ExecutionPayload],
+        sanitizer: SanitizerResult,
+    ) -> None:
+        payload = ordinary.typed_payload
+        if (
+            getattr(payload, "binary_ref", None) != binary
+            or getattr(payload, "stdin_ref", None) != stdin
+        ):
+            raise ValueError("runtime provenance mismatch")
+        if sanitizer.tool_result is not None:
+            checked = sanitizer.tool_result.typed_payload
+            if checked.binary_ref != binary or checked.stdin_ref != stdin:
+                raise ValueError("sanitizer provenance mismatch")
+
+    def _precondition_audit(self, mode: Literal["standard", "full"]) -> VerificationAuditResult:
+        return VerificationAuditResult(
+            observation=self._with_check_plan(VerificationObservation(), {}, mode),
+            public_passed_count=0,
+            private_passed_count=0,
+            not_run_count=0,
+            suite_hash="",
+            child_run_ids=[],
+            reason_code="ORACLE_OR_BASELINE_UNAVAILABLE",
+            failure_stage="precondition",
+        )
+
+    def _native_precondition_unavailable(self, original_run_id: str) -> bool:
+        """Re-evaluate the precondition directly from registered public artifacts."""
+        bundle = _evidence(self._store).view(original_run_id)
+        source_hashes: dict[str, str] = {}
+        for ref in bundle.source_snapshot:
+            name = Path(ref.name).name
+            if name in source_hashes:
+                raise ValueError("duplicate source snapshot name")
+            source_hashes[name] = hashlib.sha256(self._store.read(ref)).hexdigest()
+        _, input_ref = self._baseline(original_run_id, bundle, source_hashes)
+        if input_ref is None:
+            return True
+        return resolve_run_truth(self._store, original_run_id, source_hashes) is None
+
+    @staticmethod
+    def _canonical_terminal(
+        run: RunManifest,
+        phases: tuple[CurrentPhase | None, ...],
+    ) -> bool:
+        return bool(
+            run.status == RunStatus.COMPLETED
+            and run.current_phase is None
+            and run.last_completed_phase == CurrentPhase.FINALIZING
+            and tuple((event.status, event.phase) for event in run.events)
+            == tuple(
+                (RunStatus.QUEUED, None)
+                if phase is None and index == 0
+                else ((RunStatus.COMPLETED, None) if phase is None else (RunStatus.RUNNING, phase))
+                for index, phase in enumerate(phases)
+            )
+        )
+
+    def _load_exact_replay(
+        self,
+        original: RunManifest,
+        candidate: PatchCandidate,
+        mode: Literal["standard", "full"],
+    ) -> VerificationResult | None:
+        original_run_id = original.id
+        public_id = verification_run_id(original_run_id, candidate.patched_source_hash, mode)
+        audit_id = verification_audit_run_id(original_run_id, candidate.patched_source_hash, mode)
+        try:
+            with self._store.run_directory_set_lease((public_id,)) as lease:
+                public_run = lease.load_optional(public_id)
+                if public_run is None:
+                    public_result = None
+                else:
+                    refs = [
+                        ref
+                        for ref in public_run.artifact_refs
+                        if ref.name == "verification/result.json"
+                    ]
+                    if (
+                        public_run.kind != "verification"
+                        or public_run.parent_run_id != original_run_id
+                        or public_run.binding != original.binding
+                        or public_run.external_origin != original.external_origin
+                        or not self._canonical_terminal(
+                            public_run,
+                            (None, CurrentPhase.FINALIZING, None),
+                        )
+                        or len(public_run.artifact_refs) != 1
+                        or len(refs) != 1
+                        or refs[0].run_id != public_run.id
+                        or refs[0].relative_path != f"{public_run.id}/artifacts/{refs[0].id}"
+                    ):
+                        raise ValueError
+                    public_result = VerificationResult.model_validate_json(lease.read(refs[0]))
+                    if (
+                        public_result.candidate_hash != candidate.patched_source_hash
+                        or public_result.evaluator_audit_run_id != audit_id
+                    ):
+                        raise ValueError
+        except (OSError, ValueError):
+            raise ValueError("existing public verification conflicts") from None
+
+        if public_result is None:
+            try:
+                with self._private.run_directory_set_lease((audit_id,)) as lease:
+                    if lease.load_optional(audit_id) is not None:
+                        raise ValueError
+            except (OSError, ValueError):
+                raise ValueError("existing evaluator verification audit conflicts") from None
+            return None
+
+        origin = (
+            ExternalRunOrigin(run_id=original_run_id, visibility="public")
+            if self._store.visibility == "public"
+            else original.external_origin
+        )
+        try:
+            with self._private.run_directory_set_lease((audit_id,)) as lease:
+                audit = lease.load_optional(audit_id)
+                # A different evaluator authority may share the public store but
+                # have no local copy of this deterministic audit.  It must perform
+                # its own private derivation; the existing public projection is
+                # compared byte-for-byte when that derivation is published.
+                if audit is None:
+                    return None
+                if (
+                    audit.kind != "verification_audit"
+                    or audit.parent_run_id
+                    != (original_run_id if self._store.visibility == "evaluator" else None)
+                    or audit.binding != original.binding
+                    or audit.external_origin != origin
+                    or not self._canonical_terminal(
+                        audit,
+                        (
+                            None,
+                            CurrentPhase.PREPARING,
+                            CurrentPhase.FINALIZING,
+                            None,
+                        ),
+                    )
+                ):
+                    raise ValueError
+                audit_artifacts: dict[str, bytes] = {}
+                for ref in audit.artifact_refs:
+                    if (
+                        ref.run_id != audit.id
+                        or ref.relative_path != f"{audit.id}/artifacts/{ref.id}"
+                        or ref.name in audit_artifacts
+                    ):
+                        raise ValueError
+                    audit_artifacts[ref.name] = lease.read(ref)
+                if public_result.reason_code == "ORACLE_OR_BASELINE_UNAVAILABLE":
+                    if set(audit_artifacts) != {
+                        "observation.json",
+                        "verification/audit-result.json",
+                    }:
+                        raise ValueError
+                    expected_audit = self._precondition_audit(mode)
+                    stored_observation = VerificationObservation.model_validate_json(
+                        audit_artifacts["observation.json"]
+                    )
+                    stored_audit = VerificationAuditResult.model_validate_json(
+                        audit_artifacts["verification/audit-result.json"]
+                    )
+                    expected_public = self._public_result(
+                        VerificationObservation(),
+                        candidate,
+                        {},
+                        [],
+                        0,
+                        "ORACLE_OR_BASELINE_UNAVAILABLE",
+                        mode,
+                        audit_id,
+                    )
+                    if (
+                        not self._native_precondition_unavailable(original_run_id)
+                        or stored_observation != expected_audit.observation
+                        or stored_audit != expected_audit
+                        or public_result != expected_public
+                    ):
+                        raise ValueError
+                    return public_result
+                validate_persisted_derivation(
+                    self._store,
+                    self._private,
+                    original_run_id,
+                    public_result,
+                    original.binding,
+                )
+        except (OSError, ValueError):
+            raise ValueError("existing evaluator verification audit conflicts") from None
+        return public_result
+
+    def _publish(
+        self,
+        original_run_id: str,
+        observation: VerificationObservation,
+        candidate: PatchCandidate,
+        checks: dict[str, str],
+        binaries: list[str],
+        public_passed: int,
+        reason: str,
+        mode: Literal["standard", "full"] = "standard",
+        evaluator_audit_run_id: str | None = None,
+    ) -> VerificationResult:
+        result = self._public_result(
+            observation,
+            candidate,
+            checks,
+            binaries,
+            public_passed,
+            reason,
+            mode,
+            evaluator_audit_run_id,
+        )
+        return self._persist_public_locked(original_run_id, result, mode)
+
+    def _public_result(
+        self,
+        observation: VerificationObservation,
+        candidate: PatchCandidate,
+        checks: dict[str, str],
+        binaries: list[str],
+        public_passed: int,
+        reason: str,
+        mode: Literal["standard", "full"],
+        evaluator_audit_run_id: str | None,
+    ) -> VerificationResult:
+        observation = self._with_check_plan(observation, checks, mode)
+        requirements = observation.check_requirements
+        outcomes = observation.check_outcomes
+        not_run_reasons = {
+            item.tool: "UPSTREAM_CHECK_DID_NOT_PASS"
+            for item in requirements
+            if item.required and outcomes[item.tool] == "NOT_RUN"
+        }
+        # Explicit allowlist construction: never dump/copy private evidence into public storage.
+        return VerificationResult(
+            verdict=decide_verdict(observation),
+            failure_stage=None if reason == "ALL_REQUIRED_CHECKS_PASSED" else "verification",
+            reason_code=reason,
+            original_finding_present=observation.original_finding_present,
+            public_oracle_passed=observation.public_oracle_passed,
+            required_checks={
+                key: value for key, value in checks.items() if key != "private_oracle"
+            },
+            check_requirements=requirements,
+            check_outcomes=outcomes,
+            not_run_reasons=not_run_reasons,
+            new_findings=len(observation.new_blocking_findings),
+            candidate_hash=candidate.patched_source_hash,
+            binary_hashes=sorted(set(binaries)),
+            public_passed_count=public_passed,
+            evaluator_audit_run_id=evaluator_audit_run_id,
+            limitations=["Containers share the host kernel and GPU driver."],
+        )
+
+    def _persist_public(
+        self,
+        original_run_id: str,
+        result: VerificationResult,
+        mode: Literal["standard", "full"] = "standard",
+    ) -> VerificationResult:
+        # The parent lock is pre-existing authority shared by every publisher of
+        # this deterministic child ID; it serializes both threads and processes
+        # without creating conflict-path state in the public store.
+        with self._store._lock(original_run_id):
+            return self._persist_public_locked(original_run_id, result, mode)
+
+    def _persist_public_locked(
+        self,
+        original_run_id: str,
+        result: VerificationResult,
+        mode: Literal["standard", "full"] = "standard",
+    ) -> VerificationResult:
+        run_id = verification_run_id(original_run_id, result.candidate_hash, mode)
+        content = result.model_dump_json().encode()
+        parent = self._store.load(original_run_id)
+        try:
+            os.lstat(self._store.root / run_id)
+        except FileNotFoundError:
+            run = self._store.create_run(
+                "verification",
+                original_run_id,
+                _run_id=run_id,
+            )
+            self._store.put(
+                run.id,
+                "verification/result.json",
+                content,
+                self._store.visibility,
+            )
+            self._store.transition(run.id, "RUNNING", "FINALIZING")
+            self._store.transition(run.id, "COMPLETED", None)
+            return result
+
+        try:
+            with self._store.run_directory_set_lease((run_id,)) as lease:
+                existing = lease.load_optional(run_id)
+                if existing is None:
+                    raise ValueError
+                refs = [
+                    ref for ref in existing.artifact_refs if ref.name == "verification/result.json"
+                ]
+                if (
+                    existing.kind != "verification"
+                    or existing.parent_run_id != original_run_id
+                    or existing.binding != parent.binding
+                    or existing.external_origin != parent.external_origin
+                    or not self._canonical_terminal(existing, (None, CurrentPhase.FINALIZING, None))
+                    or len(existing.artifact_refs) != 1
+                    or len(refs) != 1
+                    or refs[0].run_id != existing.id
+                    or refs[0].relative_path != f"{existing.id}/artifacts/{refs[0].id}"
+                    or lease.read(refs[0]) != content
+                ):
+                    raise ValueError
+                persisted = VerificationResult.model_validate_json(content)
+        except (OSError, ValueError):
+            raise ValueError("existing public verification conflicts") from None
+        return persisted
+
+    @staticmethod
+    def _with_check_plan(
+        observation: VerificationObservation,
+        checks: dict[str, str],
+        mode: Literal["standard", "full"],
+    ) -> VerificationObservation:
+        requirements = plan_checks(
+            SanitizerTool.MEMCHECK,
+            "strict" if mode == "full" else "standard",
+            {tool: "SUPPORTED" for tool in SanitizerTool},
+        )
+        outcomes = {item.tool: checks.get(item.tool.value, "NOT_RUN") for item in requirements}
+        return observation.model_copy(
+            update={"check_requirements": requirements, "check_outcomes": outcomes}
+        )
+
+    def _finish_audit(
+        self,
+        audit_run_id: str,
+        result: VerificationAuditResult,
+    ) -> ArtifactRef:
+        self._private.put(
+            audit_run_id,
+            "observation.json",
+            result.observation.model_dump_json().encode(),
+            "evaluator",
+        )
+        ref = self._private.put(
+            audit_run_id,
+            "verification/audit-result.json",
+            result.model_dump_json().encode(),
+            "evaluator",
+        )
+        self._private.transition(audit_run_id, "RUNNING", "FINALIZING")
+        self._private.transition(audit_run_id, "COMPLETED", None)
+        return ref

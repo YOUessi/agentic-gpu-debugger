@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "target_corpus_version": "2026-09-29.1",
+  "anchors": [
+    {
+      "source_id": "programming-guide-12.8-u1",
+      "anchors": ["synchronization-functions", "warp-vote-functions", "warp-shuffle-functions"],
+      "rationale": "CUDA 12.8 semantics of __syncthreads/__syncwarp and the *_sync warp intrinsics: which threads must participate and what the mask must name. Anchor ids are unverified proposals; review reports any that are missing."
+    },
+    {
+      "source_id": "sanitizer-approved-memcheck",
+      "anchors": ["what-is-racecheck", "what-is-initcheck", "what-is-synccheck"],
+      "rationale": "What racecheck, initcheck and synccheck detect and report. The manual is 13.4 while the pinned tool is 2025.1.0.0: pin only paragraphs whose behavior the 2025.1 release notes support, as for the memcheck paragraphs. Anchor ids are unverified proposals."
+    }
+  ],
+  "retrieval_queries": [
+    {
+      "query_id": "dev-sync-001",
+      "query": "Which threads must execute __syncwarp for a given mask?",
+      "relevant_source_ids": ["programming-guide-12.8-u1"],
+      "rationale": "Warp synchronization participation rules are in the programming guide."
+    },
+    {
+      "query_id": "dev-sync-002",
+      "query": "Is it valid to call __syncthreads inside a divergent branch?",
+      "relevant_source_ids": ["programming-guide-12.8-u1"],
+      "rationale": "Block barrier participation rules are in the programming guide."
+    },
+    {
+      "query_id": "dev-sync-003",
+      "query": "What does synccheck report for an invalid barrier or warp sync mask?",
+      "relevant_source_ids": ["sanitizer-approved-memcheck"],
+      "rationale": "Synccheck behavior is documented in the Compute Sanitizer manual."
+    },
+    {
+      "query_id": "dev-race-001",
+      "query": "What shared memory hazard does racecheck report?",
+      "relevant_source_ids": ["sanitizer-approved-memcheck"],
+      "rationale": "Racecheck behavior is documented in the Compute Sanitizer manual."
+    },
+    {
+      "query_id": "dev-init-001",
+      "query": "What does initcheck detect about uninitialized global memory reads?",
+      "relevant_source_ids": ["sanitizer-approved-memcheck"],
+      "rationale": "Initcheck behavior is documented in the Compute Sanitizer manual."
+    }
+  ]
+}

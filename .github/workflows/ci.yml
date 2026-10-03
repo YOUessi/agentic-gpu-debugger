@@ -1,0 +1,86 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zero-cost:
+    name: Python ${{ matrix.python-version }} offline checks
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.lock
+
+      - name: Install project and development checks
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.lock
+          python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e '.[dev]'
+          python -m pip check
+
+      - name: Check dependency lock, CLI help and packaging first
+        run: >-
+          python -m pytest -q tests/unit/test_distribution_resources.py
+          tests/unit/test_retrieval.py::test_lock_covers_declared_dependencies_and_runtime_closure
+
+      - name: Lint and format
+        run: |
+          python -m ruff check src tests
+          python -m ruff format --check src tests
+
+      - name: Type check
+        run: python -m mypy --strict src/gpu_agent
+
+      - name: Run zero-cost tests
+        run: >-
+          python -m pytest -q
+          -m 'not gpu and not container and not live_llm and not release'
+
+      - name: Build source and wheel distributions
+        run: python -m build
+
+      - name: Smoke-test installed wheel outside the checkout
+        shell: bash
+        run: |
+          python -m venv --system-site-packages .wheel-smoke
+          .wheel-smoke/bin/python -m pip install --no-deps --force-reinstall dist/*.whl
+          smoke_dir="$(mktemp -d)"
+          cd "$smoke_dir"
+          "$GITHUB_WORKSPACE/.wheel-smoke/bin/gpu-agent" --help
+          "$GITHUB_WORKSPACE/.wheel-smoke/bin/python" - <<'PY'
+          from gpu_agent._resources import runtime_resource
+          from gpu_agent.environment import load_toolchain_lock
+
+          lock = runtime_resource("containers/toolchain.lock.json")
+          assert lock.is_file()
+          assert load_toolchain_lock(lock).lock_hash
+          assert runtime_resource("benchmarks/corpus-registry.json").is_file()
+          assert runtime_resource("evaluation/modes.json").is_file()
+          assert runtime_resource("knowledge/retrieval-eval.json").is_file()
+          assert runtime_resource("knowledge/sources.json").is_file()
+          PY
+
+      - name: Scope statement
+        run: >-
+          echo 'CI passed offline checks only; this is not GPU, live-model,
+          paid-evaluation, or release-acceptance evidence.'

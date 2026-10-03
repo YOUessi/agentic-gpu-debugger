@@ -1,0 +1,153 @@
+# 历史提交辅助目录
+
+本目录于 2026-09-29 从当前分支 `git log --reverse --date=short` 生成，止于 `87fa492`。
+仅保存提交日期、短 hash 和标题，不包含作者邮箱、凭据或私有实验内容。
+提交标题是历史作者的描述，不是本次对全部 diff 的审计结论，也不证明测试执行通过。
+未提交的最新检索和文档修改不在本目录内。详细问题分析见 [总目录](HISTORY.md)。
+
+共 144 个可达提交，以下按提交拓扑的反向日志次序列出：
+
+- 2026-09-15 · `33a6f23` · docs: define v2 gpu debugger architecture
+- 2026-09-15 · `4385706` · feat: inspect project CUDA toolchain
+- 2026-09-15 · `b129656` · feat: execute and record trusted CUDA workload
+- 2026-09-15 · `cd6265c` · feat: isolate CUDA execution and capture OOB evidence
+- 2026-09-15 · `b6b6b1d` · fix: preserve isolated snapshot modes under restrictive umask
+- 2026-09-15 · `4e51f81` · feat: verify scoped candidates against trusted oracles
+- 2026-09-15 · `a7ef813` · fix: close patch scope and baseline provenance gaps
+- 2026-09-15 · `491f053` · feat: retrieve versioned official CUDA evidence
+- 2026-09-15 · `040427a` · fix: enforce knowledge source and dependency contracts
+- 2026-09-15 · `f044e8e` · feat: complete agentic OOB diagnose and repair flow
+- 2026-09-15 · `4835322` · fix: enforce provider deadlines and standalone exports
+- 2026-09-15 · `2480a6b` · fix: protect provider worker startup ownership
+- 2026-09-15 · `8bd3cea` · fix: complete live DeepSeek M1 acceptance
+- 2026-09-15 · `3f3a437` · feat: validate four CUDA failure families
+- 2026-09-15 · `bf10aeb` · feat: bound adaptive investigations and rule routing
+- 2026-09-15 · `7dfcd48` · feat: enforce strict verification and private oracle boundaries
+- 2026-09-15 · `6ddcb3a` · feat: curate validated CUDA mutation corpus
+- 2026-09-15 · `9082581` · feat: evaluate diagnosis and evidence acquisition fairly
+- 2026-09-15 · `609978d` · docs: document verified GPU debugger release
+- 2026-09-15 · `9e645d9` · docs: plan v2 release foundation completion
+- 2026-09-15 · `e7df39d` · test: isolate pytest module collection
+- 2026-09-15 · `748bf93` · test: rename duplicate release gate module
+- 2026-09-15 · `f1d9f42` · feat: persist cost-bounded evaluation batches
+- 2026-09-15 · `446ac00` · fix: make evaluation resume and artifacts fail closed
+- 2026-09-15 · `b4fb24c` · feat: execute five controlled benchmark modes
+- 2026-09-16 · `d7db606` · fix: enforce benchmark cost and outcome boundaries
+- 2026-09-16 · `255e639` · feat: report complete controlled evaluation metrics
+- 2026-09-16 · `ff676a9` · fix: count production agent budget exhaustion
+- 2026-09-16 · `6c4e1dc` · feat: bind releases to immutable evaluation evidence
+- 2026-09-16 · `fd7bf60` · revert: remove unproven release attestations
+- 2026-09-16 · `ab7fb15` · docs: plan native release provenance
+- 2026-09-16 · `f266811` · feat: bind release runs before execution
+- 2026-09-16 · `b30b91a` · fix: preserve native provenance across execution domains
+- 2026-09-16 · `83a2e64` · fix: close provenance session gaps
+- 2026-09-16 · `d10cad1` · fix: require certain container cleanup
+- 2026-09-16 · `3b2d5b8` · feat: derive corpus registration from native runs
+- 2026-09-16 · `263166f` · fix: bind corpus registration to native authority
+- 2026-09-16 · `c7b6dd5` · fix: make corpus registration crash safe
+- 2026-09-16 · `568dcc8` · fix: serialize corpus transaction recovery
+- 2026-09-16 · `eefade0` · feat: bind evaluation records to native run lineage
+- 2026-09-16 · `3080945` · fix: enforce native evaluation trust boundaries
+- 2026-09-16 · `853e732` · fix: close evaluation provenance bypasses
+- 2026-09-16 · `7538b2e` · fix: close native evaluation trust boundaries
+- 2026-09-16 · `a7a7567` · fix: authorize native evaluation schedules
+- 2026-09-16 · `8eee211` · fix: require externally signed evaluation authority
+- 2026-09-16 · `d4c5c1b` · docs: freeze task3 authority stabilization
+- 2026-09-16 · `0b80726` · fix: freeze evaluation authority before execution
+- 2026-09-16 · `500cb18` · fix: pin evaluation authority to atomic store state
+- 2026-09-16 · `6c180b7` · fix: use concrete evaluation store pinning
+- 2026-09-19 · `11a206b` · fix: make evaluation execution lease non-bypassable
+- 2026-09-19 · `1fbcd1b` · fix: preserve evaluation corpus cutoffs
+- 2026-09-19 · `cef6529` · fix: reserve evaluation cutoffs before signing
+- 2026-09-19 · `5f0ea72` · fix: bind cutoff reservations to native prestates
+- 2026-09-19 · `3be8747` · fix: pin evaluation reservation run inodes
+- 2026-09-19 · `00d4c88` · fix(eval): lease cutoff authority operations
+- 2026-09-19 · `e202b5a` · fix(eval): make cutoff commit final
+- 2026-09-19 · `1f2bd3e` · fix(eval): bind lease finalization to commit
+- 2026-09-19 · `82550eb` · fix(eval): authenticate cutoff preparation
+- 2026-09-19 · `9bf6be0` · fix(eval): authenticate reservation transitions
+- 2026-09-19 · `11805f5` · fix(eval): linearize schedule binding
+- 2026-09-19 · `38f6e3a` · fix(eval): pin queued schedule authority
+- 2026-09-19 · `bc1242f` · fix: unify native verification derivation
+- 2026-09-20 · `0d84d2d` · feat: add safe public seed batch workflow
+- 2026-09-20 · `2b683b9` · fix: align memcheck seed with live evidence
+- 2026-09-20 · `da36007` · feat: wire production evaluation authority
+- 2026-09-20 · `a3eed0c` · feat: compare local retrieval strategies
+- 2026-09-20 · `2a77566` · build: prepare v2 distribution and offline CI
+- 2026-09-20 · `a2b947d` · feat: configure v2 evaluation controller
+- 2026-09-20 · `0352475` · feat: derive release gate from native evidence
+- 2026-09-20 · `556deef` · feat: expose evidence-backed release commands
+- 2026-09-20 · `712aa96` · docs: reconcile v2 release status
+- 2026-09-20 · `c127961` · feat: collect trusted release test evidence
+- 2026-09-20 · `e61afc0` · test: require native release evidence graph
+- 2026-09-20 · `26d6c5b` · feat: add controller-only private batch validation
+- 2026-09-20 · `36298f5` · feat: define sixteen public gpu candidates
+- 2026-09-20 · `f9b50e0` · build: package the full public candidate set
+- 2026-09-20 · `ed8a305` · fix: harden native release evidence collection
+- 2026-09-20 · `10d7901` · fix: align race seed with native finding
+- 2026-09-20 · `e19b9e5` · fix: keep release artifacts outside checkout
+- 2026-09-20 · `27bd092` · docs: design v2 operator evidence workflow
+- 2026-09-21 · `12b49f5` · docs: plan v2 operator evidence workflow
+- 2026-09-21 · `a5696dc` · feat: secure external controller artifacts
+- 2026-09-21 · `013cbf8` · fix: bind controller artifact traversal
+- 2026-09-21 · `77e0b92` · feat: preflight evaluator holdout judgments
+- 2026-09-21 · `ef9e8b8` · fix: bind holdout artifacts and rubric to their owners
+- 2026-09-21 · `1d515fc` · feat: score complete holdout evaluations
+- 2026-09-21 · `6dca798` · fix: validate holdout scoring recovery state
+- 2026-09-21 · `55af00f` · refactor: derive canonical release evidence roots
+- 2026-09-21 · `4ce47aa` · feat: freeze canonical release selections
+- 2026-09-21 · `c0447d0` · docs: add v2 evidence operator runbook
+- 2026-09-21 · `cc6abd9` · fix release evidence provenance validation
+- 2026-09-21 · `f723886` · fix release artifact inventory invariants
+- 2026-09-21 · `dfe8d0c` · fix holdout scoring recovery conflicts
+- 2026-09-21 · `f5ce2c0` · narrow holdout recovery validation catch
+- 2026-09-21 · `c10d1f1` · docs: design evaluator-only holdout execution
+- 2026-09-21 · `26bb978` · docs: plan holdout evaluator isolation
+- 2026-09-21 · `1d77a46` · refactor: preserve diagnosis store visibility
+- 2026-09-21 · `13a7c9c` · fix: isolate verification audit derivation
+- 2026-09-21 · `f2c5ad0` · fix: reject invalid evaluator lineage metadata
+- 2026-09-21 · `97bfe7a` · feat: bind holdout execution in evaluator storage
+- 2026-09-21 · `9635378` · fix: validate evaluator holdout artifacts
+- 2026-09-21 · `d5ec663` · fix: harden evaluator holdout transactions
+- 2026-09-21 · `12e6150` · fix: validate holdout claim after locking
+- 2026-09-21 · `cbbf5d9` · fix: isolate holdout execution evidence
+- 2026-09-21 · `d217cd2` · fix: harden holdout execution isolation
+- 2026-09-21 · `b818e9a` · fix: close holdout authorization leaks
+- 2026-09-21 · `eb7adbb` · fix: make holdout authorization self-validating
+- 2026-09-21 · `002bd50` · fix: pin production evaluation stores
+- 2026-09-21 · `0047567` · fix: harden production corpus authority
+- 2026-09-21 · `ec0ab70` · docs: record task 4 approval
+- 2026-09-21 · `3e57533` · fix: validate blind holdout release lineage
+- 2026-09-21 · `4a3124b` · fix: harden private holdout resolution
+- 2026-09-22 · `222790d` · fix: preserve public holdout metric identity
+- 2026-09-22 · `22dafa4` · fix: preserve validated mode acquisition failures
+- 2026-09-22 · `c766f71` · style: normalize repository formatting
+- 2026-09-22 · `570faf2` · perf: validate holdout batch authority once
+- 2026-09-22 · `1e5d6a1` · test: add native metric lineage discriminator
+- 2026-09-22 · `092e490` · fix: make public verification replay idempotent
+- 2026-09-22 · `f931c31` · fix: make verification replay fully idempotent
+- 2026-09-22 · `27632a0` · fix: replay precondition verification audits
+- 2026-09-22 · `0625f2f` · docs: record task 5 approval
+- 2026-09-22 · `d3ce227` · fix: persist policy-denied evaluation outcomes
+- 2026-09-22 · `1db8b72` · fix: replay policy-denied evaluation steps
+- 2026-09-22 · `7d27f56` · fix: bind agent denial to budget timeline
+- 2026-09-22 · `1d9e906` · fix: close denied evaluation evidence timeline
+- 2026-09-22 · `b60a477` · fix: raise agent model call ceiling
+- 2026-09-22 · `702c43e` · fix: retain terminal provider failures as records
+- 2026-09-22 · `f775c10` · fix: enforce DeepSeek response schemas
+- 2026-09-22 · `c7172c8` · fix: retain exhausted format retry failures
+- 2026-09-23 · `ae4458e` · chore: checkpoint evaluation recovery state
+- 2026-09-24 · `9d75699` · fix: freeze v2.1 case-aware evaluation and record-only provider runs
+- 2026-09-24 · `31a293c` · fix: preserve patch JSON retries and record allowlisted rejection reasons
+- 2026-09-24 · `52d319f` · fix: add phase-specific retries and planner evidence progress
+- 2026-09-24 · `f81052a` · fix: audit output normalization and expand version-reviewed CUDA knowledge
+- 2026-09-24 · `0a56f08` · Fix bounded sync caller analysis and version precise API retrieval
+- 2026-09-24 · `cdd629f` · Return computed caller-mask counterexamples within existing patch retry
+- 2026-09-24 · `31679d1` · Record native four-tool regression and default failure reruns to full verification
+- 2026-09-24 · `e80ce75` · Make offline verification and permission tests independent of host state
+- 2026-09-25 · `82379fa` · Accept real parameterized release node IDs and record frozen-version closeout checks
+- 2026-09-26 · `ab9ef0c` · Preflight all evaluation inputs and reconcile verified project state
+- 2026-09-26 · `cbddff5` · fix(provider): make forbidden-field retry explain JSON instance contract
+- 2026-09-26 · `472a1ee` · fix(provider): honor explicit request deadline within task budget
+- 2026-09-26 · `a088eb8` · docs: record eight targeted development retests and remaining failures
+- 2026-09-28 · `87fa492` · fix: invalidate stale manifests and complete offline accounting and retrieval checks
