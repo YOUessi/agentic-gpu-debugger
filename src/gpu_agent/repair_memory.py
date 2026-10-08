@@ -126,6 +126,27 @@ def derive_public_experiences(store: RunStore, run_id: str) -> list[RepairExperi
             or candidate.get("parent_run_id") != run_id
         ):
             raise ValueError("repair experience candidate or public check source mismatch")
+        check_run_id = check.get("run_id")
+        if not isinstance(check_run_id, str):
+            raise ValueError("repair experience missing public self-check run")
+        child = store.load(check_run_id)
+        if (
+            child.kind != "repair_self_check"
+            or child.status != RunStatus.COMPLETED
+            or child.parent_run_id != run_id
+            or child.binding is not None
+        ):
+            raise ValueError("repair experience self-check lineage is invalid")
+        check_ref = _one(store, check_run_id, "self-check.json")
+        if check_ref is None or json.loads(store.read(check_ref)) != check:
+            raise ValueError("repair experience public self-check report mismatch")
+        checked_sources = {
+            PurePosixPath(ref.name).name: store.read(ref)
+            for ref in child.artifact_refs
+            if ref.name.startswith("sources/")
+        }
+        if source_hash(checked_sources) != candidate["patched_source_hash"]:
+            raise ValueError("repair experience self-check source hash mismatch")
         checks = checked.get("checks", {})
         effect_ref = _one(store, run_id, f"repair/{index}/patch-effect.json")
         effect = json.loads(store.read(effect_ref)) if effect_ref else {}
