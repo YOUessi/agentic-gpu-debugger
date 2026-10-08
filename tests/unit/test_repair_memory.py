@@ -95,7 +95,7 @@ def test_frozen_memory_from_real_public_run_contract(store, tmp_path):
 @pytest.mark.parametrize("mismatch", ["source", "incomplete"])
 def test_memory_refuses_bad_candidate_source_or_unfinished_child(store, mismatch):
     run_id = _fixture_run(store, mismatch=mismatch)
-    with pytest.raises(ValueError, match="source mismatch|self-check lineage"):
+    with pytest.raises(ValueError, match="source.*mismatch|self-check lineage"):
         derive_public_experiences(store, run_id)
 
 
