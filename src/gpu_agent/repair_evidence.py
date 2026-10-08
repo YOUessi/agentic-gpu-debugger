@@ -65,8 +65,19 @@ def transfer_self_check_evidence(
         or origin.binding is not None
     ):
         raise ValueError("reused evidence has invalid run lineage")
+    origin_bundle = _evidence(store).view(self_check_run_id)
+    # Older/synthetic public checks legitimately have no native Sanitizer evidence.
+    if not origin_bundle.sanitizer_results:
+        return
+    target_bundle = _evidence(store).view(target_run_id)
+    current_kernel = [
+        ref for ref in target_bundle.source_snapshot
+        if PurePosixPath(ref.name).name == "kernel.cu"
+    ]
+    if len(current_kernel) != 1:
+        raise ValueError("reinvestigation has no canonical candidate snapshot")
     source = store.read(_one(store, self_check_run_id, "sources/kernel.cu"))
-    target_source = store.read(_one(store, target_run_id, "sources/kernel.cu"))
+    target_source = store.read(current_kernel[0])
     if (
         hashlib.sha256(source).hexdigest() != candidate_source_sha256
         or source != target_source
@@ -78,8 +89,6 @@ def transfer_self_check_evidence(
     summary = json.loads(store.read(_one(store, self_check_run_id, "self-check.json")))
     if summary.get("status") != "FAILED":
         return
-    origin_bundle = _evidence(store).view(self_check_run_id)
-    target_bundle = _evidence(store).view(target_run_id)
     origin_env, target_env = origin_bundle.environment, target_bundle.environment
     # Require the same attestable execution environment before trusting prior observations.
     for key in ("toolchain_lock_hash", "image_id", "target_arch"):
