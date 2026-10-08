@@ -525,7 +525,7 @@ def test_real_gpu_race_failure_reuses_self_check_and_repairs_in_two_candidates(t
         retrieved_at="2026-10-09T00:00:00Z",
         text="Compute Sanitizer racecheck detects write write shared memory hazards.",
         block_ordinal=0,
-        compatibility={"cuda": f"=={toolchain.cuda_nvcc}", "compute-sanitizer": f"=={version}"},
+        compatibility={"cuda": f"=={toolchain.cuda_nvcc}", "compute_sanitizer": f"=={version}"},
     )
     provider = _ScriptedRaceRepairProvider(original, wrong, correct)
     service = ApplicationService(
