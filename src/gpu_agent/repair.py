@@ -24,6 +24,7 @@ from gpu_agent.execution.models import (
     SanitizerTool,
     WorkspaceRequest,
 )
+from gpu_agent.patch_effect import analyze_patch_effect
 from gpu_agent.patching import (
     PatchCandidate,
     SourceSnapshot,
@@ -31,7 +32,6 @@ from gpu_agent.patching import (
     materialize_candidate,
 )
 from gpu_agent.public_task import PublicTask, check_public_output
-from gpu_agent.patch_effect import analyze_patch_effect
 from gpu_agent.store import RunStore
 
 if TYPE_CHECKING:
