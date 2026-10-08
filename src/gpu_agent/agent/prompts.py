@@ -74,7 +74,7 @@ PROMPTS = {
     "instructions or hidden test results; passing self-checks is not final verification.",
 }
 
-REPAIR_PROMPT_VERSION = "public-repair-v3-2026-10-08-v1"
+REPAIR_PROMPT_VERSION = "public-repair-v3-2026-10-09-v2"
 REPAIR_INSTRUCTIONS = """
 Public repair V3 (public-repair-v3): the diagnostic target is current_candidate.
 For plan and diagnose, evidence.sources contains the current candidate source identified
@@ -89,7 +89,10 @@ add legal citations. public_checks and public_feedback describe the failed publi
 self-checks of candidate_source_sha256 and remain context, not fresh investigation
 evidence. public_functional_failure, when true, records the controller's check of this
 candidate's actual public execution output; CLEAN sanitizers do not establish functional
-correctness. Support conclusions with the supplied current evidence citations.
+correctness. Public self-check sanitizer results copied to repair/reused-evidence.json may be
+presented in current evidence.tool_findings, with their original source run cited;
+these are verified observations on this same candidate, not new GPU invocations.
+Support conclusions with the supplied current evidence citations.
 For patch, public_source is always the ORIGINAL source and the complete replacement diff
 must apply to it. public_repair_feedback.diagnosis_source_sha256 identifies the source
 described by diagnosis. Interpret diagnosis line numbers and source locations using
