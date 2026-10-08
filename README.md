@@ -60,6 +60,19 @@ repair v2还要求源码目录中的公开 `task.json`：固定算法标识、�
 Sanitizer；缺少规格不能判自检通过。支持的功能定义在 `src/gpu_agent/public_task.py`，
 不是从隐藏验证推导需求。详见[本轮修复记录](docs/repair-log/2026-10-01-public-repair-correctness.md)。
 
+Repair v3提供显式启用的失败候选重新调查；默认仍为v2。它按公开失败信号决定直接修订
+还是调查当前候选，并在原有共享预算内使用新诊断生成针对原始源码的完整补丁：
+
+```bash
+gpu-agent repair benchmarks/public/case_0009/public_input --allow-paid-calls \
+  --reinvestigate --max-reinvestigations 1 --max-candidates 3
+```
+
+重新调查不重置预算，公开自检仍需通过后才进入独立strict验证。使用限制、诊断源码
+作用域和产物见[Repair v3操作说明](docs/v2-operator-runbook.md#repair-v3)，实际测试与
+失败记录见[2026-10-08记录](docs/repair-log/2026-10-08-repair-v3-reinvestigation.md)。
+当前不据此宣称修复率或真实模型能力收益已验证。
+
 使用 Conda 同时固定 Python 和原生 CUDA 开发工具，环境内的 Python 依赖用 pip 锁定。不叠加 venv，不复用其他项目的 PyTorch 环境。Conda **不是**安全沙箱；候选代码只能在后续的 Docker 隔离后端执行。
 
 首次创建（已存在环境时不要重复创建或覆盖）：

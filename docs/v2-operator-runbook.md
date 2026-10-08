@@ -310,3 +310,145 @@ using the repository's protected release procedure:
 Do not push, tag, or publish if the checkout moved, the real release check closed again, an
 artifact hash differs, or any private key, label, score, identity, alias, nonce, or evaluator path
 appears in Git-tracked bytes or public release output.
+
+## Repair v3
+
+本节说明显式启用的公开开发工作流 `public-repair-v3`。默认 `gpu-agent repair` 仍使用
+`public-repair-v2`；传统 `diagnose`、冻结 A–E 评测及上文 V2 release 证据流程保持原行为。
+Repair v3 支持 D/E 调查模式：当前 CLI 使用 E，没有 `--mode` 参数；应用层
+`ApplicationService.repair(..., mode="D")` 可选择 D。A–C、绑定评测的运行和 evaluator
+store 不能使用这一多轮修复入口。入口与限制见 [CLI](../src/gpu_agent/cli.py) 和
+[应用服务](../src/gpu_agent/service.py)。
+
+### 启用与前置条件
+
+沿用已配置的隔离 GPU 后端、provider、知识库和公开功能规格。输入目录需要受支持、
+绑定原始 `kernel.cu` SHA256 的 `task.json`，有效的公开输入，以及当前支持的
+`vector_api.h` 接口。自带公开案例提供相应文件。前置检查失败时会报告
+`PUBLIC_TASK_UNAVAILABLE`、`PUBLIC_TASK_INVALID`、`PUBLIC_INPUT_INVALID` 或
+`PUBLIC_INTERFACE_UNSUPPORTED`，不会通过重新调查来绕过规格检查。
+
+```bash
+gpu-agent repair benchmarks/public/case_0009/public_input --allow-paid-calls \
+  --reinvestigate --max-reinvestigations 1 --max-candidates 3 --max-llm-calls 40
+gpu-agent report RUN_ID
+```
+
+将第二条命令的 `RUN_ID` 替换为 repair 输出的实际 ID。`--allow-paid-calls` 是发送模型
+请求的显式授权；费用只记录，不设美元硬上限。参数以 `gpu-agent repair --help` 为准：
+
+| 参数 | 默认值与范围 | 含义 |
+| --- | --- | --- |
+| `--reinvestigate` | 默认关闭 | 显式选择 v3；省略时保持 v2。 |
+| `--max-reinvestigations` | 默认 1，范围 0–3 | 限制整次 repair 的重新调查次数；单独设置不启用 v3，设为 0 时不启动重新调查。 |
+| `--max-candidates` | 默认 3，范围 1–20 | 包含首次候选在内的候选上限；最后一个候选失败后不再调查。 |
+| `--max-llm-calls` | 默认 40，范围 1–40 | 限制整次 repair 的物理模型请求，包含初始调查、重新调查、补丁和格式重试。 |
+
+达到重新调查上限不会单独结束 repair：控制器记录 `REINVESTIGATION_LIMIT` 决策后，
+可继续使用最近取得的有效诊断修订，直到候选或总预算用尽。提高候选数或重新调查次数
+不会增加总调用、工具采集或时间配额。
+
+### 何时重新调查
+
+每个候选先执行公开自检。只有明确的 `FAILED` 才进入修订决策；工具不可用、超时、
+取消、截断等 `UNAVAILABLE` 状态直接停止。编译错误和首次普通运行失败通常直接修订；
+公开 Sanitizer finding、公开功能输出错误，以及相邻失败候选出现相同的非编译检查
+结果签名，可触发重新调查。分类依据公开检查状态，不能当作已经查明根因。
+决策由 [RepairCoordinator](../src/gpu_agent/repair_coordinator.py) 保存。
+
+重新调查会创建以原始诊断 run 为父级的独立 `repair_reinvestigation` public 子运行，
+重新准备、编译和运行失败候选，再继续受控工具调查。该候选内仍要求先取得 memcheck
+结果，再运行其他 Sanitizer；同一候选内仍拒绝没有信息增益的重复动作。
+
+若控制器对该子运行的实际公开输出重新执行功能检查并确认失败，会把结果绑定到当前
+输出工件，允许 v3 在没有 Sanitizer finding 时完成有依据的功能故障诊断。上轮自检失败
+本身不能满足这个条件；v2 的证据要求保持原样。投影与引用检查见
+[AgentOrchestrator](../src/gpu_agent/agent/orchestrator.py)。
+
+### 诊断与补丁的源码作用域
+
+父 run 的 `diagnosis.json` 保留原始源码语义。每次候选调查只将当前候选的源码、实际
+工具证据及本次检索文档放入新的 `PublicEvidence`。`PublicRepairContext` 中的上一轮
+诊断、`previous_diagnosis_source_sha256`、候选 hash 和失败自检反馈是带来源的上下文；
+它们不是当前事实，也不会扩大新诊断的合法 citation 集合。
+
+修订反馈同时提供 `diagnosis_source` 和 `diagnosis_source_sha256`。诊断行号与位置必须
+按这份 hash 匹配的源码解释；`previous_candidate_source` 只对应最近失败的公开检查。
+例如 C1 已重新调查、随后 C2 失败，但重新调查额度已耗尽时，生成 C3 所用的 diagnosis
+仍可能属于 C1。不能把其行号当作 C2 的行号。无论 diagnosis 属于哪个候选，返回的
+完整 replacement diff 都必须应用到原始 `public_source`，上下文行和删除行也必须
+来自原始源码。具体模型契约见 [V3 提示词](../src/gpu_agent/agent/prompts.py)。
+
+首次调查与首次补丁沿用旧提示契约；带 V3 investigation context 或 V3 修订反馈的模型
+请求使用 `public-repair-v3-2026-10-08-v1`。应按各物理调用的 `prompt_version` 核对版本，
+不能把整次运行中的所有调用都视为使用 V3 提示词。
+
+### 共享预算与自检计数
+
+初始调查与所有候选重新调查复用同一 provider、调用 gate、采集 ledger 和截止时间。
+启动新调查只重新预留最终诊断与补丁的尾部调用，不清空已经使用的次数或格式重试。
+
+| 资源 | 整次 repair 的限制与统计口径 |
+| --- | --- |
+| 物理模型请求 | 最多 40 次，可由 `--max-llm-calls` 调低；重试也计数。 |
+| 修复阶段时间 | 原始 600 秒截止时间由调查、补丁和公开自检共享；各工具超时按剩余时间裁剪，不为候选重新计时。 |
+| Agent 动作 | 初始调查加全部重新调查共享最多 38 步。 |
+| 调查 Sanitizer | 初始调查加全部重新调查共享最多 4 次实际采集调用。 |
+| 官方文档检索 | 初始调查加全部重新调查共享最多 3 次实际 RAG 调用。 |
+| 候选公开自检 Sanitizer | 与调查采集分开计数；每个候选最多执行四种工具，前置检查或工具不可用可提前结束。受候选上限与同一修复截止时间约束。 |
+
+因此“调查最多 4 次 Sanitizer”不等于“整个 repair 最多 4 次”。最终独立 strict verifier
+沿用原有执行和限额机制，其检查也不能记成 Agent 调查采集。共享计数实现见
+[预算 gate](../src/gpu_agent/agent/policy.py) 与 [公开自检循环](../src/gpu_agent/repair.py)。
+
+### 产物位置与停止原因
+
+public RunStore 默认在 `.gpu-agent/runs`，可由 `GPU_AGENT_RUN_ROOT` 指定。每个 run 的
+`<RUN_ROOT>/<RUN_ID>/manifest.json` 列出工件名称、hash 和 `relative_path`；下表是工件的
+逻辑名称，不是可以直接拼接的文件路径。实际内容保存在 manifest 指向的
+`<RUN_ID>/artifacts/<ARTIFACT_ID>`，应通过 RunStore 读取并校验 hash。
+
+| 所属运行 | 逻辑工件名称 | 核查内容 |
+| --- | --- | --- |
+| 父 run | `repair/policy.json` | 实际采用的 v2/v3、候选上限和重新调查上限。 |
+| 父 run | `repair/<N>/candidate.json`、`repair/<N>/result.json` | 第 N 个候选 hash 与其自检结果；自检前发现重复时可能只有 candidate 工件。 |
+| 父 run | `repair/<N>/decision.json` | 失败后的修订/重新调查决定及 reason；最后一个候选不再生成后续决策。 |
+| 父 run | `repair/<N>/feedback.json` | 下一次修订实际使用的公开反馈、`diagnosis_source` 与来源 hash。 |
+| 父 run | `repair/<N>/reinvestigation.json` | 重新调查 run ID、候选 source hash、新诊断和 `budget_after`。 |
+| 父 run | `repair/summary.json` | 最终 `stop_reason`、选中候选、各轮结果、调查子 run 列表、累计采集用量和自检 Sanitizer 次数。 |
+| 父 run | `agent/budget.json`、`agent/final-budget.json`、`agent/budget-audit.json` | 累计预算、repair 结束时的调用/剩余时间和预约审计；最终值查看 final-budget。 |
+| 父 run | `agent/acquisition-usage.json`、`agent/usage-summary.json` | 实际调查采集次数、物理模型调用次数及是否使用 synthetic provider。 |
+| 重新调查子 run | `repair/context.json`、`repair/lineage.json` | 历史上下文、父 run、自检 run、source hash、提示版本和 `budget_before`。 |
+| 重新调查子 run | `diagnosis.json`、`evidence/bundle.json`、`actions/<STEP>/step.json`、`actions/<STEP>/decision.json` | 当前候选的诊断、证据和受控动作轨迹。 |
+| 自检子 run | `self-check.json`、`self-check-usage.json` | 公开自检结果及该次实际 Sanitizer 调用数。 |
+| provider 所属父 run | `provider/<INVOCATION_ID>/<STATE>.json` | 每次物理模型调用的状态、prompt version、时间和用量。 |
+
+`repair/summary.json` 只在进入候选循环后产生；前置规格检查或首次诊断失败时，先查看
+CLI 错误、父 run 的诊断 limitations 与实际可用产物。常见停止原因如下：
+
+| `stop_reason` | 含义与下一步 |
+| --- | --- |
+| `PUBLIC_CHECKS_PASSED` | 公开自检通过，随后调用一次原有独立 strict verifier；仍须读取最终 verdict。 |
+| `CANDIDATE_LIMIT` | 候选数用尽；最后一个失败候选不再调查。 |
+| `REPEATED_CANDIDATE` | 新候选源码 hash 已出现，停止空转；与触发调查的重复公开失败信号不同。 |
+| `PUBLIC_CHECK_UNAVAILABLE` | 自检证据不可用；查看该轮 checks，尤其 `interruption`，不能按通过继续。 |
+| `REINVESTIGATION_INCONCLUSIVE` | 子运行未建立有效诊断；查看该轮 `reinvestigation_limitations` 和子运行 diagnosis。 |
+| `REVISION_REJECTED` | 新补丁未通过原始源码匹配或补丁范围等校验。 |
+| `AGENT_BUDGET_EXHAUSTED`、`LLM_TIMEOUT`、`LLM_UNCERTAIN_INVOCATION` 等固定错误码 | 修订或调查遇到预算/模型边界；发生在调查内部时也可能作为 inconclusive 的 limitation 保存。 |
+| `PUBLIC_REPAIR_SOURCE_MISMATCH` 等来源错误码 | 候选、自检或上下文来源不匹配；停止而不混用证据。 |
+
+`REINVESTIGATION_LIMIT` 通常是 `decision.reason`，表示本轮改为直接修订，不能误读为
+repair 已停止。模型请求为 `UNCERTAIN` 时不盲目重放，也不新建 provider 清空状态。
+
+### 公开边界与结果解释
+
+重新调查与修订只使用公开功能规格、公开输入、候选源码和实际公共工具证据；不能读取
+private holdout、ground truth、隐藏参考实现或独立 verifier 的结果来指导下一候选。
+公开自检通过后才执行一次现有严格独立验证，隐藏验证失败不会返回模型继续修复。
+`PUBLIC_CHECKS_PASSED` 不是最终成功；CLI 仅在最终 verdict 为 `VERIFIED_FIXED` 时以 0
+退出。容器隔离、受限补丁、来源校验和 V2 release 门禁均保持原机制。
+
+本节说明已实现的行为契约，不宣称 GPU/LLM 能力收益或修复率提升已验证。脚本化 GPU
+冒烟、真实模型实验、实际失败轮次与环境限制以
+[2026-10-08 逐轮记录](repair-log/2026-10-08-repair-v3-reinvestigation.md) 为准；脚本化
+provider 的闭环验证不能替代同一冻结案例、模型、输入和预算下的 V2/V3 效果比较。

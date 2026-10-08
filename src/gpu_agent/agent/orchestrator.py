@@ -1,5 +1,6 @@
 """Controller-owned typed registry: the model proposes, policy authorizes, tools execute."""
 
+import hashlib
 import json
 from collections.abc import Callable
 from pathlib import PurePosixPath
@@ -18,6 +19,7 @@ from gpu_agent.agent.models import (
     PlannerState,
     PublicEvidence,
     PublicFinding,
+    PublicRepairContext,
     PublicSource,
     RetrieveDocsAction,
     SourceRange,
@@ -46,6 +48,7 @@ from gpu_agent.execution.models import (
 )
 from gpu_agent.knowledge.models import DocumentChunk, KnowledgeError
 from gpu_agent.knowledge.retrieve import KnowledgeIndex
+from gpu_agent.public_task import check_public_output
 from gpu_agent.store import RunStore
 
 
@@ -118,7 +121,51 @@ def public_evidence_from_bundle(store: RunStore, bundle: EvidenceBundle) -> Publ
 
 
 def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
-    return public_evidence_from_bundle(store, _evidence(store).view(run_id))
+    bundle = _evidence(store).view(run_id)
+    evidence = public_evidence_from_bundle(store, bundle)
+    manifest = store.load(run_id)
+    contexts = [ref for ref in manifest.artifact_refs if ref.name == "repair/context.json"]
+    if not contexts:
+        return evidence
+    if (
+        store.visibility != "public"
+        or manifest.kind != "repair_reinvestigation"
+        or manifest.binding is not None
+        or len(contexts) != 1
+    ):
+        raise ProviderError("PUBLIC_REPAIR_CONTEXT_INVALID")
+    context = PublicRepairContext.model_validate_json(store.read(contexts[0]))
+    if (
+        len(evidence.sources) != 1
+        or hashlib.sha256(evidence.sources[0].content.encode()).hexdigest()
+        != context.candidate_source_sha256
+    ):
+        raise ProviderError("PUBLIC_REPAIR_SOURCE_MISMATCH")
+    # Never trust a persisted boolean or the previous self-check as current functional proof.
+    context = context.model_copy(update={"public_functional_failure": False})
+    execution = bundle.execution_result
+    if (
+        execution is not None
+        and execution.runtime_status == "SUCCESS"
+        and bundle.public_task is not None
+    ):
+        inputs = [ref for ref in manifest.artifact_refs if ref.name == "public-input.json"]
+        if len(inputs) != 1:
+            raise ProviderError("PUBLIC_REPAIR_INPUT_INVALID")
+        try:
+            outcome = check_public_output(
+                bundle.public_task, store.read(inputs[0]), store.read(execution.output_ref)
+            )
+        except (ValueError, OverflowError):
+            raise ProviderError("PUBLIC_REPAIR_INPUT_INVALID") from None
+        evidence.observed_facts.append(
+            EvidenceClaim(
+                text=f"Public functional check: {outcome}",
+                citation_ids=[execution.output_ref.id, inputs[0].id],
+            )
+        )
+        context = context.model_copy(update={"public_functional_failure": outcome != "PASSED"})
+    return evidence.model_copy(update={"repair_context": context})
 
 
 def derive_final_diagnosis(model: DiagnosisResult, evidence: PublicEvidence) -> DiagnosisResult:
@@ -151,6 +198,8 @@ class AgentOrchestrator:
         self.rule_router = RuleRouter()
         self.seen: set[str] = set()
         self.executed: list[ExecutedAction] = []
+        self._root_run_id = handle.run_id
+        self._investigation_runs = {handle.run_id}
         self.registry: dict[str, Callable[[AgentAction], None]] = {
             "run_memcheck": self._memcheck,
             "run_racecheck": self._sanitizer,
@@ -158,6 +207,55 @@ class AgentOrchestrator:
             "run_synccheck": self._sanitizer,
             "retrieve_official_docs": self._docs,
         }
+
+    def continue_in_workspace(
+        self,
+        backend: ExecutionBackend,
+        handle: WorkspaceHandle,
+        stdin_ref: ArtifactRef,
+    ) -> "AgentOrchestrator":
+        """Investigate a fresh public candidate under this task's existing limits.
+
+        The caller must retain the child's cumulative budget and acquisition usage,
+        including after an unsuccessful investigation, before starting another child.
+        """
+        if self.store.visibility != "public":
+            raise ValueError("repair continuation requires a public store")
+        backend_store = getattr(backend, "store", self.store)
+        if not isinstance(backend_store, RunStore) or backend_store.identity != self.store.identity:
+            raise ValueError("repair continuation backend must use the same public store")
+        if handle.run_id in self._investigation_runs:
+            raise ValueError("repair investigation run was already used")
+        run = self.store.load(handle.run_id)
+        if run.parent_run_id != self._root_run_id:
+            raise ValueError("repair investigation must have the original root as its parent")
+        if stdin_ref.run_id != handle.run_id or stdin_ref.visibility != "public":
+            raise ValueError("repair investigation input belongs to another run or visibility")
+        self.store.read(stdin_ref)
+
+        self.budget = self.budget.model_copy(
+            update={
+                "llm_calls": self.provider.gate.snapshot().llm_calls,
+                "remaining_seconds": self.provider.gate.remaining(),
+            }
+        )
+        child = AgentOrchestrator(
+            self.store,
+            self.provider,
+            backend,
+            handle,
+            stdin_ref,
+            self.knowledge,
+            self.knowledge_version,
+            self.budget.model_copy(),
+        )
+        child.ledger = self.ledger
+        child.acquisition_usage = self.acquisition_usage.model_copy()
+        child._root_run_id = self._root_run_id
+        child._investigation_runs = self._investigation_runs
+        self._investigation_runs.add(handle.run_id)
+        self.provider.gate.begin_repair_cycle()
+        return child
 
     def _memcheck(self, action: AgentAction) -> None:
         if action.action_type != "run_memcheck":
@@ -476,7 +574,7 @@ class AgentOrchestrator:
                 self.acquisition_usage.model_dump_json().encode(),
                 self.store.visibility,
             )
-            snapshot = self.budget.model_copy(
+            self.budget = self.budget.model_copy(
                 update={
                     "llm_calls": self.provider.gate.snapshot().llm_calls,
                     "remaining_seconds": self.provider.gate.remaining(),
@@ -485,7 +583,7 @@ class AgentOrchestrator:
             self.store.put(
                 run_id,
                 "agent/budget.json",
-                snapshot.model_dump_json().encode(),
+                self.budget.model_dump_json().encode(),
                 self.store.visibility,
             )
             self.store.put(

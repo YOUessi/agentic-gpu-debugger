@@ -34,6 +34,11 @@ class RuleRouter:
             return MemcheckAction(rationale="RULE_FALLBACK: memory-safety precheck")
         if outcomes[SanitizerTool.MEMCHECK] != "CLEAN":
             return InconclusiveAction(rationale="RULE_FALLBACK: memcheck evidence is unavailable")
+        if (
+            evidence.repair_context is not None
+            and evidence.repair_context.public_functional_failure
+        ):
+            return FinishAction(rationale="RULE_FALLBACK: current public output violates the task")
         if budget.sanitizer_calls >= budget.max_sanitizer_calls:
             return InconclusiveAction(rationale="RULE_FALLBACK: sanitizer budget exhausted")
 
