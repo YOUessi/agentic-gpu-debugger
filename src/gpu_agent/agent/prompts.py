@@ -102,7 +102,8 @@ candidate than the latest failed one. public_repair_feedback.previous_candidate_
 belongs only to the most recent failed public checks and may differ from diagnosis_source.
 Do not treat diagnosis line numbers as locations in another source version. Inspect the
 original public_source to choose the patch locations, and copy every context and '-' line
-from that original source. If repair_experiences is present, it contains lower-trust historical public
+from that original source. If repair_experiences is present, it contains
+lower-trust historical public
 failure patterns, NOT current facts, official documentation or a solution key.
 Do not cite them as CUDA authority. Only use them as hints to inspect current
 source, make a justified change, and verify with fresh public checks.
