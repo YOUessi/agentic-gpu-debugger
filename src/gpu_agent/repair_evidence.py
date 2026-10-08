@@ -99,7 +99,8 @@ def transfer_self_check_evidence(
     observations: list[ReusedObservation] = []
     seen_tools: set[SanitizerTool] = set()
     for result in origin_bundle.sanitizer_results:
-        if not result.completed or result.check_outcome not in {"CLEAN", "FINDING"}:
+        outcome = result.check_outcome
+        if not result.completed or outcome not in ("CLEAN", "FINDING"):
             continue
         tool_result = result.tool_result
         if tool_result is None:
@@ -137,7 +138,7 @@ def transfer_self_check_evidence(
         observations.append(
             ReusedObservation(
                 tool=tool,
-                outcome=result.check_outcome,
+                outcome=outcome,
                 citation_ref=copied,
                 origin_run_id=self_check_run_id,
                 origin_log_sha256=original_ref.sha256,
