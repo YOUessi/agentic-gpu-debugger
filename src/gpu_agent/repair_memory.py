@@ -13,7 +13,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from gpu_agent.agent.models import DiagnosisResult
-from gpu_agent.contracts import RunStatus
+from gpu_agent.contracts import ArtifactRef, RunStatus
 from gpu_agent.evidence.repository import _evidence
 from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.patching import source_hash
@@ -75,7 +75,7 @@ class RepairExperience(ExecutionModel):
         return self
 
 
-def _one(store: RunStore, run_id: str, name: str):
+def _one(store: RunStore, run_id: str, name: str) -> ArtifactRef | None:
     found = [ref for ref in store.load(run_id).artifact_refs if ref.name == name]
     return found[-1] if len(found) == 1 else None
 
