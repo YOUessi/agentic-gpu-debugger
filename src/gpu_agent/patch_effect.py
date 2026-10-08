@@ -65,10 +65,11 @@ def analyze_patch_effect(
         if len(before) == len(after) == 1:
             old, new = before[0], after[0]
             guards = list(_GUARDED_INDEX.finditer(old))
-            if len(guards) == 1 and _GUARDED_INDEX.search(new):
+            new_guard = _GUARDED_INDEX.search(new)
+            if len(guards) == 1 and new_guard is not None:
                 index = guards[0].group(1)
                 if (
-                    _GUARDED_INDEX.search(new).group(1) == index
+                    new_guard.group(1) == index
                     and old.replace(f"[{index}]", "[threadIdx.x]", 1) == new
                 ):
                     equivalence = "PROVEN_LOCAL_NO_OP"
