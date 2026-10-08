@@ -16,7 +16,7 @@ from pydantic import Field
 from gpu_agent.agent.models import PublicEvidence, PublicFinding, PublicRepairContext
 from gpu_agent.contracts import ArtifactRef
 from gpu_agent.evidence.repository import _evidence
-from gpu_agent.execution.models import CheckOutcome, ExecutionModel, SanitizerTool, SourceLocation
+from gpu_agent.execution.models import ExecutionModel, SanitizerTool, SourceLocation
 from gpu_agent.store import RunStore
 
 
@@ -195,7 +195,10 @@ def candidate_reused_evidence(
         if hashlib.sha256(raw).hexdigest() != observation.origin_log_sha256:
             raise ValueError("reused citation content hash mismatch")
         original_run = store.load(observation.origin_run_id)
-        if original_run.kind != "repair_self_check" or original_run.parent_run_id != store.load(run_id).parent_run_id:
+        if (
+            original_run.kind != "repair_self_check"
+            or original_run.parent_run_id != store.load(run_id).parent_run_id
+        ):
             raise ValueError("reused observation not from sibling public check")
         if observation.tool in outcomes and outcomes[observation.tool] != observation.outcome:
             raise ValueError("reused observation conflicts with fresh current evidence")
