@@ -14,8 +14,8 @@ from pydantic import Field, model_validator
 
 from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.contracts import RunStatus
-from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.evidence.repository import _evidence
+from gpu_agent.execution.models import ExecutionModel
 from gpu_agent.patching import source_hash
 from gpu_agent.public_task import PublicTask
 from gpu_agent.store import RunStore, read_regular

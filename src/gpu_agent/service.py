@@ -55,8 +55,8 @@ from gpu_agent.patching import (
 )
 from gpu_agent.provenance import capture_repository_snapshot, runtime_code_fingerprint
 from gpu_agent.public_task import PublicRepairInputError, load_public_task, public_expected_output
-from gpu_agent.repair_memory import FrozenRepairMemory
 from gpu_agent.repair import RepairPolicy, repair_candidates
+from gpu_agent.repair_memory import FrozenRepairMemory
 from gpu_agent.store import RunStore, read_regular
 from gpu_agent.verification.engine import (
     VerificationEngine,

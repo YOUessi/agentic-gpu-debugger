@@ -143,7 +143,7 @@ def test_optional_memory_is_only_in_v3_initial_patch(
             max_candidates=1,
         ),
     )
-    patch_requests = [item for item, kind in zip(provider.inputs, provider.kinds)
+    patch_requests = [item for item, kind in zip(provider.inputs, provider.kinds, strict=True)
                       if kind == "patch"]
     assert len(patch_requests) == 1
     assert ("repair_experiences" in patch_requests[0]) is use_memory
