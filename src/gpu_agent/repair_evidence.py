@@ -71,8 +71,7 @@ def transfer_self_check_evidence(
         return
     target_bundle = _evidence(store).view(target_run_id)
     current_kernel = [
-        ref for ref in target_bundle.source_snapshot
-        if PurePosixPath(ref.name).name == "kernel.cu"
+        ref for ref in target_bundle.source_snapshot if PurePosixPath(ref.name).name == "kernel.cu"
     ]
     if len(current_kernel) != 1:
         raise ValueError("reinvestigation has no canonical candidate snapshot")
@@ -168,8 +167,7 @@ def candidate_reused_evidence(
 ) -> PublicEvidence:
     """Project only locally owned, verified re-used evidence into the planner view."""
     found = [
-        ref for ref in store.load(run_id).artifact_refs
-        if ref.name == "repair/reused-evidence.json"
+        ref for ref in store.load(run_id).artifact_refs if ref.name == "repair/reused-evidence.json"
     ]
     if not found:
         return evidence
@@ -180,8 +178,10 @@ def candidate_reused_evidence(
     if (
         record.source_sha256 != context.candidate_source_sha256
         or record.input_sha256 != hashlib.sha256(stdin).hexdigest()
-        or record.source_run_id not in {
-            r.id for r in store.children(store.load(run_id).parent_run_id or "0" * 32)
+        or record.source_run_id
+        not in {
+            r.id
+            for r in store.children(store.load(run_id).parent_run_id or "0" * 32)
             if r.kind == "repair_self_check"
         }
     ):

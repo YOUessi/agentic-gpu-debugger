@@ -419,9 +419,7 @@ class _ScriptedRaceRepairProvider(FakeProvider):
     """First patch is a known no-op; native GPU evidence drives the second patch."""
 
     def __init__(self, original: str, wrong: str, correct: str) -> None:
-        super().__init__(
-            [], DiagnosisResult.inconclusive("SCRIPT_NOT_RUN"), _diff(original, wrong)
-        )
+        super().__init__([], DiagnosisResult.inconclusive("SCRIPT_NOT_RUN"), _diff(original, wrong))
         self.original = original
         self.wrong = wrong
         self.correct = correct
@@ -482,9 +480,7 @@ class _ScriptedRaceRepairProvider(FakeProvider):
         return super().revise_patch(public_source, diagnosis, feedback)
 
 
-def test_real_gpu_race_failure_reuses_self_check_and_repairs_in_two_candidates(
-    tmp_path, request
-):
+def test_real_gpu_race_failure_reuses_self_check_and_repairs_in_two_candidates(tmp_path, request):
     """Scripted model decisions, but genuinely compiled/executed GPU and strict verifier."""
     from gpu_agent.service import ApplicationService
     from gpu_agent.verification.models import VerificationVerdict
@@ -492,9 +488,7 @@ def test_real_gpu_race_failure_reuses_self_check_and_repairs_in_two_candidates(
     repo = Path(__file__).resolve().parents[2]
     source = repo / "benchmarks/public/case_0009/public_input"
     original = (source / "kernel.cu").read_text()
-    wrong = original.replace(
-        "block_summary = slots[0];", "block_summary = slots[threadIdx.x];", 1
-    )
+    wrong = original.replace("block_summary = slots[0];", "block_summary = slots[threadIdx.x];", 1)
     correct = (
         original.replace(
             "__shared__ volatile float slots[16];",

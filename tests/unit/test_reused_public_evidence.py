@@ -29,19 +29,30 @@ def _tool_result(store, run_id, tool, findings):
     raw = store.put(run_id, f"raw/{tool.value}.log", (tool.value + "-native").encode(), "public")
     stdout = store.put(run_id, f"stdout/{tool.value}", b"", "public")
     payload = SanitizerPayload(
-        tool=tool.value, completed=True, check_outcome="FINDING" if findings else "CLEAN",
+        tool=tool.value,
+        completed=True,
+        check_outcome="FINDING" if findings else "CLEAN",
         findings=findings,
     )
     clock = datetime.now(UTC)
     result = ToolResult[SanitizerPayload](
         tool_name="compute-sanitizer",
-        request_id="a" * 32, started_at=clock, finished_at=clock, elapsed_ms=1,
-        exit_code=0, timed_out=False, stdout_artifact=stdout,
-        stderr_artifact=raw, typed_payload=payload,
+        request_id="a" * 32,
+        started_at=clock,
+        finished_at=clock,
+        elapsed_ms=1,
+        exit_code=0,
+        timed_out=False,
+        stdout_artifact=stdout,
+        stderr_artifact=raw,
+        typed_payload=payload,
     )
     return SanitizerResult(
-        tool_result=result, status="SUCCESS", findings=findings,
-        completed=True, check_outcome=payload.check_outcome,
+        tool_result=result,
+        status="SUCCESS",
+        findings=findings,
+        completed=True,
+        check_outcome=payload.check_outcome,
     )
 
 
@@ -78,9 +89,14 @@ def _runs(store):
             source_snapshot=[store.put(check.id, "snapshot/kernel.cu", kernel, "public")],
         ),
     )
-    store.put(check.id, "self-check.json", json.dumps({
-        "status": "FAILED", "checks": {"memcheck": "CLEAN", "racecheck": "FINDING"}
-    }).encode(), "public")
+    store.put(
+        check.id,
+        "self-check.json",
+        json.dumps(
+            {"status": "FAILED", "checks": {"memcheck": "CLEAN", "racecheck": "FINDING"}}
+        ).encode(),
+        "public",
+    )
     store.transition(check.id, "COMPLETED", None)
     store.transition(child.id, "RUNNING", "PREPARING")
     child_source = store.put(child.id, "snapshot/kernel.cu", kernel, "public")
@@ -129,9 +145,9 @@ def test_reuse_refuses_untrusted_source_input_and_environment(store, changed):
         bundle = _evidence(store).view(child.id)
         _evidence(store).save(
             child.id,
-            bundle.model_copy(update={"environment": {
-                **bundle.environment, "toolchain_lock_hash": "f" * 64
-            }}),
+            bundle.model_copy(
+                update={"environment": {**bundle.environment, "toolchain_lock_hash": "f" * 64}}
+            ),
         )
     if changed in ("source", "input"):
         with pytest.raises(ValueError, match="inconsistent candidate source or input"):
@@ -139,6 +155,5 @@ def test_reuse_refuses_untrusted_source_input_and_environment(store, changed):
     else:
         transfer_self_check_evidence(store, child.id, check.id, _sha(kernel), stdin)
         assert not any(
-            ref.name == "repair/reused-evidence.json"
-            for ref in store.load(child.id).artifact_refs
+            ref.name == "repair/reused-evidence.json" for ref in store.load(child.id).artifact_refs
         )
