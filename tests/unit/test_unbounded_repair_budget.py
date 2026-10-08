@@ -34,10 +34,13 @@ def test_no_separate_sanitizer_cap_still_keeps_other_budgets():
     for _ in range(7):
         reservation = ledger.reserve("run_racecheck")
         ledger.settle(reservation)
-    assert sum(
-        item["state"] == "COMPLETED" and item["action"] == "run_racecheck"
-        for item in ledger.audit
-    ) == 7
+    assert (
+        sum(
+            item["state"] == "COMPLETED" and item["action"] == "run_racecheck"
+            for item in ledger.audit
+        )
+        == 7
+    )
     bounded = BudgetLedger()
     for _ in range(4):
         bounded.settle(bounded.reserve("run_racecheck"))
@@ -49,14 +52,18 @@ def test_policy_keeps_default_cap_and_unbounded_action_allowed():
     evidence = PublicEvidence(sanitizer_outcomes={"memcheck": "CLEAN"})
     action = RacecheckAction()
     bounded = decide_action(
-        action, evidence,
+        action,
+        evidence,
         AgentBudget(sanitizer_calls=4),
-        CurrentPhase.DIAGNOSING, set(),
+        CurrentPhase.DIAGNOSING,
+        set(),
     )
     unbounded = decide_action(
-        action, evidence,
+        action,
+        evidence,
         AgentBudget(max_sanitizer_calls=None, sanitizer_calls=7),
-        CurrentPhase.DIAGNOSING, set(),
+        CurrentPhase.DIAGNOSING,
+        set(),
     )
     assert bounded.reason_codes == ["AGENT_BUDGET_EXHAUSTED"]
     assert unbounded.allowed
@@ -85,7 +92,8 @@ def test_service_propagates_budget_only_when_opted_in(
 
     monkeypatch.setattr(service_module, "AgentOrchestrator", spy)
     monkeypatch.setattr(
-        service_module, "repair_candidates",
+        service_module,
+        "repair_candidates",
         lambda _store, _snapshot, first, *_args, **_kwargs: first,
     )
     service.repair(
@@ -115,7 +123,9 @@ def test_cli_explicitly_requires_v3_for_unbounded_mode(monkeypatch):
             )
 
     monkeypatch.setattr(ApplicationService, "configured", lambda: Stub())
-    rejected = CliRunner().invoke(app, ["repair", "kernel.cu", "--unbounded-sanitizer-calls"])
+    rejected = CliRunner().invoke(
+        app, ["repair", "kernel.cu", "--unbounded-sanitizer-calls"]
+    )
     assert rejected.exit_code != 0
     assert not policies
     accepted = CliRunner().invoke(
@@ -129,6 +139,7 @@ def test_cli_explicitly_requires_v3_for_unbounded_mode(monkeypatch):
 
 def test_default_v2_cli_still_has_original_policy(monkeypatch):
     from gpu_agent.service import ApplicationService
+
     policies = []
 
     class Stub:
