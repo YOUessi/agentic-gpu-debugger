@@ -31,6 +31,7 @@ from gpu_agent.patching import (
     materialize_candidate,
 )
 from gpu_agent.public_task import PublicTask, check_public_output
+from gpu_agent.patch_effect import analyze_patch_effect
 from gpu_agent.store import RunStore
 
 if TYPE_CHECKING:
@@ -269,6 +270,22 @@ def repair_candidates(
             break
         seen.add(candidate.patched_source_hash)
         sources = materialize_candidate(snapshot, candidate)
+        # Advisory only: never substitute heuristics for actual GPU/Oracle checks.
+        diagnosis_source = (
+            coordinator.diagnosis_source if coordinator is not None else source.content
+        )
+        assessment = analyze_patch_effect(
+            source.content,
+            sources["kernel.cu"].decode(),
+            diagnosis,
+            diagnosis_source=diagnosis_source,
+        )
+        store.put(
+            run_id,
+            f"repair/{number}/patch-effect.json",
+            assessment.model_dump_json().encode(),
+            "public",
+        )
         checked = self_check(
             store, run_id, sources, stdin, backend_factory, provider.gate, public_task
         )
@@ -317,6 +334,7 @@ def repair_candidates(
             "round": number,
             "previous_candidate_source": sources["kernel.cu"].decode(),
             "public_self_check": checked.model_dump(mode="json", exclude={"run_id"}),
+            "patch_effect_assessment": assessment.model_dump(mode="json"),
         }
         if coordinator is not None:
             feedback.update(
