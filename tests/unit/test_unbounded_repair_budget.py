@@ -112,7 +112,7 @@ def test_cli_explicitly_requires_v3_for_unbounded_mode(monkeypatch):
         def repair(self, source, policy):
             policies.append(policy)
             return SimpleNamespace(id="a" * 32, artifact_refs=[]), SimpleNamespace(
-                model_dump_json=lambda **_kwargs: "{}"
+                verdict="VERIFIED_FIXED", model_dump_json=lambda **_kwargs: "{}"
             )
 
     monkeypatch.setattr(ApplicationService, "configured", lambda: Stub())
@@ -136,7 +136,7 @@ def test_default_v2_cli_still_has_original_policy(monkeypatch):
         def repair(self, source, policy):
             policies.append(policy)
             return SimpleNamespace(id="a" * 32, artifact_refs=[]), SimpleNamespace(
-                model_dump_json=lambda **_kwargs: "{}"
+                verdict="VERIFIED_FIXED", model_dump_json=lambda **_kwargs: "{}"
             )
 
     monkeypatch.setattr(ApplicationService, "configured", lambda: Stub())
