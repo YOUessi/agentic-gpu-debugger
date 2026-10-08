@@ -387,7 +387,20 @@ def test_public_repair_v3_reinvestigates_numeric_failure_on_real_gpu(tmp_path, r
         try:
             if handle is not None:
                 backend.cleanup(handle)
-            assert all(item.active_containers() == [] for item in backends)
+            # Child TemporaryDirectories have already been removed by the repair loop.
+            # Query their owner labels through the original controller's surviving cwd.
+            for item in backends:
+                inspection = backend._docker(
+                    [
+                        "ps",
+                        "--all",
+                        "--quiet",
+                        "--filter",
+                        f"label=io.gpu-agent.owner={item._owner}",
+                    ]
+                )
+                assert inspection.exit_code == 0, inspection.tool_error
+                assert not inspection.stdout.strip(), "Owned containers remain after cleanup."
             assert gate.remaining() > 0, "The shared 600-second task deadline was exceeded."
         except BaseException:
             passed = False

@@ -138,7 +138,35 @@ env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY \
 本地已收集到 1 个测试，但执行为 skip（容器环境不可用）；这不是 GPU 通过。
 
 Tang 预检已实际返回：RTX 4090 Laptop GPU、驱动 580.178.04、Python 3.11.16、Docker 29.1.3。
-下一步在独立检出验证精确提交，记录原生运行 ID、锁定工具链、调用计数和 GPU 结果。
+实现已提交为 `dd92a364c4ddad4f1afd41c50e33c614cca11a18`；Tang 独立检出位于
+`/home/you/projects/agentic-gpu-debugger-repair-v3-20261008`，已核对相同 HEAD。
+
+### Tang 第一轮失败：测试收尾的工作目录已销毁
+
+精确命令（在上述 Tang checkout 执行）：
+
+```bash
+/home/you/conda_env/agentic-gpu-debugger/bin/python -I -m pytest \
+  tests/gpu/test_repair_v3_gpu.py::test_public_repair_v3_reinvestigates_numeric_failure_on_real_gpu \
+  --require-live \
+  --gpu-run-root /home/you/projects/agentic-gpu-debugger-repair-v3-20261008/runs/repair-v3-20261008/public \
+  --release-evidence-report /home/you/projects/agentic-gpu-debugger-repair-v3-20261008/runs/repair-v3-20261008/pytest-report.json \
+  -q -s
+```
+
+结果为 **1 failed in 28.84s**，退出码 1。父 run `4e6905f091084c9eaa0847cfb133e18d`，
+候选调查 run `7bff9d8d54a348988c86b42077f072f6`。
+实际 CUDA 流程、数值失败、新诊断、最终公开检查、四种 Sanitizer、引用隔离和预算断言已执行通过，
+但最后的容器清理检查抛出 `RuntimeError: cannot inspect active containers`，所以整项仍记失败。
+原始 stdout 和 pytest 报告保留在该 `runs/repair-v3-20261008` 目录。
+
+原因已由堆栈和 `_docker` 实现确认：`active_containers()` 使用该 backend 的 `workspace_root` 作为
+Docker 查询进程的 cwd；self-check 和子调查返回后，其 `TemporaryDirectory` 已删除，查询无法启动。
+这属于新增测试的生命周期使用错误，不能将其解释为候选仍有计算错误，也不能直接忽略清理断言。
+
+修复仅改变 GPU 测试：仍逐一查询每个 backend 的精确 owner 标签，但统一使用尚存在的原始控制目录启动
+真实 `docker ps --all`，要求命令成功且无残留容器。不修改 production backend，不重建候选工作目录，
+不模拟 Docker 返回。下一轮只重跑这一个失败的 GPU 测试，保留上述失败记录。
 
 ## 尚未评价的范围
 
