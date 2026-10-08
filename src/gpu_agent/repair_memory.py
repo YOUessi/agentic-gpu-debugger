@@ -7,7 +7,7 @@ on-the-fly updates are allowed. Rebuild/freeze the index between experiments.
 
 import hashlib
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Literal
 
 from pydantic import Field, model_validator
@@ -15,6 +15,8 @@ from pydantic import Field, model_validator
 from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.contracts import RunStatus
 from gpu_agent.execution.models import ExecutionModel
+from gpu_agent.evidence.repository import _evidence
+from gpu_agent.patching import source_hash
 from gpu_agent.public_task import PublicTask
 from gpu_agent.store import RunStore, read_regular
 
@@ -96,6 +98,14 @@ def derive_public_experiences(store: RunStore, run_id: str) -> list[RepairExperi
     if not task_ref or not diagnosis_ref or not summary_ref:
         return []
     task = PublicTask.model_validate_json(store.read(task_ref))
+    bundle = _evidence(store).view(run_id)
+    originals = {
+        PurePosixPath(ref.name).name: store.read(ref)
+        for ref in bundle.source_snapshot
+    }
+    if hashlib.sha256(originals.get("kernel.cu", b"")).hexdigest() != task.source_sha256:
+        raise ValueError("public task source is not bound to the original snapshot")
+    original_manifest_hash = source_hash(originals)
     diagnosis = DiagnosisResult.model_validate_json(store.read(diagnosis_ref))
     summary = json.loads(store.read(summary_ref))
     experiences: list[RepairExperience] = []
@@ -112,7 +122,8 @@ def derive_public_experiences(store: RunStore, run_id: str) -> list[RepairExperi
         if (
             check != checked
             or candidate.get("patched_source_hash") != round_info.get("candidate_hash")
-            or candidate.get("base_source_hash") != task.source_sha256
+            or candidate.get("base_source_hash") != original_manifest_hash
+            or candidate.get("parent_run_id") != run_id
         ):
             raise ValueError("repair experience candidate or public check source mismatch")
         checks = checked.get("checks", {})

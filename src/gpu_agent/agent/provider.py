@@ -647,7 +647,10 @@ class LLMProvider(Protocol):
         state: PlannerState | None = None,
     ) -> AgentAction: ...
     def diagnose(self, evidence: PublicEvidence) -> DiagnosisResult: ...
-    def propose_patch(self, public_source: PublicSource, diagnosis: DiagnosisResult) -> str: ...
+    def propose_patch(
+        self, public_source: PublicSource, diagnosis: DiagnosisResult,
+        *, experience_hints: list[dict[str, str]] | None = None,
+    ) -> str: ...
     def revise_patch(
         self, public_source: PublicSource, diagnosis: DiagnosisResult, feedback: dict[str, object]
     ) -> str: ...
@@ -949,8 +952,11 @@ class OpenAIResponsesProvider:
             validate,
         )
 
-    def propose_patch(self, public_source: PublicSource, diagnosis: DiagnosisResult) -> str:
-        return self._patch(public_source, diagnosis)
+    def propose_patch(
+        self, public_source: PublicSource, diagnosis: DiagnosisResult,
+        *, experience_hints: list[dict[str, str]] | None = None,
+    ) -> str:
+        return self._patch(public_source, diagnosis, experience_hints=experience_hints)
 
     def revise_patch(
         self, public_source: PublicSource, diagnosis: DiagnosisResult, feedback: dict[str, object]
@@ -962,6 +968,8 @@ class OpenAIResponsesProvider:
         public_source: PublicSource,
         diagnosis: DiagnosisResult,
         feedback: dict[str, object] | None = None,
+        *,
+        experience_hints: list[dict[str, str]] | None = None,
     ) -> str:
         def validate(value: PatchOutput) -> PatchOutput:
             try:
@@ -987,6 +995,7 @@ class OpenAIResponsesProvider:
                 "public_source": public_source.model_dump(mode="json"),
                 "diagnosis": diagnosis.model_dump(mode="json"),
                 **({"public_repair_feedback": feedback} if feedback is not None else {}),
+                **({"repair_experiences": experience_hints} if experience_hints else {}),
             },
             PatchOutput,
             validate,
@@ -1047,12 +1056,16 @@ class FakeProvider:
         self._record("diagnose", {"evidence": evidence.model_dump(mode="json")})
         return self.result
 
-    def propose_patch(self, public_source: PublicSource, diagnosis: DiagnosisResult) -> str:
+    def propose_patch(
+        self, public_source: PublicSource, diagnosis: DiagnosisResult,
+        *, experience_hints: list[dict[str, str]] | None = None,
+    ) -> str:
         self._record(
             "patch",
             {
                 "public_source": public_source.model_dump(mode="json"),
                 "diagnosis": diagnosis.model_dump(mode="json"),
+                **({"repair_experiences": experience_hints} if experience_hints else {}),
             },
         )
         return self.diff

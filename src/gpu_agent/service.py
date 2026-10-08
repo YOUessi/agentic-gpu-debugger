@@ -55,6 +55,7 @@ from gpu_agent.patching import (
 )
 from gpu_agent.provenance import capture_repository_snapshot, runtime_code_fingerprint
 from gpu_agent.public_task import PublicRepairInputError, load_public_task, public_expected_output
+from gpu_agent.repair_memory import FrozenRepairMemory
 from gpu_agent.repair import RepairPolicy, repair_candidates
 from gpu_agent.store import RunStore, read_regular
 from gpu_agent.verification.engine import (
@@ -87,6 +88,7 @@ class ApplicationService:
         backend_factory: BackendFactory = IsolatedGPUBackend,
         knowledge: KnowledgeIndex | None = None,
         knowledge_version: str = "",
+        repair_memory: FrozenRepairMemory | None = None,
         _binding: RunBinding | None = None,
         _evaluation_schedule_verifier: "EvaluationScheduleVerifier | None" = None,
     ) -> None:
@@ -95,6 +97,7 @@ class ApplicationService:
         self.store, self.evaluator_store = store, evaluator_store
         self._provider, self._backend_factory = provider, backend_factory
         self.knowledge, self.knowledge_version = knowledge, knowledge_version
+        self.repair_memory = repair_memory
         self._binding = _binding
         self._evaluation_schedule_verifier = _evaluation_schedule_verifier
         self._pricing_attestation: PricingAttestation | None = None
@@ -168,11 +171,17 @@ class ApplicationService:
                 knowledge = KnowledgeIndex.load(Path(cache))
             except KnowledgeError:
                 pass  # The typed knowledge limitation is emitted if retrieval is requested.
+        repair_memory = (
+            FrozenRepairMemory.load(Path(location))
+            if (location := os.environ.get("GPU_AGENT_REPAIR_MEMORY_INDEX"))
+            else None
+        )
         return cls(
             RunStore(root),
             RunStore(evaluator.absolute() / "runs", visibility="evaluator"),
             knowledge=knowledge,
             knowledge_version=os.environ.get("GPU_AGENT_KNOWLEDGE_VERSION", ""),
+            repair_memory=repair_memory,
         )
 
     @classmethod
@@ -675,7 +684,36 @@ class ApplicationService:
                 if result.diagnostic_outcome == "DIAGNOSED":
                     self.store.transition(run.id, "RUNNING", "PATCH_GENERATING")
                     public_source = public_evidence(self.store, run.id).sources[0]
-                    diff = provider.propose_patch(public_source, result)
+                    experience_hints: list[dict[str, str]] = []
+                    if (
+                        repair_policy is not None
+                        and repair_policy.version == "public-repair-v3"
+                        and self.repair_memory is not None
+                        and public_task is not None
+                        and self._binding is None
+                    ):
+                        experience_hints = self.repair_memory.retrieve(
+                            public_task.algorithm, result.failure_family
+                        )
+                        self.store.put(
+                            run.id,
+                            "repair/experience-retrieval.json",
+                            json.dumps(
+                                {
+                                    "corpus_sha256": self.repair_memory.corpus_sha256,
+                                    "hints": experience_hints,
+                                },
+                                sort_keys=True,
+                            ).encode(),
+                            "public",
+                        )
+                    diff = (
+                        provider.propose_patch(
+                            public_source, result, experience_hints=experience_hints
+                        )
+                        if experience_hints
+                        else provider.propose_patch(public_source, result)
+                    )
                     try:
                         candidate = apply_generated_candidate(snapshot, diff)
                     except ValueError:
@@ -716,6 +754,7 @@ class ApplicationService:
                             repair_policy,
                             public_task,
                             coordinator=coordinator,
+                            experience_hints=experience_hints,
                         )
                     register_candidate(self.store, candidate)
             except (ProviderError, BackendInfrastructureError) as exc:

@@ -247,6 +247,7 @@ def repair_candidates(
     public_task: PublicTask | None = None,
     *,
     coordinator: "RepairCoordinator | None" = None,
+    experience_hints: list[dict[str, str]] | None = None,
 ) -> PatchCandidate:
     """Select the last checked candidate; preserve all attempts against the original base."""
     if (policy.version == "public-repair-v3") != (coordinator is not None):
@@ -336,6 +337,8 @@ def repair_candidates(
             "public_self_check": checked.model_dump(mode="json", exclude={"run_id"}),
             "patch_effect_assessment": assessment.model_dump(mode="json"),
         }
+        if experience_hints:
+            feedback["repair_experiences"] = experience_hints
         if coordinator is not None:
             feedback.update(
                 {

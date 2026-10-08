@@ -285,7 +285,7 @@ def test_sdk_instructions_and_invocation_versions_select_v3_together(
     invocations = provider.invocations()
     assert len(invocations) == 1 and invocations[0].state == "COMPLETED"
     if is_v3:
-        assert invocations[0].prompt_version == "public-repair-v3-2026-10-09-v3"
+        assert invocations[0].prompt_version == "public-repair-v3-2026-10-09-v4"
         assert instructions.startswith(PROMPTS[kind]) and instructions != PROMPTS[kind]
         assert "current_candidate" in instructions
         assert "previous_diagnosis_source_sha256" in instructions
@@ -363,7 +363,7 @@ def test_rejected_old_citations_retry_with_current_evidence_and_v3_telemetry(sto
     assert provider.diagnose(_evidence(repair=True)) == _current_diagnosis()
     invocations = provider.invocations()
     assert [call.state for call in invocations] == ["FAILED", "COMPLETED"]
-    assert {call.prompt_version for call in invocations} == {"public-repair-v3-2026-10-09-v3"}
+    assert {call.prompt_version for call in invocations} == {"public-repair-v3-2026-10-09-v4"}
     assert invocations[0].output_diagnostics.failure_class == "DOMAIN_REJECTED"
     for call in port.calls:
         evidence = json.loads(call["input"])["untrusted_data"]["evidence"]
