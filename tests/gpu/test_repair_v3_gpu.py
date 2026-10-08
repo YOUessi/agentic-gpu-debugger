@@ -413,3 +413,159 @@ def test_public_repair_v3_reinvestigates_numeric_failure_on_real_gpu(tmp_path, r
             store.transition(run.id, "RUNNING", "FINALIZING")
             store.transition(run.id, "COMPLETED" if passed else "FAILED", None)
             print(encoded)
+
+
+class _ScriptedRaceRepairProvider(FakeProvider):
+    """First patch is a known no-op; native GPU evidence drives the second patch."""
+
+    def __init__(self, original: str, wrong: str, correct: str) -> None:
+        super().__init__(
+            [], DiagnosisResult.inconclusive("SCRIPT_NOT_RUN"), _diff(original, wrong)
+        )
+        self.original = original
+        self.wrong = wrong
+        self.correct = correct
+        self.saw_reused_evidence = False
+
+    def plan(self, evidence, budget, feedback=None, state=None):
+        if SanitizerTool.MEMCHECK not in evidence.sanitizer_outcomes:
+            action = MemcheckAction()
+        elif SanitizerTool.RACECHECK not in evidence.sanitizer_outcomes:
+            from gpu_agent.agent.models import RacecheckAction
+
+            action = RacecheckAction()
+        elif evidence.tool_findings and not evidence.documentation:
+            action = RetrieveDocsAction(
+                typed_arguments={"query": "shared memory write write race", "k": 1}
+            )
+        else:
+            action = FinishAction()
+        self.actions.append(action)
+        return super().plan(evidence, budget, feedback, state)
+
+    def diagnose(self, evidence):
+        if evidence.repair_context is not None:
+            assert evidence.sources[0].content == self.wrong
+            assert "REUSED_ATTESTED_PUBLIC_SELF_CHECK" in evidence.limitations
+            self.saw_reused_evidence = True
+        else:
+            assert evidence.sources[0].content == self.original
+        assert evidence.sanitizer_outcomes[SanitizerTool.MEMCHECK] == "CLEAN"
+        assert evidence.sanitizer_outcomes[SanitizerTool.RACECHECK] == "FINDING"
+        assert evidence.tool_findings and evidence.documentation
+        located = [f.source_location for f in evidence.tool_findings if f.source_location]
+        assert located
+        self.result = DiagnosisResult(
+            diagnostic_outcome="DIAGNOSED",
+            failure_family="shared_memory_race",
+            root_cause="Two threads write to the same shared-memory slot.",
+            source_locations=[located[0]],
+            observed_facts=evidence.observed_facts,
+            tool_findings=[
+                EvidenceClaim(text=f.category, citation_ids=[f.artifact_id])
+                for f in evidence.tool_findings
+            ],
+            documentation_evidence=[
+                EvidenceClaim(text=d.text, citation_ids=[d.chunk_id])
+                for d in evidence.documentation
+            ],
+            recommended_change="Provide each writer a separate shared-memory slot.",
+            confidence_label="high",
+        )
+        return super().diagnose(evidence)
+
+    def revise_patch(self, public_source, diagnosis, feedback):
+        assert public_source.content == self.original
+        assert feedback["previous_candidate_source"] == self.wrong
+        assert diagnosis.failure_family == "shared_memory_race"
+        self.diff = _diff(self.original, self.correct)
+        return super().revise_patch(public_source, diagnosis, feedback)
+
+
+def test_real_gpu_race_failure_reuses_self_check_and_repairs_in_two_candidates(
+    tmp_path, request
+):
+    """Scripted model decisions, but genuinely compiled/executed GPU and strict verifier."""
+    from gpu_agent.service import ApplicationService
+    from gpu_agent.verification.models import VerificationVerdict
+
+    repo = Path(__file__).resolve().parents[2]
+    source = repo / "benchmarks/public/case_0009/public_input"
+    original = (source / "kernel.cu").read_text()
+    wrong = original.replace(
+        "block_summary = slots[0];", "block_summary = slots[threadIdx.x];", 1
+    )
+    correct = (
+        original.replace(
+            "__shared__ volatile float slots[16];",
+            "__shared__ volatile float slots[32];",
+            1,
+        )
+        .replace("const unsigned int slot = threadIdx.x & 15U;", "const unsigned int slot = threadIdx.x;", 1)
+        .replace("block_summary = slots[0];", "block_summary = slots[0] + slots[31];", 1)
+    )
+    assert wrong != original and correct != wrong
+    backend_factory = IsolatedGPUBackend
+    public = RunStore(
+        Path(request.config.getoption("--gpu-run-root"))
+        if request.config.getoption("--gpu-run-root")
+        else tmp_path / "public-runs"
+    )
+    availability = backend_factory(public, tmp_path / "probe", tmp_path / "probe-tasks").availability()
+    if not availability.ready:
+        pytest.skip(availability.reason)
+    toolchain = load_toolchain_lock(LOCK_PATH)
+    version = toolchain.compute_sanitizer.split()[0]
+    chunk = make_chunk(
+        source_id="reused-racecheck",
+        document_title="CUDA data race hazards",
+        document_version=version,
+        section_title="Shared memory hazards",
+        source_url="https://docs.nvidia.com/compute-sanitizer/ComputeSanitizer/index.html",
+        retrieved_at="2026-10-09T00:00:00Z",
+        text="Compute Sanitizer racecheck detects write write shared memory hazards.",
+        block_ordinal=0,
+        compatibility={"cuda": f"=={toolchain.cuda_nvcc}", "compute-sanitizer": f"=={version}"},
+    )
+    provider = _ScriptedRaceRepairProvider(original, wrong, correct)
+    service = ApplicationService(
+        public,
+        RunStore(tmp_path / "evaluator/runs", visibility="evaluator"),
+        provider=provider,
+        backend_factory=backend_factory,
+        knowledge=KnowledgeIndex([chunk]),
+        knowledge_version=f"cuda={toolchain.cuda_nvcc};compute-sanitizer={version}",
+    )
+    run, verdict = service.repair(
+        source,
+        policy=RepairPolicy(version="public-repair-v3", max_candidates=2),
+    )
+    summary = _artifact(public, run.id, "repair/summary.json")
+    assert summary["stop_reason"] == "PUBLIC_CHECKS_PASSED"
+    assert len(summary["rounds"]) == 2
+    assert summary["rounds"][0]["check"]["checks"]["racecheck"] == "FINDING"
+    assert summary["rounds"][1]["check"]["checks"]["racecheck"] == "CLEAN"
+    assert summary["reinvestigations"] == 1
+    assert provider.saw_reused_evidence
+    assert summary["acquisition_usage"]["sanitizer_calls"] == 2
+    (child,) = summary["investigation_runs"]
+    copied = _artifact(public, child, "repair/reused-evidence.json")
+    assert copied["source_sha256"] == _sha(wrong.encode())
+    assert set(item["tool"] for item in copied["observations"]) >= {"memcheck", "racecheck"}
+    assert verdict is not None and verdict.verdict == VerificationVerdict.VERIFIED_FIXED
+    assert summary["rounds"][1]["check"]["status"] == "PASSED"
+    print(
+        json.dumps(
+            {
+                "test": "scripted_first_failure_native_GPU",
+                "public_run": run.id,
+                "child_run": child,
+                "verification": verdict.verdict,
+                "candidates": len(summary["rounds"]),
+                "sanitizer_acquisitions": summary["acquisition_usage"]["sanitizer_calls"],
+                "reused_observations": len(copied["observations"]),
+                "scripted_provider": True,
+            },
+            sort_keys=True,
+        )
+    )
