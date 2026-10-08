@@ -10,9 +10,7 @@ from pydantic import Field
 from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.execution.models import ExecutionModel
 
-_GUARDED_INDEX = re.compile(
-    r"\bif\s*\(\s*threadIdx\.x\s*==\s*(\d+)\s*\)"
-)
+_GUARDED_INDEX = re.compile(r"\bif\s*\(\s*threadIdx\.x\s*==\s*(\d+)\s*\)")
 
 
 class PatchEffectAssessment(ExecutionModel):
@@ -48,13 +46,17 @@ def analyze_patch_effect(
         changes.append((i1, j1, old_lines[i1:i2], new_lines[j1:j2]))
         modified.extend(range(i1 + 1, i2 + 1))
 
-    source_matches = hashlib.sha256(diagnosis_source.encode()).hexdigest() == hashlib.sha256(
-        original.encode()
-    ).hexdigest()
+    source_matches = (
+        hashlib.sha256(diagnosis_source.encode()).hexdigest()
+        == hashlib.sha256(original.encode()).hexdigest()
+    )
     touched = (
-        any(location.path == "kernel.cu" and location.line in modified
-            for location in diagnosis.source_locations)
-        if source_matches else None
+        any(
+            location.path == "kernel.cu" and location.line in modified
+            for location in diagnosis.source_locations
+        )
+        if source_matches
+        else None
     )
     equivalence: Literal["PROVEN_LOCAL_NO_OP", "NOT_ESTABLISHED"] = "NOT_ESTABLISHED"
     code = "CHANGE_NOT_PROVEN_EQUIVALENT"

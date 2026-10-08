@@ -141,7 +141,8 @@ def main() -> int:
             artifact_names = {"repair/summary.json", "agent/final-budget.json"}
             exported = {
                 ref.name: json.loads(service.store.read(ref))
-                for ref in run.artifact_refs if ref.name in artifact_names
+                for ref in run.artifact_refs
+                if ref.name in artifact_names
             }
             row = {
                 "ordinal": ordinal,
@@ -158,8 +159,7 @@ def main() -> int:
                     item.usage.total_tokens or 0 for item in invocations if item.usage
                 ),
                 "calls_with_unknown_usage": sum(
-                    item.usage is None or item.usage.total_tokens is None
-                    for item in invocations
+                    item.usage is None or item.usage.total_tokens is None for item in invocations
                 ),
                 "api_cost_usd": None,
                 "attempts": 1,
