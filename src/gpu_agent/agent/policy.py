@@ -71,7 +71,10 @@ class BudgetLedger:
                     self._counts["llm"] += 1
                     self._counts["planner"] += int(action == "planner_llm")
                 elif action.startswith("run_") and action.endswith("check"):
-                    if self._counts["sanitizer"] >= self.budget.max_sanitizer_calls:
+                    if (
+                        self.budget.max_sanitizer_calls is not None
+                        and self._counts["sanitizer"] >= self.budget.max_sanitizer_calls
+                    ):
                         raise BudgetExceeded("SANITIZER_BUDGET_EXHAUSTED")
                     self._counts["sanitizer"] += 1
                 elif action == "retrieve_official_docs":
@@ -248,6 +251,7 @@ def decide_action(
         reason = "MEMCHECK_PRECHECK_REQUIRED"
     elif (
         action.action_type in {"run_memcheck", "run_racecheck", "run_initcheck", "run_synccheck"}
+        and budget.max_sanitizer_calls is not None
         and budget.sanitizer_calls >= budget.max_sanitizer_calls
     ):
         reason = "AGENT_BUDGET_EXHAUSTED"
