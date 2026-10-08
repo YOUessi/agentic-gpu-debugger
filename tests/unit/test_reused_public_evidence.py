@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -32,7 +32,7 @@ def _tool_result(store, run_id, tool, findings):
         tool=tool.value, completed=True, check_outcome="FINDING" if findings else "CLEAN",
         findings=findings,
     )
-    clock = datetime.now(timezone.utc)
+    clock = datetime.now(UTC)
     result = ToolResult[SanitizerPayload](
         tool_name="compute-sanitizer",
         request_id="a" * 32, started_at=clock, finished_at=clock, elapsed_ms=1,
