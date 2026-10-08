@@ -168,6 +168,70 @@ Docker 查询进程的 cwd；self-check 和子调查返回后，其 `TemporaryDi
 真实 `docker ps --all`，要求命令成功且无残留容器。不修改 production backend，不重建候选工作目录，
 不模拟 Docker 返回。下一轮只重跑这一个失败的 GPU 测试，保留上述失败记录。
 
+### Tang 第二轮通过：完整原生公开修复流程与收尾
+
+测试修复提交为 `bb6e9cf92bf282a53a9071e505148d5582795334`。Tang 对本次独立 checkout
+执行 fetch 和精确提交的 `merge --ff-only`，核对 HEAD 后运行同一测试，输出目录换为 `r2`，
+未重跑其他 GPU 测试、模型调用或已成功的独立测试单元。
+
+```bash
+/home/you/conda_env/agentic-gpu-debugger/bin/python -I -m pytest \
+  tests/gpu/test_repair_v3_gpu.py::test_public_repair_v3_reinvestigates_numeric_failure_on_real_gpu \
+  --require-live \
+  --gpu-run-root /home/you/projects/agentic-gpu-debugger-repair-v3-20261008/runs/repair-v3-20261008-r2/public \
+  --release-evidence-report /home/you/projects/agentic-gpu-debugger-repair-v3-20261008/runs/repair-v3-20261008-r2/pytest-report.json \
+  -q -s
+```
+
+实际结果：**1 passed in 27.92s**，退出码 0，没有 skip。真实 Docker owner 查询确认本次四个后端
+没有残留容器。主 run 的 `repair/gpu-smoke.json` 记录 `status=PASSED`，原始日志保存在相同 r2
+目录的 `gpu-smoke.log`，机器报告为 `pytest-report.json`。
+
+| 核对项 | 实际记录 |
+| --- | --- |
+| GPU 测试代码提交 | `bb6e9cf92bf282a53a9071e505148d5582795334` |
+| 父 run | `6c97649e2d67491da3025eb26adbbd37` |
+| 候选重新调查 run | `4abe0607a92c4cdebcc45887d714ec39` |
+| 公开输入 | vector-add，n=257，a 全为 1.0、b 全为 2.0 |
+| 首候选 | 边界安全但计算 a-b，真实 `NUMERIC_MISMATCH` |
+| 新调查 | 失败候选 memcheck CLEAN；当前输出仍数值错误，新诊断引用当前工件 |
+| 最终公开检查 | 功能 PASSED；memcheck/racecheck/initcheck/synccheck 全 CLEAN |
+| 调查支出 | 2 次原生 Sanitizer，1 次本地固定文档片段检索 |
+| 固定自检支出 | 4 次原生 Sanitizer，独立于调查统计 |
+| 脚本 provider 计数 | 9 次逻辑调用；真实模型 API 调用 0 次 |
+| 共享 deadline | 完成含清理后剩余 573.261 秒，起始上限 600 秒 |
+| 工具链锁 SHA256 | `3880152ba598d514a27ca364a4e812abb8f2ec9e21a7ac3be784c2d2def6ac91` |
+| 原始 kernel SHA256 | `91df0c5fc2eabcb3375266239408086e757106011f34443cb57b9d07ebd9ca23` |
+| 失败候选 kernel SHA256 | `b6b7f60011c7ba0a6d0a1833b38996b740ec79ac064884011aabf7a28551f52d` |
+| 最终 kernel SHA256 | `6813b1cd70e3efe3d9b2a0c5d23815b5183e5b3a07e67d44fc5b486a7c239ded` |
+
+锁定运行环境为 CUDA nvcc 12.8.93、Compute Sanitizer 2025.1.0.0、sm_89，镜像 ID 为
+`sha256:ec7f38d73b44d6e363f23cf5f2c22d7bdb93865b2a05d4110f068a7591b5f515`。
+测试检查了原生 ELF、源码 manifest、执行与 Sanitizer 的 binary 引用、所有工件的 RunStore hash、
+候选/原始引用隔离、原始源码未修改、两次补丁同一基准及共享 ledger/gate。
+
+本项只证明公开修复控制流；结果显式为 `private_verification=NOT_RUN`、`verified_fixed=false`，
+不把公开自检通过改称完整私有验证通过。脚本 provider 与固定本地文档片段也不构成真实 LLM/RAG 收益评价。
+
+### 离线分发与外部 wheel 安装检查
+
+独立任务在 scratch 源码快照上执行 `.venv/bin/python -m build --no-isolation`，生成 sdist 和 wheel，
+退出码 0。随后建立新的临时 venv，用 `pip install --no-index --no-deps --force-reinstall` 安装
+刚构建的 wheel，并在仓库外执行 CLI 和 runtime-resource smoke。所有命令退出码均为 0。
+
+临时环境仅复用开发环境的第三方依赖目录，不执行开发环境的 editable `.pth` 钩子。
+断言确认 `gpu_agent.__file__` 位于该 wheel 环境的 `site-packages/gpu_agent/__init__.py`，原仓库
+`src` 不在 smoke 的 `sys.path`。顶层 help、repair help 的 `--reinvestigate`、新 continuation/gate
+接口、运行依赖约束、工具链锁及其 runner/Dockerfile 绑定、corpus/modes/retrieval/sources 资源均通过。
+
+完整命令、断言、分发物 SHA256 和输出位于
+`/workspace/scratch/cca353f9d23f/repair-v3-packaging.log`；分发物位于
+`/workspace/scratch/cca353f9d23f/repair-v3-packaging-_ogumrmg/dist/`。
+wheel 为 540,112 bytes，sdist 为 671,987 bytes。构建前后源码快照内容变化为空，没有在仓库写入分发物。
+
+本地开发环境的 OpenAI SDK 实际为 3.26.1，满足项目声明范围，但不同于 CI `requirements.lock` 的精确
+版本 3.13.0。因此还需 GitHub CI 在锁定依赖和 Python 3.11/3.12 上检查；本地通过不替代该环境差异的验证。
+
 ## 尚未评价的范围
 
 没有执行真实 LLM 的 V2/V3 同条件收益对照、私有 holdout 或 release acceptance。
