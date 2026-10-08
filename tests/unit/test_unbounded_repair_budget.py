@@ -70,9 +70,7 @@ def test_policy_keeps_default_cap_and_unbounded_action_allowed():
 
 
 @pytest.mark.parametrize("unbounded", [False, True])
-def test_service_propagates_budget_only_when_opted_in(
-    oob_service, monkeypatch, unbounded
-):
+def test_service_propagates_budget_only_when_opted_in(oob_service, monkeypatch, unbounded):
     from gpu_agent import service as service_module
 
     service, _, source = oob_service
@@ -123,9 +121,7 @@ def test_cli_explicitly_requires_v3_for_unbounded_mode(monkeypatch):
             )
 
     monkeypatch.setattr(ApplicationService, "configured", lambda: Stub())
-    rejected = CliRunner().invoke(
-        app, ["repair", "kernel.cu", "--unbounded-sanitizer-calls"]
-    )
+    rejected = CliRunner().invoke(app, ["repair", "kernel.cu", "--unbounded-sanitizer-calls"])
     assert rejected.exit_code != 0
     assert not policies
     accepted = CliRunner().invoke(
