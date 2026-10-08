@@ -99,10 +99,7 @@ def derive_public_experiences(store: RunStore, run_id: str) -> list[RepairExperi
         return []
     task = PublicTask.model_validate_json(store.read(task_ref))
     bundle = _evidence(store).view(run_id)
-    originals = {
-        PurePosixPath(ref.name).name: store.read(ref)
-        for ref in bundle.source_snapshot
-    }
+    originals = {PurePosixPath(ref.name).name: store.read(ref) for ref in bundle.source_snapshot}
     if hashlib.sha256(originals.get("kernel.cu", b"")).hexdigest() != task.source_sha256:
         raise ValueError("public task source is not bound to the original snapshot")
     original_manifest_hash = source_hash(originals)
@@ -205,14 +202,17 @@ class FrozenRepairMemory(ExecutionModel):
         ranks = sorted(
             self.records,
             key=lambda record: (
-                -(5 * (record.algorithm == algorithm)
-                  + 3 * (record.failure_family == failure_family)),
+                -(
+                    5 * (record.algorithm == algorithm)
+                    + 3 * (record.failure_family == failure_family)
+                ),
                 record.record_id,
             ),
         )
         eligible = [
-            record for record in ranks if record.algorithm == algorithm
-            or record.failure_family == failure_family
+            record
+            for record in ranks
+            if record.algorithm == algorithm or record.failure_family == failure_family
         ][:k]
         return [
             {

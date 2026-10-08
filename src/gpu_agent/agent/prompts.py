@@ -121,8 +121,10 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
     evidence = payload.get("evidence")
     context = evidence.get("repair_context") if isinstance(evidence, Mapping) else None
     feedback = payload.get("public_repair_feedback")
-    if context is not None or payload.get("repair_experiences") is not None or (
-        isinstance(feedback, Mapping) and feedback.get("contract") == "public-repair-v3"
+    if (
+        context is not None
+        or payload.get("repair_experiences") is not None
+        or (isinstance(feedback, Mapping) and feedback.get("contract") == "public-repair-v3")
     ):
         return REPAIR_PROMPT_VERSION, PROMPTS[kind] + REPAIR_INSTRUCTIONS
     return PROMPT_VERSION, PROMPTS[kind]

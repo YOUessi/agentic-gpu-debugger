@@ -15,9 +15,7 @@ def main() -> None:
     args = p.parse_args()
     if args.output.exists():
         raise ValueError("refuse to overwrite a frozen memory index")
-    index = FrozenRepairMemory.from_public_runs(
-        RunStore(args.public_store), args.run_id
-    )
+    index = FrozenRepairMemory.from_public_runs(RunStore(args.public_store), args.run_id)
     index.save(args.output)
     print(f"MEMORY_EXPORTED count={len(index.records)} hash={index.corpus_sha256}")
 

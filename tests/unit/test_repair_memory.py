@@ -33,14 +33,17 @@ def _fixture_run(store, *, mismatch: str | None = None):
     )
     store.put(run.id, "public-task.json", task.model_dump_json().encode(), "public")
     store.put(
-        run.id, "diagnosis.json",
-        DiagnosisResult.inconclusive("OLDER_DIAGNOSIS").model_dump_json().encode(), "public",
+        run.id,
+        "diagnosis.json",
+        DiagnosisResult.inconclusive("OLDER_DIAGNOSIS").model_dump_json().encode(),
+        "public",
     )
     selfcheck = store.create_run("repair_self_check", parent_run_id=run.id)
     store.transition(selfcheck.id, "RUNNING", "PREPARING")
     store.put(selfcheck.id, "sources/kernel.cu", patched, "public")
     result = {
-        "run_id": selfcheck.id, "status": "FAILED",
+        "run_id": selfcheck.id,
+        "status": "FAILED",
         "checks": {"functional": "PASSED", "racecheck": "FINDING"},
         "feedback": [],
     }
@@ -57,13 +60,18 @@ def _fixture_run(store, *, mismatch: str | None = None):
     store.put(run.id, "repair/1/candidate.json", json.dumps(candidate).encode(), "public")
     store.put(run.id, "repair/1/result.json", json.dumps(result).encode(), "public")
     store.put(
-        run.id, "repair/1/patch-effect.json",
-        json.dumps({"semantic_equivalence": "PROVEN_LOCAL_NO_OP"}).encode(), "public",
+        run.id,
+        "repair/1/patch-effect.json",
+        json.dumps({"semantic_equivalence": "PROVEN_LOCAL_NO_OP"}).encode(),
+        "public",
     )
     store.put(
-        run.id, "repair/summary.json",
-        json.dumps({"rounds": [{"candidate_hash": candidate["patched_source_hash"],
-                               "check": result}]}).encode(), "public",
+        run.id,
+        "repair/summary.json",
+        json.dumps(
+            {"rounds": [{"candidate_hash": candidate["patched_source_hash"], "check": result}]}
+        ).encode(),
+        "public",
     )
     store.transition(run.id, "COMPLETED", None)
     return run.id
@@ -109,7 +117,8 @@ def test_memory_refuses_evaluator_store(tmp_path):
 
 @pytest.mark.parametrize("use_memory", [False, True])
 def test_optional_memory_is_only_in_v3_initial_patch(
-    oob_service, use_memory,
+    oob_service,
+    use_memory,
 ):
     service, provider, source = oob_service
     kernel = (source / "kernel.cu").read_bytes()
@@ -143,13 +152,20 @@ def test_optional_memory_is_only_in_v3_initial_patch(
             max_candidates=1,
         ),
     )
-    patch_requests = [item for item, kind in zip(provider.inputs, provider.kinds, strict=True)
-                      if kind == "patch"]
+    patch_requests = [
+        item for item, kind in zip(provider.inputs, provider.kinds, strict=True) if kind == "patch"
+    ]
     assert len(patch_requests) == 1
     assert ("repair_experiences" in patch_requests[0]) is use_memory
-    assert len([
-        r for r in service.store.load(
-            next(p for p in service.store.root.iterdir() if p.is_dir()).name
-        ).artifact_refs
-        if r.name == "repair/experience-retrieval.json"
-    ]) <= 1
+    assert (
+        len(
+            [
+                r
+                for r in service.store.load(
+                    next(p for p in service.store.root.iterdir() if p.is_dir()).name
+                ).artifact_refs
+                if r.name == "repair/experience-retrieval.json"
+            ]
+        )
+        <= 1
+    )

@@ -648,8 +648,11 @@ class LLMProvider(Protocol):
     ) -> AgentAction: ...
     def diagnose(self, evidence: PublicEvidence) -> DiagnosisResult: ...
     def propose_patch(
-        self, public_source: PublicSource, diagnosis: DiagnosisResult,
-        *, experience_hints: list[dict[str, str]] | None = None,
+        self,
+        public_source: PublicSource,
+        diagnosis: DiagnosisResult,
+        *,
+        experience_hints: list[dict[str, str]] | None = None,
     ) -> str: ...
     def revise_patch(
         self, public_source: PublicSource, diagnosis: DiagnosisResult, feedback: dict[str, object]
@@ -953,8 +956,11 @@ class OpenAIResponsesProvider:
         )
 
     def propose_patch(
-        self, public_source: PublicSource, diagnosis: DiagnosisResult,
-        *, experience_hints: list[dict[str, str]] | None = None,
+        self,
+        public_source: PublicSource,
+        diagnosis: DiagnosisResult,
+        *,
+        experience_hints: list[dict[str, str]] | None = None,
     ) -> str:
         return self._patch(public_source, diagnosis, experience_hints=experience_hints)
 
@@ -1057,8 +1063,11 @@ class FakeProvider:
         return self.result
 
     def propose_patch(
-        self, public_source: PublicSource, diagnosis: DiagnosisResult,
-        *, experience_hints: list[dict[str, str]] | None = None,
+        self,
+        public_source: PublicSource,
+        diagnosis: DiagnosisResult,
+        *,
+        experience_hints: list[dict[str, str]] | None = None,
     ) -> str:
         self._record(
             "patch",
