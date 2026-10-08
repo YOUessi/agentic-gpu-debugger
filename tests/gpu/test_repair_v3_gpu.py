@@ -501,7 +501,11 @@ def test_real_gpu_race_failure_reuses_self_check_and_repairs_in_two_candidates(
             "__shared__ volatile float slots[32];",
             1,
         )
-        .replace("const unsigned int slot = threadIdx.x & 15U;", "const unsigned int slot = threadIdx.x;", 1)
+        .replace(
+            "const unsigned int slot = threadIdx.x & 15U;",
+            "const unsigned int slot = threadIdx.x;",
+            1,
+        )
         .replace("block_summary = slots[0];", "block_summary = slots[0] + slots[31];", 1)
     )
     assert wrong != original and correct != wrong
@@ -511,7 +515,9 @@ def test_real_gpu_race_failure_reuses_self_check_and_repairs_in_two_candidates(
         if request.config.getoption("--gpu-run-root")
         else tmp_path / "public-runs"
     )
-    availability = backend_factory(public, tmp_path / "probe", tmp_path / "probe-tasks").availability()
+    availability = backend_factory(
+        public, tmp_path / "probe", tmp_path / "probe-tasks"
+    ).availability()
     if not availability.ready:
         pytest.skip(availability.reason)
     toolchain = load_toolchain_lock(LOCK_PATH)
