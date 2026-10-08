@@ -20,7 +20,7 @@
 
 开发在独立云端 checkout `/workspace/scratch/cca353f9d23f/agentic-gpu-debugger` 进行，
 解释器为该目录的 `.venv/bin/python`（Python 3.12.14）。Tang 上已有未提交工作的项目目录不作开发用途；
-真实 GPU 验证将从 GitHub 提交建立另一个独立检出。
+真实 GPU 验证从 GitHub 提交建立另一个独立检出，具体提交和结果见第四轮。
 
 验收包括：默认 V2 兼容、失败候选独立调查、有效新诊断进入原始基准补丁、纯功能错误的 D/E 路径、
 跨运行引用隔离、共享预算与截止时间、不可用停止、异常清理、三轮修订的诊断源码对应，以及原生 GPU 控制流。
@@ -116,13 +116,13 @@ deadline 用例修正输入/输出后单独得到预期失败：实际后端调�
 同版本 `ruff check src tests` 通过，`ruff format --check src tests` 显示 175 个文件无需格式化；
 `mypy --strict src/gpu_agent` 显示 77 个源文件无问题；`pip check` 无依赖冲突。
 
-## 第四轮：完整 CPU 回归与 Tang GPU 验证（进行中）
+## 第四轮：完整 CPU 回归与 Tang GPU 验证
 
 初始全套 baseline 在约 43% 进度后主动中断，退出码 130，不作为通过证据。
 其环境包含 SOCKS 代理，而环境未安装 `socksio`，已有 SDK 构造测试会受此影响。
 只对离线测试子进程移除代理变量后，该既有单测已通过；没有修改 SDK 实现或全局环境。
 
-当前最终离线回归命令：
+本轮完整离线回归命令：
 
 ```bash
 env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY \
@@ -130,7 +130,7 @@ env -u ALL_PROXY -u all_proxy -u HTTP_PROXY -u HTTPS_PROXY \
   --durations=15 -m 'not gpu and not container and not live_llm and not release'
 ```
 
-命令正在运行，完整结果尚待记录，不将进度中的测试点数当作通过总数。
+该命令最终在依赖锁测试处停止，实际结果及下一轮处理见下文；不将中间进度当作完整通过结果。
 
 新增 `tests/gpu/test_repair_v3_gpu.py`，直接使用原生后端与公开案例：原始 OOB → 首候选改为 `a-b`
 → 公开数值错误 → 候选重新调查得到 CLEAN memcheck 和数值错误事实 → original-base 修订为 `a+b`
@@ -193,9 +193,9 @@ Docker 查询进程的 cwd；self-check 和子调查返回后，其 `TemporaryDi
 | 父 run | `6c97649e2d67491da3025eb26adbbd37` |
 | 候选重新调查 run | `4abe0607a92c4cdebcc45887d714ec39` |
 | 公开输入 | vector-add，n=257，a 全为 1.0、b 全为 2.0 |
-| 首候选 | 边界安全但计算 a-b，真实 `NUMERIC_MISMATCH` |
+| 首候选 | 边界安全但计算 a-b；原生输出 shape=[257]、全为 -1.0，真实 `NUMERIC_MISMATCH` |
 | 新调查 | 失败候选 memcheck CLEAN；当前输出仍数值错误，新诊断引用当前工件 |
-| 最终公开检查 | 功能 PASSED；memcheck/racecheck/initcheck/synccheck 全 CLEAN |
+| 最终公开检查 | 原生输出 shape=[257]、全为 3.0，功能 PASSED；memcheck/racecheck/initcheck/synccheck 全 CLEAN |
 | 调查支出 | 2 次原生 Sanitizer，1 次本地固定文档片段检索 |
 | 固定自检支出 | 4 次原生 Sanitizer，独立于调查统计 |
 | 脚本 provider 计数 | 9 次逻辑调用；真实模型 API 调用 0 次 |
@@ -229,8 +229,81 @@ Docker 查询进程的 cwd；self-check 和子调查返回后，其 `TemporaryDi
 `/workspace/scratch/cca353f9d23f/repair-v3-packaging-_ogumrmg/dist/`。
 wheel 为 540,112 bytes，sdist 为 671,987 bytes。构建前后源码快照内容变化为空，没有在仓库写入分发物。
 
-本地开发环境的 OpenAI SDK 实际为 3.26.1，满足项目声明范围，但不同于 CI `requirements.lock` 的精确
-版本 3.13.0。因此还需 GitHub CI 在锁定依赖和 Python 3.11/3.12 上检查；本地通过不替代该环境差异的验证。
+此项构建时，本地开发环境的 OpenAI SDK 为 3.26.1，满足项目声明范围，但不同于 CI
+`requirements.lock` 的精确版本 3.13.0。本地随后对齐锁文件，过程保留在第五轮；GitHub CI
+另在锁定依赖和 Python 3.11/3.12 上检查，本地构建通过不替代该环境差异的验证。
+
+### 草稿 PR 与锁定环境 CI
+
+2026-10-08 14:24:32 UTC 已建立 [PR #2](https://github.com/YOUessi/agentic-gpu-debugger/pull/2)，
+目标为 `design/v2-operator-workflow`，当时 head 为 `663bac61cbeb99df0918493fc639e1b4c7887f58`。
+初始设为 draft，完整测试完成前不宣告可合并。
+
+[CI run 37792215872](https://github.com/YOUessi/agentic-gpu-debugger/actions/runs/37792215872)
+分别使用 Python 3.11 与 3.12 和 `requirements.lock`。依赖、CLI/打包前置、lint/format 和
+strict mypy 先完成，完整 zero-cost tests、最终构建和外部 wheel smoke 的最终结果见第六轮。
+
+## 第五轮：本地完整回归暴露依赖安装偏差
+
+本地完整回归结束为 **1 failed, 1258 passed, 54 deselected in 1848.14s**，退出码 1。
+失败项为 `tests/unit/test_retrieval.py::test_lock_covers_declared_dependencies_and_runtime_closure`，
+明确错误是本地 `librt==0.16.0` 与 `requirements.lock` 的 `0.15.0` 不一致。
+
+原因属于开发环境初始化：开始时执行 editable `[dev]` 安装，解析到了声明范围内较新的包，
+没有先完整安装锁文件。除已记录的 OpenAI SDK 差异外，`librt`、Typer 等也可能与精确锁不同。
+`pip check` 只验证版本约束相容，不能证明环境等于仓库锁；本次依赖锁测试正确暴露了这个区别。
+没有将此失败改称源代码通过，也没有改锁文件迁就开发环境。
+
+修复命令为 `.venv/bin/python -m pip install --disable-pip-version-check -r requirements.lock`，
+退出码 0，完整输出为相邻任务目录的 `repair-v3-lock-install.log`。恢复仓库锁定的 OpenAI 3.13.0、
+librt 0.15.0、Typer 0.27.2、Ruff 0.16.7 等版本，没有修改源码或 lock。
+
+从原始收集顺序中选取失败项及其后的 319 个未执行用例，保存为相邻目录的
+`repair-v3-remaining-nodeids.txt`，并增加受依赖变化影响的
+`tests/unit/test_repair_public_context.py` 和
+`tests/unit/test_repair_reinvestigation.py::test_repair_cli_selects_v3_explicitly`。
+通过 Python 的 `pytest.main(['-x', '-q', '--durations=10', *remaining, *extra])` 执行，
+同样只在测试子进程移除代理变量。该续跑的实际结果是 **353 passed in 53.36s**，退出码 0，
+完整输出为 `repair-v3-offline-remainder.log`。
+
+因此最初收集的 1,578 个 CPU 用例在两段本地执行中均得到通过结果，另有 33 项依赖相关复验；
+这不是“一次全套在同一锁定环境通过”，两段环境差别保留在记录中。
+已通过的昂贵评测存储测试没有因依赖安装重跑。锁定环境下再次运行 Ruff lint、175 文件 format check、
+77 源文件 strict mypy 和 pip check，均通过。
+GitHub 两组 CI 从开始即安装同一锁文件，已通过依赖锁前置检查，其完整结果见第六轮。
+
+## 第六轮：锁定环境 CI 与交付核对
+
+2026-10-08 15:04:32 UTC，[CI run 37792215872](https://github.com/YOUessi/agentic-gpu-debugger/actions/runs/37792215872)
+结束为 `completed/success`。已实际读取两个 job 的步骤结果与完整日志；workflow 的 head 为
+`663bac61cbeb99df0918493fc639e1b4c7887f58`，PR base 仍为
+`ab46153c0190aa73ed11305b4181a46dccf2be5f`。
+
+全量离线命令为：
+
+```bash
+python -m pytest -q -m 'not gpu and not container and not live_llm and not release'
+```
+
+| 锁定 CI 环境 | 依赖锁、CLI 与打包前置用例 | 完整离线测试 | 后续构建与仓库外 wheel smoke |
+| --- | --- | --- | --- |
+| Python 3.11.17，job `113362299664` | 9 passed in 1.89s | 1578 passed, 54 deselected in 1712.30s | 全部 success |
+| Python 3.12.15，job `113362299206` | 9 passed in 2.44s | 1578 passed, 54 deselected in 2347.27s | 全部 success |
+
+两组的 `pip check`、Ruff lint、175 文件 format check、77 个源文件的 strict mypy 也全部成功。
+sdist 和 wheel 均真实构建；使用单独 venv 安装 wheel，随后从仓库外的工作目录验证 CLI、工具链绑定及运行资源。
+这两项是同一锁文件下各自完整通过的 CPU 证据，与第五轮分段完成的本地结果分开记录。
+它们不包含 GPU、container、live LLM 或 release acceptance，不能替代第四轮的原生 GPU 证据。
+
+交付时再次核对 `bb6e9cf92bf282a53a9071e505148d5582795334` 与上述 CI head：
+只有本修复日志发生变化，源码、测试、依赖、工作流和运行资源均一致。独立复核还确认了
+`Repair v3` 手册锚点、CLI 参数范围、自带公开输入文件和原始源码 hash。
+
+最终收尾提交只更新本日志与 implementation plan 两份文字文件，使用 `[skip ci]` 避免为记录更新
+重复执行已经成功的相同检查；完整 CI 证据对应上述 `663bac61`，不是另一次在文档提交上的测试。
+最终交付为 [PR #2](https://github.com/YOUessi/agentic-gpu-debugger/pull/2)，目标分支为
+`design/v2-operator-workflow`，本轮不执行合并。Tang 的独立 checkout 保留在精确 GPU 通过提交
+`bb6e9cf92bf282a53a9071e505148d5582795334`，两轮原始 GPU 工件均保留。
 
 ## 尚未评价的范围
 

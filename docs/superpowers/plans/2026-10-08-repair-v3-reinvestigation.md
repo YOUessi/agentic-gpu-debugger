@@ -60,13 +60,13 @@ public evidence projection in `agent/orchestrator.py`; `tests/unit/test_repair_r
 - [x] Test limits, unavailable and inconclusive outcomes, functional-only failure, and one-time private verification.
 - [x] Implement native public child prepare/build/run, exact-source context export and cumulative parent usage records.
 - [x] Expose `--reinvestigate` and bounded `--max-reinvestigations` on the existing repair command.
-- [ ] Run targeted repair, provider, agent and evaluation regression tests, then zero-cost CI checks. Targeted integration: 101 passed; full offline CI is running.
+- [x] Run targeted repair, provider, agent and evaluation regression tests, then zero-cost CI checks. Targeted integration: 101 passed; locked Python 3.11 and 3.12 CI each passed all 1,578 offline tests, followed by successful distribution build and installed-wheel smoke. See [CI run 37792215872](https://github.com/YOUessi/agentic-gpu-debugger/actions/runs/37792215872).
 
 ## Task 4: Independent review, GPU validation and handoff
 
 **Files:** dated `docs/repair-log/2026-10-08-repair-v3-reinvestigation.md`, runbook, changelog; a focused GPU smoke command/test when needed.
 
 - [x] Review the complete implementation against the spec; address material findings with regression tests. All four findings have regression coverage.
-- [ ] Commit the branch through GitHub, then use an isolated Tang checkout to run the committed GPU validation.
-- [ ] Record actual environment and results, separate scripted-provider control-flow proof from live model evidence.
-- [ ] Open a reviewable PR against `design/v2-operator-workflow`; report completed validation and remaining effect-evaluation work.
+- [x] Commit the branch through GitHub, then use an isolated Tang checkout to run the committed GPU validation. Native smoke passed on `bb6e9cf92bf282a53a9071e505148d5582795334`.
+- [x] Record actual environment and results, separate scripted-provider control-flow proof from live model evidence.
+- [x] Open a reviewable PR against `design/v2-operator-workflow`; report completed validation and remaining effect-evaluation work. [PR #2](https://github.com/YOUessi/agentic-gpu-debugger/pull/2) is open; full locked-environment CI and native GPU verification are complete. The dated log preserves both failed rounds and successful reruns, and explicitly leaves live-model V2/V3 effect evaluation for a separate experiment.
