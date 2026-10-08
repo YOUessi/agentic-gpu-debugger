@@ -1,7 +1,6 @@
 """Opt-in no separate sanitizer cap for public Repair v3, preserving normal limits."""
 
 import hashlib
-import json
 from types import SimpleNamespace
 
 import pytest
