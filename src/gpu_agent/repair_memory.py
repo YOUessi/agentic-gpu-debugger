@@ -5,7 +5,6 @@ No evaluator store, private inputs, model-authored lessons, arbitrary URLs, or
 on-the-fly updates are allowed. Rebuild/freeze the index between experiments.
 """
 
-import difflib
 import hashlib
 import json
 import re
@@ -58,23 +57,30 @@ LESSONS: dict[str, str] = {
 }
 
 
-
 _BARRIER_STMT = re.compile(r"^\s*__syncthreads\s*\(\s*\)\s*;\s*(?://.*)?$")
 
 
+def _barrier_neighbors(source: bytes) -> list[tuple[str, str]]:
+    """Record the nearest operations on both sides of every block barrier."""
+    lines = [
+        line.strip()
+        for line in source.decode("utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("//")
+    ]
+    return [
+        (lines[i - 1] if i else "", lines[i + 1] if i + 1 < len(lines) else "")
+        for i, line in enumerate(lines)
+        if _BARRIER_STMT.fullmatch(line) is not None
+    ]
+
+
 def _edited_block_barrier(before: bytes, after: bytes) -> bool:
-    """Recognize edits to standalone CUDA block barriers; never infer causality."""
-    changed = difflib.unified_diff(
-        before.decode("utf-8").splitlines(),
-        after.decode("utf-8").splitlines(),
-        n=0,
-    )
-    return any(
-        line[:1] in {"+", "-"}
-        and not line.startswith(("+++", "---"))
-        and _BARRIER_STMT.fullmatch(line[1:]) is not None
-        for line in changed
-    )
+    """Detect insertion/removal or changed operation order around block barriers.
+
+    This is a historical warning about an edit and failed check, never a
+    deterministic attribution that this edit caused the observed failure.
+    """
+    return _barrier_neighbors(before) != _barrier_neighbors(after)
 
 
 def _digest(value: object) -> str:
@@ -195,7 +201,10 @@ def derive_public_experiences(store: RunStore, run_id: str) -> list[RepairExperi
             originals["kernel.cu"], checked_sources["kernel.cu"]
         ) and (
             checks.get("functional") not in (None, "PASSED")
-            or any(checks.get(tool) == "FINDING" for tool in ("memcheck", "racecheck", "initcheck", "synccheck"))
+            or any(
+                checks.get(tool) == "FINDING"
+                for tool in ("memcheck", "racecheck", "initcheck", "synccheck")
+            )
         ):
             lesson_code = "BLOCK_BARRIER_EDIT_FAILED"
         elif checks.get("functional") not in (None, "PASSED"):

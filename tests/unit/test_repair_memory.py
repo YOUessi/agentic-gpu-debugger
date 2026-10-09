@@ -208,3 +208,20 @@ def test_frozen_indexes_combine_deterministically_without_refetching(store):
     assert len(joined.records) == 2
     assert joined == FrozenRepairMemory.combine([second, first])
     assert joined.corpus_sha256 == _digest(sorted(record.record_id for record in joined.records))
+
+
+def test_barrier_swap_across_a_write_is_detected_even_when_diff_aligns_barrier():
+    from gpu_agent.repair_memory import _edited_block_barrier
+
+    before = (
+        b"const float v = tile[lane];\n"
+        b"__syncthreads();\n"
+        b"tile[lane] = v;\n"
+    )
+    after = (
+        b"const float v = tile[lane];\n"
+        b"tile[lane] = v;\n"
+        b"__syncthreads();\n"
+    )
+    assert _edited_block_barrier(before, after)
+    assert not _edited_block_barrier(before, before + b"int unrelated;\n")
