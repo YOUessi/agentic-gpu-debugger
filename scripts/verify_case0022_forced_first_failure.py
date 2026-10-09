@@ -18,8 +18,8 @@ from urllib.parse import urlsplit
 
 from gpu_agent.agent.provider import (
     DevelopmentCallPolicy,
-    OpenAIResponsesProvider,
     OpenAIProviderSettings,
+    OpenAIResponsesProvider,
 )
 from gpu_agent.provenance import capture_repository_snapshot, runtime_code_fingerprint
 from gpu_agent.public_task import PublicTask
@@ -61,9 +61,7 @@ def main() -> int:
     assert task.source_sha256 == digest(source.encode())
     old = "        __syncthreads();\n        tile[lane] = value;"
     assert source.count(old) == 1
-    incorrect = source.replace(
-        old, "        tile[lane] = value;\n        __syncthreads();", 1
-    )
+    incorrect = source.replace(old, "        tile[lane] = value;\n        __syncthreads();", 1)
     assert digest(incorrect.encode()) == (
         "d1fac7bc60f231f4bc041b71ef7b04ece7f13ba8794aa90f7a9cdd504ebecce5"
     ), "forced error no longer matches frozen V3 candidate"
@@ -172,9 +170,13 @@ def main() -> int:
             "cost_usd": None,
         }
         saved_feedback = [
-            {"artifact_name": name, "revision_history": value.get("revision_history", []),
-             "diagnosis_scoped_to_latest_candidate":
-                 value.get("diagnosis_scoped_to_latest_candidate")}
+            {
+                "artifact_name": name,
+                "revision_history": value.get("revision_history", []),
+                "diagnosis_scoped_to_latest_candidate": value.get(
+                    "diagnosis_scoped_to_latest_candidate"
+                ),
+            }
             for name, value in sorted(artifacts.items())
             if name.endswith("/feedback.json")
         ]
@@ -191,9 +193,12 @@ def main() -> int:
             "stop_reason": summary.get("stop_reason"),
             "candidate_rounds": len(summary.get("rounds", [])),
             "public_rounds": [
-                {"round": item["round"], "candidate_hash": item.get("candidate_hash"),
-                 "checks": item.get("check", {}).get("checks"),
-                 "status": item.get("check", {}).get("status")}
+                {
+                    "round": item["round"],
+                    "candidate_hash": item.get("candidate_hash"),
+                    "checks": item.get("check", {}).get("checks"),
+                    "status": item.get("check", {}).get("status"),
+                }
                 for item in summary.get("rounds", [])
             ],
             "reinvestigations": summary.get("reinvestigations", 0),
@@ -203,10 +208,23 @@ def main() -> int:
             "historical_v3_comparison": "single development replay; not causal evidence",
         }
         save_exclusive(output / "result.json", row)
-        print("FORCED_REPLAY_RESULT=" + json.dumps(
-            {k: row[k] for k in ("run_id", "verdict", "stop_reason",
-                                 "candidate_rounds", "reinvestigations", "usage")}
-        ), flush=True)
+        print(
+            "FORCED_REPLAY_RESULT="
+            + json.dumps(
+                {
+                    k: row[k]
+                    for k in (
+                        "run_id",
+                        "verdict",
+                        "stop_reason",
+                        "candidate_rounds",
+                        "reinvestigations",
+                        "usage",
+                    )
+                }
+            ),
+            flush=True,
+        )
         return 0 if row["verdict"] == "VERIFIED_FIXED" else 1
     except BaseException as exc:
         # Never print an upstream response body, secret, or private evaluator data.
