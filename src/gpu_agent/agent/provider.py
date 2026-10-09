@@ -28,7 +28,7 @@ from gpu_agent.agent.models import (
     PublicSource,
 )
 from gpu_agent.agent.policy import CallKind, LLMCallGate, validate_diagnosis
-from gpu_agent.agent.prompts import PROMPT_VERSION, PROMPTS
+from gpu_agent.agent.prompts import PROMPT_VERSION, select_prompt
 from gpu_agent.agent.transport import TransportError, classify_transport_error
 from gpu_agent.contracts import new_id, now
 from gpu_agent.execution.models import ExecutionModel
@@ -517,7 +517,8 @@ def invoke_sdk(
         correction = (
             correction_text(request.kind, request.correction_hints) if request.attempt else ""
         )
-        instructions = PROMPTS[request.kind] + correction
+        _, instructions = select_prompt(request.kind, request.payload)
+        instructions += correction
         common = {
             "model": request.model,
             "input": json.dumps({"untrusted_data": request.payload}, ensure_ascii=False),
@@ -807,6 +808,7 @@ class OpenAIResponsesProvider:
                     else new_id()
                 ),
                 endpoint_host=urlsplit(self.settings.endpoint or "").hostname or "",
+                prompt_version=select_prompt(kind, payload)[0],
                 format_retry_of=previous,
             )
             self._save(invocation)

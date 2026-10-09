@@ -92,3 +92,5 @@
 - [2026-10-03：投递收尾](2026-10-03-portfolio-handoff.md)
 - [2026-10-03：CI同名测试模块收集修复](2026-10-03-ci-collection.md)
 - [2026-10-04：GitHub第二次CI失败核查与日志缺口](2026-10-04-github-ci-second-run.md)
+- [2026-10-08：Repair v3失败候选重新调查、来源作用域与共享预算](2026-10-08-repair-v3-reinvestigation.md)
+- [2026-10-09：Repair v3首次真实模型试用、无效补丁与调查预算不足](2026-10-09-repair-v3-live-use.md)

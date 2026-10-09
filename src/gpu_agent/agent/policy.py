@@ -125,6 +125,11 @@ class LLMCallGate:
         # One format retry per call kind: a diagnose retry must not use up the patch's.
         self._format_retried: set[CallKind] = set()
 
+    def begin_repair_cycle(self) -> None:
+        """Reserve the next diagnosis and patch within the original task limits."""
+        with self._lock:
+            self._diagnosed = self._patched = False
+
     def remaining(self) -> float:
         return max(0.0, self._budget.max_wall_time_seconds - (self._clock() - self._start))
 
@@ -183,7 +188,13 @@ def action_policy_for_prompt(prompt_version: str | None) -> ActionPolicyVersion:
         raise ValueError("action replay requires a bound prompt version")
     return (
         CURRENT_ACTION_POLICY
-        if prompt_version in {"m3-2026-09-29-v10", "m3-2026-09-30-v11", "m3-2026-10-01-v12"}
+        if prompt_version
+        in {
+            "m3-2026-09-29-v10",
+            "m3-2026-09-30-v11",
+            "m3-2026-10-01-v12",
+            "public-repair-v3-2026-10-08-v1",
+        }
         else "diagnosis-m1-v1"
     )
 
@@ -194,7 +205,8 @@ def missing_evidence(evidence: PublicEvidence) -> list[MissingEvidence]:
     if "memcheck" not in evidence.sanitizer_outcomes:
         missing.append("memcheck_outcome")
     if not evidence.tool_findings:
-        missing.append("tool_finding")
+        if evidence.repair_context is None or not evidence.repair_context.public_functional_failure:
+            missing.append("tool_finding")
     elif not evidence.documentation:
         missing.append("documentation_for_finding")
     return missing

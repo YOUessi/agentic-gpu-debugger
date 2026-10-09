@@ -1,0 +1,295 @@
+[
+  {
+    "run_id": "177a6daf715a4b53bfc47eeca11cf831",
+    "step": 0,
+    "action_type": "run_memcheck",
+    "arguments": {},
+    "budget_before": {
+      "agent_steps": 0,
+      "budget_version": "m1-v1",
+      "llm_calls": 0,
+      "max_agent_steps": 38,
+      "max_llm_calls": 40,
+      "max_rag_calls": 3,
+      "max_sanitizer_calls": 4,
+      "max_source_reads": 5,
+      "max_wall_time_seconds": 600.0,
+      "rag_calls": 0,
+      "remaining_seconds": 593.7550294059911,
+      "sanitizer_calls": 0,
+      "source_reads": 0
+    },
+    "decision": {
+      "action_type": "run_memcheck",
+      "action_hash": "b0cf15936b67cebe924f0d1fd0b87ce266110a093580a4074c2519eda3f4b151",
+      "allowed": true,
+      "mandatory_actions": [
+        "run_memcheck"
+      ],
+      "prohibited_actions": [
+        "modify_source",
+        "network",
+        "private_files",
+        "shell"
+      ],
+      "reason_codes": [],
+      "policy_version": "diagnosis-full-source-v2"
+    }
+  },
+  {
+    "run_id": "177a6daf715a4b53bfc47eeca11cf831",
+    "step": 1,
+    "action_type": "run_synccheck",
+    "arguments": {},
+    "budget_before": {
+      "agent_steps": 1,
+      "budget_version": "m1-v1",
+      "llm_calls": 1,
+      "max_agent_steps": 38,
+      "max_llm_calls": 40,
+      "max_rag_calls": 3,
+      "max_sanitizer_calls": 4,
+      "max_source_reads": 5,
+      "max_wall_time_seconds": 600.0,
+      "rag_calls": 0,
+      "remaining_seconds": 588.5387377620209,
+      "sanitizer_calls": 1,
+      "source_reads": 0
+    },
+    "decision": {
+      "action_type": "run_synccheck",
+      "action_hash": "a1b6f6ac60ffca8358eb42ea96de8ed4b71107838d948fcb6474cb37142328fb",
+      "allowed": true,
+      "mandatory_actions": [],
+      "prohibited_actions": [
+        "modify_source",
+        "network",
+        "private_files",
+        "shell"
+      ],
+      "reason_codes": [],
+      "policy_version": "diagnosis-full-source-v2"
+    }
+  },
+  {
+    "run_id": "177a6daf715a4b53bfc47eeca11cf831",
+    "step": 2,
+    "action_type": "run_racecheck",
+    "arguments": {},
+    "budget_before": {
+      "agent_steps": 2,
+      "budget_version": "m1-v1",
+      "llm_calls": 2,
+      "max_agent_steps": 38,
+      "max_llm_calls": 40,
+      "max_rag_calls": 3,
+      "max_sanitizer_calls": 4,
+      "max_source_reads": 5,
+      "max_wall_time_seconds": 600.0,
+      "rag_calls": 0,
+      "remaining_seconds": 582.4530167379999,
+      "sanitizer_calls": 2,
+      "source_reads": 0
+    },
+    "decision": {
+      "action_type": "run_racecheck",
+      "action_hash": "cd4d977ef3a8b7a017201e54e6ff00841ea144cf38fcd1f80015e2d7259cd27a",
+      "allowed": true,
+      "mandatory_actions": [],
+      "prohibited_actions": [
+        "modify_source",
+        "network",
+        "private_files",
+        "shell"
+      ],
+      "reason_codes": [],
+      "policy_version": "diagnosis-full-source-v2"
+    }
+  },
+  {
+    "run_id": "177a6daf715a4b53bfc47eeca11cf831",
+    "step": 3,
+    "action_type": "retrieve_official_docs",
+    "arguments": {
+      "k": 5,
+      "query": "CUDA shared memory race volatile __shared__ warp-synchronous writes no read of value written by another thread documentation"
+    },
+    "budget_before": {
+      "agent_steps": 3,
+      "budget_version": "m1-v1",
+      "llm_calls": 3,
+      "max_agent_steps": 38,
+      "max_llm_calls": 40,
+      "max_rag_calls": 3,
+      "max_sanitizer_calls": 4,
+      "max_source_reads": 5,
+      "max_wall_time_seconds": 600.0,
+      "rag_calls": 0,
+      "remaining_seconds": 576.5865750760422,
+      "sanitizer_calls": 3,
+      "source_reads": 0
+    },
+    "decision": {
+      "action_type": "retrieve_official_docs",
+      "action_hash": "f527b5ab9fafdd4aa04f3077697a51729541cc87bd9af47d8a3d5e9aa1ca4f55",
+      "allowed": true,
+      "mandatory_actions": [
+        "retrieve_official_docs"
+      ],
+      "prohibited_actions": [
+        "modify_source",
+        "network",
+        "private_files",
+        "shell"
+      ],
+      "reason_codes": [],
+      "policy_version": "diagnosis-full-source-v2"
+    }
+  },
+  {
+    "run_id": "177a6daf715a4b53bfc47eeca11cf831",
+    "step": 4,
+    "action_type": "finish_diagnosis",
+    "arguments": {},
+    "budget_before": {
+      "agent_steps": 4,
+      "budget_version": "m1-v1",
+      "llm_calls": 4,
+      "max_agent_steps": 38,
+      "max_llm_calls": 40,
+      "max_rag_calls": 3,
+      "max_sanitizer_calls": 4,
+      "max_source_reads": 5,
+      "max_wall_time_seconds": 600.0,
+      "rag_calls": 1,
+      "remaining_seconds": 571.7543884930201,
+      "sanitizer_calls": 3,
+      "source_reads": 0
+    },
+    "decision": {
+      "action_type": "finish_diagnosis",
+      "action_hash": "84183ea118016d2c87e23cb43d7a4b263521682ea90ef15c5e2d4e86779c092f",
+      "allowed": true,
+      "mandatory_actions": [],
+      "prohibited_actions": [
+        "modify_source",
+        "network",
+        "private_files",
+        "shell"
+      ],
+      "reason_codes": [],
+      "policy_version": "diagnosis-full-source-v2"
+    }
+  },
+  {
+    "run_id": "a22d2eea2497495cb6ea567a96223cd4",
+    "step": 5,
+    "action_type": "run_memcheck",
+    "arguments": {},
+    "budget_before": {
+      "agent_steps": 5,
+      "budget_version": "m1-v1",
+      "llm_calls": 7,
+      "max_agent_steps": 38,
+      "max_llm_calls": 40,
+      "max_rag_calls": 3,
+      "max_sanitizer_calls": 4,
+      "max_source_reads": 5,
+      "max_wall_time_seconds": 600.0,
+      "rag_calls": 1,
+      "remaining_seconds": 538.4191179670161,
+      "sanitizer_calls": 3,
+      "source_reads": 0
+    },
+    "decision": {
+      "action_type": "run_memcheck",
+      "action_hash": "f85a79f88a292e1696c0d72a0aa6ccb56b79ff75865a1ba84c6d81fbbfd5cea8",
+      "allowed": true,
+      "mandatory_actions": [
+        "run_memcheck"
+      ],
+      "prohibited_actions": [
+        "modify_source",
+        "network",
+        "private_files",
+        "shell"
+      ],
+      "reason_codes": [],
+      "policy_version": "diagnosis-full-source-v2"
+    }
+  },
+  {
+    "run_id": "a22d2eea2497495cb6ea567a96223cd4",
+    "step": 6,
+    "action_type": "run_racecheck",
+    "arguments": {},
+    "budget_before": {
+      "agent_steps": 6,
+      "budget_version": "m1-v1",
+      "llm_calls": 8,
+      "max_agent_steps": 38,
+      "max_llm_calls": 40,
+      "max_rag_calls": 3,
+      "max_sanitizer_calls": 4,
+      "max_source_reads": 5,
+      "max_wall_time_seconds": 600.0,
+      "rag_calls": 1,
+      "remaining_seconds": 530.8743289830163,
+      "sanitizer_calls": 4,
+      "source_reads": 0
+    },
+    "decision": {
+      "action_type": "run_racecheck",
+      "action_hash": "9aa909e119771ed8bb43ef8ac59a8116d796e399bf9dc7048fbd653c9d233f99",
+      "allowed": false,
+      "mandatory_actions": [],
+      "prohibited_actions": [
+        "modify_source",
+        "network",
+        "private_files",
+        "shell"
+      ],
+      "reason_codes": [
+        "AGENT_BUDGET_EXHAUSTED"
+      ],
+      "policy_version": "diagnosis-full-source-v2"
+    }
+  },
+  {
+    "run_id": "a22d2eea2497495cb6ea567a96223cd4",
+    "step": 7,
+    "action_type": "run_racecheck",
+    "arguments": {},
+    "budget_before": {
+      "agent_steps": 7,
+      "budget_version": "m1-v1",
+      "llm_calls": 9,
+      "max_agent_steps": 38,
+      "max_llm_calls": 40,
+      "max_rag_calls": 3,
+      "max_sanitizer_calls": 4,
+      "max_source_reads": 5,
+      "max_wall_time_seconds": 600.0,
+      "rag_calls": 1,
+      "remaining_seconds": 526.1766633390216,
+      "sanitizer_calls": 4,
+      "source_reads": 0
+    },
+    "decision": {
+      "action_type": "run_racecheck",
+      "action_hash": "d09273e320b098b5bebdb4da2eb9c0967ef440f27b644975bb3e66affef2f984",
+      "allowed": false,
+      "mandatory_actions": [],
+      "prohibited_actions": [
+        "modify_source",
+        "network",
+        "private_files",
+        "shell"
+      ],
+      "reason_codes": [
+        "AGENT_BUDGET_EXHAUSTED"
+      ],
+      "policy_version": "diagnosis-full-source-v2"
+    }
+  }
+]

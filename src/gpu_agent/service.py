@@ -655,7 +655,7 @@ class ApplicationService:
                 )
                 if execution.runtime_status in {"TOOL_ERROR", "TIMEOUT", "CANCELLED", "TRUNCATED"}:
                     raise ProviderError("EXECUTION_EVIDENCE_UNAVAILABLE")
-                result = AgentOrchestrator(
+                orchestrator = AgentOrchestrator(
                     self.store,
                     provider,
                     backend,
@@ -663,7 +663,8 @@ class ApplicationService:
                     stdin_ref,
                     self.knowledge,
                     self.knowledge_version,
-                ).investigate(run.id, mode=mode, required_tools=required_tools)
+                )
+                result = orchestrator.investigate(run.id, mode=mode, required_tools=required_tools)
                 if result.diagnostic_outcome == "DIAGNOSED":
                     self.store.transition(run.id, "RUNNING", "PATCH_GENERATING")
                     public_source = public_evidence(self.store, run.id).sources[0]
@@ -681,6 +682,21 @@ class ApplicationService:
                         }
                     )
                     if repair_policy is not None:
+                        from gpu_agent.repair_coordinator import RepairCoordinator
+
+                        coordinator = None
+                        if repair_policy.version == "public-repair-v3":
+                            assert public_task is not None
+                            coordinator = RepairCoordinator(
+                                self.store,
+                                orchestrator,
+                                self._backend_factory,
+                                public_task,
+                                public_source,
+                                result,
+                                max_reinvestigations=repair_policy.max_reinvestigations,
+                                mode=mode,
+                            )
                         candidate = repair_candidates(
                             self.store,
                             snapshot,
@@ -692,6 +708,7 @@ class ApplicationService:
                             self._backend_factory,
                             repair_policy,
                             public_task,
+                            coordinator=coordinator,
                         )
                     register_candidate(self.store, candidate)
             except (ProviderError, BackendInfrastructureError) as exc:

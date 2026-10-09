@@ -8,6 +8,16 @@ Versioning and the structure of Keep a Changelog.
 - Final V2 release evidence and the frozen paid evaluation remain gated by the
   repository's acceptance policy.
 
+### Added
+
+- 显式启用的 Repair v3：公开自检失败后按受控信号重新调查失败候选，支持 D/E，默认
+  Repair v2 保持不变。新增 `--reinvestigate` 和 `--max-reinvestigations`，共享原有
+  调用、调查工具与时间预算，并单独记录自检 Sanitizer 用量。
+- 保存候选作用域诊断、重新调查 lineage、决策和停止原因；以 hash 匹配的
+  `diagnosis_source` 解释诊断，后续补丁仍以原始源码为基准，最终独立 strict 验证机制
+  保持不变。使用与证据边界见 [Repair v3 操作说明](docs/v2-operator-runbook.md#repair-v3)；
+  本次实现不作为 GPU/LLM 修复收益已经验证的声明。
+
 ## [0.2.0] - 2026-09-20
 
 ### Added

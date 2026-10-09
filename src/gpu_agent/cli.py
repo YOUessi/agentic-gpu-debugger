@@ -896,6 +896,10 @@ def repair_command(
     allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
     max_candidates: Annotated[int, typer.Option("--max-candidates", min=1, max=20)] = 3,
     max_llm_calls: Annotated[int, typer.Option("--max-llm-calls", min=1, max=40)] = 40,
+    reinvestigate: Annotated[
+        bool, typer.Option("--reinvestigate", help="Enable v3 investigation of failed candidates.")
+    ] = False,
+    max_reinvestigations: Annotated[int, typer.Option("--max-reinvestigations", min=0, max=3)] = 1,
 ) -> None:
     """Investigate, self-check/revise using public inputs, then independently verify."""
     from gpu_agent.agent.provider import DevelopmentCallPolicy
@@ -907,7 +911,14 @@ def repair_command(
         service = ApplicationService.configured()
         if allow_paid_calls:
             service.allow_development_paid_calls(DevelopmentCallPolicy(max_llm_calls=max_llm_calls))
-        run, verified = service.repair(source, policy=RepairPolicy(max_candidates=max_candidates))
+        run, verified = service.repair(
+            source,
+            policy=RepairPolicy(
+                version="public-repair-v3" if reinvestigate else "public-repair-v2",
+                max_candidates=max_candidates,
+                max_reinvestigations=max_reinvestigations,
+            ),
+        )
         typer.echo(f"run_id {run.id}")
         for ref in run.artifact_refs:
             if ref.name == "repair/summary.json":

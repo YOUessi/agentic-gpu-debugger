@@ -1,8 +1,8 @@
 """M1 model-facing contracts contain identifiers, never executable capabilities."""
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import Field, TypeAdapter
+from pydantic import Field, SerializerFunctionWrapHandler, TypeAdapter, model_serializer
 
 from gpu_agent.contracts import new_id
 from gpu_agent.execution.models import CheckOutcome, ExecutionModel, SanitizerTool, SourceLocation
@@ -234,17 +234,6 @@ class PublicFinding(ExecutionModel):
     source_location: SourceLocation | None = None
 
 
-class PublicEvidence(ExecutionModel):
-    """Explicit export allowlist; backend commands, paths and harness stay controller-side."""
-
-    sources: list[PublicSource] = Field(default_factory=list)
-    observed_facts: list[EvidenceClaim] = Field(default_factory=list)
-    tool_findings: list[PublicFinding] = Field(default_factory=list)
-    documentation: list[DocumentChunk] = Field(default_factory=list)
-    sanitizer_outcomes: dict[SanitizerTool, CheckOutcome] = Field(default_factory=dict)
-    limitations: list[str] = Field(default_factory=list)
-
-
 # Frozen before any evaluation run (evaluation/development-labels.json uses the same set).
 # A closed vocabulary makes family accuracy a label comparison, not a spelling contest.
 FailureFamily = Literal[
@@ -286,6 +275,42 @@ class DiagnosisResult(ExecutionModel):
             diagnostic_outcome="LLM_UNAVAILABLE" if code == "LLM_UNAVAILABLE" else "INCONCLUSIVE",
             limitations=[code],
         )
+
+
+class PublicRepairContext(ExecutionModel):
+    """Public hypotheses and failed checks, attributed to their source versions."""
+
+    version: Literal["public-repair-v3"] = "public-repair-v3"
+    repair_round: int = Field(ge=1, le=20)
+    original_source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    candidate_source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    previous_diagnosis_source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    previous_diagnosis: DiagnosisResult
+    public_checks: dict[str, str]
+    public_feedback: list[dict[str, str]]
+    diagnostic_target: Literal["current_candidate"] = "current_candidate"
+    # The controller derives this from this candidate's actual public execution output.
+    public_functional_failure: bool = False
+
+
+class PublicEvidence(ExecutionModel):
+    """Explicit export allowlist; backend commands, paths and harness stay controller-side."""
+
+    sources: list[PublicSource] = Field(default_factory=list)
+    observed_facts: list[EvidenceClaim] = Field(default_factory=list)
+    tool_findings: list[PublicFinding] = Field(default_factory=list)
+    documentation: list[DocumentChunk] = Field(default_factory=list)
+    sanitizer_outcomes: dict[SanitizerTool, CheckOutcome] = Field(default_factory=dict)
+    limitations: list[str] = Field(default_factory=list)
+    repair_context: PublicRepairContext | None = None
+
+    @model_serializer(mode="wrap")
+    def serialize_public_evidence(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data: dict[str, Any] = handler(self)
+        if self.repair_context is None:
+            # Preserve legacy evidence payloads, including when nested in other models.
+            data.pop("repair_context", None)
+        return data
 
 
 class PolicyDecision(ExecutionModel):

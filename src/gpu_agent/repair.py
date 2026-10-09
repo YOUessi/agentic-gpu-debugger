@@ -5,12 +5,13 @@ import json
 import tempfile
 from collections.abc import Callable
 from pathlib import Path
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from pydantic import Field
 
 from gpu_agent.agent.models import DiagnosisResult, PublicSource
 from gpu_agent.agent.policy import LLMCallGate
+from gpu_agent.agent.prompts import REPAIR_PROMPT_VERSION
 from gpu_agent.agent.provider import LLMProvider, ProviderError
 from gpu_agent.execution.backend import ExecutionBackend
 from gpu_agent.execution.isolated import IsolatedGPUBackend
@@ -32,12 +33,16 @@ from gpu_agent.patching import (
 from gpu_agent.public_task import PublicTask, check_public_output
 from gpu_agent.store import RunStore
 
+if TYPE_CHECKING:
+    from gpu_agent.repair_coordinator import RepairCoordinator
+
 REPAIR_VERSION = "public-repair-v2"
 
 
 class RepairPolicy(ExecutionModel):
-    version: Literal["public-repair-v2"] = "public-repair-v2"
+    version: Literal["public-repair-v2", "public-repair-v3"] = "public-repair-v2"
     max_candidates: int = Field(default=3, ge=1, le=20, strict=True)
+    max_reinvestigations: int = Field(default=1, ge=0, le=3, strict=True)
 
 
 class PublicCheck(ExecutionModel):
@@ -66,6 +71,7 @@ def self_check(
     store.transition(run.id, "RUNNING", "PREPARING")
     checks: dict[str, str] = {}
     feedback: list[dict[str, str]] = []
+    sanitizer_calls = 0
     status: Literal["PASSED", "FAILED", "UNAVAILABLE"] = "UNAVAILABLE"
     with tempfile.TemporaryDirectory(prefix="gpu-agent-self-check-") as tmp:
         root = Path(tmp)
@@ -160,14 +166,14 @@ def self_check(
                             status = "FAILED"
                 if status == "PASSED":
                     for tool in SanitizerTool:
-                        result = backend.run_sanitizer(
-                            SanitizerRequest(
-                                workspace_id=handle.id,
-                                tool=tool.value,
-                                stdin_ref=input_ref,
-                                timeout_seconds=gate.timeout(60),
-                            )
+                        request = SanitizerRequest(
+                            workspace_id=handle.id,
+                            tool=tool.value,
+                            stdin_ref=input_ref,
+                            timeout_seconds=gate.timeout(60),
                         )
+                        sanitizer_calls += 1
+                        result = backend.run_sanitizer(request)
                         checks[tool.value] = result.check_outcome
                         feedback.append(
                             {
@@ -208,9 +214,19 @@ def self_check(
             )
         finally:
             if handle is not None:
-                backend.cleanup(handle)
+                try:
+                    backend.cleanup(handle)
+                except (BackendInfrastructureError, OSError):
+                    status = "UNAVAILABLE"
+                    checks["interruption"] = "EXECUTION_INFRASTRUCTURE_UNAVAILABLE"
     report = PublicCheck(run_id=run.id, status=status, checks=checks, feedback=feedback)
     store.put(run.id, "self-check.json", report.model_dump_json().encode(), "public")
+    store.put(
+        run.id,
+        "self-check-usage.json",
+        json.dumps({"sanitizer_calls": sanitizer_calls}).encode(),
+        "public",
+    )
     store.transition(run.id, "COMPLETED", None)
     return report
 
@@ -226,8 +242,12 @@ def repair_candidates(
     backend_factory: BackendFactory,
     policy: RepairPolicy,
     public_task: PublicTask | None = None,
+    *,
+    coordinator: "RepairCoordinator | None" = None,
 ) -> PatchCandidate:
     """Select the last checked candidate; preserve all attempts against the original base."""
+    if (policy.version == "public-repair-v3") != (coordinator is not None):
+        raise ValueError("repair v3 requires its controller coordinator")
     run_id = snapshot.parent_run_id
     store.put(run_id, "repair/policy.json", policy.model_dump_json().encode(), "public")
     candidate = first
@@ -251,6 +271,8 @@ def repair_candidates(
             store, run_id, sources, stdin, backend_factory, provider.gate, public_task
         )
         selected = candidate
+        if coordinator is not None:
+            coordinator.observe(checked)
         rounds.append(
             {
                 "round": number,
@@ -268,12 +290,40 @@ def repair_candidates(
             break
         if number == policy.max_candidates:
             break
+        if coordinator is not None:
+            decision = coordinator.decide(checked)
+            store.put(
+                run_id,
+                f"repair/{number}/decision.json",
+                decision.model_dump_json().encode(),
+                "public",
+            )
+            rounds[-1]["decision"] = decision.model_dump(mode="json")
+            if decision.action == "REINVESTIGATE":
+                try:
+                    updated = coordinator.investigate(number, sources, stdin, checked)
+                except ProviderError as exc:
+                    stop = exc.code
+                    break
+                if updated.diagnostic_outcome != "DIAGNOSED":
+                    stop = "REINVESTIGATION_INCONCLUSIVE"
+                    rounds[-1]["reinvestigation_limitations"] = updated.limitations
+                    break
+            diagnosis = coordinator.diagnosis
         feedback: dict[str, object] = {
-            "contract": REPAIR_VERSION,
+            "contract": policy.version,
             "round": number,
             "previous_candidate_source": sources["kernel.cu"].decode(),
             "public_self_check": checked.model_dump(mode="json", exclude={"run_id"}),
         }
+        if coordinator is not None:
+            feedback.update(
+                {
+                    "diagnosis_source_sha256": coordinator.diagnosis_source_sha256,
+                    "diagnosis_source": coordinator.diagnosis_source,
+                    "original_source_sha256": coordinator.original_source_sha256,
+                }
+            )
         store.put(run_id, f"repair/{number}/feedback.json", json.dumps(feedback).encode(), "public")
         try:
             diff = provider.revise_patch(source, diagnosis, feedback)
@@ -282,7 +332,9 @@ def repair_candidates(
                     "generated_by": first.generated_by,
                     "provider": first.provider,
                     "model": first.model,
-                    "prompt_version": first.prompt_version,
+                    "prompt_version": (
+                        REPAIR_PROMPT_VERSION if coordinator is not None else first.prompt_version
+                    ),
                 }
             )
         except ProviderError as exc:
@@ -296,10 +348,11 @@ def repair_candidates(
         "repair/summary.json",
         json.dumps(
             {
-                "version": REPAIR_VERSION,
+                "version": policy.version,
                 "stop_reason": stop,
                 "selected_hash": selected.patched_source_hash,
                 "rounds": rounds,
+                **(coordinator.summary() if coordinator is not None else {}),
             }
         ).encode(),
         "public",
