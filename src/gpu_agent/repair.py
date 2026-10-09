@@ -354,8 +354,7 @@ def repair_candidates(
                     "diagnosis_source": coordinator.diagnosis_source,
                     "original_source_sha256": coordinator.original_source_sha256,
                     "diagnosis_scoped_to_latest_candidate": (
-                        coordinator.diagnosis_source_sha256
-                        == assessment.candidate_source_sha256
+                        coordinator.diagnosis_source_sha256 == assessment.candidate_source_sha256
                     ),
                     "revision_history": [
                         {

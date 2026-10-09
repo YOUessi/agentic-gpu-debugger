@@ -15,7 +15,8 @@ from gpu_agent.contracts import CurrentPhase
 
 
 def evidence_for_family(
-    family: str, *,
+    family: str,
+    *,
     functional_failure: bool = True,
     memcheck: str = "CLEAN",
     existing_tool: str | None = None,
@@ -98,9 +99,7 @@ def test_clean_memcheck_alone_cannot_refute_shared_race():
         ("shared_memory_race", True, "FINDING"),
     ],
 )
-def test_no_hazard_specific_check_when_not_warranted(
-    family, functional_failure, memcheck
-):
+def test_no_hazard_specific_check_when_not_warranted(family, functional_failure, memcheck):
     evidence = evidence_for_family(
         family,
         functional_failure=functional_failure,
