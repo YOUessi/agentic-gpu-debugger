@@ -1,10 +1,12 @@
 """Freeze a small diverse public V2/V3 exploratory comparison."""
 
 import importlib.util
+
+import pytest
 from pathlib import Path
 
 
-def test_comparison_schedule_is_predeclared_and_unique():
+def test_comparison_schedule_is_predeclared_and_unique(monkeypatch):
     module_path = Path(__file__).resolve().parents[2] / "scripts/compare_repair_versions.py"
     import sys
 
@@ -26,3 +28,8 @@ def test_comparison_schedule_is_predeclared_and_unique():
         ("case_0022", "V3"),
     }
     assert len(scheduled) == 4
+    monkeypatch.setenv("GPU_AGENT_REPAIR_MEMORY_INDEX", "/tmp/unrelated-memory.json")
+    with pytest.raises(ValueError, match="requires repair memory disabled"):
+        mod.ensure_memory_disabled()
+    monkeypatch.delenv("GPU_AGENT_REPAIR_MEMORY_INDEX")
+    mod.ensure_memory_disabled()
