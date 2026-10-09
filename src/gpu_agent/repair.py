@@ -293,16 +293,21 @@ def repair_candidates(
         selected = candidate
         if coordinator is not None:
             coordinator.observe(checked)
-        rounds.append(
-            {
-                "round": number,
-                "candidate_hash": candidate.patched_source_hash,
-                "candidate_kernel_sha256": assessment.candidate_source_sha256,
-                "candidate_patch_excerpt": candidate.unified_diff[:1400],
-                "patch_effect_reason": assessment.reasoning_code,
-                "check": checked.model_dump(mode="json"),
-            }
-        )
+        public_round: dict[str, object] = {
+            "round": number,
+            "candidate_hash": candidate.patched_source_hash,
+            "check": checked.model_dump(mode="json"),
+        }
+        if coordinator is not None:
+            # Do not change the frozen V2 summary format.
+            public_round.update(
+                {
+                    "candidate_kernel_sha256": assessment.candidate_source_sha256,
+                    "candidate_patch_excerpt": candidate.unified_diff[:1400],
+                    "patch_effect_reason": assessment.reasoning_code,
+                }
+            )
+        rounds.append(public_round)
         store.put(
             run_id, f"repair/{number}/result.json", checked.model_dump_json().encode(), "public"
         )
