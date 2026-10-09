@@ -60,27 +60,42 @@ LESSONS: dict[str, str] = {
 _BARRIER_STMT = re.compile(r"^\s*__syncthreads\s*\(\s*\)\s*;\s*(?://.*)?$")
 
 
-def _barrier_neighbors(source: bytes) -> list[tuple[str, str]]:
-    """Record the nearest operations on both sides of every block barrier."""
-    lines = [
-        line.strip()
-        for line in source.decode("utf-8").splitlines()
-        if line.strip() and not line.lstrip().startswith("//")
-    ]
-    return [
-        (lines[i - 1] if i else "", lines[i + 1] if i + 1 < len(lines) else "")
-        for i, line in enumerate(lines)
-        if _BARRIER_STMT.fullmatch(line) is not None
-    ]
+def _barrier_phases(source: bytes) -> tuple[int, dict[str, list[int]]]:
+    """Count preceding barriers for each non-barrier operation.
+
+    Only unique unchanged operations are used for relative-order comparisons.
+    Editing the contents of an adjacent operation is not itself a barrier edit.
+    """
+    count = 0
+    operations: dict[str, list[int]] = {}
+    for line in source.decode("utf-8").splitlines():
+        statement = line.strip()
+        if not statement or statement.startswith("//"):
+            continue
+        if _BARRIER_STMT.fullmatch(statement) is not None:
+            count += 1
+        else:
+            operations.setdefault(statement, []).append(count)
+    return count, operations
 
 
 def _edited_block_barrier(before: bytes, after: bytes) -> bool:
-    """Detect insertion/removal or changed operation order around block barriers.
+    """Conservatively flag barrier count or ordering changes across stable operations.
 
-    This is a historical warning about an edit and failed check, never a
-    deterministic attribution that this edit caused the observed failure.
+    This is a historical warning for a failed candidate, not causal proof that a
+    particular barrier edit caused its observed functional or sanitizer failure.
     """
-    return _barrier_neighbors(before) != _barrier_neighbors(after)
+    before_count, before_ops = _barrier_phases(before)
+    after_count, after_ops = _barrier_phases(after)
+    if before_count != after_count:
+        return True
+    return any(
+        len(phases) == 1
+        and len(after_ops.get(statement, [])) == 1
+        and phases[0] != after_ops[statement][0]
+        for statement, phases in before_ops.items()
+    )
+
 
 
 def _digest(value: object) -> str:
