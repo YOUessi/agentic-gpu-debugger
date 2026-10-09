@@ -34,17 +34,13 @@ from gpu_agent.store import RunStore
 pytestmark = [pytest.mark.gpu, pytest.mark.container]
 
 
-def test_case22_numeric_mismatch_must_recheck_original_race_on_real_gpu(
-    tmp_path, request
-):
+def test_case22_numeric_mismatch_must_recheck_original_race_on_real_gpu(tmp_path, request):
     repo = Path(__file__).resolve().parents[2]
     task_root = repo / "benchmarks/public/case_0022/public_input"
     original = (task_root / "kernel.cu").read_text()
     start = "        __syncthreads();\n        tile[lane] = value;"
     assert original.count(start) == 1
-    failed = original.replace(
-        start, "        tile[lane] = value;\n        __syncthreads();", 1
-    )
+    failed = original.replace(start, "        tile[lane] = value;\n        __syncthreads();", 1)
     task = PublicTask.model_validate_json((task_root / "task.json").read_bytes())
     assert task.source_sha256 == hashlib.sha256(original.encode()).hexdigest()
 
