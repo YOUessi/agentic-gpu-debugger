@@ -9,6 +9,7 @@ from pydantic import ValidationError
 from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.evidence.models import EvidenceBundle
 from gpu_agent.evidence.repository import _evidence
+from gpu_agent.patch_effect import PatchEffectAssessment
 from gpu_agent.patching import source_hash
 from gpu_agent.public_task import PublicTask
 from gpu_agent.repair import RepairPolicy
@@ -62,7 +63,14 @@ def _fixture_run(store, *, mismatch: str | None = None):
     store.put(
         run.id,
         "repair/1/patch-effect.json",
-        json.dumps({"semantic_equivalence": "PROVEN_LOCAL_NO_OP"}).encode(),
+        PatchEffectAssessment(
+            candidate_source_sha256=(
+                "f" * 64 if mismatch == "effect" else hashlib.sha256(patched).hexdigest()
+            ),
+            reference_source_sha256=hashlib.sha256(kernel).hexdigest(),
+            semantic_equivalence="PROVEN_LOCAL_NO_OP",
+            reasoning_code="EQUAL_INDEX_UNDER_THREAD_GUARD",
+        ).model_dump_json().encode(),
         "public",
     )
     store.put(
@@ -100,10 +108,10 @@ def test_frozen_memory_from_real_public_run_contract(store, tmp_path):
         FrozenRepairMemory.load(dest)
 
 
-@pytest.mark.parametrize("mismatch", ["source", "incomplete"])
+@pytest.mark.parametrize("mismatch", ["source", "incomplete", "effect"])
 def test_memory_refuses_bad_candidate_source_or_unfinished_child(store, mismatch):
     run_id = _fixture_run(store, mismatch=mismatch)
-    with pytest.raises(ValueError, match="source.*mismatch|self-check lineage"):
+    with pytest.raises(ValueError, match="source.*mismatch|self-check lineage|patch-effect"):
         derive_public_experiences(store, run_id)
 
 

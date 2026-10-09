@@ -16,6 +16,7 @@ from gpu_agent.agent.models import DiagnosisResult
 from gpu_agent.contracts import ArtifactRef, RunStatus
 from gpu_agent.evidence.repository import _evidence
 from gpu_agent.execution.models import ExecutionModel
+from gpu_agent.patch_effect import PatchEffectAssessment
 from gpu_agent.patching import source_hash
 from gpu_agent.public_task import PublicTask
 from gpu_agent.store import RunStore, read_regular
@@ -146,8 +147,19 @@ def derive_public_experiences(store: RunStore, run_id: str) -> list[RepairExperi
             raise ValueError("repair experience self-check source hash mismatch")
         checks = checked.get("checks", {})
         effect_ref = _one(store, run_id, f"repair/{index}/patch-effect.json")
-        effect = json.loads(store.read(effect_ref)) if effect_ref else {}
-        if effect.get("semantic_equivalence") == "PROVEN_LOCAL_NO_OP":
+        effect = (
+            PatchEffectAssessment.model_validate_json(store.read(effect_ref))
+            if effect_ref is not None
+            else None
+        )
+        if effect is not None:
+            if (
+                effect.candidate_source_sha256
+                != hashlib.sha256(checked_sources["kernel.cu"]).hexdigest()
+                or effect.reference_source_sha256 != task.source_sha256
+            ):
+                raise ValueError("repair patch-effect source provenance mismatch")
+        if effect is not None and effect.semantic_equivalence == "PROVEN_LOCAL_NO_OP":
             lesson_code: LessonCode = "GUARDED_INDEX_EQUIVALENCE"
         elif checks.get("racecheck") == "FINDING" and checks.get("functional") == "PASSED":
             lesson_code = "NUMERIC_PASS_RACE_REMAINS"
