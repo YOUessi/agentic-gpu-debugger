@@ -258,6 +258,7 @@ def repair_candidates(
     selected = first
     seen: set[str] = set()
     rounds: list[dict[str, object]] = []
+    revision_history: list[dict[str, object]] = []
     stop = "CANDIDATE_LIMIT"
     for number in range(1, policy.max_candidates + 1):
         store.put(
@@ -300,6 +301,17 @@ def repair_candidates(
                 "check": checked.model_dump(mode="json"),
             }
         )
+        if coordinator is not None:
+            revision_history.append(
+                {
+                    "round": number,
+                    "candidate_kernel_sha256": assessment.candidate_source_sha256,
+                    "candidate_patch_excerpt": candidate.unified_diff[:1400],
+                    "patch_effect_reason": assessment.reasoning_code,
+                    "status": checked.status,
+                    "checks": dict(checked.checks),
+                }
+            )
         store.put(
             run_id, f"repair/{number}/result.json", checked.model_dump_json().encode(), "public"
         )
@@ -345,6 +357,10 @@ def repair_candidates(
                     "diagnosis_source_sha256": coordinator.diagnosis_source_sha256,
                     "diagnosis_source": coordinator.diagnosis_source,
                     "original_source_sha256": coordinator.original_source_sha256,
+                    "diagnosis_scoped_to_latest_candidate": (
+                        coordinator.diagnosis_source_sha256 == assessment.candidate_source_sha256
+                    ),
+                    "revision_history": list(revision_history),
                 }
             )
         store.put(run_id, f"repair/{number}/feedback.json", json.dumps(feedback).encode(), "public")

@@ -32,12 +32,11 @@ def schedule() -> list[tuple[str, str]]:
     return units
 
 
-
-
 def ensure_memory_disabled() -> None:
     """Prevent a hidden V3-only memory factor in the fixed V2/V3 pilot."""
     if os.environ.get("GPU_AGENT_REPAIR_MEMORY_INDEX"):
         raise ValueError("V2/V3 exploratory comparison requires repair memory disabled")
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)

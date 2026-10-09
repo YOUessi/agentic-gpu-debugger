@@ -1,0 +1,74 @@
+{
+  "date": "2026-10-09",
+  "scope": "Targeted native GPU evidence-gap proof and ONE real-model development retry on the known case_0022; not independent holdout nor causal A/B evidence",
+  "code_commit": "6a9a06de4c91e6714d696a8dd183cc94e1a7d13b",
+  "prior_frozen_trial_commit": "e4e7a8d4d069cecb24355e9c521bf7bd121e0870",
+  "target_case": "case_0022",
+  "original_kernel_sha256": "b79fd84c71131f94601cc153fa00307e848d73c477267bfd7a6f80384d0394a1",
+  "native_hypothesis_check": {
+    "source": "original case_0022 modified to match previous V3 candidate one",
+    "run_id": "f883e8e94b584e32be3dbc5d5e8e4d92",
+    "elapsed_seconds": 8.83,
+    "code_commit": "6a9a06de4c91e6714d696a8dd183cc94e1a7d13b",
+    "assertions": {
+      "functional": "NUMERIC_MISMATCH",
+      "memcheck": "CLEAN",
+      "racecheck": "FINDING",
+      "finish_diagnosis_before_racecheck": "REJECTED",
+      "required_action": "run_racecheck"
+    },
+    "gpu_execution": "REAL",
+    "provider": "SCRIPTED_PRIOR_DIAGNOSIS_ONLY",
+    "llm_physical_calls": 0,
+    "private_verifier": "NOT_USED"
+  },
+  "development_live_retry": {
+    "run_id": "053d36993ff647fab62e2ccd50009666",
+    "model": "deepseek-v4-pro",
+    "memory_index": "DISABLED",
+    "candidate_count": 1,
+    "reinvestigations": 0,
+    "stop_reason": "PUBLIC_CHECKS_PASSED",
+    "candidate_hash": "77c257cd0e6a010ef5bfc7e623783bcc56e8d89246ca92ad196702242fe1ad07",
+    "identical_to_frozen_V2_success_candidate": true,
+    "checks": {
+      "functional": "PASSED",
+      "memcheck": "CLEAN",
+      "racecheck": "CLEAN",
+      "initcheck": "CLEAN",
+      "synccheck": "CLEAN"
+    },
+    "independent_verification": {
+      "verdict": "VERIFIED_FIXED",
+      "reason_code": "ALL_REQUIRED_CHECKS_PASSED",
+      "audit_run_id": "eaeb634725868e1130c5511d967ef732"
+    },
+    "actual": {
+      "cli_exit": 0,
+      "elapsed_seconds": 197.91,
+      "model_calls": 7,
+      "plan_calls": 5,
+      "diagnose_calls": 1,
+      "patch_calls": 1,
+      "sanitizer_acquisitions": 3,
+      "reinvestigations": 0,
+      "total_tokens": 20209,
+      "input_tokens": 18488,
+      "output_tokens": 1721,
+      "cached_tokens": 8704,
+      "api_cost_usd": null
+    },
+    "prompt_versions_observed": [
+      "m3-2026-10-01-v12"
+    ],
+    "novel_V3_v5_prompt_invoked": false,
+    "raw_log_sha256": "e1df3176efac7ea35a19682e38473783e104cd1872e0b60fc1dbde7f24f679ab",
+    "official_knowledge_index_sha256": "6ddc3cf2443ff983f08d0dcae44ca5f68ba28033beeb391a162422f9936ed27a"
+  },
+  "interpretation": [
+    "Evidence policy gap physically reproduced and guarded in tests",
+    "New live-model first-candidate success does not exercise revised multi-round context",
+    "Same successful patch hash as earlier V2 confirms candidate sampling variability",
+    "No unseen-case generalization claim"
+  ]
+}

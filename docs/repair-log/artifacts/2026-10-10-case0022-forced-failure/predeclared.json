@@ -1,0 +1,23 @@
+{
+  "kind": "case0022_forced_first_failure_real_model_public_development",
+  "started_at": "2026-10-09T16:08:07.063759+00:00",
+  "code_commit": "9ea075c943607b35d9f92c5f60a084b9640258c1",
+  "runtime_code_hash": "9dee2b4a0c03e9b4a708c113454185a6a7e3545c7d9fe5c214d4af7c977c81b8",
+  "model": "deepseek-v4-pro",
+  "case": "case_0022",
+  "source_sha256": "b79fd84c71131f94601cc153fa00307e848d73c477267bfd7a6f80384d0394a1",
+  "forced_first_kernel_sha256": "d1fac7bc60f231f4bc041b71ef7b04ece7f13ba8794aa90f7a9cdd504ebecce5",
+  "forced_first_diff_sha256": "21bf3aa16b66a45eecd21bd4939e040f5566884ef0f9ca3ac96c1fcc9c66c9ba",
+  "injected_initial_patch_only": true,
+  "initial_patch_is_not_an_LLM_response": true,
+  "initial_patch_counts_as_zero_paid_calls": true,
+  "subsequent_planning_diagnosis_and_revision_are_real_llm": true,
+  "no_repair_memory": true,
+  "knowledge_index_sha256": "6ddc3cf2443ff983f08d0dcae44ca5f68ba28033beeb391a162422f9936ed27a",
+  "max_candidates": 3,
+  "max_reinvestigations": 1,
+  "max_llm_calls": 40,
+  "total_task_deadline_seconds": 600,
+  "unbounded_independent_sanitizer_call_count": true,
+  "no_automatic_retries": true
+}
