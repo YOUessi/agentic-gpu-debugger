@@ -30,9 +30,7 @@ def test_real_fix_and_cross_candidate_location_abstain():
         "const unsigned int slot = threadIdx.x & 15U;\n"
         "if (threadIdx.x == 0) block_summary = slots[0];\n"
     )
-    fixed = source.replace("slots[16]", "slots[32]").replace(
-        "threadIdx.x & 15U", "threadIdx.x"
-    )
+    fixed = source.replace("slots[16]", "slots[32]").replace("threadIdx.x & 15U", "threadIdx.x")
     result = analyze_patch_effect(source, fixed, _diagnosis(2), diagnosis_source=source)
     assert result.semantic_equivalence == "NOT_ESTABLISHED"
     assert result.diagnosed_location_touched is True
