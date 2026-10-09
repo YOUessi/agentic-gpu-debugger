@@ -1,0 +1,17 @@
+{
+  "version": "public-repair-memory-v1",
+  "records": [
+    {
+      "record_id": "ff27e6f40ce82d6930283aaae64f5c733eab9c671a421f9767463afcfd1f2c95",
+      "public_run_id": "177a6daf715a4b53bfc47eeca11cf831",
+      "candidate_sha256": "72dbf4f806c1d6bf9ce9b58209c04b86d35ef759c3df776bd15f2519f3e1e18b",
+      "source_sha256": "394dc3f945580df9ea74437ef75b2873848ca1d20522c031c7ef02b6f9cd8c11",
+      "algorithm": "vector-add-cpu-v1",
+      "failure_family": "shared_memory_race",
+      "evidence_sha256": "f66560c23b822a62262badf49851533276276133f74012d66141c856bbbb678f",
+      "lesson_code": "NUMERIC_PASS_RACE_REMAINS",
+      "lesson": "A prior candidate produced correct public numeric output but racecheck still reported a finding. Functional success does not imply race freedom."
+    }
+  ],
+  "corpus_sha256": "45869ac44ba56aade3be5c8accfde86c981fc4aa326d52e336f173221102aa02"
+}

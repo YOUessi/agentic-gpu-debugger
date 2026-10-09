@@ -49,6 +49,7 @@ from gpu_agent.execution.models import (
 from gpu_agent.knowledge.models import DocumentChunk, KnowledgeError
 from gpu_agent.knowledge.retrieve import KnowledgeIndex
 from gpu_agent.public_task import check_public_output
+from gpu_agent.repair_evidence import candidate_reused_evidence
 from gpu_agent.store import RunStore
 
 
@@ -165,6 +166,7 @@ def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
             )
         )
         context = context.model_copy(update={"public_functional_failure": outcome != "PASSED"})
+    evidence = candidate_reused_evidence(store, run_id, evidence, context)
     return evidence.model_copy(update={"repair_context": context})
 
 

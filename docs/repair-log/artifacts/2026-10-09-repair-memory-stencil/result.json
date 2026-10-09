@@ -1,0 +1,67 @@
+{
+  "date": "2026-10-09",
+  "scope": "one qualitative cross-algorithm public Repair V3 live smoke with frozen prior failure memory",
+  "executed_code_commit": "d2747edd4518a8c116dbc6abf518bbed891beacf",
+  "case": "case_0018",
+  "algorithm": "stencil-cpu-v1",
+  "original_files_sha256": {
+    "kernel": "d9df4d683f5b09c31454b9f196ec7d49c3cddb94aa9df07d8d3ff9ac1f828434",
+    "input": "7841a87fc3f8300dca145438998e8e5a142044d2e0286cea4d99887ac7e35a7c",
+    "task": "2b26ffe710ffd8a50a0aa5cc8467d1397570c8a9840df70fb53e59359fbe5c53"
+  },
+  "model": "deepseek-v4-pro",
+  "toolchain_version": "CUDA 12.8.1 / Compute Sanitizer 2025.1",
+  "knowledge_corpus_sha256": "15c53142f8949ba1d852a3227fd11460060adec359fda9ee0cf42c52011b8600",
+  "memory_corpus_sha256": "502269e68014aade52a5c36ffd6f2cddcb23ba3793cd79ac4f15cfbb60a70031",
+  "memory_file_sha256": "e200097a23425767ca5678462c044a3e87b300074f0b4e18c214a9ee1af323d4",
+  "memory_record_count": 4,
+  "memory_retrieval": {
+    "hints": 3,
+    "lesson_codes": [
+      "BLOCK_BARRIER_EDIT_FAILED",
+      "NUMERIC_PASS_RACE_REMAINS",
+      "BLOCK_BARRIER_EDIT_FAILED"
+    ],
+    "trust": "HISTORICAL_PUBLIC_FAILURE_NOT_AUTHORITATIVE",
+    "target_algorithm_in_memory": false
+  },
+  "run_id": "68a3c235f4d14668a106db50035bb4d",
+  "public_self_check_run_id": "8cbf2a5531554d5ca74476f4209e6126",
+  "verification_audit_run_id": "ab4ee97ae77ddaf58ee01aeb7f4c534d",
+  "first_candidate_source_sha256": "eac35ef138aabc7dd559589ae1eebb8391b66b988a8134d48d09b8fefc293cbb",
+  "result": {
+    "cli_exit_code": 0,
+    "elapsed_seconds_approx": 186.16,
+    "repair_stop_reason": "PUBLIC_CHECKS_PASSED",
+    "candidates": 1,
+    "reinvestigations": 0,
+    "independent_verdict": "VERIFIED_FIXED",
+    "reason": "ALL_REQUIRED_CHECKS_PASSED",
+    "public_functional": "PASSED",
+    "memcheck": "CLEAN",
+    "racecheck": "CLEAN",
+    "initcheck": "CLEAN",
+    "synccheck": "CLEAN"
+  },
+  "usage": {
+    "model_calls": 6,
+    "plan": 4,
+    "diagnose": 1,
+    "patch": 1,
+    "input_tokens": 16962,
+    "output_tokens": 1370,
+    "cached_tokens": 7296,
+    "total_tokens": 18332,
+    "api_cost_usd": null
+  },
+  "backend": {
+    "project_labeled_containers_after": 0,
+    "code_workspace_clean": true
+  },
+  "original_stdout_sha256": "199fe5eeed489f72e25e92eb6df2c58fe7d648843dfa90f66e61d96ba00b11be",
+  "limitations": [
+    "Single development run; no memory-off paired control; cannot infer memory benefit",
+    "Verifier is scoped to registered task, not an exhaustive proof of all CUDA schedules",
+    "Private inputs, evaluator truth and external response IDs were not exported"
+  ]
+}

@@ -452,3 +452,45 @@ private holdout、ground truth、隐藏参考实现或独立 verifier 的结果�
 冒烟、真实模型实验、实际失败轮次与环境限制以
 [2026-10-08 逐轮记录](repair-log/2026-10-08-repair-v3-reinvestigation.md) 为准；脚本化
 provider 的闭环验证不能替代同一冻结案例、模型、输入和预算下的 V2/V3 效果比较。
+
+
+## Repair v3 后续工程扩展：复用证据、Patch Effect、冻结 Repair Memory
+
+### 来源可证的公开自检复用
+
+V3 重新调查时，若当前候选的源码、公开输入、工具链与此前该候选
+`repair_self_check` 的原生证据匹配，可以在新子 Run 复制并校验自检
+Sanitizer 原生日志，使此前真实观察成为**当前子 Run 本地可引用的证据**。
+每条复用记录绑定原始公共 Run ID、日志 SHA256 与源码/输入 Hash。
+复用不算作一次新的 GPU Sanitizer 调查调用，不可读取 evaluator/private
+资料，更不能取代独立严格验证；来源不一致则不能复用。
+
+### Patch Effect（静态建议，不是 Verifier）
+
+每轮候选的 `repair/<N>/patch-effect.json` 记录源码和诊断来源 Hash、改动位置，
+以及少数可证明的局部语义等价替换（如 `threadIdx.x == 0` 条件下
+`slots[0]` → `slots[threadIdx.x]`）。其余输出
+`NOT_ESTABLISHED`，不能由静态建议宣布修复成功。
+失败后把建议作为非权威公开反馈加入下一轮修订。
+
+### 冻结 Repair Memory（仅开发态 Public V3）
+
+`scripts/export_repair_memory.py` 只接受已完成、非评价绑定、来源完整的公开
+`diagnosis` Run。每项由实际失败候选及已完成公开自检结果提炼：
+`NUMERIC_PASS_RACE_REMAINS`、`BLOCK_BARRIER_EDIT_FAILED`、
+`FUNCTIONAL_MISMATCH` 等类型。对跨 RunStore 数据先分别导出冻结索引，
+再用 `scripts/merge_repair_memory.py` 合并；合并后的 canonical records 与
+`corpus_sha256` 可复验，工具拒绝覆盖既有索引。
+
+设置 `GPU_AGENT_REPAIR_MEMORY_INDEX=/abs/path/frozen.json` 显式启用；
+仅未绑定的 public Repair V3 根据算法及诊断故障家族检索，记录
+`repair/experience-retrieval.json` 并将经验作为低信任提示传给模型。
+**V2 和当前预先固定的 V2/V3 探索对照都不使用这些经验。**
+记忆不能当作 NVIDIA 官方规范，也不能在同批评测中读写私有答案或动态增补。
+[冻结索引样例](repair-log/artifacts/2026-10-09-repair-memory/merged_public_failures_20261009.json)、
+[复杂 CUDA 对照失败](repair-log/2026-10-09-v2-v3-complex-pilot.md)、
+[真实记忆试用](repair-log/2026-10-09-repair-memory-live-stencil.md)。
+
+注意：模型在 Stencil 真实试用中收到 3 条经验、首个候选即
+`VERIFIED_FIXED`，仅说明检索路径和真实 GPU 链路可工作，
+**没有 memory-off 相同条件的配对数据，不能主张记忆带来性能增益**。

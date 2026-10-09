@@ -1,0 +1,136 @@
+{
+  "date": "2026-10-09",
+  "scope": "four-unit exploratory public V2/V3 paired comparison; real DeepSeek v4-pro + Tang GPU",
+  "repository": "YOUessi/agentic-gpu-debugger",
+  "executed_code_commit": "e4e7a8d4d069cecb24355e9c521bf7bd121e0870",
+  "runtime_code_hash": "f503c18fa399bfb41278891f6f8a57a49d455b791c463f3fba12d43df36f7ec8",
+  "predeclared_schedule_sha256": "01fee4abcb39053c99bd1bd9901d0c63d4aa42d95b963130ff9905a77ac6f32d",
+  "original_results_jsonl_sha256": "8e999424748118d05d718d6631ecdea69c47a60d0e2da0b20a3f899680b30e93",
+  "seed": 20261009,
+  "provider": "deepseek-v4-pro",
+  "knowledge_corpus_hash": "15c53142f8949ba1d852a3227fd11460060adec359fda9ee0cf42c52011b8600",
+  "knowledge_index_sha256": "6ddc3cf2443ff983f08d0dcae44ca5f68ba28033beeb391a162422f9936ed27a",
+  "source_input_hashes": {
+    "case_0021": {
+      "kernel.cu": "961c2bf24c5f672eaac4a91d8b0c4f5348f64dd8d352a1d173764f625d342fed",
+      "input.json": "0fdb58e0f1a819d6f4917003094ce917135c3bef60e8a1469cdfe5712b15b684",
+      "task.json": "ed7de3a2c07a63133330b7226731bba2c6116468bfb23f15c00047dc33ae74c2"
+    },
+    "case_0022": {
+      "kernel.cu": "b79fd84c71131f94601cc153fa00307e848d73c477267bfd7a6f80384d0394a1",
+      "input.json": "a3813eaf2ae68efaab3cf4c65190b367ddc19b2c87cb2649bcc4891be5044ca9",
+      "task.json": "f7b5deebfc022604b46d2ce08ddb474c5902b19d0181d1ec75b1578aaf04aa5b"
+    }
+  },
+  "schedule": [
+    [
+      "case_0022",
+      "V2"
+    ],
+    [
+      "case_0021",
+      "V2"
+    ],
+    [
+      "case_0022",
+      "V3"
+    ],
+    [
+      "case_0021",
+      "V3"
+    ]
+  ],
+  "conditions": {
+    "repeats_per_case_version": 1,
+    "mode": "E",
+    "memory_index": "DISABLED",
+    "V2": {
+      "sanitizer_acquisition_cap": 4,
+      "max_candidates": 3
+    },
+    "V3": {
+      "sanitizer_acquisition_cap": null,
+      "max_candidates": 3,
+      "max_reinvestigations": 1
+    },
+    "max_llm_calls_per_unit": 40,
+    "task_deadline_seconds": 600
+  },
+  "units": [
+    {
+      "ordinal": 0,
+      "case": "case_0022",
+      "version": "V2",
+      "run_id": "bdbb9c9962e448ac8d38b4c9a39e2ffd",
+      "verdict": "VERIFIED_FIXED",
+      "reason": "ALL_REQUIRED_CHECKS_PASSED",
+      "elapsed_seconds": 227.03145376394968,
+      "physical_calls": 8,
+      "total_tokens": 26706,
+      "rounds": 2,
+      "reinvestigations": 0,
+      "stop_reason": "PUBLIC_CHECKS_PASSED"
+    },
+    {
+      "ordinal": 1,
+      "case": "case_0021",
+      "version": "V2",
+      "run_id": "c77b339743fc4c3092281863fc237518",
+      "verdict": "VERIFIED_FIXED",
+      "reason": "ALL_REQUIRED_CHECKS_PASSED",
+      "elapsed_seconds": 185.30792370502604,
+      "physical_calls": 5,
+      "total_tokens": 15693,
+      "rounds": 1,
+      "reinvestigations": 0,
+      "stop_reason": "PUBLIC_CHECKS_PASSED"
+    },
+    {
+      "ordinal": 2,
+      "case": "case_0022",
+      "version": "V3",
+      "run_id": "c55216300e0840eb8d56dec46bfeefbb",
+      "verdict": "NOT_VERIFIED",
+      "reason": null,
+      "elapsed_seconds": 109.20021927298512,
+      "physical_calls": 12,
+      "total_tokens": 48846,
+      "rounds": 3,
+      "reinvestigations": 1,
+      "stop_reason": "CANDIDATE_LIMIT"
+    },
+    {
+      "ordinal": 3,
+      "case": "case_0021",
+      "version": "V3",
+      "run_id": "85d433b94a9749948332874e4ccf309f",
+      "verdict": "VERIFIED_FIXED",
+      "reason": "ALL_REQUIRED_CHECKS_PASSED",
+      "elapsed_seconds": 182.45828397001605,
+      "physical_calls": 5,
+      "total_tokens": 17416,
+      "rounds": 1,
+      "reinvestigations": 0,
+      "stop_reason": "PUBLIC_CHECKS_PASSED"
+    }
+  ],
+  "aggregate": {
+    "V2": {
+      "verified_fixed": 2,
+      "units": 2,
+      "total_model_calls": 13,
+      "total_tokens": 42399
+    },
+    "V3": {
+      "verified_fixed": 1,
+      "units": 2,
+      "total_model_calls": 17,
+      "total_tokens": 66262
+    },
+    "total_units": 4,
+    "run_exit_code": 0,
+    "total_wall_seconds_approx": 707.15,
+    "known_cost_usd": null
+  },
+  "interpretation": "Single sample each, different sanitizer cap; no causal or statistical superiority claim. A failed public repair has not run private verification."
+}
