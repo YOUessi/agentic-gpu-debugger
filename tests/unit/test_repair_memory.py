@@ -218,19 +218,10 @@ def test_barrier_swap_across_a_write_is_detected_even_when_diff_aligns_barrier()
 def test_merely_editing_an_adjacent_computation_is_not_a_barrier_relocation():
     from gpu_agent.repair_memory import _edited_block_barrier
 
-    original = (
-        b"float v = tile[lane];\n"
-        b"__syncthreads();\n"
-        b"tile[lane] = v;\n"
-    )
-    after = (
-        b"float v = tile[lane];\n"
-        b"__syncthreads();\n"
-        b"tile[lane] = v + 1.0f;\n"
-    )
+    original = b"float v = tile[lane];\n__syncthreads();\ntile[lane] = v;\n"
+    after = b"float v = tile[lane];\n__syncthreads();\ntile[lane] = v + 1.0f;\n"
     assert not _edited_block_barrier(original, after)
     assert _edited_block_barrier(original, original.replace(b"__syncthreads();\n", b""))
     assert _edited_block_barrier(
         original, original.replace(b"tile[lane] = v;\n", b"tile[lane] = v;\n__syncthreads();\n")
     )
-
