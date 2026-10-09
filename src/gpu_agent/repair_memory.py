@@ -197,9 +197,7 @@ def derive_public_experiences(store: RunStore, run_id: str) -> list[RepairExperi
             lesson_code: LessonCode = "GUARDED_INDEX_EQUIVALENCE"
         elif checks.get("racecheck") == "FINDING" and checks.get("functional") == "PASSED":
             lesson_code = "NUMERIC_PASS_RACE_REMAINS"
-        elif _edited_block_barrier(
-            originals["kernel.cu"], checked_sources["kernel.cu"]
-        ) and (
+        elif _edited_block_barrier(originals["kernel.cu"], checked_sources["kernel.cu"]) and (
             checks.get("functional") not in (None, "PASSED")
             or any(
                 checks.get(tool) == "FINDING"

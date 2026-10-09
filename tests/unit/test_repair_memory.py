@@ -75,13 +75,9 @@ def _fixture_run(store, *, mismatch: str | None = None, barrier_case: bool = Fal
                 "f" * 64 if mismatch == "effect" else hashlib.sha256(patched).hexdigest()
             ),
             reference_source_sha256=hashlib.sha256(kernel).hexdigest(),
-            semantic_equivalence=(
-                "NOT_ESTABLISHED" if barrier_case else "PROVEN_LOCAL_NO_OP"
-            ),
+            semantic_equivalence=("NOT_ESTABLISHED" if barrier_case else "PROVEN_LOCAL_NO_OP"),
             reasoning_code=(
-                "CHANGE_NOT_PROVEN_EQUIVALENT"
-                if barrier_case
-                else "EQUAL_INDEX_UNDER_THREAD_GUARD"
+                "CHANGE_NOT_PROVEN_EQUIVALENT" if barrier_case else "EQUAL_INDEX_UNDER_THREAD_GUARD"
             ),
         )
         .model_dump_json()
@@ -213,15 +209,7 @@ def test_frozen_indexes_combine_deterministically_without_refetching(store):
 def test_barrier_swap_across_a_write_is_detected_even_when_diff_aligns_barrier():
     from gpu_agent.repair_memory import _edited_block_barrier
 
-    before = (
-        b"const float v = tile[lane];\n"
-        b"__syncthreads();\n"
-        b"tile[lane] = v;\n"
-    )
-    after = (
-        b"const float v = tile[lane];\n"
-        b"tile[lane] = v;\n"
-        b"__syncthreads();\n"
-    )
+    before = b"const float v = tile[lane];\n__syncthreads();\ntile[lane] = v;\n"
+    after = b"const float v = tile[lane];\ntile[lane] = v;\n__syncthreads();\n"
     assert _edited_block_barrier(before, after)
     assert not _edited_block_barrier(before, before + b"int unrelated;\n")
