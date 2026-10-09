@@ -1,0 +1,1 @@
+"""Controller-owned candidate verification."""

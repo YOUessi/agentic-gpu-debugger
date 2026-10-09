@@ -1,0 +1,644 @@
+"""Controller-owned typed registry: the model proposes, policy authorizes, tools execute."""
+
+import hashlib
+import json
+from collections.abc import Callable
+from pathlib import PurePosixPath
+
+from pydantic import ValidationError
+
+from gpu_agent.agent.models import (
+    ACTION_ADAPTER,
+    AcquisitionUsage,
+    AgentAction,
+    AgentBudget,
+    DiagnosisResult,
+    DocsArguments,
+    EvidenceClaim,
+    ExecutedAction,
+    PlannerState,
+    PublicEvidence,
+    PublicFinding,
+    PublicRepairContext,
+    PublicSource,
+    RetrieveDocsAction,
+    SourceRange,
+)
+from gpu_agent.agent.policy import (
+    BudgetExceeded,
+    BudgetLedger,
+    BudgetReservation,
+    decide_action,
+    missing_evidence,
+    validate_diagnosis,
+)
+from gpu_agent.agent.provider import LLMProvider, ProviderError
+from gpu_agent.agent.rule_router import RuleRouter
+from gpu_agent.benchmark.evaluation import EvaluationMode
+from gpu_agent.contracts import ArtifactRef, CurrentPhase
+from gpu_agent.evidence.models import EvidenceBundle
+from gpu_agent.evidence.repository import _evidence
+from gpu_agent.execution.backend import ExecutionBackend
+from gpu_agent.execution.models import (
+    CheckOutcome,
+    SanitizerRequest,
+    SanitizerTool,
+    SourceLocation,
+    WorkspaceHandle,
+)
+from gpu_agent.knowledge.models import DocumentChunk, KnowledgeError
+from gpu_agent.knowledge.retrieve import KnowledgeIndex
+from gpu_agent.public_task import check_public_output
+from gpu_agent.store import RunStore
+
+
+def _deduplicate_findings(findings: list[PublicFinding]) -> list[PublicFinding]:
+    unique: list[PublicFinding] = []
+    seen: set[str] = set()
+    for finding in findings:
+        signature = finding.model_dump_json()
+        if signature not in seen:
+            seen.add(signature)
+            unique.append(finding)
+    return unique
+
+
+def public_evidence_from_bundle(store: RunStore, bundle: EvidenceBundle) -> PublicEvidence:
+    sources = [
+        PublicSource(
+            source_id=ref.id,
+            content=store.read(ref).decode("utf-8"),
+            functional_requirement=bundle.public_task.requirement if bundle.public_task else None,
+        )
+        for ref in bundle.source_snapshot
+        if PurePosixPath(ref.name).name == "kernel.cu"
+    ]
+    facts: list[EvidenceClaim] = []
+    if bundle.build_result is not None:
+        build = bundle.build_result
+        facts.append(
+            EvidenceClaim(
+                text=f"Build success: {build.success}",
+                citation_ids=[build.tool_result.stdout_artifact.id],
+            )
+        )
+    if bundle.execution_result is not None:
+        run = bundle.execution_result
+        facts.append(
+            EvidenceClaim(
+                text=f"Runtime status: {run.runtime_status}", citation_ids=[run.output_ref.id]
+            )
+        )
+    findings: list[PublicFinding] = []
+    sanitizer_outcomes: dict[SanitizerTool, CheckOutcome] = {}
+    for result in bundle.sanitizer_results:
+        if result.tool_result is not None:
+            sanitizer_outcomes[SanitizerTool(result.tool_result.typed_payload.tool)] = (
+                result.check_outcome
+            )
+        for finding in result.findings:
+            if finding.raw_ref is None:
+                continue
+            location = finding.source_location
+            public_location = None
+            if location is not None and PurePosixPath(location.path).name == "kernel.cu":
+                public_location = SourceLocation(path="kernel.cu", line=location.line)
+            findings.append(
+                PublicFinding(
+                    artifact_id=finding.raw_ref.id,
+                    category=finding.category,
+                    source_location=public_location,
+                )
+            )
+    docs = [DocumentChunk.model_validate_json(store.read(ref)) for ref in bundle.retrieved_chunks]
+    return PublicEvidence(
+        sources=sources,
+        observed_facts=facts,
+        tool_findings=_deduplicate_findings(findings),
+        documentation=docs,
+        sanitizer_outcomes=sanitizer_outcomes,
+    )
+
+
+def public_evidence(store: RunStore, run_id: str) -> PublicEvidence:
+    bundle = _evidence(store).view(run_id)
+    evidence = public_evidence_from_bundle(store, bundle)
+    manifest = store.load(run_id)
+    contexts = [ref for ref in manifest.artifact_refs if ref.name == "repair/context.json"]
+    if not contexts:
+        return evidence
+    if (
+        store.visibility != "public"
+        or manifest.kind != "repair_reinvestigation"
+        or manifest.binding is not None
+        or len(contexts) != 1
+    ):
+        raise ProviderError("PUBLIC_REPAIR_CONTEXT_INVALID")
+    context = PublicRepairContext.model_validate_json(store.read(contexts[0]))
+    if (
+        len(evidence.sources) != 1
+        or hashlib.sha256(evidence.sources[0].content.encode()).hexdigest()
+        != context.candidate_source_sha256
+    ):
+        raise ProviderError("PUBLIC_REPAIR_SOURCE_MISMATCH")
+    # Never trust a persisted boolean or the previous self-check as current functional proof.
+    context = context.model_copy(update={"public_functional_failure": False})
+    execution = bundle.execution_result
+    if (
+        execution is not None
+        and execution.runtime_status == "SUCCESS"
+        and bundle.public_task is not None
+    ):
+        inputs = [ref for ref in manifest.artifact_refs if ref.name == "public-input.json"]
+        if len(inputs) != 1:
+            raise ProviderError("PUBLIC_REPAIR_INPUT_INVALID")
+        try:
+            outcome = check_public_output(
+                bundle.public_task, store.read(inputs[0]), store.read(execution.output_ref)
+            )
+        except (ValueError, OverflowError):
+            raise ProviderError("PUBLIC_REPAIR_INPUT_INVALID") from None
+        evidence.observed_facts.append(
+            EvidenceClaim(
+                text=f"Public functional check: {outcome}",
+                citation_ids=[execution.output_ref.id, inputs[0].id],
+            )
+        )
+        context = context.model_copy(update={"public_functional_failure": outcome != "PASSED"})
+    return evidence.model_copy(update={"repair_context": context})
+
+
+def derive_final_diagnosis(model: DiagnosisResult, evidence: PublicEvidence) -> DiagnosisResult:
+    """Map one accepted model diagnosis to the controller's terminal diagnosis."""
+    if model.diagnostic_outcome != "DIAGNOSED":
+        return DiagnosisResult.inconclusive("MODEL_DECLARED_INCONCLUSIVE")
+    if not validate_diagnosis(model, evidence):
+        return DiagnosisResult.inconclusive("INVALID_DIAGNOSIS_EVIDENCE")
+    return model
+
+
+class AgentOrchestrator:
+    def __init__(
+        self,
+        store: RunStore,
+        provider: LLMProvider,
+        backend: ExecutionBackend,
+        handle: WorkspaceHandle,
+        stdin_ref: ArtifactRef,
+        knowledge: KnowledgeIndex | None,
+        knowledge_version: str,
+        budget: AgentBudget | None = None,
+    ) -> None:
+        self.store, self.provider, self.backend = store, provider, backend
+        self.handle, self.stdin_ref = handle, stdin_ref
+        self.knowledge, self.knowledge_version = knowledge, knowledge_version
+        self.budget = budget or AgentBudget()
+        self.acquisition_usage = AcquisitionUsage(sanitizer_calls=0, retrieval_calls=0)
+        self.ledger = BudgetLedger(self.budget)
+        self.rule_router = RuleRouter()
+        self.seen: set[str] = set()
+        self.executed: list[ExecutedAction] = []
+        self._root_run_id = handle.run_id
+        self._investigation_runs = {handle.run_id}
+        self.registry: dict[str, Callable[[AgentAction], None]] = {
+            "run_memcheck": self._memcheck,
+            "run_racecheck": self._sanitizer,
+            "run_initcheck": self._sanitizer,
+            "run_synccheck": self._sanitizer,
+            "retrieve_official_docs": self._docs,
+        }
+
+    def continue_in_workspace(
+        self,
+        backend: ExecutionBackend,
+        handle: WorkspaceHandle,
+        stdin_ref: ArtifactRef,
+    ) -> "AgentOrchestrator":
+        """Investigate a fresh public candidate under this task's existing limits.
+
+        The caller must retain the child's cumulative budget and acquisition usage,
+        including after an unsuccessful investigation, before starting another child.
+        """
+        if self.store.visibility != "public":
+            raise ValueError("repair continuation requires a public store")
+        backend_store = getattr(backend, "store", self.store)
+        if not isinstance(backend_store, RunStore) or backend_store.identity != self.store.identity:
+            raise ValueError("repair continuation backend must use the same public store")
+        if handle.run_id in self._investigation_runs:
+            raise ValueError("repair investigation run was already used")
+        run = self.store.load(handle.run_id)
+        if run.parent_run_id != self._root_run_id:
+            raise ValueError("repair investigation must have the original root as its parent")
+        if stdin_ref.run_id != handle.run_id or stdin_ref.visibility != "public":
+            raise ValueError("repair investigation input belongs to another run or visibility")
+        self.store.read(stdin_ref)
+
+        self.budget = self.budget.model_copy(
+            update={
+                "llm_calls": self.provider.gate.snapshot().llm_calls,
+                "remaining_seconds": self.provider.gate.remaining(),
+            }
+        )
+        child = AgentOrchestrator(
+            self.store,
+            self.provider,
+            backend,
+            handle,
+            stdin_ref,
+            self.knowledge,
+            self.knowledge_version,
+            self.budget.model_copy(),
+        )
+        child.ledger = self.ledger
+        child.acquisition_usage = self.acquisition_usage.model_copy()
+        child._root_run_id = self._root_run_id
+        child._investigation_runs = self._investigation_runs
+        self._investigation_runs.add(handle.run_id)
+        self.provider.gate.begin_repair_cycle()
+        return child
+
+    def _memcheck(self, action: AgentAction) -> None:
+        if action.action_type != "run_memcheck":
+            raise ValueError("typed registry mismatch")
+        reservation = self._reserve(action.action_type)
+        self.budget = self.budget.model_copy(
+            update={"sanitizer_calls": self.budget.sanitizer_calls + 1}
+        )
+        try:
+            self._run_sanitizer(SanitizerTool.MEMCHECK)
+        except Exception:
+            self.ledger.settle(reservation, "FAILED")
+            raise
+        self.ledger.settle(reservation)
+
+    def _sanitizer(self, action: AgentAction) -> None:
+        tools = {
+            "run_racecheck": SanitizerTool.RACECHECK,
+            "run_initcheck": SanitizerTool.INITCHECK,
+            "run_synccheck": SanitizerTool.SYNCCHECK,
+        }
+        tool = tools.get(action.action_type)
+        if tool is None:
+            raise ValueError("typed registry mismatch")
+        reservation = self._reserve(action.action_type)
+        self.budget = self.budget.model_copy(
+            update={"sanitizer_calls": self.budget.sanitizer_calls + 1}
+        )
+        try:
+            self._run_sanitizer(tool)
+        except Exception:
+            self.ledger.settle(reservation, "FAILED")
+            raise
+        self.ledger.settle(reservation)
+
+    def _run_sanitizer(self, tool: SanitizerTool) -> None:
+        request = SanitizerRequest(
+            workspace_id=self.handle.id,
+            stdin_ref=self.stdin_ref,
+            tool=tool.value,
+            timeout_seconds=self.provider.gate.timeout(120),
+        )
+        self.acquisition_usage = self.acquisition_usage.model_copy(
+            update={"sanitizer_calls": self.acquisition_usage.sanitizer_calls + 1}
+        )
+        result = self.backend.run_sanitizer(request)
+        if not result.completed or result.check_outcome in {"TOOL_ERROR", "UNSUPPORTED"}:
+            raise ProviderError("SANITIZER_EVIDENCE_UNAVAILABLE")
+
+    def _docs(self, action: AgentAction) -> None:
+        if action.action_type != "retrieve_official_docs":
+            raise ValueError("typed registry mismatch")
+        reservation = self._reserve(action.action_type)
+        self.budget = self.budget.model_copy(update={"rag_calls": self.budget.rag_calls + 1})
+        if self.knowledge is None:
+            self.ledger.settle(reservation, "FAILED")
+            raise ProviderError("KNOWLEDGE_UNAVAILABLE")
+        try:
+            self.acquisition_usage = self.acquisition_usage.model_copy(
+                update={"retrieval_calls": self.acquisition_usage.retrieval_calls + 1}
+            )
+            result = self.knowledge.retrieve(
+                action.typed_arguments.query, self.knowledge_version, action.typed_arguments.k
+            )
+        except KnowledgeError:
+            self.ledger.settle(reservation, "FAILED")
+            raise ProviderError("KNOWLEDGE_UNAVAILABLE") from None
+        if not result.chunks:
+            self.ledger.settle(reservation, "FAILED")
+            raise ProviderError("NO_INFORMATION_GAIN")
+        repo = _evidence(self.store)
+        bundle = repo.view(self.handle.run_id)
+        known = {
+            DocumentChunk.model_validate_json(self.store.read(r)).chunk_id
+            for r in bundle.retrieved_chunks
+        }
+        new = [c for c in result.chunks if c.chunk_id not in known]
+        if not new:
+            self.ledger.settle(reservation, "FAILED")
+            raise ProviderError("NO_INFORMATION_GAIN")
+        refs = [
+            self.store.put(
+                self.handle.run_id,
+                f"docs/{c.chunk_id}.json",
+                c.model_dump_json().encode(),
+                self.store.visibility,
+            )
+            for c in new
+        ]
+        repo.save(
+            self.handle.run_id,
+            bundle.model_copy(update={"retrieved_chunks": [*bundle.retrieved_chunks, *refs]}),
+        )
+        self.ledger.settle(reservation)
+
+    def _source(self, action: AgentAction) -> None:
+        if action.action_type != "inspect_source":
+            raise ValueError("typed registry mismatch")
+        reservation = self._reserve(action.action_type)
+        self.budget = self.budget.model_copy(update={"source_reads": self.budget.source_reads + 1})
+        # Source is already supplied in the public observation. Validate the registered range,
+        # then record exactly which immutable lines were inspected; never open a model path.
+        source = next(
+            s
+            for s in public_evidence(self.store, self.handle.run_id).sources
+            if s.source_id == action.typed_arguments.source_id
+        )
+        args = action.typed_arguments
+        lines = source.content.splitlines()[args.start_line - 1 : args.end_line]
+        if not lines:
+            self.ledger.settle(reservation, "FAILED")
+            raise ProviderError("NO_INFORMATION_GAIN")
+        self.store.put(
+            self.handle.run_id,
+            f"source-reads/{action.action_id}.json",
+            args.model_dump_json().encode(),
+            self.store.visibility,
+        )
+        self.ledger.settle(reservation)
+
+    def _planner_state(self, evidence: PublicEvidence, feedback: list[str] | None) -> PlannerState:
+        """Progress the planner needs to avoid repeats; tool choice stays with the planner."""
+        ranges = [
+            SourceRange.model_validate(
+                {key: item.typed_arguments[key] for key in ("source_id", "start_line", "end_line")}
+            )
+            for item in self.executed
+            if item.action_type == "inspect_source"
+        ]
+        return PlannerState(
+            missing_evidence=missing_evidence(evidence),
+            executed_actions=self.executed[-40:],
+            source_ranges_read=ranges[-40:],
+            rejected_previous_action=list(feedback or [])[:4],
+        )
+
+    def _reserve(self, action: str) -> BudgetReservation:
+        try:
+            return self.ledger.reserve(action)
+        except BudgetExceeded as error:
+            raise ProviderError("AGENT_BUDGET_EXHAUSTED") from error
+
+    def _diagnose(self, evidence: PublicEvidence) -> DiagnosisResult:
+        """The single final diagnosis step shared by every mode (docs/mode-contract.md)."""
+        diagnosis = self._reserve("diagnosis_llm")
+        try:
+            result = self.provider.diagnose(evidence)
+        except ProviderError:
+            self.ledger.settle(diagnosis, "FAILED")
+            raise
+        self.ledger.settle(diagnosis)
+        # Persist the exact accepted model output so validators can replay the derivation.
+        self.store.put(
+            self.handle.run_id,
+            "agent/model-diagnosis.json",
+            result.model_dump_json().encode(),
+            self.store.visibility,
+        )
+        return derive_final_diagnosis(result, evidence)
+
+    def investigate(
+        self,
+        run_id: str,
+        *,
+        mode: EvaluationMode = "E",
+        required_tools: tuple[SanitizerTool, ...] = (SanitizerTool.MEMCHECK,),
+    ) -> DiagnosisResult:
+        if mode not in {"A", "B", "C", "D", "E"}:
+            raise ValueError("invalid acquisition mode")
+        if run_id != self.handle.run_id:
+            raise ValueError("workspace belongs to another run")
+        self.store.put_if_absent_exact(
+            run_id,
+            "agent/initial-budget.json",
+            self.budget.model_dump_json().encode(),
+            self.store.visibility,
+        )
+        self.store.transition(run_id, "RUNNING", CurrentPhase.DIAGNOSING)
+        try:
+            if mode == "B":
+                # Fixed controller query against the locally frozen official corpus.
+                self._docs(
+                    RetrieveDocsAction(
+                        typed_arguments=DocsArguments(
+                            query=(
+                                "CUDA memory access out of bounds race "
+                                "synchronization initialization"
+                            ),
+                            k=5,
+                        )
+                    )
+                )
+            elif mode == "C":
+                # Precollect before the sole final diagnosis call. Preserve memcheck precedence.
+                for tool in dict.fromkeys((SanitizerTool.MEMCHECK, *required_tools)):
+                    if (
+                        tool != SanitizerTool.MEMCHECK
+                        and public_evidence(self.store, run_id).sanitizer_outcomes.get(
+                            SanitizerTool.MEMCHECK
+                        )
+                        != "CLEAN"
+                    ):
+                        break
+                    reservation = self._reserve(f"run_{tool.value}")
+                    self.budget = self.budget.model_copy(
+                        update={"sanitizer_calls": self.budget.sanitizer_calls + 1}
+                    )
+                    try:
+                        self._run_sanitizer(tool)
+                    except Exception:
+                        self.ledger.settle(reservation, "FAILED")
+                        raise
+                    self.ledger.settle(reservation)
+            if mode in {"A", "B", "C"}:
+                return self._diagnose(public_evidence(self.store, run_id))
+            replanned = False
+            feedback: list[str] | None = None
+            while True:
+                evidence = public_evidence(self.store, run_id)
+                self.budget = self.budget.model_copy(
+                    update={
+                        "llm_calls": self.provider.gate.snapshot().llm_calls,
+                        "remaining_seconds": self.provider.gate.remaining(),
+                    }
+                )
+                if (
+                    self.budget.agent_steps >= self.budget.max_agent_steps
+                    or self.budget.remaining_seconds <= 0
+                ):
+                    raise ProviderError("AGENT_BUDGET_EXHAUSTED")
+                if mode == "D":
+                    proposed = self.rule_router.next_action(evidence, self.budget)
+                else:
+                    planner = self._reserve("planner_llm")
+                    try:
+                        proposed = self.provider.plan(
+                            evidence,
+                            self.budget,
+                            feedback,
+                            state=self._planner_state(evidence, feedback),
+                        )
+                        self.ledger.settle(planner)
+                    except ProviderError:
+                        self.ledger.settle(planner, "FAILED")
+                        raise
+                try:
+                    action = ACTION_ADAPTER.validate_python(proposed.model_dump())
+                except ValidationError:
+                    raise ProviderError("ACTION_INVALID") from None
+                manifest = self.store.load(run_id)
+                evidence_refs = [
+                    ref for ref in manifest.artifact_refs if ref.name == "evidence/bundle.json"
+                ]
+                if not evidence_refs:
+                    raise ValueError("controller action has no evidence snapshot")
+                self.store.put(
+                    run_id,
+                    f"actions/{self.budget.agent_steps}/step.json",
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "action": action.model_dump(mode="json"),
+                            "evidence_ref": evidence_refs[-1].model_dump(mode="json"),
+                            "evidence": evidence.model_dump(mode="json"),
+                            "budget": self.budget.model_dump(mode="json"),
+                            "seen": sorted(self.seen),
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode(),
+                    self.store.visibility,
+                )
+                decision = decide_action(
+                    action, evidence, self.budget, CurrentPhase.DIAGNOSING, self.seen
+                )
+                self.store.put(
+                    run_id,
+                    f"actions/{self.budget.agent_steps}/decision.json",
+                    decision.model_dump_json().encode(),
+                    self.store.visibility,
+                )
+                # Do not persist model budget snapshots or arbitrary rationale as controller state.
+                if not decision.allowed:
+                    # A denied proposal consumes a step. E replans once, seeing only the
+                    # controller's reason codes; a second denial (or any in D) is final.
+                    self.budget = self.budget.model_copy(
+                        update={"agent_steps": self.budget.agent_steps + 1}
+                    )
+                    if mode == "E" and not replanned:
+                        replanned = True
+                        feedback = list(decision.reason_codes)
+                        continue
+                    raise ProviderError(decision.reason_codes[0])
+                feedback = None
+                self.seen.add(action.action_type + action.typed_arguments.model_dump_json())
+                self.executed.append(
+                    ExecutedAction(
+                        action_type=action.action_type,
+                        typed_arguments=action.typed_arguments.model_dump(mode="json"),
+                    )
+                )
+                self.budget = self.budget.model_copy(
+                    update={"agent_steps": self.budget.agent_steps + 1}
+                )
+                if action.action_type == "declare_inconclusive":
+                    return DiagnosisResult.inconclusive("MODEL_DECLARED_INCONCLUSIVE")
+                if action.action_type == "finish_diagnosis":
+                    return self._diagnose(evidence)
+                self.registry[action.action_type](action)
+        except ProviderError as exc:
+            return DiagnosisResult.inconclusive(exc.code)
+        finally:
+            self.store.put(
+                run_id,
+                "agent/acquisition-usage.json",
+                self.acquisition_usage.model_dump_json().encode(),
+                self.store.visibility,
+            )
+            self.budget = self.budget.model_copy(
+                update={
+                    "llm_calls": self.provider.gate.snapshot().llm_calls,
+                    "remaining_seconds": self.provider.gate.remaining(),
+                }
+            )
+            self.store.put(
+                run_id,
+                "agent/budget.json",
+                self.budget.model_dump_json().encode(),
+                self.store.visibility,
+            )
+            self.store.put(
+                run_id,
+                "agent/budget-audit.json",
+                json.dumps(self.ledger.audit).encode(),
+                self.store.visibility,
+            )
+            manifest = self.store.load(run_id)
+            policies = [
+                ref for ref in manifest.artifact_refs if ref.name == "agent/acquisition-policy.json"
+            ]
+            evidence_refs = [
+                ref for ref in manifest.artifact_refs if ref.name == "evidence/bundle.json"
+            ]
+            decisions = sorted(
+                (
+                    ref
+                    for ref in manifest.artifact_refs
+                    if ref.name.startswith("actions/") and ref.name.endswith("/decision.json")
+                ),
+                key=lambda ref: int(ref.name.split("/")[1]),
+            )
+            if len(policies) != 1 or not evidence_refs:
+                raise ValueError("controller lineage inputs are missing or ambiguous")
+            self.store.put(
+                run_id,
+                "agent/controller-lineage.json",
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "mode": mode,
+                        "controller": (
+                            "fixed"
+                            if mode in {"A", "B", "C"}
+                            else "rule_router"
+                            if mode == "D"
+                            else "planner"
+                        ),
+                        "provider_calls_allowed": True,
+                        "acquisition_policy_ref": {
+                            "id": policies[0].id,
+                            "sha256": policies[0].sha256,
+                        },
+                        "evidence_ref": {
+                            "id": evidence_refs[-1].id,
+                            "sha256": evidence_refs[-1].sha256,
+                        },
+                        "route_decision_refs": [
+                            {"id": ref.id, "name": ref.name, "sha256": ref.sha256}
+                            for ref in decisions
+                        ],
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode(),
+                self.store.visibility,
+            )

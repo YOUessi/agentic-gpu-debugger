@@ -1,0 +1,8 @@
+{
+  "case_0000": {
+    "benchmarks/public/case_0000/public_input/kernel.cu": "6813b1cd70e3efe3d9b2a0c5d23815b5183e5b3a07e67d44fc5b486a7c239ded",
+    "benchmarks/harness/vector_io.cpp": "a86f1e64fc67880eca0c97c5e56d4df46f1e49ca7d4f70cce4436efd691c5ea3",
+    "benchmarks/harness/vector_api.h": "49c25fd434fe26a9799a1ce86798d5b5c043b32a3d27475a37f5e31b52c4e2b7",
+    "benchmarks/harness/vendor/json.hpp": "aaf127c04cb31c406e5b04a63f1ae89369fccde6d8fa7cdda1ed4f32dfc5de63"
+  }
+}
