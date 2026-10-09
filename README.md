@@ -203,3 +203,50 @@ python -I -m pytest tests/gpu/test_clean_kernel.py --require-live --gpu-run-root
 这不是不可信代码沙箱。T02 不提供任意源码 CLI，不运行模型补丁；LocalBackend 的 Sanitizer 请求明确返回 `UNSUPPORTED`，不是 `CLEAN`。后续 T03 才建立隔离编译/执行和 memcheck OOB 证据。
 
 真实验证与安装调整见 [T01 记录](docs/t01-validation.md) 和 [T02/M0 记录](docs/t02-validation.md)。设计与依赖顺序见 [V2 规格](PROJECT_SPEC_CN_V2.md) 和 [实施计划](IMPLEMENTATION_PLAN_CN_V2.md)。不按开发天数安排任务。
+
+
+## Repair V3：公开多轮 CUDA 修复与历史失败经验
+
+当前正式评测 A–E 与 V2 release evidence 的合同未更改；公开开发模式可显式启用多轮
+`gpu-agent repair`，失败候选能够在来源校验后重新调查，按原始源码生成后续补丁，
+并通过真实 GPU 功能/四种 Sanitizer 自检。只有公开检查通过，才会进行一次隔离的
+独立严格验证。现有 T06 的单候选描述属于较早阶段，不能当成 Repair V3 的候选限制。
+
+```bash
+gpu-agent repair benchmarks/public/case_0009/public_input --allow-paid-calls \
+  --reinvestigate --unbounded-sanitizer-calls \
+  --max-candidates 3 --max-reinvestigations 1 --max-llm-calls 40
+```
+
+`--unbounded-sanitizer-calls` 仅取消开发 V3 **独立 Sanitizer 调查次数**限制；
+仍保留模型请求、任务截止时间、Agent step 数及补丁候选数限制。
+候选自身的四工具自检调用另计，且不能替代私有严格验证。
+
+历史失败经验库为**可选只读索引**。从明确选择的、已完成且有来源绑定的公开失败
+RunStore 导出，然后冻结、合并两个索引并显式启用：
+
+```bash
+python scripts/export_repair_memory.py --public-store /runs/public-A \
+  --run-id <public-run-id> --output /path/public-A.json
+python scripts/export_repair_memory.py --public-store /runs/public-B \
+  --run-id <public-run-id> --output /path/public-B.json
+python scripts/merge_repair_memory.py --index /path/public-A.json \
+  --index /path/public-B.json --output /path/frozen-memory.json
+export GPU_AGENT_REPAIR_MEMORY_INDEX=/path/frozen-memory.json
+# 此后显式运行 Repair V3；不要把经验自动写回当前评测批次。
+```
+
+经验项保留算法/故障类别、原公共 Run ID、候选 Hash 和结果证据 Hash，
+只作为低信任的修复提示，不能宣称是 NVIDIA 规范、当前观测或官方验证结论。
+冻结索引的语料 Hash 会写入 `repair/experience-retrieval.json`；正式对照需明确
+禁用或冻结 Memory，避免同批次信息泄漏。历史示例：
+[冻结公开失败经验](knowledge/repair_memory/merged_public_failures_20261009.json)。
+
+真实 GPU 工程闭环验证已覆盖“首个候选失败→重新调查→第二候选→独立验证”。
+[复杂案例探索对照](docs/repair-log/2026-10-09-v2-v3-complex-pilot.md)
+得到 V2 2/2、V3 1/2 的单次结果，不能声称 V3 成功率更高。
+[记忆跨算法试用](docs/repair-log/2026-10-09-repair-memory-live-stencil.md)
+真实加载并检索 3 条经验后修复 Stencil 且通过严格验证，但尚没有
+memory-on/off 的因果增益对照。完整来源边界见
+[V3 操作员手册](docs/v2-operator-runbook.md#repair-v3) 与
+[按日期的失败与修复记录](docs/repair-log/README.md)。
