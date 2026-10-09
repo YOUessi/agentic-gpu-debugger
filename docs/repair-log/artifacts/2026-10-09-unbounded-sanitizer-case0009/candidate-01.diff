@@ -1,0 +1,15 @@
+--- a/kernel.cu
++++ b/kernel.cu
+@@ -8,9 +8,9 @@
+ __global__ void folded_warp_writes() {
+-    __shared__ volatile float slots[16];
+-    const unsigned int slot = threadIdx.x & 15U;
++    __shared__ volatile float slots[32];
++    const unsigned int slot = threadIdx.x;
+     slots[slot] = static_cast<float>(threadIdx.x);
+     __syncthreads();
+-    if (threadIdx.x == 0) block_summary = slots[0];
++    if (threadIdx.x == 0) block_summary = slots[0] + slots[31];
+ }
+ 
+ __global__ void vector_add(const float* a, const float* b, float* out, std::size_t n) {

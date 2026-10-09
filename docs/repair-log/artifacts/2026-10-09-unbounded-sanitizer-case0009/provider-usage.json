@@ -1,0 +1,19 @@
+{
+  "model": "deepseek-v4-pro",
+  "synthetic": false,
+  "physical_calls": 6,
+  "all_calls_completed": true,
+  "call_kinds": {
+    "plan": 4,
+    "diagnose": 1,
+    "patch": 1
+  },
+  "usage": {
+    "input_tokens": 16239,
+    "output_tokens": 1426,
+    "total_tokens": 17665,
+    "cached_tokens": 6912
+  },
+  "cost_usd": null,
+  "pricing_attestation": "NOT_REVIEWED"
+}
