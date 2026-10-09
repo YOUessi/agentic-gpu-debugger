@@ -99,3 +99,4 @@
 - [2026-10-09：Repair v3 证据复用、Patch Effect、冻结失败记忆进展](2026-10-09-repair-v3-robustness-progress.md)
 - [2026-10-09：冻结失败经验跨算法真实 DeepSeek/Stencil 试用及严格验证](2026-10-09-repair-memory-live-stencil.md)
 - [2026-10-09：case_0022 V2/V3 同源码逐轮信息流审计、GPU 遗漏竞争复现与单次开发回归](2026-10-09-case0022-v2-v3-information-audit.md)
+- [2026-10-10：case_0022 受控首候选失败、真实 DeepSeek 重新调查和严格验证](2026-10-10-case0022-forced-first-real-model.md)

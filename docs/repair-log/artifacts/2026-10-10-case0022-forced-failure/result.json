@@ -1,0 +1,92 @@
+{
+  "run_id": "9d9ad8807eab4ee08161ca4a884d2b7a",
+  "finished_utc": "2026-10-09T16:12:04.005860+00:00",
+  "elapsed_seconds": 236.87,
+  "forced_first_kernel_sha256": "d1fac7bc60f231f4bc041b71ef7b04ece7f13ba8794aa90f7a9cdd504ebecce5",
+  "forced_first_proposal_count": 1,
+  "verdict": "VERIFIED_FIXED",
+  "reason_code": "ALL_REQUIRED_CHECKS_PASSED",
+  "stop_reason": "PUBLIC_CHECKS_PASSED",
+  "candidate_rounds": 2,
+  "public_rounds": [
+    {
+      "round": 1,
+      "candidate_hash": "cf55f41f779456a72097ed94eeaa77ee5b0cd304c7a3e8d20581277931867d05",
+      "checks": {
+        "build": "CLEAN",
+        "runtime": "SUCCESS",
+        "functional": "NUMERIC_MISMATCH"
+      },
+      "status": "FAILED"
+    },
+    {
+      "round": 2,
+      "candidate_hash": "7a0186fc6757a292b628b90ad83641deac7f46f79bfdfe13be53d76b3b420fb3",
+      "checks": {
+        "build": "CLEAN",
+        "runtime": "SUCCESS",
+        "functional": "PASSED",
+        "memcheck": "CLEAN",
+        "memcheck_functional": "PASSED",
+        "racecheck": "CLEAN",
+        "racecheck_functional": "PASSED",
+        "initcheck": "CLEAN",
+        "initcheck_functional": "PASSED",
+        "synccheck": "CLEAN",
+        "synccheck_functional": "PASSED"
+      },
+      "status": "PASSED"
+    }
+  ],
+  "reinvestigations": 1,
+  "acquisition_usage": {
+    "schema_version": 1,
+    "sanitizer_calls": 4,
+    "retrieval_calls": 2
+  },
+  "feedback": [
+    {
+      "artifact_name": "repair/1/feedback.json",
+      "revision_history": [
+        {
+          "round": 1,
+          "candidate_kernel_sha256": "d1fac7bc60f231f4bc041b71ef7b04ece7f13ba8794aa90f7a9cdd504ebecce5",
+          "candidate_patch_excerpt": "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -9,8 +9,8 @@\n     tile[lane] = i < n ? a[i] + b[i] : 0.0f;\n     for (unsigned int offset = 1; offset < 128; offset *= 2) {\n         const float value = tile[lane] + (lane >= offset ? tile[lane - offset] : 0.0f);\n+        tile[lane] = value;\n         __syncthreads();\n-        tile[lane] = value;\n     }\n     if (i < n) out[i] = tile[lane];\n }\n",
+          "patch_effect_reason": "CHANGE_NOT_PROVEN_EQUIVALENT",
+          "status": "FAILED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "NUMERIC_MISMATCH"
+          }
+        }
+      ],
+      "diagnosis_scoped_to_latest_candidate": true
+    }
+  ],
+  "usage": {
+    "actual_physical_model_calls": 11,
+    "all_model_calls_completed": true,
+    "total_tokens": 52938,
+    "calls_with_missing_usage": 0,
+    "kinds": [
+      "plan",
+      "plan",
+      "plan",
+      "plan",
+      "diagnose",
+      "plan",
+      "plan",
+      "plan",
+      "plan",
+      "diagnose",
+      "patch"
+    ],
+    "prompt_versions": [
+      "m3-2026-10-01-v12",
+      "public-repair-v3-2026-10-09-v5"
+    ],
+    "cost_usd": null
+  },
+  "historical_v3_comparison": "single development replay; not causal evidence"
+}
