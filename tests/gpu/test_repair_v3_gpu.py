@@ -569,3 +569,220 @@ def test_real_gpu_race_failure_reuses_self_check_and_repairs_in_two_candidates(t
             sort_keys=True,
         )
     )
+
+
+class _ScriptedCase22TwoPhaseProvider(FakeProvider):
+    """No API calls; native racecheck must reject premature reinvestigation finish."""
+
+    def __init__(self, original: str, incorrect: str, corrected: str) -> None:
+        super().__init__(
+            [], DiagnosisResult.inconclusive("SCRIPT_NOT_RUN"), _diff(original, incorrect)
+        )
+        self.original = original
+        self.incorrect = incorrect
+        self.corrected = corrected
+        self.rejected_premature_finish = False
+        self.saw_native_child_racecheck = False
+        self.saw_complete_history = False
+        self.diagnosed_candidate_source = False
+
+    def plan(self, evidence, budget, feedback=None, state=None):
+        from gpu_agent.agent.models import RacecheckAction
+
+        if SanitizerTool.MEMCHECK not in evidence.sanitizer_outcomes:
+            action = MemcheckAction()
+        elif evidence.repair_context is not None and (
+            not self.rejected_premature_finish and SanitizerTool.RACECHECK not in evidence.sanitizer_outcomes
+        ):
+            # Explicitly attempt the historically premature finish, then replan
+            # using the controller's typed rejection rather than model self-discipline.
+            action = FinishAction()
+            self.rejected_premature_finish = True
+        elif SanitizerTool.RACECHECK not in evidence.sanitizer_outcomes:
+            assert (
+                evidence.repair_context is None
+                or feedback == ["MANDATORY_EVIDENCE_MISSING"]
+            )
+            action = RacecheckAction()
+        elif evidence.tool_findings and not evidence.documentation:
+            action = RetrieveDocsAction(
+                typed_arguments={"query": "shared memory synchronization racecheck", "k": 1}
+            )
+        else:
+            action = FinishAction()
+        self.actions.append(action)
+        return super().plan(evidence, budget, feedback, state)
+
+    def diagnose(self, evidence):
+        if evidence.repair_context is not None:
+            assert evidence.sources[0].content == self.incorrect
+            assert evidence.repair_context.public_functional_failure
+            self.diagnosed_candidate_source = True
+            self.saw_native_child_racecheck = (
+                evidence.sanitizer_outcomes.get(SanitizerTool.RACECHECK) == "FINDING"
+                and bool(evidence.tool_findings)
+            )
+            assert self.saw_native_child_racecheck
+        else:
+            assert evidence.sources[0].content == self.original
+        assert evidence.sanitizer_outcomes[SanitizerTool.MEMCHECK] == "CLEAN"
+        assert evidence.sanitizer_outcomes[SanitizerTool.RACECHECK] == "FINDING"
+        assert evidence.tool_findings and evidence.documentation
+        located = [item.source_location for item in evidence.tool_findings if item.source_location]
+        assert located
+        self.result = DiagnosisResult(
+            diagnostic_outcome="DIAGNOSED",
+            failure_family="shared_memory_race",
+            root_cause="In-place tile updates can overwrite values before all readers finish.",
+            source_locations=[located[0]],
+            observed_facts=evidence.observed_facts,
+            tool_findings=[
+                EvidenceClaim(text=f.category, citation_ids=[f.artifact_id])
+                for f in evidence.tool_findings
+            ],
+            documentation_evidence=[
+                EvidenceClaim(text=c.text, citation_ids=[c.chunk_id]) for c in evidence.documentation
+            ],
+            recommended_change=(
+                "Synchronize after initialization, after all old-stage reads, and "
+                "after new-stage writes before the next iteration."
+            ),
+            confidence_label="high",
+        )
+        return super().diagnose(evidence)
+
+    def revise_patch(self, public_source, diagnosis, feedback):
+        assert public_source.content == self.original
+        assert feedback["previous_candidate_source"] == self.incorrect
+        assert feedback["diagnosis_source"] == self.incorrect
+        assert feedback["diagnosis_scoped_to_latest_candidate"] is True
+        assert feedback["diagnosis_source_sha256"] == _sha(self.incorrect.encode())
+        history = feedback["revision_history"]
+        assert len(history) == 1
+        assert history[0]["checks"]["functional"] == "NUMERIC_MISMATCH"
+        assert history[0]["candidate_kernel_sha256"] == _sha(self.incorrect.encode())
+        assert history[0]["status"] == "FAILED"
+        self.saw_complete_history = True
+        self.diff = _diff(self.original, self.corrected)
+        return super().revise_patch(public_source, diagnosis, feedback)
+
+
+def test_real_gpu_case22_reinvestigation_requires_native_racecheck_and_repairs(
+    tmp_path, request
+):
+    """Force prior numeric-only wrong patch; real racecheck, correction and verifier."""
+    from gpu_agent.service import ApplicationService
+    from gpu_agent.verification.models import VerificationVerdict
+
+    repo = Path(__file__).resolve().parents[2]
+    source = repo / "benchmarks/public/case_0022/public_input"
+    original = (source / "kernel.cu").read_text()
+    old_barrier = "        __syncthreads();\n        tile[lane] = value;"
+    assert original.count(old_barrier) == 1
+    incorrect = original.replace(
+        old_barrier, "        tile[lane] = value;\n        __syncthreads();", 1
+    )
+    corrected = original.replace(
+        "    for (unsigned int offset = 1; offset < 128; offset *= 2) {",
+        "    __syncthreads();\n    for (unsigned int offset = 1; offset < 128; offset *= 2) {",
+        1,
+    ).replace(
+        "        tile[lane] = value;",
+        "        tile[lane] = value;\n        __syncthreads();",
+        1,
+    )
+    assert incorrect != corrected != original
+    store_root = request.config.getoption("--gpu-run-root")
+    public = RunStore(Path(store_root) if store_root else tmp_path / "public")
+    backend = IsolatedGPUBackend(public, tmp_path / "availability", tmp_path / "probe-tasks")
+    available = backend.availability()
+    if not available.ready:
+        pytest.skip(available.reason)
+    toolchain = load_toolchain_lock(LOCK_PATH)
+    version = toolchain.compute_sanitizer.split()[0]
+    chunk = make_chunk(
+        source_id="case22-scripted",
+        document_title="CUDA shared memory synchronization",
+        document_version=version,
+        section_title="Block-level synchronization",
+        source_url="https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html",
+        retrieved_at="2026-10-09T00:00:00Z",
+        text=(
+            "Threads synchronize shared memory writes and reads using __syncthreads. "
+            "Racecheck reports read-after-write and write-after-read hazards."
+        ),
+        block_ordinal=0,
+        compatibility={"cuda": f"=={toolchain.cuda_nvcc}", "compute_sanitizer": f"=={version}"},
+    )
+    provider = _ScriptedCase22TwoPhaseProvider(original, incorrect, corrected)
+    service = ApplicationService(
+        public,
+        RunStore(tmp_path / "private-verification", visibility="evaluator"),
+        provider=provider,
+        backend_factory=IsolatedGPUBackend,
+        knowledge=KnowledgeIndex([chunk]),
+        knowledge_version=f"cuda={toolchain.cuda_nvcc};compute-sanitizer={version}",
+    )
+    run, verdict = service.repair(
+        source,
+        policy=RepairPolicy(
+            version="public-repair-v3",
+            max_candidates=2,
+            max_reinvestigations=1,
+            unbounded_sanitizer_calls=True,
+        ),
+    )
+    summary = _artifact(public, run.id, "repair/summary.json")
+    assert summary["stop_reason"] == "PUBLIC_CHECKS_PASSED"
+    assert summary["reinvestigations"] == 1 and len(summary["rounds"]) == 2
+    assert summary["rounds"][0]["check"]["checks"]["functional"] == "NUMERIC_MISMATCH"
+    assert summary["rounds"][1]["check"]["checks"]["racecheck"] == "CLEAN"
+    assert provider.rejected_premature_finish
+    assert provider.saw_native_child_racecheck
+    assert provider.diagnosed_candidate_source
+    assert provider.saw_complete_history
+    (child_id,) = summary["investigation_runs"]
+    child_manifest = public.load(child_id)
+    actions = [
+        _artifact(public, child_id, ref.name)
+        for ref in child_manifest.artifact_refs
+        if ref.name.startswith("actions/") and ref.name.endswith("/step.json")
+    ]
+    decisions = [
+        _artifact(public, child_id, ref.name)
+        for ref in child_manifest.artifact_refs
+        if ref.name.startswith("actions/") and ref.name.endswith("/decision.json")
+    ]
+    assert any(
+        a["action"]["action_type"] == "finish_diagnosis"
+        and a["evidence"]["sanitizer_outcomes"].get("memcheck") == "CLEAN"
+        and "racecheck" not in a["evidence"]["sanitizer_outcomes"]
+        for a in actions
+    )
+    assert any(
+        d["reason_codes"] == ["MANDATORY_EVIDENCE_MISSING"] and not d["allowed"]
+        for d in decisions
+    )
+    child_evidence = public_evidence(public, child_id)
+    assert child_evidence.sanitizer_outcomes[SanitizerTool.RACECHECK] == "FINDING"
+    assert not any(
+        ref.name == "repair/reused-evidence.json"
+        for ref in child_manifest.artifact_refs
+    )  # Numeric failure prevented old self-check from running a Sanitizer.
+    assert verdict is not None and verdict.verdict == VerificationVerdict.VERIFIED_FIXED
+    print(
+        json.dumps(
+            {
+                "test": "case22_scripted_forced_first_failure_real_gpu",
+                "public_run": run.id,
+                "reinvestigation_run": child_id,
+                "native_memcheck": "CLEAN",
+                "native_racecheck": "FINDING",
+                "rejected_premature_finish": True,
+                "public_repair_rounds": 2,
+                "strict_verdict": verdict.verdict,
+                "provider": "scripted_no_paid_calls",
+            },
+            sort_keys=True,
+        )
+    )
