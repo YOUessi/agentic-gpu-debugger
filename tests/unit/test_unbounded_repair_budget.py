@@ -150,3 +150,21 @@ def test_default_v2_cli_still_has_original_policy(monkeypatch):
     assert result.exit_code == 0, result.output
     assert policies[0].version == "public-repair-v2"
     assert policies[0].unbounded_sanitizer_calls is False
+
+
+def test_rule_router_opt_in_may_exceed_previous_four_call_threshold():
+    """D-mode route must agree with the Ledger on None, but keep default cap."""
+    from gpu_agent.agent.models import PublicSource
+    from gpu_agent.agent.rule_router import RuleRouter
+
+    evidence = PublicEvidence(
+        sources=[PublicSource(source_id="a" * 32, content="__shared__ float tile[128];")],
+        sanitizer_outcomes={"memcheck": "CLEAN"},
+    )
+    router = RuleRouter()
+    unlimited = router.next_action(
+        evidence, AgentBudget(max_sanitizer_calls=None, sanitizer_calls=4)
+    )
+    default = router.next_action(evidence, AgentBudget(sanitizer_calls=4))
+    assert unlimited.action_type == "run_racecheck"
+    assert default.action_type == "declare_inconclusive"
