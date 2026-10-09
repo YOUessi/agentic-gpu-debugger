@@ -92,3 +92,20 @@ V2 的 8 次物理模型请求全部为 `m3-2026-10-01-v12`；V3 起初 7 次同
 - 即使随后在 `case_0022` 上成功，也只能视为**被用于发现缺陷的开发案例修复**，不能把它计入未见案例的成功率提升；正式对照应选新案例、冻结代码、控制相同模型和采样预算，保留所有失败。
 
 本报告支持的主结论是：**V3 在首次失败后允许仅凭数值失配和 CLEAN memcheck 完成竞争类重新诊断，产生了对已存在修改的重复建议；在下一次故障模式变化时，控制器使用了旧源码诊断与仅一轮自检反馈。** 这两处证据链漏洞已明确可通过代码和回归验证改进。不能从个例判断所有 CUDA 问题均应重新调查，或推广未经验证的同步修复模板。
+
+
+## 补充：针对原始遗漏证据的真实 GPU 测试（2026-10-09）
+
+测试代码：`tests/gpu/test_repair_hypothesis_gpu.py`。从公开 `case_0022` 原始源码，严格重建历史 V3 第一候选（将循环中的 `__syncthreads()` 从写前移到写后）。只对 prior diagnosis family 使用构造的 `shared_memory_race` 结构，其余是真正的 CUDA 原生构建、运行、公开 Oracle、memcheck 和 racecheck。
+
+Tang 运行结果：公开 Oracle **NUMERIC_MISMATCH**，native memcheck **CLEAN**，native racecheck **FINDING**；修订后的 `missing_evidence` 在已有 CLEAN memcheck 时返回 `racecheck_outcome`，控制器禁止直接 `finish_diagnosis`，而 D Router 提出 `run_racecheck`。**1 passed in 8.83s**、真实模型请求 **0**。原生公共 Run ID `f883e8e94b584e32be3dbc5d5e8e4d92`；独立目录 `/home/you/gpu-agent-case0022-hypothesis-native-20261009-01/public`。这验证了**同一候选确实存在旧调查漏掉的 Racecheck 事实**。
+
+## 补充：一次真实模型开发态单次重试（与冻结探索分开）
+
+在修复证据门禁和 feedback 历史后，使用 Tang 实机 `deepseek-v4-pro` 再次运行公开 `case_0022`，但仅作为**已参与设计的开发案例回归**，绝不回填或改写此前的四单元对照数据。执行代码 commit `6a9a06de4c91e6714d696a8dd183cc94e1a7d13b`；保持正式模型配置、官方文档索引和同一公开输入，关掉 Repair Memory，候选上限 3、重新调查上限 1、模型最多 40 次、总截止 600 秒，仅一次真实模型采样。
+
+实际：父 Run ID `053d36993ff647fab62e2ccd50009666`，**首候选** `PUBLIC_CHECKS_PASSED`，四个 Sanitizer CLEAN，独立验证 **VERIFIED_FIXED**，exit 0，模型请求 **7** 次，合计 **20,209 tokens**（input 18,488；output 1,721；cached 8,704 属于 input 子集），约 **197.91s**。候选 Hash：`77c257cd0e6a010ef5bfc7e623783bcc56e8d89246ca92ad196702242fe1ad07`，**与历史 V2 第二个成功补丁完全相同**。最终审计 Run ID `eaeb634725868e1130c5511d967ef732`。本地 RunStore `/home/you/gpu-agent-case0022-feedback-v5-live-20261009-01`；原始 CLI 日志 SHA256 `e1df3176efac7ea35a19682e38473783e104cd1872e0b60fc1dbde7f24f679ab`。
+
+至关重要：本次调用组成是 **5 plan + 1 diagnose + 1 patch**，`prompt_version` 全部为原版 `m3-2026-10-01-v12`。由于**第一份补丁就成功**，本次完全没有调用新增的 V3 v5 再调查或跨轮修订能力。因而这个新成功**不构成新增机制改善模型修复率的证据**，反而说明单次样本之间的首次补丁波动较大。此结果应与旧 V3 三候选失败并存，未来需要在新未见任务上预声明多次重复和独立消融。
+
+[本次物理 GPU 证据和真实模型回放 JSON](artifacts/2026-10-09-case0022-root-cause-audit/development-replay.json) 包含代码和结果 hash；不会将隐藏输入或未经授权的 API 响应写入公开文档。
