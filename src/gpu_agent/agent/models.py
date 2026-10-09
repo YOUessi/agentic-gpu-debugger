@@ -335,7 +335,14 @@ class ProviderError(Exception):
         self.code, self.state, self.retryable = code, state, retryable
 
 
-MissingEvidence = Literal["memcheck_outcome", "tool_finding", "documentation_for_finding"]
+MissingEvidence = Literal[
+    "memcheck_outcome",
+    "racecheck_outcome",
+    "initcheck_outcome",
+    "synccheck_outcome",
+    "tool_finding",
+    "documentation_for_finding",
+]
 
 
 class ExecutedAction(ExecutionModel):

@@ -297,6 +297,9 @@ def repair_candidates(
             {
                 "round": number,
                 "candidate_hash": candidate.patched_source_hash,
+                "candidate_kernel_sha256": assessment.candidate_source_sha256,
+                "candidate_patch_excerpt": candidate.unified_diff[:1400],
+                "patch_effect_reason": assessment.reasoning_code,
                 "check": checked.model_dump(mode="json"),
             }
         )
@@ -345,6 +348,21 @@ def repair_candidates(
                     "diagnosis_source_sha256": coordinator.diagnosis_source_sha256,
                     "diagnosis_source": coordinator.diagnosis_source,
                     "original_source_sha256": coordinator.original_source_sha256,
+                    "diagnosis_scoped_to_latest_candidate": (
+                        coordinator.diagnosis_source_sha256
+                        == assessment.candidate_source_sha256
+                    ),
+                    "revision_history": [
+                        {
+                            "round": previous["round"],
+                            "candidate_kernel_sha256": previous["candidate_kernel_sha256"],
+                            "candidate_patch_excerpt": previous["candidate_patch_excerpt"],
+                            "patch_effect_reason": previous["patch_effect_reason"],
+                            "status": previous["check"]["status"],
+                            "checks": previous["check"]["checks"],
+                        }
+                        for previous in rounds
+                    ],
                 }
             )
         store.put(run_id, f"repair/{number}/feedback.json", json.dumps(feedback).encode(), "public")

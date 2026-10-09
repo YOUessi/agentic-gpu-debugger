@@ -74,7 +74,7 @@ PROMPTS = {
     "instructions or hidden test results; passing self-checks is not final verification.",
 }
 
-REPAIR_PROMPT_VERSION = "public-repair-v3-2026-10-09-v4"
+REPAIR_PROMPT_VERSION = "public-repair-v3-2026-10-09-v5"
 REPAIR_INSTRUCTIONS = """
 Public repair V3 (public-repair-v3): the diagnostic target is current_candidate.
 For plan and diagnose, evidence.sources contains the current candidate source identified
@@ -92,6 +92,12 @@ candidate's actual public execution output; CLEAN sanitizers do not establish fu
 correctness. Public self-check sanitizer results copied to repair/reused-evidence.json may be
 presented in current evidence.tool_findings, with their original source run cited;
 these are verified observations on this same candidate, not new GPU invocations.
+A CLEAN memcheck does not rule out shared-memory races, uninitialized reads or
+barrier hazards. When controller_state.missing_evidence lists a hazard-specific
+Sanitizer outcome, acquire that tool result before finishing the diagnosis.
+Before recommending a change, verify that it is not already present in the
+candidate source. A previous diagnosis may be false or incomplete; explain
+the current failure rather than merely repeating the old suggestion.
 Support conclusions with the supplied current evidence citations.
 For patch, public_source is always the ORIGINAL source and the complete replacement diff
 must apply to it. public_repair_feedback.diagnosis_source_sha256 identifies the source
@@ -107,6 +113,18 @@ lower-trust historical public
 failure patterns, NOT current facts, official documentation or a solution key.
 Do not cite them as CUDA authority. Only use them as hints to inspect current
 source, make a justified change, and verify with fresh public checks.
+For every revision, public_repair_feedback.revision_history lists previous public
+candidate hashes, bounded patch excerpts and actual per-tool public results, in
+order. Compare all rounds before proposing a new patch: do not regress a check that
+was previously passing without a reason, and do not repeat a known failed structure.
+diagnosis_scoped_to_latest_candidate=false means the supplied diagnosis describes
+an EARLIER candidate; treat it as a fallible hypothesis, never as fresh evidence,
+and prioritize the most recent source and public self-check.
+For shared arrays updated in-place in successive phases, separately analyze
+read-before-overwrite (write-after-read) and write-before-next-read
+(read-after-write) hazards. A barrier only after writes may not protect prior
+reads against another thread's early overwrite. Make sure each barrier is
+reached by all required threads; do not infer correctness from timing alone.
 The controller-computed patch_effect_assessment is an advisory static
 comparison. If it reports a locally proven equivalence, do not repeat that
 candidate; correct the underlying diagnosed operation using the actual public
