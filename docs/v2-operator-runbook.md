@@ -487,7 +487,7 @@ Sanitizer 原生日志，使此前真实观察成为**当前子 Run 本地可引
 `repair/experience-retrieval.json` 并将经验作为低信任提示传给模型。
 **V2 和当前预先固定的 V2/V3 探索对照都不使用这些经验。**
 记忆不能当作 NVIDIA 官方规范，也不能在同批评测中读写私有答案或动态增补。
-[冻结索引样例](../knowledge/repair_memory/merged_public_failures_20261009.json)、
+[冻结索引样例](repair-log/artifacts/2026-10-09-repair-memory/merged_public_failures_20261009.json)、
 [复杂 CUDA 对照失败](repair-log/2026-10-09-v2-v3-complex-pilot.md)、
 [真实记忆试用](repair-log/2026-10-09-repair-memory-live-stencil.md)。
 

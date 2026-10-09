@@ -6,7 +6,7 @@
 
 执行源码提交 `d2747edd4518a8c116dbc6abf518bbed891beacf`；任务原始 `kernel.cu` SHA256 `d9df4d683f5b09c31454b9f196ec7d49c3cddb94aa9df07d8d3ff9ac1f828434`。public `input.json` SHA256 `7841a87fc3f8300dca145438998e8e5a142044d2e0286cea4d99887ac7e35a7c`，`task.json` SHA256 `2b26ffe710ffd8a50a0aa5cc8467d1397570c8a9840df70fb53e59359fbe5c53`。
 
-本次使用的 [合并冻结经验索引](../../knowledge/repair_memory/merged_public_failures_20261009.json) 内部 corpus SHA256：
+本次使用的 [合并冻结经验索引](artifacts/2026-10-09-repair-memory/merged_public_failures_20261009.json) 内部 corpus SHA256：
 `502269e68014aade52a5c36ffd6f2cddcb23ba3793cd79ac4f15cfbb60a70031`；Tang 原始索引文件 SHA256 `e200097a23425767ca5678462c044d2e0286cea4d99887ac7e35a7c`。索引只有四条历史失败经验，来源 Run 分别为 `177a6daf715a4b53bfc47eeca11cf831` 与 `c55216300e0840eb8d56dec46bfeefbb`；不含 `stencil-cpu-v1` 本案例。
 
 ## 实际检索与使用

@@ -240,7 +240,7 @@ export GPU_AGENT_REPAIR_MEMORY_INDEX=/path/frozen-memory.json
 只作为低信任的修复提示，不能宣称是 NVIDIA 规范、当前观测或官方验证结论。
 冻结索引的语料 Hash 会写入 `repair/experience-retrieval.json`；正式对照需明确
 禁用或冻结 Memory，避免同批次信息泄漏。历史示例：
-[冻结公开失败经验](knowledge/repair_memory/merged_public_failures_20261009.json)。
+[冻结公开失败经验](docs/repair-log/artifacts/2026-10-09-repair-memory/merged_public_failures_20261009.json)。
 
 真实 GPU 工程闭环验证已覆盖“首个候选失败→重新调查→第二候选→独立验证”。
 [复杂案例探索对照](docs/repair-log/2026-10-09-v2-v3-complex-pilot.md)
