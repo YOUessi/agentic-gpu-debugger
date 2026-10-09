@@ -29,14 +29,12 @@ class RuleRouter:
                 return InconclusiveAction(
                     rationale="RULE_FALLBACK: mandatory hypothesis check exceeds budget"
                 )
-            family_actions = {
-                SanitizerTool.RACECHECK: RacecheckAction,
-                SanitizerTool.INITCHECK: InitcheckAction,
-                SanitizerTool.SYNCCHECK: SynccheckAction,
-            }
-            return family_actions[followup](
-                rationale="RULE_FALLBACK: verify previous candidate hazard on current source"
-            )
+            rationale = "RULE_FALLBACK: verify previous candidate hazard on current source"
+            if followup == SanitizerTool.RACECHECK:
+                return RacecheckAction(rationale=rationale)
+            if followup == SanitizerTool.INITCHECK:
+                return InitcheckAction(rationale=rationale)
+            return SynccheckAction(rationale=rationale)
         if evidence.tool_findings:
             if not evidence.documentation and budget.rag_calls < budget.max_rag_calls:
                 query = " ".join(f.category for f in evidence.tool_findings)[:500]

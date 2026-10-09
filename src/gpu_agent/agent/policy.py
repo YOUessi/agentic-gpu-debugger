@@ -237,14 +237,12 @@ def missing_evidence(evidence: PublicEvidence) -> list[MissingEvidence]:
     if "memcheck" not in evidence.sanitizer_outcomes:
         missing.append("memcheck_outcome")
     tool = followup_sanitizer_for_prior_hypothesis(evidence)
-    if tool is not None:
-        missing.append(
-            {
-                SanitizerTool.RACECHECK: "racecheck_outcome",
-                SanitizerTool.INITCHECK: "initcheck_outcome",
-                SanitizerTool.SYNCCHECK: "synccheck_outcome",
-            }[tool]
-        )
+    if tool == SanitizerTool.RACECHECK:
+        missing.append("racecheck_outcome")
+    elif tool == SanitizerTool.INITCHECK:
+        missing.append("initcheck_outcome")
+    elif tool == SanitizerTool.SYNCCHECK:
+        missing.append("synccheck_outcome")
     if not evidence.tool_findings:
         if evidence.repair_context is None or not evidence.repair_context.public_functional_failure:
             missing.append("tool_finding")
