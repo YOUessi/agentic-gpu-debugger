@@ -1,9 +1,9 @@
 """Freeze a small diverse public V2/V3 exploratory comparison."""
 
 import importlib.util
+from pathlib import Path
 
 import pytest
-from pathlib import Path
 
 
 def test_comparison_schedule_is_predeclared_and_unique(monkeypatch):
