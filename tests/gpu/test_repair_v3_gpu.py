@@ -592,17 +592,15 @@ class _ScriptedCase22TwoPhaseProvider(FakeProvider):
         if SanitizerTool.MEMCHECK not in evidence.sanitizer_outcomes:
             action = MemcheckAction()
         elif evidence.repair_context is not None and (
-            not self.rejected_premature_finish and SanitizerTool.RACECHECK not in evidence.sanitizer_outcomes
+            not self.rejected_premature_finish
+            and SanitizerTool.RACECHECK not in evidence.sanitizer_outcomes
         ):
             # Explicitly attempt the historically premature finish, then replan
             # using the controller's typed rejection rather than model self-discipline.
             action = FinishAction()
             self.rejected_premature_finish = True
         elif SanitizerTool.RACECHECK not in evidence.sanitizer_outcomes:
-            assert (
-                evidence.repair_context is None
-                or feedback == ["MANDATORY_EVIDENCE_MISSING"]
-            )
+            assert evidence.repair_context is None or feedback == ["MANDATORY_EVIDENCE_MISSING"]
             action = RacecheckAction()
         elif evidence.tool_findings and not evidence.documentation:
             action = RetrieveDocsAction(
@@ -618,10 +616,9 @@ class _ScriptedCase22TwoPhaseProvider(FakeProvider):
             assert evidence.sources[0].content == self.incorrect
             assert evidence.repair_context.public_functional_failure
             self.diagnosed_candidate_source = True
-            self.saw_native_child_racecheck = (
-                evidence.sanitizer_outcomes.get(SanitizerTool.RACECHECK) == "FINDING"
-                and bool(evidence.tool_findings)
-            )
+            self.saw_native_child_racecheck = evidence.sanitizer_outcomes.get(
+                SanitizerTool.RACECHECK
+            ) == "FINDING" and bool(evidence.tool_findings)
             assert self.saw_native_child_racecheck
         else:
             assert evidence.sources[0].content == self.original
@@ -641,7 +638,8 @@ class _ScriptedCase22TwoPhaseProvider(FakeProvider):
                 for f in evidence.tool_findings
             ],
             documentation_evidence=[
-                EvidenceClaim(text=c.text, citation_ids=[c.chunk_id]) for c in evidence.documentation
+                EvidenceClaim(text=c.text, citation_ids=[c.chunk_id])
+                for c in evidence.documentation
             ],
             recommended_change=(
                 "Synchronize after initialization, after all old-stage reads, and "
@@ -667,9 +665,7 @@ class _ScriptedCase22TwoPhaseProvider(FakeProvider):
         return super().revise_patch(public_source, diagnosis, feedback)
 
 
-def test_real_gpu_case22_reinvestigation_requires_native_racecheck_and_repairs(
-    tmp_path, request
-):
+def test_real_gpu_case22_reinvestigation_requires_native_racecheck_and_repairs(tmp_path, request):
     """Force prior numeric-only wrong patch; real racecheck, correction and verifier."""
     from gpu_agent.service import ApplicationService
     from gpu_agent.verification.models import VerificationVerdict
@@ -760,14 +756,12 @@ def test_real_gpu_case22_reinvestigation_requires_native_racecheck_and_repairs(
         for a in actions
     )
     assert any(
-        d["reason_codes"] == ["MANDATORY_EVIDENCE_MISSING"] and not d["allowed"]
-        for d in decisions
+        d["reason_codes"] == ["MANDATORY_EVIDENCE_MISSING"] and not d["allowed"] for d in decisions
     )
     child_evidence = public_evidence(public, child_id)
     assert child_evidence.sanitizer_outcomes[SanitizerTool.RACECHECK] == "FINDING"
     assert not any(
-        ref.name == "repair/reused-evidence.json"
-        for ref in child_manifest.artifact_refs
+        ref.name == "repair/reused-evidence.json" for ref in child_manifest.artifact_refs
     )  # Numeric failure prevented old self-check from running a Sanitizer.
     assert verdict is not None and verdict.verdict == VerificationVerdict.VERIFIED_FIXED
     print(
