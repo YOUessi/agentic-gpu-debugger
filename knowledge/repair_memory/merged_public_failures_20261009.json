@@ -1,0 +1,50 @@
+{
+  "version": "public-repair-memory-v1",
+  "records": [
+    {
+      "record_id": "65906c525a1076a770a943891f96becc356132eb2f270fad507b22d9fd077289",
+      "public_run_id": "c55216300e0840eb8d56dec46bfeefbb",
+      "candidate_sha256": "cf55f41f779456a72097ed94eeaa77ee5b0cd304c7a3e8d20581277931867d05",
+      "source_sha256": "b79fd84c71131f94601cc153fa00307e848d73c477267bfd7a6f80384d0394a1",
+      "algorithm": "segment-scan-cpu-v1",
+      "failure_family": "shared_memory_race",
+      "evidence_sha256": "9a571fdc781215feeb61375bf9a1b6200fb537a264d5ea77367811f241a2a872",
+      "lesson_code": "BLOCK_BARRIER_EDIT_FAILED",
+      "lesson": "A previous public patch added, removed or moved a block barrier and still failed a functional or sanitizer check. Reassess shared-memory read/write ordering and block-uniform barrier participation; adding or moving a barrier alone is not proof of correctness."
+    },
+    {
+      "record_id": "98a55d4c46ca1264b6619495ee67bea304336512d3364f23101d81019fa5bcd7",
+      "public_run_id": "c55216300e0840eb8d56dec46bfeefbb",
+      "candidate_sha256": "39f29c4d03cb09c374967a28ddb3835350ff8830988ec7879f6c950cd03ac808",
+      "source_sha256": "b79fd84c71131f94601cc153fa00307e848d73c477267bfd7a6f80384d0394a1",
+      "algorithm": "segment-scan-cpu-v1",
+      "failure_family": "shared_memory_race",
+      "evidence_sha256": "3a3a2ea1ec8a97809b65745cbbb941dd8be6822f63f8b45489080258f35c993e",
+      "lesson_code": "NUMERIC_PASS_RACE_REMAINS",
+      "lesson": "A prior candidate produced correct public numeric output but racecheck still reported a finding. Functional success does not imply race freedom."
+    },
+    {
+      "record_id": "affe2e639c932c3af56736b3d297241a3e0463911d4a55751471409cb4ac0d96",
+      "public_run_id": "c55216300e0840eb8d56dec46bfeefbb",
+      "candidate_sha256": "9cb10afaef841aba9f9ab6306d483fc7c98b586eec192bf27ff1c38ce4c29cc1",
+      "source_sha256": "b79fd84c71131f94601cc153fa00307e848d73c477267bfd7a6f80384d0394a1",
+      "algorithm": "segment-scan-cpu-v1",
+      "failure_family": "shared_memory_race",
+      "evidence_sha256": "bd19ed1c241090d775708ed4c5541b16bc3e640311137321e47b8324bd0b2211",
+      "lesson_code": "BLOCK_BARRIER_EDIT_FAILED",
+      "lesson": "A previous public patch added, removed or moved a block barrier and still failed a functional or sanitizer check. Reassess shared-memory read/write ordering and block-uniform barrier participation; adding or moving a barrier alone is not proof of correctness."
+    },
+    {
+      "record_id": "ff27e6f40ce82d6930283aaae64f5c733eab9c671a421f9767463afcfd1f2c95",
+      "public_run_id": "177a6daf715a4b53bfc47eeca11cf831",
+      "candidate_sha256": "72dbf4f806c1d6bf9ce9b58209c04b86d35ef759c3df776bd15f2519f3e1e18b",
+      "source_sha256": "394dc3f945580df9ea74437ef75b2873848ca1d20522c031c7ef02b6f9cd8c11",
+      "algorithm": "vector-add-cpu-v1",
+      "failure_family": "shared_memory_race",
+      "evidence_sha256": "f66560c23b822a62262badf49851533276276133f74012d66141c856bbbb678f",
+      "lesson_code": "NUMERIC_PASS_RACE_REMAINS",
+      "lesson": "A prior candidate produced correct public numeric output but racecheck still reported a finding. Functional success does not imply race freedom."
+    }
+  ],
+  "corpus_sha256": "502269e68014aade52a5c36ffd6f2cddcb23ba3793cd79ac4f15cfbb60a70031"
+}

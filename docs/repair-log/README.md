@@ -97,3 +97,4 @@
 - [2026-10-09：Repair v3取消独立Sanitizer额度，真实模型修复成功与对照限制](2026-10-09-unbounded-sanitizer-experiment.md)
 - [2026-10-09：复杂 CUDA case_0021/0022 的 V2/V3 四单元探索对照，含失败轨迹](2026-10-09-v2-v3-complex-pilot.md)
 - [2026-10-09：Repair v3 证据复用、Patch Effect、冻结失败记忆进展](2026-10-09-repair-v3-robustness-progress.md)
+- [2026-10-09：冻结失败经验跨算法真实 DeepSeek/StenciI 试用及严格验证](2026-10-09-repair-memory-live-stencil.md)
