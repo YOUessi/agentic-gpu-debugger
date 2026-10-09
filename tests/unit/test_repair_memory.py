@@ -70,7 +70,9 @@ def _fixture_run(store, *, mismatch: str | None = None):
             reference_source_sha256=hashlib.sha256(kernel).hexdigest(),
             semantic_equivalence="PROVEN_LOCAL_NO_OP",
             reasoning_code="EQUAL_INDEX_UNDER_THREAD_GUARD",
-        ).model_dump_json().encode(),
+        )
+        .model_dump_json()
+        .encode(),
         "public",
     )
     store.put(
