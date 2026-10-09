@@ -22,7 +22,7 @@ Tang 上运行 `tests/gpu/test_repair_v3_gpu.py::test_real_gpu_race_failure_reus
 
 `src/gpu_agent/patch_effect.py` 在没有 GPU 前，只对少量可证明的条件等价替换生成 `PROVEN_LOCAL_NO_OP`，并检查修复是否涉及对应原诊断位置；其余情况返回 `NOT_ESTABLISHED`，避免过度推断。控制器将结果写入 `repair/<round>/patch-effect.json` 并反馈给后续修订，**不能当成 verifier 或替代 GPU**。
 
-## P1：复杂案例对照（执行中，以实际结果为准）
+## P1：复杂案例对照（已完成）
 
 预先冻结公开 `case_0021`（二维 Stencil）和 `case_0022`（Segmented Scan），V2/V3 各 1 次，共 4 单元；使用真实 DeepSeek 和 Tang GPU，固定种子 20261009、源代码和文档索引 Hash。V3 同时取消独立 Sanitizer 次数上限，因此为混合方案对照，不是重新调查的单因素因果试验。
 
@@ -40,3 +40,8 @@ Tang 上运行 `tests/gpu/test_repair_v3_gpu.py::test_real_gpu_race_failure_reus
 2. 四单元真实模型对照最终结果、每单元实际调用量和未知费用状态记录。
 3. Repair Memory 的加载/检索复验与工程综述，确认正常结束的任务不会泄漏信息到经验库。
 4. PR 评审与合并：不得把未完成的复杂案例对照写成成功；旧 PR #2、后续独立分支保持清晰。
+
+
+### 2026-10-09 补记：探索对照已完成
+
+固定 4 单元真实模型试验已全部结束：V2 2/2 成功，V3 1/2 成功；`case_0022/V3` 三候选、1 次重新调查后仍失败。详细原因、调用量和原始结果 SHA256 见 [独立对照报告](2026-10-09-v2-v3-complex-pilot.md)。旧的“执行中”段落保留为当时状态记录，不覆盖当时事实。该结果只代表一次探索性试验。

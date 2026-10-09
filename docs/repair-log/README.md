@@ -95,3 +95,5 @@
 - [2026-10-08：Repair v3失败候选重新调查、来源作用域与共享预算](2026-10-08-repair-v3-reinvestigation.md)
 - [2026-10-09：Repair v3首次真实模型试用、无效补丁与调查预算不足](2026-10-09-repair-v3-live-use.md)
 - [2026-10-09：Repair v3取消独立Sanitizer额度，真实模型修复成功与对照限制](2026-10-09-unbounded-sanitizer-experiment.md)
+- [2026-10-09：复杂 CUDA case_0021/0022 的 V2/V3 四单元探索对照，含失败轨迹](2026-10-09-v2-v3-complex-pilot.md)
+- [2026-10-09：Repair v3 证据复用、Patch Effect、冻结失败记忆进展](2026-10-09-repair-v3-robustness-progress.md)
