@@ -21,9 +21,12 @@ from gpu_agent.repair_memory import (
 )
 
 
-def _fixture_run(store, *, mismatch: str | None = None):
+def _fixture_run(store, *, mismatch: str | None = None, barrier_case: bool = False):
     kernel = b'#include "vector_api.h"\nint a;\n'
     patched = b'#include "vector_api.h"\nint b;\n'
+    if barrier_case:
+        kernel = b'#include "vector_api.h"\n__syncthreads();\nint a;\n'
+        patched = b'#include "vector_api.h"\nint a;\n__syncthreads();\n'
     run = store.create_run("diagnosis")
     store.transition(run.id, "RUNNING", "PREPARING")
     source = store.put(run.id, "sources/kernel.cu", kernel, "public")
@@ -45,7 +48,11 @@ def _fixture_run(store, *, mismatch: str | None = None):
     result = {
         "run_id": selfcheck.id,
         "status": "FAILED",
-        "checks": {"functional": "PASSED", "racecheck": "FINDING"},
+        "checks": (
+            {"functional": "NUMERIC_MISMATCH", "racecheck": "CLEAN"}
+            if barrier_case
+            else {"functional": "PASSED", "racecheck": "FINDING"}
+        ),
         "feedback": [],
     }
     store.put(selfcheck.id, "self-check.json", json.dumps(result).encode(), "public")
@@ -68,8 +75,14 @@ def _fixture_run(store, *, mismatch: str | None = None):
                 "f" * 64 if mismatch == "effect" else hashlib.sha256(patched).hexdigest()
             ),
             reference_source_sha256=hashlib.sha256(kernel).hexdigest(),
-            semantic_equivalence="PROVEN_LOCAL_NO_OP",
-            reasoning_code="EQUAL_INDEX_UNDER_THREAD_GUARD",
+            semantic_equivalence=(
+                "NOT_ESTABLISHED" if barrier_case else "PROVEN_LOCAL_NO_OP"
+            ),
+            reasoning_code=(
+                "CHANGE_NOT_PROVEN_EQUIVALENT"
+                if barrier_case
+                else "EQUAL_INDEX_UNDER_THREAD_GUARD"
+            ),
         )
         .model_dump_json()
         .encode(),
@@ -179,3 +192,19 @@ def test_optional_memory_is_only_in_v3_initial_patch(
         )
         <= 1
     )
+
+
+def test_failed_block_barrier_relocation_becomes_a_specific_lesson(store):
+    run_id = _fixture_run(store, barrier_case=True)
+    (lesson,) = derive_public_experiences(store, run_id)
+    assert lesson.lesson_code == "BLOCK_BARRIER_EDIT_FAILED"
+    assert "read/write" in lesson.lesson
+
+
+def test_frozen_indexes_combine_deterministically_without_refetching(store):
+    first = FrozenRepairMemory.from_public_runs(store, [_fixture_run(store)])
+    second = FrozenRepairMemory.from_public_runs(store, [_fixture_run(store)])
+    joined = FrozenRepairMemory.combine([first, second, first])
+    assert len(joined.records) == 2
+    assert joined == FrozenRepairMemory.combine([second, first])
+    assert joined.corpus_sha256 == _digest(sorted(record.record_id for record in joined.records))

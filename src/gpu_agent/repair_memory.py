@@ -5,8 +5,10 @@ No evaluator store, private inputs, model-authored lessons, arbitrary URLs, or
 on-the-fly updates are allowed. Rebuild/freeze the index between experiments.
 """
 
+import difflib
 import hashlib
 import json
+import re
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
@@ -26,6 +28,7 @@ LessonCode = Literal[
     "NUMERIC_PASS_RACE_REMAINS",
     "FUNCTIONAL_MISMATCH",
     "PUBLIC_CHECK_FAILED",
+    "BLOCK_BARRIER_EDIT_FAILED",
 ]
 
 LESSONS: dict[str, str] = {
@@ -46,7 +49,32 @@ LESSONS: dict[str, str] = {
         "A prior candidate failed a public build/runtime/functional or sanitizer "
         "check. Inspect concrete current evidence instead of copying that patch."
     ),
+    "BLOCK_BARRIER_EDIT_FAILED": (
+        "A previous public patch added, removed or moved a block barrier and still "
+        "failed a functional or sanitizer check. Reassess shared-memory read/write "
+        "ordering and block-uniform barrier participation; adding or moving a "
+        "barrier alone is not proof of correctness."
+    ),
 }
+
+
+
+_BARRIER_STMT = re.compile(r"^\s*__syncthreads\s*\(\s*\)\s*;\s*(?://.*)?$")
+
+
+def _edited_block_barrier(before: bytes, after: bytes) -> bool:
+    """Recognize edits to standalone CUDA block barriers; never infer causality."""
+    changed = difflib.unified_diff(
+        before.decode("utf-8").splitlines(),
+        after.decode("utf-8").splitlines(),
+        n=0,
+    )
+    return any(
+        line[:1] in {"+", "-"}
+        and not line.startswith(("+++", "---"))
+        and _BARRIER_STMT.fullmatch(line[1:]) is not None
+        for line in changed
+    )
 
 
 def _digest(value: object) -> str:
@@ -163,6 +191,13 @@ def derive_public_experiences(store: RunStore, run_id: str) -> list[RepairExperi
             lesson_code: LessonCode = "GUARDED_INDEX_EQUIVALENCE"
         elif checks.get("racecheck") == "FINDING" and checks.get("functional") == "PASSED":
             lesson_code = "NUMERIC_PASS_RACE_REMAINS"
+        elif _edited_block_barrier(
+            originals["kernel.cu"], checked_sources["kernel.cu"]
+        ) and (
+            checks.get("functional") not in (None, "PASSED")
+            or any(checks.get(tool) == "FINDING" for tool in ("memcheck", "racecheck", "initcheck", "synccheck"))
+        ):
+            lesson_code = "BLOCK_BARRIER_EDIT_FAILED"
         elif checks.get("functional") not in (None, "PASSED"):
             lesson_code = "FUNCTIONAL_MISMATCH"
         else:
@@ -192,6 +227,20 @@ class FrozenRepairMemory(ExecutionModel):
         if ids != sorted(set(ids)) or self.corpus_sha256 != _digest(ids):
             raise ValueError("repair memory index is not canonical and frozen")
         return self
+
+    @classmethod
+    def combine(cls, indexes: list["FrozenRepairMemory"]) -> "FrozenRepairMemory":
+        """Merge independently frozen public indexes, preserving deterministic identity."""
+        unique: dict[str, RepairExperience] = {}
+        for index in indexes:
+            validated = cls.model_validate(index)
+            for record in validated.records:
+                prior = unique.get(record.record_id)
+                if prior is not None and prior != record:
+                    raise ValueError("conflicting frozen repair experience identity")
+                unique[record.record_id] = record
+        ids = sorted(unique)
+        return cls(records=[unique[i] for i in ids], corpus_sha256=_digest(ids))
 
     @classmethod
     def from_public_runs(cls, store: RunStore, run_ids: list[str]) -> "FrozenRepairMemory":
