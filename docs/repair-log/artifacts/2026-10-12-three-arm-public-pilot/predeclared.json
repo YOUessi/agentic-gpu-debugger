@@ -1,0 +1,79 @@
+{
+  "kind": "public_repair_three_arm_pilot",
+  "date_utc": "2026-10-11T16:11:06.441873+00:00",
+  "repository": "YOUessi/agentic-gpu-debugger",
+  "current_commit": "1eaac1fdf456a46118ea3aecc16338a9142c29bb",
+  "legacy_commit": "e4e7a8d4d069cecb24355e9c521bf7bd121e0870",
+  "case_input_hashes": {
+    "case_0019": {
+      "kernel.cu": "ee78a8aaab518f350371056351071ce1dd1b05dc42e42b5a82ca9b3786c5f471",
+      "task.json": "fb37762d3bbeda9bc2856df2ebb79a806a7f2979f3a8e3254e0196e426d3177b",
+      "input.json": "863f8b06284b7a1ce438bbf0c944929736ea01d982e9799ef41d74fac8b5e515"
+    },
+    "case_0020": {
+      "kernel.cu": "482d127677bc18922dfb0ed2736d2795bc0835c5c08d6b2f9d8f1d16be41eb52",
+      "task.json": "d7512723dfd1a7a0ed3ab73ac55b3f3a1079ac98e3925fa4276d04df871445a3",
+      "input.json": "d772abc5cda92b683adbc072db439b7bcfae01f1276ccff9e97e8033f553aa05"
+    }
+  },
+  "official_knowledge_index_sha256": "6ddc3cf2443ff983f08d0dcae44ca5f68ba28033beeb391a162422f9936ed27a",
+  "official_knowledge_version": "cuda=12.8.1;compute-sanitizer=2025.1.0.0",
+  "model": "deepseek-v4-pro",
+  "endpoint_host": "api.deepseek.com",
+  "seed": 20261011,
+  "units": [
+    [
+      "case_0019",
+      "V2"
+    ],
+    [
+      "case_0020",
+      "V3_OLD"
+    ],
+    [
+      "case_0019",
+      "V3_OLD"
+    ],
+    [
+      "case_0020",
+      "V3_NEW"
+    ],
+    [
+      "case_0019",
+      "V3_NEW"
+    ],
+    [
+      "case_0020",
+      "V2"
+    ]
+  ],
+  "arms": {
+    "V2": {
+      "checkout": "current",
+      "reinvestigate": false,
+      "sanitizer_cap": 4
+    },
+    "V3_OLD": {
+      "checkout": "legacy",
+      "reinvestigate": true,
+      "sanitizer_cap": 4
+    },
+    "V3_NEW": {
+      "checkout": "current",
+      "reinvestigate": true,
+      "sanitizer_cap": 4
+    }
+  },
+  "budget_per_unit": {
+    "candidate_limit": 3,
+    "reinvestigations": 1,
+    "model_calls": 40,
+    "agent_steps": 38,
+    "wall_seconds": 600
+  },
+  "memory": "disabled",
+  "repeat_count": 1,
+  "automatic_retry": false,
+  "development_public_only": true,
+  "limitations": "Public cases may have appeared in prior project evaluations. Only one repetition each; legacy and current code differ in more than the reinvestigation evidence gate. No causal claim."
+}

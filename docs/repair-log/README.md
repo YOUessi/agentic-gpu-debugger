@@ -100,3 +100,4 @@
 - [2026-10-09：冻结失败经验跨算法真实 DeepSeek/Stencil 试用及严格验证](2026-10-09-repair-memory-live-stencil.md)
 - [2026-10-09：case_0022 V2/V3 同源码逐轮信息流审计、GPU 遗漏竞争复现与单次开发回归](2026-10-09-case0022-v2-v3-information-audit.md)
 - [2026-10-10：case_0022 受控首候选失败、真实 DeepSeek 重新调查和严格验证](2026-10-10-case0022-forced-first-real-model.md)
+- [2026-10-12：Repair V2/旧 V3/新 V3 六单元公开 GPU 实验与原始结果](2026-10-12-three-arm-public-gpu-pilot.md)
