@@ -1,0 +1,121 @@
+{
+  "schema_version": 1,
+  "scope": "curated public evidence summary, not a complete raw evidence archive",
+  "snapshot_commit": "0d7db80df1bad79be0c4812ec673ec99c43e51a4",
+  "runtime_code_hash": "60cc2c9ab74255edc3e8c9f7677907f46f800d9394fe6969c82e3bf003b96587",
+  "prompt_version": "m3-2026-10-01-v12",
+  "knowledge_hash": "15c53142f8949ba1d852a3227fd11460060adec359fda9ee0cf42c52011b8600",
+  "units": [
+    {
+      "case_id": "case_0021",
+      "mode": "E",
+      "run_id": "44ddb114785b4afc93a5da5b8661f9ad",
+      "diagnostic_outcome": "DIAGNOSED",
+      "physical_calls": 5,
+      "known_total_tokens": 17397,
+      "unknown_usage_calls": 0,
+      "proposed_actions": [
+        "run_memcheck",
+        "retrieve_official_docs",
+        "finish_diagnosis"
+      ],
+      "result_sha256": "315552577fbaae71adbc5366477cb233b05d715ee4be913d86058bbee218e928",
+      "stop_reason": "PUBLIC_CHECKS_PASSED",
+      "final_verdict": "VERIFIED_FIXED",
+      "selected_candidate_hash": "4728a0012e96b8ba1c27339861a76d20b78371215cff2df5dadaafcb8ff5c0dc",
+      "rounds": [
+        {
+          "round": 1,
+          "candidate_hash": "4728a0012e96b8ba1c27339861a76d20b78371215cff2df5dadaafcb8ff5c0dc",
+          "status": "PASSED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "PASSED",
+            "memcheck": "CLEAN",
+            "memcheck_functional": "PASSED",
+            "racecheck": "CLEAN",
+            "racecheck_functional": "PASSED",
+            "initcheck": "CLEAN",
+            "initcheck_functional": "PASSED",
+            "synccheck": "CLEAN",
+            "synccheck_functional": "PASSED"
+          }
+        }
+      ],
+      "candidates": [
+        {
+          "artifact_sha256": "5539691dd9b0b43bd4a11d2777f5a73c731b84ec3fa579ad6f22f92086c1663f",
+          "round": 1,
+          "unified_diff": "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -10,7 +10,7 @@\n     float value = a[i];\n     value += col > 0 ? a[i - 1] : 0.0f;\n     value += col + 1 < 32 && i + 1 < n ? a[i + 1] : 0.0f;\n-    value += a[i - 32];\n+    value += row > 0 ? a[i - 32] : 0.0f;\n     value += i + 32 < n ? a[i + 32] : 0.0f;\n     out[i] = value + b[i];\n }\n"
+        }
+      ]
+    },
+    {
+      "case_id": "case_0022",
+      "mode": "E",
+      "run_id": "eaee4fd7291043f79379fc7941807425",
+      "diagnostic_outcome": "DIAGNOSED",
+      "physical_calls": 8,
+      "known_total_tokens": 26629,
+      "unknown_usage_calls": 0,
+      "proposed_actions": [
+        "run_memcheck",
+        "run_racecheck",
+        "retrieve_official_docs",
+        "finish_diagnosis"
+      ],
+      "result_sha256": "348ff04f7ee2891fc56a074579995aeb660eb33b99cdfdb0d3979dfb459f3c20",
+      "stop_reason": "REPEATED_CANDIDATE",
+      "final_verdict": null,
+      "selected_candidate_hash": "39f29c4d03cb09c374967a28ddb3835350ff8830988ec7879f6c950cd03ac808",
+      "rounds": [
+        {
+          "round": 1,
+          "candidate_hash": "cf55f41f779456a72097ed94eeaa77ee5b0cd304c7a3e8d20581277931867d05",
+          "status": "FAILED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "NUMERIC_MISMATCH"
+          }
+        },
+        {
+          "round": 2,
+          "candidate_hash": "39f29c4d03cb09c374967a28ddb3835350ff8830988ec7879f6c950cd03ac808",
+          "status": "FAILED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "PASSED",
+            "memcheck": "CLEAN",
+            "memcheck_functional": "PASSED",
+            "racecheck": "FINDING",
+            "racecheck_functional": "PASSED",
+            "initcheck": "CLEAN",
+            "initcheck_functional": "PASSED",
+            "synccheck": "CLEAN",
+            "synccheck_functional": "NUMERIC_MISMATCH"
+          }
+        }
+      ],
+      "candidates": [
+        {
+          "artifact_sha256": "f21102d560c370ca05cbc5e539624adfd2c470d5e2fb0fd97984c953ed432fc4",
+          "round": 1,
+          "unified_diff": "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -9,8 +9,8 @@\n     tile[lane] = i < n ? a[i] + b[i] : 0.0f;\n     for (unsigned int offset = 1; offset < 128; offset *= 2) {\n         const float value = tile[lane] + (lane >= offset ? tile[lane - offset] : 0.0f);\n-        __syncthreads();\n         tile[lane] = value;\n+        __syncthreads();\n     }\n     if (i < n) out[i] = tile[lane];\n }\n"
+        },
+        {
+          "artifact_sha256": "77fc4053de55ddc754849c83f770efe4b3619cb52730fe4400cea5cebcf7bf36",
+          "round": 2,
+          "unified_diff": "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -7,10 +7,11 @@\n     const unsigned int lane = threadIdx.x;\n     const std::size_t i = blockIdx.x * 128 + lane;\n     tile[lane] = i < n ? a[i] + b[i] : 0.0f;\n+    __syncthreads();\n     for (unsigned int offset = 1; offset < 128; offset *= 2) {\n         const float value = tile[lane] + (lane >= offset ? tile[lane - offset] : 0.0f);\n-        __syncthreads();\n         tile[lane] = value;\n+        __syncthreads();\n     }\n     if (i < n) out[i] = tile[lane];\n }\n"
+        },
+        {
+          "artifact_sha256": "abb627cb87ea852b6137eb58cda45a62a773930cf5dda00dbdc6f039510e6119",
+          "round": 3,
+          "unified_diff": "--- a/kernel.cu\n+++ b/kernel.cu\n@@ -7,10 +7,11 @@\n     const unsigned int lane = threadIdx.x;\n     const std::size_t i = blockIdx.x * 128 + lane;\n     tile[lane] = i < n ? a[i] + b[i] : 0.0f;\n+    __syncthreads();\n     for (unsigned int offset = 1; offset < 128; offset *= 2) {\n         const float value = tile[lane] + (lane >= offset ? tile[lane - offset] : 0.0f);\n-        __syncthreads();\n         tile[lane] = value;\n+        __syncthreads();\n     }\n     if (i < n) out[i] = tile[lane];\n }\n"
+        }
+      ]
+    }
+  ]
+}

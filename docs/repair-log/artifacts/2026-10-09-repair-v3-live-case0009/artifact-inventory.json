@@ -1,0 +1,30 @@
+{
+  "provenance.json": {
+    "sha256": "ccd280c016f09ce637ab893ab18467b390efc553ada317a47bb53093350e7c40",
+    "bytes": 3823
+  },
+  "summary.json": {
+    "sha256": "1a3beb13eb4f82fcb98bc8c33006879fda7a5356a0d946a5f5552cf152e11e5a",
+    "bytes": 11961
+  },
+  "provider-usage.json": {
+    "sha256": "b3f1ef021705d1ff8bf5c80b8dfc76d9d2b86bba428bf54e1632ff7be7047569",
+    "bytes": 7673
+  },
+  "actions.json": {
+    "sha256": "c3630602bb641be6cfa3952e2b22941270640fe6a604c5623b21f4a63b01f003",
+    "bytes": 7942
+  },
+  "candidate-01.diff": {
+    "sha256": "355c13906a43129eef4b225d87be7cddde0477d9ae7ba1ac8c43b115199cad01",
+    "bytes": 334
+  },
+  "evidence-index.json": {
+    "sha256": "fa80e5977728d9d9bdc530819c3ec69f2d53baafecb00f5b79178007eb73c730",
+    "bytes": 19860
+  },
+  "report.txt": {
+    "sha256": "4477c78f4038f527dd33354af89fd3e1a7f2a8e14f86226f421315e0285dc1bf",
+    "bytes": 1008
+  }
+}

@@ -1,0 +1,67 @@
+{
+  "date": "2026-10-09",
+  "experiment": "repair-v3-no-sanitizer-cap-20261009-02",
+  "code_commit": "c005936d8f3524669ec509049c1b1543c9b11a3f",
+  "root_run_id": "383757f3c8094d1eb478d749aab2d080",
+  "self_check_run_id": "a855014937ee47a8b44d8ff4042350fa",
+  "evaluation_audit_run_id": "4e92fd634146c32e914b7d3bc87010d1",
+  "source_case": "case_0009",
+  "provider": "deepseek-responses",
+  "model": "deepseek-v4-pro",
+  "candidate_sha256": "26746251d6bd4cd2834c98aca272be952a4a692540b2e81c0cf7857c75a31fb8",
+  "policy": {
+    "version": "public-repair-v3",
+    "unbounded_sanitizer_calls": true,
+    "max_sanitizer_calls": null,
+    "max_candidates": 20,
+    "max_reinvestigations": 3,
+    "max_llm_calls": 40,
+    "max_agent_steps": 38,
+    "max_wall_time_seconds": 600
+  },
+  "actual": {
+    "cli_exit": 0,
+    "elapsed_seconds_approx": 199.21,
+    "candidates": 1,
+    "reinvestigations": 0,
+    "sanitizer_acquisitions": 2,
+    "rag_calls": 1,
+    "agent_steps": 4,
+    "physical_model_calls": 6,
+    "self_check_sanitizers": 4,
+    "stop_reason": "PUBLIC_CHECKS_PASSED"
+  },
+  "public_self_check": {
+    "build": "CLEAN",
+    "runtime": "SUCCESS",
+    "functional": "PASSED",
+    "memcheck": "CLEAN",
+    "racecheck": "CLEAN",
+    "initcheck": "CLEAN",
+    "synccheck": "CLEAN"
+  },
+  "independent_verification": {
+    "verdict": "VERIFIED_FIXED",
+    "reason_code": "ALL_REQUIRED_CHECKS_PASSED",
+    "original_finding_present": false,
+    "new_findings": 0,
+    "public_oracle_passed": true,
+    "required_checks": {
+      "build": "CLEAN",
+      "runtime": "CLEAN",
+      "public_oracle": "CLEAN",
+      "memcheck": "CLEAN",
+      "racecheck": "CLEAN",
+      "initcheck": "CLEAN",
+      "synccheck": "CLEAN"
+    }
+  },
+  "limitations": [
+    "Single non-fixed-seed sample, not a causal ablation of budget change",
+    "First candidate passed; no reinvestigation exercised",
+    "Registered task validation does not imply arbitrary external program semantics"
+  ],
+  "raw_log_sha256": "2ce2e0a1f9bdba211dbaf0b65e3fc1db53c39287370b49f4588e335d87490da8",
+  "knowledge_index_sha256": "6ddc3cf2443ff983f08d0dcae44ca5f68ba28033beeb391a162422f9936ed27a",
+  "model_cost_usd": null
+}

@@ -1,0 +1,60 @@
+{
+  "schema_version": 1,
+  "description": "Public development mutation metadata; per-entry SHA256 uses json.dumps(entry, sort_keys=True).encode(). Not exposed to the model.",
+  "mutations": [
+    {
+      "number": 17,
+      "name": "rotate",
+      "oracle": "rotate-add-cpu-v1",
+      "tool": "memcheck",
+      "finding": "Invalid __global__ read",
+      "mutation": "drop-wraparound",
+      "n": 129
+    },
+    {
+      "number": 18,
+      "name": "stencil",
+      "oracle": "stencil-cpu-v1",
+      "tool": "racecheck",
+      "finding": "Race reported between Write access and Read access",
+      "mutation": "remove-tile-barrier",
+      "n": 257
+    },
+    {
+      "number": 19,
+      "name": "histogram",
+      "oracle": "histogram-cpu-v1",
+      "tool": "initcheck",
+      "finding": "Uninitialized __global__ memory read",
+      "mutation": "omit-accumulator-initialization",
+      "n": 129
+    },
+    {
+      "number": 20,
+      "name": "warp_reduce",
+      "oracle": "warp-reduce-cpu-v1",
+      "tool": "memcheck",
+      "finding": "Invalid __global__ read",
+      "mutation": "shift-reduction-input",
+      "n": 65
+    },
+    {
+      "number": 21,
+      "name": "stencil2d",
+      "oracle": "stencil2d-cpu-v1",
+      "tool": "memcheck",
+      "finding": "Invalid __global__ read",
+      "mutation": "omit-top-boundary",
+      "n": 1057
+    },
+    {
+      "number": 22,
+      "name": "segment_scan",
+      "oracle": "segment-scan-cpu-v1",
+      "tool": "racecheck",
+      "finding": "Race reported between Read access and Write access",
+      "mutation": "omit-stage-barrier",
+      "n": 257
+    }
+  ]
+}

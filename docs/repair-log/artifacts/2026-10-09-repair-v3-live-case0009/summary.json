@@ -1,0 +1,308 @@
+{
+  "parent_run_id": "177a6daf715a4b53bfc47eeca11cf831",
+  "self_check_run_id": "e0f0f915b89040f6924dc032ced9a715",
+  "reinvestigation_run_id": "a22d2eea2497495cb6ea567a96223cd4",
+  "policy": {
+    "version": "public-repair-v3",
+    "max_candidates": 3,
+    "max_reinvestigations": 1
+  },
+  "repair_summary": {
+    "version": "public-repair-v3",
+    "stop_reason": "REINVESTIGATION_INCONCLUSIVE",
+    "selected_hash": "72dbf4f806c1d6bf9ce9b58209c04b86d35ef759c3df776bd15f2519f3e1e18b",
+    "rounds": [
+      {
+        "round": 1,
+        "candidate_hash": "72dbf4f806c1d6bf9ce9b58209c04b86d35ef759c3df776bd15f2519f3e1e18b",
+        "check": {
+          "run_id": "e0f0f915b89040f6924dc032ced9a715",
+          "status": "FAILED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "PASSED",
+            "memcheck": "CLEAN",
+            "memcheck_functional": "PASSED",
+            "racecheck": "FINDING",
+            "racecheck_functional": "PASSED",
+            "initcheck": "CLEAN",
+            "initcheck_functional": "PASSED",
+            "synccheck": "CLEAN",
+            "synccheck_functional": "PASSED"
+          },
+          "feedback": [
+            {
+              "check": "runtime",
+              "status": "SUCCESS",
+              "stdout": "{\"dtype\":\"float32\",\"shape\":[32],\"values\":[3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0,3.0]}\n",
+              "stderr": ""
+            },
+            {
+              "check": "functional",
+              "outcome": "PASSED",
+              "requirement": "For every i in [0,n), output[i] = a[i] + b[i]. Inputs and outputs are float32; atol=1e-5, rtol=1e-5."
+            },
+            {
+              "check": "memcheck",
+              "outcome": "CLEAN",
+              "findings": "[]"
+            },
+            {
+              "check": "memcheck_functional",
+              "outcome": "PASSED"
+            },
+            {
+              "check": "racecheck",
+              "outcome": "FINDING",
+              "findings": "[{\"tool\": \"racecheck\", \"category\": \"Race reported between Write access and Write access\", \"kernel\": null, \"source_location\": {\"path\": \"kernel.cu\", \"line\": 11, \"function\": null}}]"
+            },
+            {
+              "check": "racecheck_functional",
+              "outcome": "PASSED"
+            },
+            {
+              "check": "initcheck",
+              "outcome": "CLEAN",
+              "findings": "[]"
+            },
+            {
+              "check": "initcheck_functional",
+              "outcome": "PASSED"
+            },
+            {
+              "check": "synccheck",
+              "outcome": "CLEAN",
+              "findings": "[]"
+            },
+            {
+              "check": "synccheck_functional",
+              "outcome": "PASSED"
+            }
+          ]
+        },
+        "decision": {
+          "action": "REINVESTIGATE",
+          "reason": "PUBLIC_SANITIZER_FAILURE",
+          "failure_signature": "b56590920f18441b8d71b38a6d33655f4ba9f112286660c0b4e3c4c7105a140f"
+        },
+        "reinvestigation_limitations": [
+          "AGENT_BUDGET_EXHAUSTED"
+        ]
+      }
+    ],
+    "reinvestigations": 1,
+    "investigation_runs": [
+      "a22d2eea2497495cb6ea567a96223cd4"
+    ],
+    "diagnosis_source_sha256": "394dc3f945580df9ea74437ef75b2873848ca1d20522c031c7ef02b6f9cd8c11",
+    "acquisition_usage": {
+      "schema_version": 1,
+      "sanitizer_calls": 4,
+      "retrieval_calls": 1
+    },
+    "self_check_sanitizer_calls": 4
+  },
+  "original_diagnosis": {
+    "diagnostic_outcome": "DIAGNOSED",
+    "failure_family": "shared_memory_race",
+    "root_cause": "In folded_warp_writes, multiple threads in the same warp write to the same shared memory slots[slot] where slot = threadIdx.x & 15U; with blockDim 32, each slot is targeted by two threads. The writes occur before __syncthreads(), producing a write-after-write hazard on shared memory. The racecheck finding at kernel.cu:11 identifies this shared-memory race.",
+    "source_locations": [
+      {
+        "path": "kernel.cu",
+        "line": 11,
+        "function": null
+      }
+    ],
+    "recommended_change": "Remove the folded_warp_writes kernel invocation or redesign the shared memory writes so that each shared memory location is written by a single thread before synchronization. If the kernel is only diagnostic test code, avoid launching it during normal vector_add execution.",
+    "confidence_label": "high",
+    "limitations": []
+  },
+  "final_budget": {
+    "budget_version": "m1-v1",
+    "max_agent_steps": 38,
+    "max_sanitizer_calls": 4,
+    "max_rag_calls": 3,
+    "max_source_reads": 5,
+    "max_llm_calls": 40,
+    "max_wall_time_seconds": 600.0,
+    "agent_steps": 8,
+    "sanitizer_calls": 4,
+    "rag_calls": 1,
+    "source_reads": 0,
+    "llm_calls": 10,
+    "remaining_seconds": 521.5699779320275
+  },
+  "provider_usage": {
+    "physical_calls": 10,
+    "synthetic": false
+  },
+  "token_totals": {
+    "input_tokens": 29742,
+    "output_tokens": 2002,
+    "total_tokens": 31744,
+    "cached_tokens": 12672,
+    "reasoning_tokens": 0
+  },
+  "provider_call_kinds": {
+    "plan": 8,
+    "diagnose": 1,
+    "patch": 1
+  },
+  "cost_usd": null,
+  "cost_status": "unknown; no reviewed price attestation for this development trial",
+  "independent_verification": "NOT_RUN",
+  "verified_fixed": false,
+  "application_exit_code": 1,
+  "elapsed_seconds": 80.186,
+  "native_evidence": [
+    {
+      "run_id": "177a6daf715a4b53bfc47eeca11cf831",
+      "kind": "diagnosis",
+      "parent_run_id": null,
+      "status": "COMPLETED",
+      "build_success": true,
+      "execution_status": "SUCCESS",
+      "sanitizers": [
+        {
+          "tool": "memcheck",
+          "outcome": "CLEAN",
+          "findings": []
+        },
+        {
+          "tool": "synccheck",
+          "outcome": "CLEAN",
+          "findings": []
+        },
+        {
+          "tool": "racecheck",
+          "outcome": "FINDING",
+          "findings": [
+            {
+              "tool": "racecheck",
+              "category": "Race reported between Write access and Write access",
+              "kernel": null,
+              "source_location": {
+                "path": "kernel.cu",
+                "line": 11,
+                "function": null
+              },
+              "raw_ref": {
+                "id": "4ed3ff2ecf0b4c57bc4adbef092d5f00",
+                "run_id": "177a6daf715a4b53bfc47eeca11cf831",
+                "name": "sanitizer/941c1ef1d08a48b0837eac4324de4a12/racecheck.log",
+                "sha256": "5adbb40a8b058a7ca9a2852019d8991adde003e1e3576d3d39e2899b7193ecc2",
+                "visibility": "public",
+                "relative_path": "177a6daf715a4b53bfc47eeca11cf831/artifacts/4ed3ff2ecf0b4c57bc4adbef092d5f00",
+                "byte_count": 317
+              }
+            }
+          ]
+        }
+      ],
+      "retrieved_chunks": 5,
+      "environment": {
+        "cuda_nvcc": "12.8.93",
+        "compute_sanitizer": "2025.1.0.0 (build 35583870)",
+        "target_arch": "sm_89",
+        "backend": "IsolatedGPUBackend",
+        "toolchain_lock_hash": "3880152ba598d514a27ca364a4e812abb8f2ec9e21a7ac3be784c2d2def6ac91",
+        "image_id": "sha256:ec7f38d73b44d6e363f23cf5f2c22d7bdb93865b2a05d4110f068a7591b5f515",
+        "base_repo_digest": "nvidia/cuda@sha256:a99a1860ba8e2916e5c3e73b72ec4c4301653a84586e05bfc9a2aa2d58027e97",
+        "policy": "{\"user\":\"65532:65532\",\"network\":\"none\",\"capabilities\":\"ALL\",\"no_new_privileges\":true,\"read_only_root\":true,\"cpus\":4,\"memory\":\"4g\",\"pids\":64,\"build_tmpfs\":\"1g\",\"run_tmpfs\":\"256m\",\"gpu\":\"device=0\",\"log_driver\":\"none\",\"log_bytes\":2097152,\"binary_bytes\":67108864,\"source_bytes\":4194304,\"build_timeout_seconds\":120,\"max_run_timeout_seconds\":300}"
+      }
+    },
+    {
+      "run_id": "a22d2eea2497495cb6ea567a96223cd4",
+      "kind": "repair_reinvestigation",
+      "parent_run_id": "177a6daf715a4b53bfc47eeca11cf831",
+      "status": "COMPLETED",
+      "build_success": true,
+      "execution_status": "SUCCESS",
+      "sanitizers": [
+        {
+          "tool": "memcheck",
+          "outcome": "CLEAN",
+          "findings": []
+        }
+      ],
+      "retrieved_chunks": 0,
+      "environment": {
+        "cuda_nvcc": "12.8.93",
+        "compute_sanitizer": "2025.1.0.0 (build 35583870)",
+        "target_arch": "sm_89",
+        "backend": "IsolatedGPUBackend",
+        "toolchain_lock_hash": "3880152ba598d514a27ca364a4e812abb8f2ec9e21a7ac3be784c2d2def6ac91",
+        "image_id": "sha256:ec7f38d73b44d6e363f23cf5f2c22d7bdb93865b2a05d4110f068a7591b5f515",
+        "base_repo_digest": "nvidia/cuda@sha256:a99a1860ba8e2916e5c3e73b72ec4c4301653a84586e05bfc9a2aa2d58027e97",
+        "policy": "{\"user\":\"65532:65532\",\"network\":\"none\",\"capabilities\":\"ALL\",\"no_new_privileges\":true,\"read_only_root\":true,\"cpus\":4,\"memory\":\"4g\",\"pids\":64,\"build_tmpfs\":\"1g\",\"run_tmpfs\":\"256m\",\"gpu\":\"device=0\",\"log_driver\":\"none\",\"log_bytes\":2097152,\"binary_bytes\":67108864,\"source_bytes\":4194304,\"build_timeout_seconds\":120,\"max_run_timeout_seconds\":300}"
+      }
+    },
+    {
+      "run_id": "e0f0f915b89040f6924dc032ced9a715",
+      "kind": "repair_self_check",
+      "parent_run_id": "177a6daf715a4b53bfc47eeca11cf831",
+      "status": "COMPLETED",
+      "build_success": true,
+      "execution_status": "SUCCESS",
+      "sanitizers": [
+        {
+          "tool": "memcheck",
+          "outcome": "CLEAN",
+          "findings": []
+        },
+        {
+          "tool": "racecheck",
+          "outcome": "FINDING",
+          "findings": [
+            {
+              "tool": "racecheck",
+              "category": "Race reported between Write access and Write access",
+              "kernel": null,
+              "source_location": {
+                "path": "kernel.cu",
+                "line": 11,
+                "function": null
+              },
+              "raw_ref": {
+                "id": "304f78dad45f40aca9acdb731ec45ea8",
+                "run_id": "e0f0f915b89040f6924dc032ced9a715",
+                "name": "sanitizer/a63aae64eaba43298e99a11bf07a51d2/racecheck.log",
+                "sha256": "5adbb40a8b058a7ca9a2852019d8991adde003e1e3576d3d39e2899b7193ecc2",
+                "visibility": "public",
+                "relative_path": "e0f0f915b89040f6924dc032ced9a715/artifacts/304f78dad45f40aca9acdb731ec45ea8",
+                "byte_count": 317
+              }
+            }
+          ]
+        },
+        {
+          "tool": "initcheck",
+          "outcome": "CLEAN",
+          "findings": []
+        },
+        {
+          "tool": "synccheck",
+          "outcome": "CLEAN",
+          "findings": []
+        }
+      ],
+      "retrieved_chunks": 0,
+      "environment": {
+        "cuda_nvcc": "12.8.93",
+        "compute_sanitizer": "2025.1.0.0 (build 35583870)",
+        "target_arch": "sm_89",
+        "backend": "IsolatedGPUBackend",
+        "toolchain_lock_hash": "3880152ba598d514a27ca364a4e812abb8f2ec9e21a7ac3be784c2d2def6ac91",
+        "image_id": "sha256:ec7f38d73b44d6e363f23cf5f2c22d7bdb93865b2a05d4110f068a7591b5f515",
+        "base_repo_digest": "nvidia/cuda@sha256:a99a1860ba8e2916e5c3e73b72ec4c4301653a84586e05bfc9a2aa2d58027e97",
+        "policy": "{\"user\":\"65532:65532\",\"network\":\"none\",\"capabilities\":\"ALL\",\"no_new_privileges\":true,\"read_only_root\":true,\"cpus\":4,\"memory\":\"4g\",\"pids\":64,\"build_tmpfs\":\"1g\",\"run_tmpfs\":\"256m\",\"gpu\":\"device=0\",\"log_driver\":\"none\",\"log_bytes\":2097152,\"binary_bytes\":67108864,\"source_bytes\":4194304,\"build_timeout_seconds\":120,\"max_run_timeout_seconds\":300}"
+      }
+    }
+  ],
+  "cleanup": {
+    "project_labeled_container_count": 0,
+    "docker_query_exit_code": 0,
+    "query_scope": "containers carrying io.gpu-agent.owner; read only"
+  }
+}

@@ -1,0 +1,10 @@
+--- a/kernel.cu
++++ b/kernel.cu
+@@ -11,6 +11,6 @@
+     slots[slot] = static_cast<float>(threadIdx.x);
+     __syncthreads();
+-    if (threadIdx.x == 0) block_summary = slots[0];
++    if (threadIdx.x == 0) block_summary = slots[threadIdx.x];
+ }
+ 
+ __global__ void vector_add(const float* a, const float* b, float* out, std::size_t n) {

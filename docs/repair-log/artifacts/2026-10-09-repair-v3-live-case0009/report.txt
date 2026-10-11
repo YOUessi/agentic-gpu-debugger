@@ -1,0 +1,16 @@
+Repair v3 真实试用公开摘要
+说明：由经过 RunStore hash 校验的公开工件汇总；完整原生 report 保留在 Tang 的 report-full.txt。
+案例：case_0009 / E
+模型：deepseek-v4-pro（真实调用）
+代码提交：93ba8452b3f9607aab8eaa594ec2403dd35450a6
+父 run：177a6daf715a4b53bfc47eeca11cf831
+应用退出码：1；耗时：80.186 秒
+候选：1；重新调查：1；第二补丁：未生成
+公开数值检查：32 个结果全部为 3.0，PASSED
+公开工具检查：memcheck CLEAN；racecheck FINDING；initcheck CLEAN；synccheck CLEAN
+停止：REINVESTIGATION_INCONCLUSIVE / AGENT_BUDGET_EXHAUSTED
+调查工具预算：初始 3 次 + 候选 memcheck 1 次 = 4/4；固定公开自检另计 4 次
+模型调用：10/40（8 plan、1 diagnose、1 patch），全部 COMPLETED
+Token：31744；费用：未知
+独立验证：NOT_RUN；最终 VERIFIED_FIXED：false
+本例证明真实调查、补丁、自检及重新调查启动已执行；新诊断与后续补丁闭环未完成。

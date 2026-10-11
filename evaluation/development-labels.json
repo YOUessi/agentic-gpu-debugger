@@ -1,0 +1,86 @@
+{
+  "schema_version": 1,
+  "note": "Frozen before the development rerun. Family is derived from the registered mutation and target tool; location and root-cause labels are not yet adjudicated and are therefore not scored.",
+  "cases": {
+    "case_0001": {
+      "failure_family": "out_of_bounds",
+      "target_tool": "memcheck",
+      "expected_finding": "Invalid __global__ read"
+    },
+    "case_0002": {
+      "failure_family": "shared_memory_race",
+      "target_tool": "racecheck",
+      "expected_finding": "Race reported between Write access and Read access"
+    },
+    "case_0003": {
+      "failure_family": "uninitialized_memory_read",
+      "target_tool": "initcheck",
+      "expected_finding": "Uninitialized __global__ memory read"
+    },
+    "case_0004": {
+      "failure_family": "barrier_misuse",
+      "target_tool": "synccheck",
+      "expected_finding": "Barrier error detected. Invalid arguments."
+    },
+    "case_0005": {
+      "failure_family": "out_of_bounds",
+      "target_tool": "memcheck",
+      "expected_finding": "Invalid __global__ write"
+    },
+    "case_0006": {
+      "failure_family": "out_of_bounds",
+      "target_tool": "memcheck",
+      "expected_finding": "Invalid __global__ read"
+    },
+    "case_0007": {
+      "failure_family": "misaligned_access",
+      "target_tool": "memcheck",
+      "expected_finding": "Invalid __global__ write"
+    },
+    "case_0008": {
+      "failure_family": "shared_memory_race",
+      "target_tool": "racecheck",
+      "expected_finding": "Race reported between Write access and Write access"
+    },
+    "case_0009": {
+      "failure_family": "shared_memory_race",
+      "target_tool": "racecheck",
+      "expected_finding": "Race reported between Write access and Write access"
+    },
+    "case_0010": {
+      "failure_family": "shared_memory_race",
+      "target_tool": "racecheck",
+      "expected_finding": "Race reported between Write access and Write access"
+    },
+    "case_0011": {
+      "failure_family": "uninitialized_memory_read",
+      "target_tool": "initcheck",
+      "expected_finding": "Uninitialized __global__ memory read"
+    },
+    "case_0012": {
+      "failure_family": "uninitialized_memory_read",
+      "target_tool": "initcheck",
+      "expected_finding": "Uninitialized __global__ memory read"
+    },
+    "case_0013": {
+      "failure_family": "uninitialized_memory_read",
+      "target_tool": "initcheck",
+      "expected_finding": "Uninitialized __global__ memory read"
+    },
+    "case_0014": {
+      "failure_family": "barrier_misuse",
+      "target_tool": "synccheck",
+      "expected_finding": "Barrier error detected. Invalid arguments."
+    },
+    "case_0015": {
+      "failure_family": "barrier_misuse",
+      "target_tool": "synccheck",
+      "expected_finding": "Barrier error detected. Invalid arguments."
+    },
+    "case_0016": {
+      "failure_family": "barrier_misuse",
+      "target_tool": "synccheck",
+      "expected_finding": "Barrier error detected. Invalid arguments."
+    }
+  }
+}

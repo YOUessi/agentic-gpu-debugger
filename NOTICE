@@ -1,0 +1,10 @@
+Agentic GPU Debugger
+Copyright (c) 2026 Agentic GPU Debugger contributors
+
+This distribution includes nlohmann/json in benchmarks/harness/vendor/json.hpp.
+That component is licensed under the MIT License; its license text is retained
+at benchmarks/harness/vendor/LICENSE.MIT.
+
+The container definition references NVIDIA CUDA images and tooling. Those
+images and tools are not redistributed by this Python package and remain
+subject to NVIDIA's applicable license terms.
