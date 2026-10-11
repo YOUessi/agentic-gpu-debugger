@@ -43,6 +43,8 @@ class RepairPolicy(ExecutionModel):
     version: Literal["public-repair-v2", "public-repair-v3"] = "public-repair-v2"
     max_candidates: int = Field(default=3, ge=1, le=20, strict=True)
     max_reinvestigations: int = Field(default=1, ge=0, le=3, strict=True)
+    # Opt-in development experiment only. Normal V2/V3 and frozen evaluations retain 4.
+    unbounded_sanitizer_calls: bool = Field(default=False, strict=True)
 
 
 class PublicCheck(ExecutionModel):

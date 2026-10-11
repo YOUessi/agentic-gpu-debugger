@@ -663,6 +663,13 @@ class ApplicationService:
                     stdin_ref,
                     self.knowledge,
                     self.knowledge_version,
+                    budget=(
+                        AgentBudget(max_sanitizer_calls=None)
+                        if repair_policy is not None
+                        and repair_policy.version == "public-repair-v3"
+                        and repair_policy.unbounded_sanitizer_calls
+                        else None
+                    ),
                 )
                 result = orchestrator.investigate(run.id, mode=mode, required_tools=required_tools)
                 if result.diagnostic_outcome == "DIAGNOSED":

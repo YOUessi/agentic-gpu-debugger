@@ -94,3 +94,4 @@
 - [2026-10-04：GitHub第二次CI失败核查与日志缺口](2026-10-04-github-ci-second-run.md)
 - [2026-10-08：Repair v3失败候选重新调查、来源作用域与共享预算](2026-10-08-repair-v3-reinvestigation.md)
 - [2026-10-09：Repair v3首次真实模型试用、无效补丁与调查预算不足](2026-10-09-repair-v3-live-use.md)
+- [2026-10-09：Repair v3取消独立Sanitizer额度，真实模型修复成功与对照限制](2026-10-09-unbounded-sanitizer-experiment.md)

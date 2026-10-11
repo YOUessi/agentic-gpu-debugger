@@ -900,6 +900,14 @@ def repair_command(
         bool, typer.Option("--reinvestigate", help="Enable v3 investigation of failed candidates.")
     ] = False,
     max_reinvestigations: Annotated[int, typer.Option("--max-reinvestigations", min=0, max=3)] = 1,
+    unbounded_sanitizer_calls: Annotated[
+        bool,
+        typer.Option(
+            "--unbounded-sanitizer-calls",
+            help="Development Repair v3 only: remove the separate sanitizer call count cap. "
+            "Agent steps, total time, and paid LLM calls remain bounded.",
+        ),
+    ] = False,
 ) -> None:
     """Investigate, self-check/revise using public inputs, then independently verify."""
     from gpu_agent.agent.provider import DevelopmentCallPolicy
@@ -907,6 +915,8 @@ def repair_command(
     from gpu_agent.repair import RepairPolicy
     from gpu_agent.service import ApplicationService
 
+    if unbounded_sanitizer_calls and not reinvestigate:
+        raise typer.BadParameter("--unbounded-sanitizer-calls requires --reinvestigate")
     try:
         service = ApplicationService.configured()
         if allow_paid_calls:
@@ -917,6 +927,7 @@ def repair_command(
                 version="public-repair-v3" if reinvestigate else "public-repair-v2",
                 max_candidates=max_candidates,
                 max_reinvestigations=max_reinvestigations,
+                unbounded_sanitizer_calls=unbounded_sanitizer_calls,
             ),
         )
         typer.echo(f"run_id {run.id}")

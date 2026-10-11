@@ -39,7 +39,10 @@ class RuleRouter:
             and evidence.repair_context.public_functional_failure
         ):
             return FinishAction(rationale="RULE_FALLBACK: current public output violates the task")
-        if budget.sanitizer_calls >= budget.max_sanitizer_calls:
+        if (
+            budget.max_sanitizer_calls is not None
+            and budget.sanitizer_calls >= budget.max_sanitizer_calls
+        ):
             return InconclusiveAction(rationale="RULE_FALLBACK: sanitizer budget exhausted")
 
         source = "\n".join(item.content for item in evidence.sources)

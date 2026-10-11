@@ -14,7 +14,7 @@ Identifier = Annotated[str, Field(pattern=r"^[a-f0-9]{32}$")]
 class AgentBudget(ExecutionModel):
     budget_version: Literal["m1-v1"] = "m1-v1"
     max_agent_steps: int = Field(default=38, ge=0, le=38)
-    max_sanitizer_calls: int = Field(default=4, ge=0, le=4)
+    max_sanitizer_calls: int | None = Field(default=4, ge=0, le=4)
     max_rag_calls: int = Field(default=3, ge=0, le=3)
     max_source_reads: int = Field(default=5, ge=0, le=5)
     max_llm_calls: int = Field(default=40, ge=0, le=40)
@@ -31,7 +31,7 @@ class AcquisitionUsage(ExecutionModel):
     """Actual acquisition invocations, distinct from budget reservations and attempts."""
 
     schema_version: Literal[1] = 1
-    sanitizer_calls: int = Field(strict=True, ge=0, le=4)
+    sanitizer_calls: int = Field(strict=True, ge=0)
     retrieval_calls: int = Field(strict=True, ge=0, le=3)
 
 
