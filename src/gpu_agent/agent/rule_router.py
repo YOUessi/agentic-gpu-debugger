@@ -13,6 +13,7 @@ from gpu_agent.agent.models import (
     RetrieveDocsAction,
     SynccheckAction,
 )
+from gpu_agent.agent.policy import followup_sanitizer_for_prior_hypothesis
 from gpu_agent.execution.models import SanitizerTool
 
 
@@ -20,6 +21,20 @@ class RuleRouter:
     """Choose only published, typed actions and stop when no budgeted evidence remains."""
 
     def next_action(self, evidence: PublicEvidence, budget: AgentBudget) -> AgentAction:
+        if followup := followup_sanitizer_for_prior_hypothesis(evidence):
+            if (
+                budget.max_sanitizer_calls is not None
+                and budget.sanitizer_calls >= budget.max_sanitizer_calls
+            ):
+                return InconclusiveAction(
+                    rationale="RULE_FALLBACK: mandatory hypothesis check exceeds budget"
+                )
+            rationale = "RULE_FALLBACK: verify previous candidate hazard on current source"
+            if followup == SanitizerTool.RACECHECK:
+                return RacecheckAction(rationale=rationale)
+            if followup == SanitizerTool.INITCHECK:
+                return InitcheckAction(rationale=rationale)
+            return SynccheckAction(rationale=rationale)
         if evidence.tool_findings:
             if not evidence.documentation and budget.rag_calls < budget.max_rag_calls:
                 query = " ".join(f.category for f in evidence.tool_findings)[:500]

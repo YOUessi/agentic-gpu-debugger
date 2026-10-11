@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "executed_at": "2026-10-09",
+  "source_run_commit": "e4e7a8d4d069cecb24355e9c521bf7bd121e0870",
+  "case": "case_0022",
+  "original_source_sha256": "b79fd84c71131f94601cc153fa00307e848d73c477267bfd7a6f80384d0394a1",
+  "v2": {
+    "run": "bdbb9c9962e448ac8d38b4c9a39e2ffd",
+    "prompt": "m3-2026-10-01-v12",
+    "verdict": "VERIFIED_FIXED",
+    "physical_calls": 8,
+    "total_tokens": 26706,
+    "rounds": [
+      {
+        "hash": "39f29c4d03cb09c374967a28ddb3835350ff8830988ec7879f6c950cd03ac808",
+        "status": "FAILED",
+        "functional": "PASSED",
+        "racecheck": "FINDING",
+        "synccheck_functional": "NUMERIC_MISMATCH"
+      },
+      {
+        "hash": "77c257cd0e6a010ef5bfc7e623783bcc56e8d89246ca92ad196702242fe1ad07",
+        "status": "PASSED",
+        "functional": "PASSED",
+        "racecheck": "CLEAN",
+        "synccheck_functional": "PASSED"
+      }
+    ]
+  },
+  "v3": {
+    "run": "c55216300e0840eb8d56dec46bfeefbb",
+    "prompt_before": "m3-2026-10-01-v12",
+    "prompt_reinvestigation": "public-repair-v3-2026-10-09-v4",
+    "verdict": "NOT_VERIFIED",
+    "physical_calls": 12,
+    "total_tokens": 48846,
+    "rounds": [
+      {
+        "hash": "cf55f41f779456a72097ed94eeaa77ee5b0cd304c7a3e8d20581277931867d05",
+        "kernel_sha256": "d1fac7bc60f231f4bc041b71ef7b04ece7f13ba8794aa90f7a9cdd504ebecce5",
+        "status": "FAILED",
+        "functional": "NUMERIC_MISMATCH",
+        "checks_performed": [
+          "build",
+          "runtime",
+          "functional"
+        ]
+      },
+      {
+        "hash": "39f29c4d03cb09c374967a28ddb3835350ff8830988ec7879f6c950cd03ac808",
+        "kernel_sha256": "8e2f0acdd8aa179071a039165facd6929bb2df52a6dea626fb1ffbde812254f7",
+        "status": "FAILED",
+        "functional": "PASSED",
+        "racecheck": "FINDING",
+        "synccheck_functional": "NUMERIC_MISMATCH",
+        "diagnosis_source_sha256": "d1fac7bc60f231f4bc041b71ef7b04ece7f13ba8794aa90f7a9cdd504ebecce5"
+      },
+      {
+        "hash": "9cb10afaef841aba9f9ab6306d483fc7c98b586eec192bf27ff1c38ce4c29cc1",
+        "status": "FAILED",
+        "functional": "NUMERIC_MISMATCH"
+      }
+    ],
+    "reinvestigation": {
+      "run": "d39699314da5439fbb9f802ba4745bc8",
+      "after_round": 1,
+      "actions": [
+        "run_memcheck",
+        "finish_diagnosis"
+      ],
+      "observed_memcheck": "CLEAN",
+      "racecheck_acquired": false,
+      "diagnosis_source_sha256": "d1fac7bc60f231f4bc041b71ef7b04ece7f13ba8794aa90f7a9cdd504ebecce5",
+      "diagnosed_family": "shared_memory_race",
+      "recommendation_already_present": true
+    },
+    "feedback_history_field_present": false,
+    "round2_diagnosis_source_stale": true
+  },
+  "exact_shared_candidate_hash": "39f29c4d03cb09c374967a28ddb3835350ff8830988ec7879f6c950cd03ac808",
+  "limitations": [
+    "Public run artifacts and provider metadata only; no full verbatim request input persisted",
+    "Single sample per mode; not causal evidence",
+    "No private verifier ground truth accessed"
+  ]
+}

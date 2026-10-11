@@ -1,0 +1,15 @@
+--- a/kernel.cu
++++ b/kernel.cu
+@@ -8,9 +8,11 @@
+     const std::size_t i = blockIdx.x * 128 + lane;
+     tile[lane] = i < n ? a[i] + b[i] : 0.0f;
+     for (unsigned int offset = 1; offset < 128; offset *= 2) {
++        __syncthreads();
+         const float value = tile[lane] + (lane >= offset ? tile[lane - offset] : 0.0f);
++        __syncthreads();
++        tile[lane] = value;
+         __syncthreads();
+-        tile[lane] = value;
+     }
+     if (i < n) out[i] = tile[lane];
+ }

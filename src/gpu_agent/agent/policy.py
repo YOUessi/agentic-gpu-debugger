@@ -200,9 +200,35 @@ def action_policy_for_prompt(prompt_version: str | None) -> ActionPolicyVersion:
             "public-repair-v3-2026-10-09-v2",
             "public-repair-v3-2026-10-09-v3",
             "public-repair-v3-2026-10-09-v4",
+            "public-repair-v3-2026-10-09-v5",
         }
         else "diagnosis-m1-v1"
     )
+
+
+def followup_sanitizer_for_prior_hypothesis(evidence: PublicEvidence) -> SanitizerTool | None:
+    """A failed candidate cannot dismiss an earlier hazard with an unrelated clean tool.
+
+    Only a *current*, controller-derived public functional mismatch and a CLEAN
+    memcheck require rechecking a prior concrete hazard family. Previous diagnoses
+    select a check, never constitute valid citations for the new candidate.
+    """
+    context = evidence.repair_context
+    if (
+        context is None
+        or not context.public_functional_failure
+        or context.previous_diagnosis.diagnostic_outcome != "DIAGNOSED"
+        or evidence.sanitizer_outcomes.get(SanitizerTool.MEMCHECK) != "CLEAN"
+    ):
+        return None
+    corresponding = {
+        "shared_memory_race": SanitizerTool.RACECHECK,
+        "uninitialized_memory_read": SanitizerTool.INITCHECK,
+        "barrier_misuse": SanitizerTool.SYNCCHECK,
+    }.get(context.previous_diagnosis.failure_family)
+    if corresponding is None or corresponding in evidence.sanitizer_outcomes:
+        return None
+    return corresponding
 
 
 def missing_evidence(evidence: PublicEvidence) -> list[MissingEvidence]:
@@ -210,6 +236,13 @@ def missing_evidence(evidence: PublicEvidence) -> list[MissingEvidence]:
     missing: list[MissingEvidence] = []
     if "memcheck" not in evidence.sanitizer_outcomes:
         missing.append("memcheck_outcome")
+    tool = followup_sanitizer_for_prior_hypothesis(evidence)
+    if tool == SanitizerTool.RACECHECK:
+        missing.append("racecheck_outcome")
+    elif tool == SanitizerTool.INITCHECK:
+        missing.append("initcheck_outcome")
+    elif tool == SanitizerTool.SYNCCHECK:
+        missing.append("synccheck_outcome")
     if not evidence.tool_findings:
         if evidence.repair_context is None or not evidence.repair_context.public_functional_failure:
             missing.append("tool_finding")
@@ -232,6 +265,9 @@ def decide_action(
         mandatory.append("run_memcheck")
     if evidence.tool_findings and not evidence.documentation:
         mandatory.append("retrieve_official_docs")
+    followup = followup_sanitizer_for_prior_hypothesis(evidence)
+    if followup is not None:
+        mandatory.append(f"run_{followup.value}")
     reason: str | None = None
     signature = action.action_type + action.typed_arguments.model_dump_json()
     if phase != CurrentPhase.DIAGNOSING:

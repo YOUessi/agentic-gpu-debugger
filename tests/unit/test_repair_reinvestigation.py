@@ -326,6 +326,16 @@ def test_later_revision_keeps_diagnosis_source_after_reinvestigation_limit(
             feedback["diagnosis_source_sha256"]
             == hashlib.sha256(checked[0]["kernel.cu"]).hexdigest()
         )
+        history = feedback["revision_history"]
+        assert len(history) == len(received) + 1
+        assert [item["round"] for item in history] == list(range(1, len(history) + 1))
+        assert all(item["status"] == "FAILED" for item in history)
+        assert all(item["candidate_kernel_sha256"] for item in history)
+        assert feedback["diagnosis_scoped_to_latest_candidate"] is (len(received) == 0)
+        if len(received) == 1:
+            assert history[0]["checks"]["memcheck"] == "FINDING"
+            assert history[1]["checks"]["functional"] == "NUMERIC_MISMATCH"
+            assert history[0]["candidate_kernel_sha256"] != history[1]["candidate_kernel_sha256"]
         received.append(feedback)
         if len(received) == 1:
             return second_diff
