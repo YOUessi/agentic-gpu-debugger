@@ -1,0 +1,270 @@
+{
+  "experiment": "2026-10-12 matched-budget public exploratory three-arm trial",
+  "frozen_runner_commit": "1341df2016fba2db9e226fb90016c6cf71083cdd",
+  "current_code_commit": "1eaac1fdf456a46118ea3aecc16338a9142c29bb",
+  "legacy_code_commit": "e4e7a8d4d069cecb24355e9c521bf7bd121e0870",
+  "execution_started_utc": "2026-10-11T16:11:06.441873+00:00",
+  "seed": 20261011,
+  "conditions": {
+    "V2": {
+      "checkout": "current",
+      "reinvestigate": false,
+      "sanitizer_cap": 4
+    },
+    "V3_OLD": {
+      "checkout": "legacy",
+      "reinvestigate": true,
+      "sanitizer_cap": 4
+    },
+    "V3_NEW": {
+      "checkout": "current",
+      "reinvestigate": true,
+      "sanitizer_cap": 4
+    }
+  },
+  "budget_per_unit": {
+    "candidate_limit": 3,
+    "reinvestigations": 1,
+    "model_calls": 40,
+    "agent_steps": 38,
+    "wall_seconds": 600
+  },
+  "case_hashes": {
+    "case_0019": {
+      "kernel.cu": "ee78a8aaab518f350371056351071ce1dd1b05dc42e42b5a82ca9b3786c5f471",
+      "task.json": "fb37762d3bbeda9bc2856df2ebb79a806a7f2979f3a8e3254e0196e426d3177b",
+      "input.json": "863f8b06284b7a1ce438bbf0c944929736ea01d982e9799ef41d74fac8b5e515"
+    },
+    "case_0020": {
+      "kernel.cu": "482d127677bc18922dfb0ed2736d2795bc0835c5c08d6b2f9d8f1d16be41eb52",
+      "task.json": "d7512723dfd1a7a0ed3ab73ac55b3f3a1079ac98e3925fa4276d04df871445a3",
+      "input.json": "d772abc5cda92b683adbc072db439b7bcfae01f1276ccff9e97e8033f553aa05"
+    }
+  },
+  "memory": "DISABLED",
+  "source_predeclared_sha256": "2ad590c76907fa66911313cfbd99e0817bdf1704c43f111b322f510fc8cbd5a6",
+  "source_results_jsonl_sha256": "ce8f6974ecfcd259fb725519ce38026a744f9ece35d4b5c24543dd011d916b15",
+  "knowledge_index_sha256": "6ddc3cf2443ff983f08d0dcae44ca5f68ba28033beeb391a162422f9936ed27a",
+  "aggregate": {
+    "V2": {
+      "units": 2,
+      "verified_fixed": 1,
+      "physical_llm_calls": 11,
+      "total_tokens": 39308,
+      "total_elapsed_seconds": 232.446
+    },
+    "V3_OLD": {
+      "units": 2,
+      "verified_fixed": 1,
+      "physical_llm_calls": 18,
+      "total_tokens": 68984,
+      "total_elapsed_seconds": 314.686
+    },
+    "V3_NEW": {
+      "units": 2,
+      "verified_fixed": 2,
+      "physical_llm_calls": 13,
+      "total_tokens": 39659,
+      "total_elapsed_seconds": 400.987
+    }
+  },
+  "units": [
+    {
+      "ordinal": 0,
+      "case": "case_0019",
+      "arm": "V2",
+      "run_id": "15d9bb922e6b4b2bba312a88a5d3b3d5",
+      "verdict": "VERIFIED_FIXED",
+      "stop_reason": "PUBLIC_CHECKS_PASSED",
+      "physical_llm_calls": 6,
+      "token_count": 18758,
+      "candidates": 1,
+      "reinvestigations": 0,
+      "elapsed_seconds": 196.124,
+      "public_checks": [
+        {
+          "round": 1,
+          "status": "PASSED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "PASSED",
+            "memcheck": "CLEAN",
+            "memcheck_functional": "PASSED",
+            "racecheck": "CLEAN",
+            "racecheck_functional": "PASSED",
+            "initcheck": "CLEAN",
+            "initcheck_functional": "PASSED",
+            "synccheck": "CLEAN",
+            "synccheck_functional": "PASSED"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 1,
+      "case": "case_0020",
+      "arm": "V3_OLD",
+      "run_id": "4ae22f09a8c141d18d37cfe05aa209f8",
+      "verdict": "NOT_VERIFIED",
+      "stop_reason": "CANDIDATE_LIMIT",
+      "physical_llm_calls": 11,
+      "token_count": 47591,
+      "candidates": 3,
+      "reinvestigations": 1,
+      "elapsed_seconds": 106.75,
+      "public_checks": [
+        {
+          "round": 1,
+          "status": "FAILED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "NUMERIC_MISMATCH"
+          }
+        },
+        {
+          "round": 2,
+          "status": "FAILED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "NUMERIC_MISMATCH"
+          }
+        },
+        {
+          "round": 3,
+          "status": "FAILED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "NUMERIC_MISMATCH"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 2,
+      "case": "case_0019",
+      "arm": "V3_OLD",
+      "run_id": "f73ba6d6490f4d389d1716581255c27e",
+      "verdict": "VERIFIED_FIXED",
+      "stop_reason": "PUBLIC_CHECKS_PASSED",
+      "physical_llm_calls": 7,
+      "token_count": 21393,
+      "candidates": 1,
+      "reinvestigations": 0,
+      "elapsed_seconds": 207.936,
+      "public_checks": [
+        {
+          "round": 1,
+          "status": "PASSED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "PASSED",
+            "memcheck": "CLEAN",
+            "memcheck_functional": "PASSED",
+            "racecheck": "CLEAN",
+            "racecheck_functional": "PASSED",
+            "initcheck": "CLEAN",
+            "initcheck_functional": "PASSED",
+            "synccheck": "CLEAN",
+            "synccheck_functional": "PASSED"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 3,
+      "case": "case_0020",
+      "arm": "V3_NEW",
+      "run_id": "3a17ee0f273541e3a4df9b0d143e2ac6",
+      "verdict": "VERIFIED_FIXED",
+      "stop_reason": "PUBLIC_CHECKS_PASSED",
+      "physical_llm_calls": 5,
+      "token_count": 15750,
+      "candidates": 1,
+      "reinvestigations": 0,
+      "elapsed_seconds": 204.653,
+      "public_checks": [
+        {
+          "round": 1,
+          "status": "PASSED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "PASSED",
+            "memcheck": "CLEAN",
+            "memcheck_functional": "PASSED",
+            "racecheck": "CLEAN",
+            "racecheck_functional": "PASSED",
+            "initcheck": "CLEAN",
+            "initcheck_functional": "PASSED",
+            "synccheck": "CLEAN",
+            "synccheck_functional": "PASSED"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 4,
+      "case": "case_0019",
+      "arm": "V3_NEW",
+      "run_id": "d1bcf4ac923443b9af3546e04a49ed42",
+      "verdict": "VERIFIED_FIXED",
+      "stop_reason": "PUBLIC_CHECKS_PASSED",
+      "physical_llm_calls": 8,
+      "token_count": 23909,
+      "candidates": 1,
+      "reinvestigations": 0,
+      "elapsed_seconds": 196.334,
+      "public_checks": [
+        {
+          "round": 1,
+          "status": "PASSED",
+          "checks": {
+            "build": "CLEAN",
+            "runtime": "SUCCESS",
+            "functional": "PASSED",
+            "memcheck": "CLEAN",
+            "memcheck_functional": "PASSED",
+            "racecheck": "CLEAN",
+            "racecheck_functional": "PASSED",
+            "initcheck": "CLEAN",
+            "initcheck_functional": "PASSED",
+            "synccheck": "CLEAN",
+            "synccheck_functional": "PASSED"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 5,
+      "case": "case_0020",
+      "arm": "V2",
+      "run_id": "3ac8b2b1e243496c8bee28cc3a879b5e",
+      "verdict": "NOT_VERIFIED",
+      "stop_reason": null,
+      "physical_llm_calls": 5,
+      "token_count": 20550,
+      "candidates": 0,
+      "reinvestigations": 0,
+      "elapsed_seconds": 36.322,
+      "public_checks": []
+    }
+  ],
+  "error_classification": {
+    "case_0020_V2": "DIAGNOSIS_REJECTED_BEFORE_PATCH: LLM_INVALID_OUTPUT from two DOMAIN_REJECTED model attempts (diagnose_policy_rejected); zero candidates",
+    "case_0020_V3_OLD": "3 checked candidates each PUBLIC_FUNCTIONAL NUMERIC_MISMATCH; stop CANDIDATE_LIMIT; one reinvestigation",
+    "case_0020_V3_NEW": "first candidate passed public CPU oracle and all four sanitizers, independent strict VERIFIED_FIXED"
+  },
+  "scope_limitations": [
+    "Public development cases, not independent private held out case set",
+    "One sample per arm per case, statistical significance not estimated",
+    "Legacy and current checkouts differ in more than one implementation/prompt factor",
+    "No arms needed new V3 reinvestigation in successful runs, so efficacy of reinvestigation is not isolated",
+    "Costs in USD not priced or independently attested: unknown",
+    "Raw public RunStore retained on Tang; private verifier internals not exported"
+  ]
+}
