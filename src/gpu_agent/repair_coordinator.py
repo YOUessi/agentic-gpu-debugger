@@ -22,6 +22,7 @@ from gpu_agent.execution.models import (
     WorkspaceRequest,
 )
 from gpu_agent.public_task import PublicTask
+from gpu_agent.repair_evidence import transfer_self_check_evidence
 from gpu_agent.store import RunStore
 
 if TYPE_CHECKING:
@@ -208,6 +209,9 @@ class RepairCoordinator:
                 )
                 if execution.runtime_status in {"TOOL_ERROR", "TIMEOUT", "CANCELLED", "TRUNCATED"}:
                     raise ProviderError("EXECUTION_EVIDENCE_UNAVAILABLE")
+                transfer_self_check_evidence(
+                    self.store, run.id, checked.run_id, context.candidate_source_sha256, stdin
+                )
                 continuation = self.orchestrator.continue_in_workspace(backend, handle, stdin_ref)
                 result = continuation.investigate(run.id, mode=self.mode)
             except (ProviderError, BackendInfrastructureError) as exc:

@@ -197,6 +197,9 @@ def action_policy_for_prompt(prompt_version: str | None) -> ActionPolicyVersion:
             "m3-2026-09-30-v11",
             "m3-2026-10-01-v12",
             "public-repair-v3-2026-10-08-v1",
+            "public-repair-v3-2026-10-09-v2",
+            "public-repair-v3-2026-10-09-v3",
+            "public-repair-v3-2026-10-09-v4",
         }
         else "diagnosis-m1-v1"
     )
