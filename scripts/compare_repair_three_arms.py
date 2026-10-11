@@ -41,17 +41,13 @@ def schedule() -> list[tuple[str, str]]:
 
 
 def git_head(root: Path) -> str:
-    return subprocess.check_output(
-        ["git", "rev-parse", "HEAD"], cwd=root, text=True
-    ).strip()
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=root, text=True).strip()
 
 
 def require_checkout(root: Path, expected: str) -> None:
     if git_head(root) != expected:
         raise ValueError(f"frozen checkout mismatch: {root}")
-    if subprocess.check_output(
-        ["git", "status", "--porcelain"], cwd=root, text=True
-    ).strip():
+    if subprocess.check_output(["git", "status", "--porcelain"], cwd=root, text=True).strip():
         raise ValueError("refuse dirty worktree in frozen pilot")
 
 
@@ -89,9 +85,9 @@ def run_unit(args: argparse.Namespace) -> int:
         raise ValueError("memory unexpectedly configured for comparison")
     if os.environ.get("GPU_AGENT_KNOWLEDGE_VERSION") != VERSION:
         raise ValueError("incompatible official knowledge toolchain version")
-    if (
-        args.expected_commit == LEGACY_SHA and arm != "V3_OLD"
-    ) or (args.expected_commit == CURRENT_SHA and arm == "V3_OLD"):
+    if (args.expected_commit == LEGACY_SHA and arm != "V3_OLD") or (
+        args.expected_commit == CURRENT_SHA and arm == "V3_OLD"
+    ):
         raise ValueError("arm bound to wrong code checkout")
 
     os.environ["GPU_AGENT_RUN_ROOT"] = str(args.unit_dir / "public")
@@ -131,8 +127,11 @@ def run_unit(args: argparse.Namespace) -> int:
                 raw_summary.get("acquisition_usage") if raw_summary else None
             ),
             "public_checks": [
-                {"round": r["round"], "status": r["check"]["status"],
-                 "checks": r["check"].get("checks", {})}
+                {
+                    "round": r["round"],
+                    "status": r["check"]["status"],
+                    "checks": r["check"].get("checks", {}),
+                }
                 for r in (raw_summary.get("rounds", []) if raw_summary else [])
             ],
             "physical_llm_calls": len(usage),
@@ -151,22 +150,35 @@ def run_unit(args: argparse.Namespace) -> int:
         }
         write_once(args.unit_dir / "result.json", output)
         print(
-            "UNIT_RESULT=" + json.dumps({
-                k: output[k] for k in (
-                    "case", "arm", "verdict", "repair_stop_reason",
-                    "candidate_round_count", "reinvestigations",
-                    "physical_llm_calls", "token_count", "elapsed_seconds",
-                )
-            }),
+            "UNIT_RESULT="
+            + json.dumps(
+                {
+                    k: output[k]
+                    for k in (
+                        "case",
+                        "arm",
+                        "verdict",
+                        "repair_stop_reason",
+                        "candidate_round_count",
+                        "reinvestigations",
+                        "physical_llm_calls",
+                        "token_count",
+                        "elapsed_seconds",
+                    )
+                }
+            ),
             flush=True,
         )
         return 0
     except Exception as exc:
         write_once(
             args.unit_dir / "interrupted.json",
-            {"error_class": type(exc).__name__,
-             "elapsed_seconds": round(time.monotonic() - started, 3),
-             "attempts": 1, "no_retry": True},
+            {
+                "error_class": type(exc).__name__,
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+                "attempts": 1,
+                "no_retry": True,
+            },
         )
         print("UNIT_INTERRUPTED=" + type(exc).__name__, flush=True)
         return 2
@@ -226,8 +238,11 @@ def run_pilot(args: argparse.Namespace) -> int:
                 "V3_NEW": {"checkout": "current", "reinvestigate": True, "sanitizer_cap": 4},
             },
             "budget_per_unit": {
-                "candidate_limit": 3, "reinvestigations": 1,
-                "model_calls": 40, "agent_steps": 38, "wall_seconds": 600,
+                "candidate_limit": 3,
+                "reinvestigations": 1,
+                "model_calls": 40,
+                "agent_steps": 38,
+                "wall_seconds": 600,
             },
             "memory": "disabled",
             "repeat_count": 1,
@@ -253,35 +268,57 @@ def run_pilot(args: argparse.Namespace) -> int:
             checkout = legacy if arm == "V3_OLD" else current
             write_once(
                 unit_dir / "attempt.json",
-                {"ordinal": ordinal, "case": case, "arm": arm,
-                 "code_commit": LEGACY_SHA if arm == "V3_OLD" else CURRENT_SHA,
-                 "started_utc": datetime.now(UTC).isoformat()},
+                {
+                    "ordinal": ordinal,
+                    "case": case,
+                    "arm": arm,
+                    "code_commit": LEGACY_SHA if arm == "V3_OLD" else CURRENT_SHA,
+                    "started_utc": datetime.now(UTC).isoformat(),
+                },
             )
             env = os.environ.copy()
             env.pop("GPU_AGENT_REPAIR_MEMORY_INDEX", None)
-            env.update({
-                "GPU_AGENT_KNOWLEDGE_INDEX": str(frozen_index),
-                "GPU_AGENT_KNOWLEDGE_VERSION": VERSION,
-                "PYTHONUNBUFFERED": "1",
-            })
+            env.update(
+                {
+                    "GPU_AGENT_KNOWLEDGE_INDEX": str(frozen_index),
+                    "GPU_AGENT_KNOWLEDGE_VERSION": VERSION,
+                    "PYTHONUNBUFFERED": "1",
+                }
+            )
             cmd = [
-                sys.executable, "-I", str(Path(__file__).resolve()),
-                "--unit", "--checkout", str(checkout),
-                "--expected-commit", LEGACY_SHA if arm == "V3_OLD" else CURRENT_SHA,
-                "--case", case, "--arm", arm,
-                "--unit-dir", str(unit_dir),
-                "--knowledge-index", str(frozen_index),
+                sys.executable,
+                "-I",
+                str(Path(__file__).resolve()),
+                "--unit",
+                "--checkout",
+                str(checkout),
+                "--expected-commit",
+                LEGACY_SHA if arm == "V3_OLD" else CURRENT_SHA,
+                "--case",
+                case,
+                "--arm",
+                arm,
+                "--unit-dir",
+                str(unit_dir),
+                "--knowledge-index",
+                str(frozen_index),
             ]
             print(f"START {ordinal + 1}/{len(units)} {case} {arm}", flush=True)
             try:
                 run = subprocess.run(
-                    cmd, cwd=checkout, env=env, text=True,
-                    capture_output=True, timeout=780,
+                    cmd,
+                    cwd=checkout,
+                    env=env,
+                    text=True,
+                    capture_output=True,
+                    timeout=780,
                 )
             except subprocess.TimeoutExpired:
                 # Timeout is recorded, never silently re-run.
-                write_once(unit_dir / "interrupted.json",
-                           {"error_class": "CHILD_DEADLINE_EXCEEDED", "attempts": 1})
+                write_once(
+                    unit_dir / "interrupted.json",
+                    {"error_class": "CHILD_DEADLINE_EXCEEDED", "attempts": 1},
+                )
                 run = None
             if run is not None:
                 (unit_dir / "child.stdout").write_text(run.stdout)
@@ -292,11 +329,14 @@ def run_pilot(args: argparse.Namespace) -> int:
             else:
                 failures += 1
                 row = {
-                    "ordinal": ordinal, "case": case, "arm": arm,
-                    "verdict": "EXECUTION_INCOMPLETE", "attempts": 1,
+                    "ordinal": ordinal,
+                    "case": case,
+                    "arm": arm,
+                    "verdict": "EXECUTION_INCOMPLETE",
+                    "attempts": 1,
                     "error_class": (
-                        json.loads((unit_dir / "interrupted.json").read_text())
-                        .get("error_class") if (unit_dir / "interrupted.json").exists()
+                        json.loads((unit_dir / "interrupted.json").read_text()).get("error_class")
+                        if (unit_dir / "interrupted.json").exists()
                         else "UNKNOWN"
                     ),
                 }
@@ -327,10 +367,16 @@ def main() -> int:
     parser.add_argument("--unit-dir", type=Path)
     args = parser.parse_args()
     if args.unit:
-        if any(v is None for v in (
-            args.checkout, args.expected_commit, args.case,
-            args.arm, args.unit_dir,
-        )):
+        if any(
+            v is None
+            for v in (
+                args.checkout,
+                args.expected_commit,
+                args.case,
+                args.arm,
+                args.unit_dir,
+            )
+        ):
             raise ValueError("unit requires frozen commit, case and output directory")
         return run_unit(args)
     if args.repository is None or args.legacy_repository is None or args.output is None:

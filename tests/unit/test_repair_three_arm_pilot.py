@@ -11,8 +11,7 @@ def test_three_arm_schedule_is_deterministic_and_covers_all_units():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     expected = {
-        (case, arm) for case in ("case_0019", "case_0020")
-        for arm in ("V2", "V3_OLD", "V3_NEW")
+        (case, arm) for case in ("case_0019", "case_0020") for arm in ("V2", "V3_OLD", "V3_NEW")
     }
     assert module.schedule() == module.schedule()
     assert len(module.schedule()) == len(expected) == 6
