@@ -70,7 +70,7 @@ def run_langgraph_public_repair(
         # Public check is the ONLY edge into the private evaluator.
         return "verify" if state["public_checks_passed"] else "end"
 
-    def strict_verify(state: PublicRepairState) -> dict[str, str]:
+    def strict_verify(state: PublicRepairState) -> dict[str, bool]:
         nonlocal verified
         # The evaluator capability never enters graph state or Agent tools.
         verified = service.verify_exact(state["run_id"], strict=True)[0]
