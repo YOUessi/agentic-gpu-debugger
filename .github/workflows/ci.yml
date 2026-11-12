@@ -35,7 +35,6 @@ jobs:
       - name: Install project and development checks
         run: |
           python -m pip install --disable-pip-version-check -r requirements.lock
-          python -m pip install --disable-pip-version-check -r requirements.langgraph.txt
           python -m pip install --disable-pip-version-check --no-deps --no-build-isolation -e '.[dev]'
           python -m pip check
 
