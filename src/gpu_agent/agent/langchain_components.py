@@ -161,6 +161,7 @@ class LangChainModelComponents:
     ) -> str:
         """Reuse the provider's bounded public-feedback revision and diff checks."""
         require_no_external_tracing()
+
         def call(_: PublicSource) -> str:
             return self.provider.revise_patch(source, diagnosis, feedback)
 
