@@ -435,6 +435,11 @@ class ApplicationService:
     ) -> RunManifest:
         if mode not in {"A", "B", "C", "D", "E"}:
             raise ValueError("invalid acquisition mode")
+        if mode in {"D", "E"}:
+            from gpu_agent.agent.langchain_components import component_layer
+
+            if component_layer() == "langchain" and self._binding is not None:
+                raise ValueError("LangChain components are not approved for frozen evaluations")
         if evaluation_unit is not None and (
             self._binding is None
             or self._binding.purpose != "evaluation"
@@ -715,13 +720,23 @@ class ApplicationService:
                             ).encode(),
                             "public",
                         )
-                    diff = (
-                        provider.propose_patch(
-                            public_source, result, experience_hints=experience_hints
-                        )
-                        if experience_hints
-                        else provider.propose_patch(public_source, result)
+                    from gpu_agent.agent.langchain_components import (
+                        LangChainModelComponents,
+                        component_layer,
                     )
+
+                    if mode in {"D", "E"} and component_layer() == "langchain":
+                        diff = LangChainModelComponents(provider).propose_patch(
+                            public_source, result, experience_hints
+                        )
+                    else:
+                        diff = (
+                            provider.propose_patch(
+                                public_source, result, experience_hints=experience_hints
+                            )
+                            if experience_hints
+                            else provider.propose_patch(public_source, result)
+                        )
                     try:
                         candidate = apply_generated_candidate(snapshot, diff)
                     except ValueError:

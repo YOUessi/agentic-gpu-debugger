@@ -201,6 +201,7 @@ class AgentOrchestrator:
         self.rule_router = RuleRouter()
         self.seen: set[str] = set()
         self.executed: list[ExecutedAction] = []
+        self._component_layer = "native"
         self._root_run_id = handle.run_id
         self._investigation_runs = {handle.run_id}
         self.registry: dict[str, Callable[[AgentAction], None]] = {
@@ -320,9 +321,19 @@ class AgentOrchestrator:
             self.acquisition_usage = self.acquisition_usage.model_copy(
                 update={"retrieval_calls": self.acquisition_usage.retrieval_calls + 1}
             )
-            result = self.knowledge.retrieve(
-                action.typed_arguments.query, self.knowledge_version, action.typed_arguments.k
-            )
+            if self._component_layer == "langchain":
+                from gpu_agent.agent.langchain_components import retrieve_pinned
+
+                result = retrieve_pinned(
+                    self.knowledge,
+                    action.typed_arguments.query,
+                    self.knowledge_version,
+                    action.typed_arguments.k,
+                )
+            else:
+                result = self.knowledge.retrieve(
+                    action.typed_arguments.query, self.knowledge_version, action.typed_arguments.k
+                )
         except KnowledgeError:
             self.ledger.settle(reservation, "FAILED")
             raise ProviderError("KNOWLEDGE_UNAVAILABLE") from None
@@ -474,7 +485,24 @@ class AgentOrchestrator:
                     self.ledger.settle(reservation)
             if mode in {"A", "B", "C"}:
                 return self._diagnose(public_evidence(self.store, run_id))
+            if mode in {"D", "E"}:
+                from gpu_agent.agent.langchain_components import (
+                    component_layer,
+                    require_no_external_tracing,
+                )
+
+                self._component_layer = component_layer()
+                if self._component_layer == "langchain":
+                    require_no_external_tracing()
+                    self.store.put_if_absent_exact(
+                        run_id,
+                        "agent/component-layer.json",
+                        json.dumps({"schema_version": 1, "layer": "langchain-core-lcel"}).encode(),
+                        self.store.visibility,
+                    )
             engine = os.environ.get("GPU_AGENT_ORCHESTRATOR", "langgraph")
+            if self._component_layer == "langchain" and engine != "langgraph":
+                raise ValueError("LangChain components require LangGraph orchestration")
             if engine not in {"langgraph", "legacy"}:
                 raise ValueError("GPU_AGENT_ORCHESTRATOR must be langgraph or legacy")
             self.store.put_if_absent_exact(

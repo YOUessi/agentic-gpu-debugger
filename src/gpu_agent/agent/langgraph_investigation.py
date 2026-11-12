@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
+from gpu_agent.agent.langchain_components import LangChainModelComponents, component_layer
 from gpu_agent.agent.models import (
     ACTION_ADAPTER,
     DiagnosisResult,
@@ -56,6 +57,9 @@ def run_langgraph_investigation(
     # Avoid a cyclic import while preserving the original evidence projection.
     from gpu_agent.agent.orchestrator import public_evidence
 
+    layer = component_layer()
+    components = LangChainModelComponents(controller.provider) if layer == "langchain" else None
+
     def observe(state: InvestigationState) -> dict[str, Any]:
         budget = controller.budget
         controller.budget = budget.model_copy(
@@ -81,11 +85,13 @@ def run_langgraph_investigation(
         else:
             reservation = controller._reserve("planner_llm")
             try:
-                proposed = controller.provider.plan(
-                    evidence,
-                    controller.budget,
-                    feedback,
-                    state=controller._planner_state(evidence, feedback),
+                planner_state = controller._planner_state(evidence, feedback)
+                proposed = (
+                    components.plan(evidence, controller.budget, feedback, planner_state)
+                    if components is not None
+                    else controller.provider.plan(
+                        evidence, controller.budget, feedback, state=planner_state
+                    )
                 )
                 controller.ledger.settle(reservation)
             except ProviderError:
@@ -167,7 +173,12 @@ def run_langgraph_investigation(
         return {"last_tool": action.action_type}
 
     def diagnose(state: InvestigationState) -> dict[str, Any]:
-        result = controller._diagnose(public_evidence(controller.store, run_id))
+        evidence = public_evidence(controller.store, run_id)
+        result = (
+            components.diagnose(evidence, controller._diagnose)
+            if components is not None
+            else controller._diagnose(evidence)
+        )
         return {"diagnosis": result.model_dump(mode="json")}
 
     def inconclusive(state: InvestigationState) -> dict[str, Any]:
