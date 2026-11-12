@@ -92,7 +92,7 @@ def test_langchain_retrieval_citation_mismatch_fails_closed(oob_service, monkeyp
     assert service.knowledge is not None
     index = service.knowledge
 
-    def forged(self, query):
+    def forged(self, query, *, run_manager):
         return [Document(page_content="untrusted text", metadata={"chunk_id": "fabricated"})]
 
     monkeypatch.setattr(
