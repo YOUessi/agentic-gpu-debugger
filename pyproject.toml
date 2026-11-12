@@ -26,6 +26,7 @@ dependencies = [
   "pydantic>=2,<3", "typer>=0.16,<1", "httpx==0.28.1",
   "beautifulsoup4==4.13.5", "packaging==25.0",
   "openai>=3.13.0,<4",
+  "langgraph==1.2.20",
 ]
 
 [project.urls]
@@ -35,7 +36,6 @@ Issues = "https://github.com/YOUessi/agentic-gpu-debugger/issues"
 Changelog = "https://github.com/YOUessi/agentic-gpu-debugger/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
-langgraph = ["langgraph==1.2.20"]
 dev = ["build>=1.2,<2", "setuptools>=77", "pytest>=8,<10", "ruff>=0.12,<1", "mypy>=1.16,<2"]
 
 [project.scripts]
