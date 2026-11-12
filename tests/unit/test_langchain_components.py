@@ -6,9 +6,7 @@ import pytest
 
 
 @pytest.mark.parametrize("layer", ["native", "langchain"])
-def test_dev_agent_has_identical_tool_trace_and_physical_budget(
-    oob_service, monkeypatch, layer
-):
+def test_dev_agent_has_identical_tool_trace_and_physical_budget(oob_service, monkeypatch, layer):
     service, provider, source = oob_service
     monkeypatch.setenv("GPU_AGENT_ORCHESTRATOR", "langgraph")
     monkeypatch.setenv("GPU_AGENT_COMPONENT_LAYER", layer)
@@ -23,8 +21,10 @@ def test_dev_agent_has_identical_tool_trace_and_physical_budget(
     assert json.loads(service.store.read(refs["agent/final-budget.json"]))["llm_calls"] == 5
     assert json.loads(service.store.read(refs["agent/usage-summary.json"]))["physical_calls"] == 5
     assert {f"actions/{n}/decision.json" for n in range(3)} <= set(refs)
-    assert "agent/component-layer.json" in refs if layer == "langchain" else (
-        "agent/component-layer.json" not in refs
+    assert (
+        "agent/component-layer.json" in refs
+        if layer == "langchain"
+        else ("agent/component-layer.json" not in refs)
     )
     assert "secret-canary" not in json.dumps(provider.inputs)
 
@@ -82,9 +82,7 @@ def test_langchain_does_not_run_under_legacy_loop(oob_service, monkeypatch):
     assert provider.kinds == []
 
 
-def test_langchain_retrieval_citation_mismatch_fails_closed(
-    oob_service, monkeypatch
-):
+def test_langchain_retrieval_citation_mismatch_fails_closed(oob_service, monkeypatch):
     from langchain_core.documents import Document
 
     from gpu_agent.agent.langchain_components import retrieve_pinned
