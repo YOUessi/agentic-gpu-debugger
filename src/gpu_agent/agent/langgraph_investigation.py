@@ -11,7 +11,7 @@ for frozen evaluation comparisons.
 """
 
 import json
-from typing import TYPE_CHECKING, Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
@@ -204,7 +204,7 @@ def run_langgraph_investigation(
     compiled = graph.compile()
     initial: InvestigationState = {
         "run_id": run_id,
-        "mode": mode,
+        "mode": cast(Literal["D", "E"], mode),
         "feedback": [],
         "replanned": False,
     }
