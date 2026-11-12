@@ -26,6 +26,7 @@ dependencies = [
   "pydantic>=2,<3", "typer>=0.16,<1", "httpx==0.28.1",
   "beautifulsoup4==4.13.5", "packaging==25.0",
   "openai>=3.13.0,<4",
+  "langgraph==1.2.20",
 ]
 
 [project.urls]

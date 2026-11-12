@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from collections.abc import Callable
 from pathlib import PurePosixPath
 
@@ -473,6 +474,20 @@ class AgentOrchestrator:
                     self.ledger.settle(reservation)
             if mode in {"A", "B", "C"}:
                 return self._diagnose(public_evidence(self.store, run_id))
+            engine = os.environ.get("GPU_AGENT_ORCHESTRATOR", "langgraph")
+            if engine not in {"langgraph", "legacy"}:
+                raise ValueError("GPU_AGENT_ORCHESTRATOR must be langgraph or legacy")
+            self.store.put_if_absent_exact(
+                run_id,
+                "agent/orchestration-engine.json",
+                json.dumps({"schema_version": 1, "engine": engine}).encode(),
+                self.store.visibility,
+            )
+            if engine == "langgraph":
+                from gpu_agent.agent.langgraph_investigation import run_langgraph_investigation
+
+                return run_langgraph_investigation(self, run_id, mode)
+            # Explicit legacy path for frozen historical comparisons only.
             replanned = False
             feedback: list[str] | None = None
             while True:

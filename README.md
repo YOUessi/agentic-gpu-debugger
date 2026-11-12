@@ -205,6 +205,21 @@ python -I -m pytest tests/gpu/test_clean_kernel.py --require-live --gpu-run-root
 真实验证与安装调整见 [T01 记录](docs/t01-validation.md) 和 [T02/M0 记录](docs/t02-validation.md)。设计与依赖顺序见 [V2 规格](PROJECT_SPEC_CN_V2.md) 和 [实施计划](IMPLEMENTATION_PLAN_CN_V2.md)。不按开发天数安排任务。
 
 
+## LangGraph 调查编排（2026-11-12 开发分支）
+
+开发模式 D/E 的 Agent Loop 默认执行 LangGraph StateGraph（observe → plan →
+authorize → execute_tool → observe，直至 diagnose 或 inconclusive）；A/B/C
+固定证据采集的消融协议与严格验证器保持不变。公开 `repair` 顶层流程也由
+LangGraph 拆成调查修复、公开检查门禁和独立 strict 验证三个节点。
+LangGraph 仅调度节点，
+**Policy、GPU Sandbox、预算、EvidenceRepository、RunStore 和私有 Oracle 仍由控制器持有**。
+
+LangGraph 1.2.20 与全部可解析依赖已并入 `requirements.lock`。可设置
+`GPU_AGENT_ORCHESTRATOR=legacy` 显式切回原循环以核对行为；错误的配置值直接拒绝。
+目前 **没有配置持久化 LangGraph checkpointer**，因为 GPU/付费请求尚无可安全重放的
+跨进程幂等事务。RunStore 已持久化执行证据，但不等于可以在任意节点安全 Resume。
+历史冻结评测和真实 GPU 实验不因编排切换而自动成为新版本成绩。
+
 ## Repair V3：公开多轮 CUDA 修复与历史失败经验
 
 当前正式评测 A–E 与 V2 release evidence 的合同未更改；公开开发模式可显式启用多轮
