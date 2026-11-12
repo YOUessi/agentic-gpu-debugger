@@ -30,9 +30,7 @@ def test_d_e_controller_parity_for_public_tools(oob_service, monkeypatch, engine
 
 
 @pytest.mark.parametrize("engine", ["langgraph", "legacy"])
-def test_policy_denials_consume_steps_without_executing_tools(
-    oob_service, monkeypatch, engine
-):
+def test_policy_denials_consume_steps_without_executing_tools(oob_service, monkeypatch, engine):
     from gpu_agent.agent.models import MemcheckAction
 
     service, provider, source = oob_service
@@ -49,9 +47,7 @@ def test_policy_denials_consume_steps_without_executing_tools(
 
 
 @pytest.mark.parametrize("engine", ["langgraph", "legacy"])
-def test_finish_without_required_evidence_cannot_skip_policy(
-    oob_service, monkeypatch, engine
-):
+def test_finish_without_required_evidence_cannot_skip_policy(oob_service, monkeypatch, engine):
     from gpu_agent.agent.models import FinishAction
 
     service, provider, source = oob_service
@@ -69,9 +65,7 @@ def test_rule_router_uses_graph_without_planner_model(oob_service, monkeypatch):
     run = service.diagnose(source, mode="D")
 
     assert "plan" not in provider.kinds
-    assert "agent/orchestration-engine.json" in {
-        ref.name for ref in run.artifact_refs
-    }
+    assert "agent/orchestration-engine.json" in {ref.name for ref in run.artifact_refs}
 
 
 def test_invalid_engine_is_rejected_before_model_planning(oob_service, monkeypatch):
