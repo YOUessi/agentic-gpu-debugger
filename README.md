@@ -81,7 +81,8 @@ gpu-agent repair benchmarks/public/case_0009/public_input --allow-paid-calls \
 conda env create --prefix /home/you/conda_env/agentic-gpu-debugger -f environment.yml
 conda activate /home/you/conda_env/agentic-gpu-debugger
 python -I -m pip install -r requirements.lock
-python -I -m pip install --no-deps -e .
+python -I -m pip install -r requirements.langgraph.txt
+python -I -m pip install --no-deps -e '.[langgraph]'
 ```
 
 `environment.yml` 固定 CUDA 12.8 Update 1 的必需组件，未包含不需要的 Nsight GUI/数学库。实际安装的原生包 URL/SHA256 已保存到 `environment.lock.txt`；精确复现时用 `conda create --prefix /absolute/new/prefix --file environment.lock.txt` 替代上面的 YAML 创建命令，再安装 Python 依赖与本包。该 lock 仅适用于 Linux x86_64。
@@ -204,6 +205,19 @@ python -I -m pytest tests/gpu/test_clean_kernel.py --require-live --gpu-run-root
 
 真实验证与安装调整见 [T01 记录](docs/t01-validation.md) 和 [T02/M0 记录](docs/t02-validation.md)。设计与依赖顺序见 [V2 规格](PROJECT_SPEC_CN_V2.md) 和 [实施计划](IMPLEMENTATION_PLAN_CN_V2.md)。不按开发天数安排任务。
 
+
+## LangGraph 调查编排（2026-11-12 开发分支）
+
+开发模式 D/E 的 Agent Loop 默认执行 LangGraph StateGraph（observe → plan →
+authorize → execute_tool → observe，直至 diagnose 或 inconclusive）；A/B/C
+固定证据采集的消融协议与严格验证器保持不变。LangGraph 仅调度节点，
+**Policy、GPU Sandbox、预算、EvidenceRepository、RunStore 和私有 Oracle 仍由控制器持有**。
+
+依赖先安装 `requirements.langgraph.txt`。可设置
+`GPU_AGENT_ORCHESTRATOR=legacy` 显式切回原循环以核对行为；错误的配置值直接拒绝。
+目前 **没有配置持久化 LangGraph checkpointer**，因为 GPU/付费请求尚无可安全重放的
+跨进程幂等事务。RunStore 已持久化执行证据，但不等于可以在任意节点安全 Resume。
+历史冻结评测和真实 GPU 实验不因编排切换而自动成为新版本成绩。
 
 ## Repair V3：公开多轮 CUDA 修复与历史失败经验
 
