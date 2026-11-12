@@ -23,6 +23,7 @@ from gpu_agent.agent.models import (
     DiagnosisResult,
     PlannerState,
     PublicEvidence,
+    PublicSource,
 )
 from gpu_agent.agent.provider import LLMProvider
 from gpu_agent.knowledge.models import (
@@ -129,3 +130,43 @@ class LangChainModelComponents:
             lambda result: DiagnosisResult.model_validate(result.model_dump(mode="json"))
         )
         return runnable.invoke(evidence)
+
+    def propose_patch(
+        self,
+        source: PublicSource,
+        diagnosis: DiagnosisResult,
+        experience_hints: list[dict[str, str]] | None = None,
+    ) -> str:
+        """LCEL composition retaining the provider's schema, safety and patch gates."""
+        require_no_external_tracing()
+
+        def call(_: PublicSource) -> str:
+            return (
+                self.provider.propose_patch(
+                    source, diagnosis, experience_hints=experience_hints
+                )
+                if experience_hints
+                else self.provider.propose_patch(source, diagnosis)
+            )
+
+        runnable = RunnableLambda(call) | RunnableLambda(_require_patch_string)
+        return runnable.invoke(source)
+
+    def revise_patch(
+        self,
+        source: PublicSource,
+        diagnosis: DiagnosisResult,
+        feedback: dict[str, object],
+    ) -> str:
+        """Reuse the provider's bounded public-feedback revision and diff checks."""
+        require_no_external_tracing()
+        runnable = RunnableLambda(
+            lambda _: self.provider.revise_patch(source, diagnosis, feedback)
+        ) | RunnableLambda(_require_patch_string)
+        return runnable.invoke(source)
+
+
+def _require_patch_string(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("patch result must be a typed diff string")
+    return value
