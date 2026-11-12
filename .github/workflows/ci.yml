@@ -51,6 +51,12 @@ jobs:
       - name: Type check
         run: python -m mypy --strict src/gpu_agent
 
+      - name: LangGraph orchestration and public repair gate regression
+        run: >-
+          python -m pytest -q tests/unit/test_langgraph_orchestration.py
+          tests/unit/test_agent_loop.py tests/unit/test_iterative_repair.py
+          tests/unit/test_repair_reinvestigation.py
+
       - name: Run zero-cost tests
         run: >-
           python -m pytest -q
