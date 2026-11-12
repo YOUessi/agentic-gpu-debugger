@@ -337,6 +337,14 @@ class ApplicationService:
             raise ValueError("iterative repair is a public, non-evaluation workflow")
         if mode not in {"D", "E"}:
             raise ValueError("iterative repair supports D/E; A-C ablations remain single-candidate")
+        engine = os.environ.get("GPU_AGENT_ORCHESTRATOR", "langgraph")
+        if engine == "langgraph":
+            from gpu_agent.langgraph_repair import run_langgraph_public_repair
+
+            return run_langgraph_public_repair(self, source, policy or RepairPolicy(), mode)
+        if engine != "legacy":
+            raise ValueError("GPU_AGENT_ORCHESTRATOR must be langgraph or legacy")
+        # Legacy imperative workflow retained for frozen behavior comparison.
         run = self._diagnose(
             source,
             mode=mode,
