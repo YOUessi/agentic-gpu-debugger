@@ -108,10 +108,7 @@ def test_langchain_retrieval_citation_mismatch_fails_closed(
 def test_lcel_revision_reuses_provider_feedback_contract(oob_service):
     from gpu_agent.agent.langchain_components import LangChainModelComponents
 
-    service, provider, _ = oob_service
-    evidence = service.knowledge
-    assert evidence is not None
-    source = None
+    _, provider, _ = oob_service
     from gpu_agent.agent.models import DiagnosisResult, PublicSource
 
     source = PublicSource(source_id="a" * 32, content="int index;\n")
