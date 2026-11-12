@@ -15,6 +15,7 @@ from langgraph.graph import END, START, StateGraph
 from gpu_agent.benchmark.evaluation import EvaluationMode
 from gpu_agent.contracts import RunManifest
 from gpu_agent.repair import RepairPolicy
+from gpu_agent.execution.models import SanitizerTool
 from gpu_agent.verification.models import VerificationResult
 
 if TYPE_CHECKING:
@@ -44,7 +45,7 @@ def run_langgraph_public_repair(
         manifest = service._diagnose(
             source,
             mode=mode,
-            required_tools=service_required_tools(),
+            required_tools=(SanitizerTool.MEMCHECK,),
             expected_source_hash=None,
             evaluation_unit=None,
             repair_policy=policy,
@@ -73,11 +74,6 @@ def run_langgraph_public_repair(
         # The evaluator capability never enters graph state or Agent tools.
         verified = service.verify_exact(state["run_id"], strict=True)[0]
         return {}
-
-    def service_required_tools() -> tuple["SanitizerTool", ...]:
-        from gpu_agent.execution.models import SanitizerTool
-
-        return (SanitizerTool.MEMCHECK,)
 
     graph = StateGraph(PublicRepairState)
     graph.add_node("investigate_and_repair", investigate_and_repair)
