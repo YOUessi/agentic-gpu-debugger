@@ -205,6 +205,34 @@ python -I -m pytest tests/gpu/test_clean_kernel.py --require-live --gpu-run-root
 真实验证与安装调整见 [T01 记录](docs/t01-validation.md) 和 [T02/M0 记录](docs/t02-validation.md)。设计与依赖顺序见 [V2 规格](PROJECT_SPEC_CN_V2.md) 和 [实施计划](IMPLEMENTATION_PLAN_CN_V2.md)。不按开发天数安排任务。
 
 
+## LangChain Core 组件层（2026-11-13，开发分支）
+
+在 LangGraph 状态图下可以显式启用 **LangChain Core / LCEL** 的模型和 RAG
+适配层；默认保持原生组件，以便做真实的同预算对照：
+
+```bash
+export GPU_AGENT_ORCHESTRATOR=langgraph
+export GPU_AGENT_COMPONENT_LAYER=langchain  # 默认 native
+gpu-agent diagnose benchmarks/public/case_0001/public_input --allow-paid-calls
+```
+
+- `RunnableLambda` 连接 Planner、Diagnosis、Patch、Revision 的**既有**
+  `LLMProvider`，响应仍由 Pydantic / Policy / Scope Guard 校验；
+  不额外创建 `ChatOpenAI` 客户端，不改变请求量、重试与请求审计；
+- `BaseRetriever` 包装版本锁定的离线官方 CUDA 文档检索。只把
+  `Document` 作为展示/适配格式，回写的原始 `DocumentChunk` 必须与
+  内置 `KnowledgeIndex` 的查询结果和内容哈希完全一致；
+- 禁止 `LANGSMITH_TRACING`、`LANGCHAIN_TRACING`、
+  `LANGCHAIN_TRACING_V2` 等自动外部追踪，防止源码/证据通过回调外传；
+- 此路径**仅用于 D/E 公开开发实验**，未批准参与冻结 release/holdout；
+  不开启 LangChain Agent 自主工具执行，不开启额外网络检索；
+- `GPU_AGENT_COMPONENT_LAYER=native` 可以恢复原生组件。
+  本组件层不提供 GPU Checkpoint/Resume，也不能代替独立 Verifier。
+
+因此这里使用了真实 LangChain Runnable/LCEL 与 Retriever 抽象，
+但**没有采用 LangChain 高层 `create_agent()` 或 `ChatOpenAI`**
+替换已有安全模型传输。其收益必须通过实验比较验证。
+
 ## LangGraph 调查编排（2026-11-12 开发分支）
 
 开发模式 D/E 的 Agent Loop 默认执行 LangGraph StateGraph（observe → plan →
