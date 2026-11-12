@@ -10,7 +10,6 @@ Use only on explicitly authorized public development runs, not frozen evaluation
 
 import os
 from collections.abc import Callable
-from typing import TypeVar
 
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
@@ -31,8 +30,6 @@ from gpu_agent.knowledge.models import (
     RetrievalResult,
 )
 from gpu_agent.knowledge.retrieve import KnowledgeIndex
-
-T = TypeVar("T")
 
 
 def component_layer() -> str:
