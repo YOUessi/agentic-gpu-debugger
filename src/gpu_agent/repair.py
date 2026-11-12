@@ -365,7 +365,16 @@ def repair_candidates(
             )
         store.put(run_id, f"repair/{number}/feedback.json", json.dumps(feedback).encode(), "public")
         try:
-            diff = provider.revise_patch(source, diagnosis, feedback)
+            from gpu_agent.agent.langchain_components import (
+                LangChainModelComponents,
+                component_layer,
+            )
+
+            diff = (
+                LangChainModelComponents(provider).revise_patch(source, diagnosis, feedback)
+                if component_layer() == "langchain"
+                else provider.revise_patch(source, diagnosis, feedback)
+            )
             candidate = apply_generated_candidate(snapshot, diff).model_copy(
                 update={
                     "generated_by": first.generated_by,
