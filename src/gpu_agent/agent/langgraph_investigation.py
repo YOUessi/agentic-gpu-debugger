@@ -56,6 +56,7 @@ def run_langgraph_investigation(
         raise ValueError("LangGraph investigation supports only D/E acquisition")
     # Avoid a cyclic import while preserving the original evidence projection.
     from gpu_agent.agent.orchestrator import public_evidence
+
     layer = component_layer()
     components = LangChainModelComponents(controller.provider) if layer == "langchain" else None
 
