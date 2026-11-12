@@ -51,6 +51,11 @@ jobs:
       - name: Type check
         run: python -m mypy --strict src/gpu_agent
 
+      - name: LangChain LCEL components, RAG source and model budget parity
+        run: >-
+          python -m pytest -q
+          tests/unit/test_langchain_components.py
+
       - name: LangGraph orchestration and public repair gate regression
         run: >-
           python -m pytest -q tests/unit/test_langgraph_orchestration.py
