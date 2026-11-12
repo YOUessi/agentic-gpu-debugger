@@ -209,7 +209,9 @@ python -I -m pytest tests/gpu/test_clean_kernel.py --require-live --gpu-run-root
 
 开发模式 D/E 的 Agent Loop 默认执行 LangGraph StateGraph（observe → plan →
 authorize → execute_tool → observe，直至 diagnose 或 inconclusive）；A/B/C
-固定证据采集的消融协议与严格验证器保持不变。LangGraph 仅调度节点，
+固定证据采集的消融协议与严格验证器保持不变。公开 `repair` 顶层流程也由
+LangGraph 拆成调查修复、公开检查门禁和独立 strict 验证三个节点。
+LangGraph 仅调度节点，
 **Policy、GPU Sandbox、预算、EvidenceRepository、RunStore 和私有 Oracle 仍由控制器持有**。
 
 LangGraph 1.2.20 与全部可解析依赖已并入 `requirements.lock`。可设置
