@@ -43,6 +43,8 @@ class InvestigationState(TypedDict, total=False):
     action: dict[str, Any]
     route: Route
     diagnosis: dict[str, Any]
+    observed_steps: int
+    last_tool: str
 
 
 def run_langgraph_investigation(
@@ -69,7 +71,7 @@ def run_langgraph_investigation(
             raise ProviderError("AGENT_BUDGET_EXHAUSTED")
         # Read only the public projection. Evidence itself remains in RunStore.
         public_evidence(controller.store, run_id)
-        return {}
+        return {"observed_steps": controller.budget.agent_steps}
 
     def plan(state: InvestigationState) -> dict[str, Any]:
         evidence = public_evidence(controller.store, run_id)
@@ -162,7 +164,7 @@ def run_langgraph_investigation(
         # Same typed registry and execution capability as the old controller.
         # LangGraph ToolNode must not receive an arbitrary shell/network tool.
         controller.registry[action.action_type](action)
-        return {}
+        return {"last_tool": action.action_type}
 
     def diagnose(state: InvestigationState) -> dict[str, Any]:
         result = controller._diagnose(public_evidence(controller.store, run_id))
