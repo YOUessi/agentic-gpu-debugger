@@ -11,9 +11,10 @@ Use only on explicitly authorized public development runs, not frozen evaluation
 import os
 from collections.abc import Callable
 
+from langchain_core.callbacks import CallbackManagerForRetrieverRun
 from langchain_core.documents import Document
 from langchain_core.retrievers import BaseRetriever
-from langchain_core.runnables import RunnableLambda
+from langchain_core.runnables import Runnable, RunnableLambda
 from pydantic import ConfigDict, Field
 
 from gpu_agent.agent.models import (
@@ -56,7 +57,9 @@ class PinnedNvidiaRetriever(BaseRetriever):
     version: str
     k: int = Field(default=5, ge=1, le=5)
 
-    def _get_relevant_documents(self, query: str) -> list[Document]:
+    def _get_relevant_documents(
+        self, query: str, *, run_manager: CallbackManagerForRetrieverRun
+    ) -> list[Document]:
         result = self.index.retrieve(query, self.version, k=self.k)
         return [
             Document(
@@ -158,9 +161,12 @@ class LangChainModelComponents:
     ) -> str:
         """Reuse the provider's bounded public-feedback revision and diff checks."""
         require_no_external_tracing()
-        runnable = RunnableLambda(
-            lambda _: self.provider.revise_patch(source, diagnosis, feedback)
-        ) | RunnableLambda(_require_patch_string)
+        def call(_: PublicSource) -> str:
+            return self.provider.revise_patch(source, diagnosis, feedback)
+
+        runnable: Runnable[PublicSource, str] = RunnableLambda(call) | RunnableLambda(
+            _require_patch_string
+        )
         return runnable.invoke(source)
 
 
