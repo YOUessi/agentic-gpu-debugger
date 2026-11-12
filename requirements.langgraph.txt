@@ -1,0 +1,3 @@
+# LangGraph runtime required by the D/E graph orchestration path.
+# Install after requirements.lock; this is a top-level pin, not a transitive lock.
+langgraph==1.2.20
