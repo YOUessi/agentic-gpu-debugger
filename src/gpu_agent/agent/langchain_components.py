@@ -142,9 +142,7 @@ class LangChainModelComponents:
 
         def call(_: PublicSource) -> str:
             return (
-                self.provider.propose_patch(
-                    source, diagnosis, experience_hints=experience_hints
-                )
+                self.provider.propose_patch(source, diagnosis, experience_hints=experience_hints)
                 if experience_hints
                 else self.provider.propose_patch(source, diagnosis)
             )
