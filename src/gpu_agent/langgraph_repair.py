@@ -26,6 +26,7 @@ class PublicRepairState(TypedDict, total=False):
     run_id: str
     public_checks_passed: bool
     stop_reason: str
+    verification_completed: bool
 
 
 def run_langgraph_public_repair(
@@ -73,7 +74,7 @@ def run_langgraph_public_repair(
         nonlocal verified
         # The evaluator capability never enters graph state or Agent tools.
         verified = service.verify_exact(state["run_id"], strict=True)[0]
-        return {}
+        return {"verification_completed": True}
 
     graph = StateGraph(PublicRepairState)
     graph.add_node("investigate_and_repair", investigate_and_repair)
