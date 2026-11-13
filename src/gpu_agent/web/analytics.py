@@ -129,6 +129,7 @@ class AnalyticsCatalog:
                 raise ValueError("batch has no summary or progress artifact")
             ref = progress[-1]
         return self._json_ref(ref)
+
     @staticmethod
     def _datetime(value: object) -> datetime | None:
         if not isinstance(value, str):
@@ -232,9 +233,7 @@ class AnalyticsCatalog:
     def _batch_card(self, run: RunManifest, payload: dict[str, Any]) -> BatchCard:
         cases = payload.get("cases", [])
         items = (
-            [item for item in cases if isinstance(item, dict)]
-            if isinstance(cases, list)
-            else []
+            [item for item in cases if isinstance(item, dict)] if isinstance(cases, list) else []
         )
         counts = Counter(str(item.get("status", "NOT_RUN")) for item in items)
         tools = Counter(str(item.get("target_tool", "unknown")) for item in items)
@@ -318,8 +317,7 @@ class AnalyticsCatalog:
                 for record in filtered
                 if needle in str(record.get("case_id", "")).lower()
                 or needle in str(record.get("template_id", "")).lower()
-                or needle
-                in str(self._record_diagnosis(record).get("failure_family", "")).lower()
+                or needle in str(self._record_diagnosis(record).get("failure_family", "")).lower()
             ]
 
         total = len(filtered)
@@ -389,8 +387,7 @@ class AnalyticsCatalog:
         return EvaluationDetail(
             summary=self._evaluation_card(run, payload),
             mode_metrics=[
-                self._mode_summary(mode_name, grouped[mode_name])
-                for mode_name in sorted(grouped)
+                self._mode_summary(mode_name, grouped[mode_name]) for mode_name in sorted(grouped)
             ],
             failure_families=dict(families),
             records=rows,
@@ -398,7 +395,6 @@ class AnalyticsCatalog:
             page=page,
             page_size=page_size,
         )
-
 
     @staticmethod
     def _delta_value(candidate: float | None, baseline: float | None) -> float | None:
@@ -689,9 +685,7 @@ class AnalyticsCatalog:
                         if isinstance(value, str)
                     ],
                     target_detections=[
-                        bool(value)
-                        for value in target_detections
-                        if isinstance(value, bool)
+                        bool(value) for value in target_detections if isinstance(value, bool)
                     ],
                     reason_code=(
                         str(item.get("reason_code"))

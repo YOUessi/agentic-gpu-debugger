@@ -231,6 +231,7 @@ class BatchDetail(BaseModel):
     stopped_reason: str | None = None
     cases: list[BatchCaseRow]
 
+
 class EvaluationDelta(BaseModel):
     verified_rate_delta: float | None = None
     latency_mean_ms_delta: float | None = None

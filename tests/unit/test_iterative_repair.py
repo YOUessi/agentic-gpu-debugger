@@ -324,7 +324,6 @@ def test_repair_reports_run_id_before_external_work(oob_service, monkeypatch):
     assert service.store.load(run.id).status == "COMPLETED"
 
 
-
 @pytest.mark.parametrize(
     "engine,component",
     [("legacy", "native"), ("langgraph", "native"), ("langgraph", "langchain")],

@@ -36,6 +36,7 @@ class RepairJobStore:
         reject_symlinks(self.root)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
+
     def _path(self, job_id: str) -> Path:
         if not _JOB_ID.fullmatch(job_id):
             raise ValueError("invalid web job ID")
@@ -110,9 +111,7 @@ class RepairJobManager:
     def _update(self, job_id: str, **changes: object) -> RepairJob:
         with self._lock:
             current = self.store.load(job_id)
-            return self.store.save(
-                current.model_copy(update={**changes, "updated_at": _now()})
-            )
+            return self.store.save(current.model_copy(update={**changes, "updated_at": _now()}))
 
     def submit(self, request: RepairRequest) -> RepairJob:
         source = self._source_resolver(request.case_id)

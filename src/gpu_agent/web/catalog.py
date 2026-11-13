@@ -277,9 +277,7 @@ class RunCatalog:
                 continue
             decision = json.loads(self.store.read(ref))
             action_type = (
-                decision.get("action_type", "unknown")
-                if isinstance(decision, dict)
-                else "unknown"
+                decision.get("action_type", "unknown") if isinstance(decision, dict) else "unknown"
             )
             actions.append(
                 {

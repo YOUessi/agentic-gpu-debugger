@@ -221,9 +221,7 @@ def create_app(
             content=detail.model_dump_json(indent=2),
             media_type="application/json",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="evaluation-{run_id[:12]}.json"'
-                )
+                "Content-Disposition": (f'attachment; filename="evaluation-{run_id[:12]}.json"')
             },
         )
 
@@ -237,9 +235,7 @@ def create_app(
             content="\ufeff" + _evaluation_csv(detail),
             media_type="text/csv; charset=utf-8",
             headers={
-                "Content-Disposition": (
-                    f'attachment; filename="evaluation-{run_id[:12]}.csv"'
-                )
+                "Content-Disposition": (f'attachment; filename="evaluation-{run_id[:12]}.csv"')
             },
         )
 

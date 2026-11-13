@@ -179,9 +179,7 @@ def test_analytics_overview_and_details(tmp_path):
     analytics_store, batch_id, evaluation_id, diagnosis_id, source_artifact_id = _analytics_store(
         tmp_path
     )
-    client = TestClient(
-        create_app(service, repository=tmp_path, analytics_store=analytics_store)
-    )
+    client = TestClient(create_app(service, repository=tmp_path, analytics_store=analytics_store))
 
     overview = client.get("/api/analytics/overview")
     assert overview.status_code == 200
@@ -223,9 +221,7 @@ def test_analytics_overview_and_details(tmp_path):
     assert run_body["summary"]["failure_family"] == "shared_memory_race"
     assert "Two threads update the same location" in run_body["diagnosis"]["root_cause"]
 
-    artifact = client.get(
-        f"/api/analytics/runs/{diagnosis_id}/artifacts/{source_artifact_id}"
-    )
+    artifact = client.get(f"/api/analytics/runs/{diagnosis_id}/artifacts/{source_artifact_id}")
     assert artifact.status_code == 200
     assert "__global__ void kernel" in artifact.text
 
@@ -233,9 +229,7 @@ def test_analytics_overview_and_details(tmp_path):
 def test_analytics_endpoints_do_not_fall_back_to_evaluator_store(tmp_path):
     service = _service(tmp_path)
     analytics_store = RunStore(tmp_path / "analytics")
-    client = TestClient(
-        create_app(service, repository=tmp_path, analytics_store=analytics_store)
-    )
+    client = TestClient(create_app(service, repository=tmp_path, analytics_store=analytics_store))
 
     overview = client.get("/api/analytics/overview").json()
     assert overview["batch_count"] == 0
@@ -258,15 +252,11 @@ def test_analytics_overview_surfaces_invalid_public_projection(tmp_path):
     analytics_store.transition(broken.id, "RUNNING", "FINALIZING")
     analytics_store.transition(broken.id, "COMPLETED", None)
 
-    client = TestClient(
-        create_app(service, repository=tmp_path, analytics_store=analytics_store)
-    )
+    client = TestClient(create_app(service, repository=tmp_path, analytics_store=analytics_store))
     body = client.get("/api/analytics/overview").json()
 
     assert body["evaluation_count"] == 0
-    assert body["projection_errors"] == [
-        f"{broken.id}:ANALYTICS_PROJECTION_INVALID"
-    ]
+    assert body["projection_errors"] == [f"{broken.id}:ANALYTICS_PROJECTION_INVALID"]
 
 
 def test_analytics_rejects_root_containing_evaluator_visibility_artifacts(tmp_path):
@@ -293,9 +283,7 @@ def test_analytics_rejects_root_containing_evaluator_visibility_artifacts(tmp_pa
 
     # Simulate a misconfigured path being reopened with the default public label.
     disguised = RunStore(evaluator_root)
-    client = TestClient(
-        create_app(service, repository=tmp_path, analytics_store=disguised)
-    )
+    client = TestClient(create_app(service, repository=tmp_path, analytics_store=disguised))
     response = client.get("/api/analytics/overview")
 
     assert response.status_code == 503

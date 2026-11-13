@@ -166,6 +166,7 @@ def test_dashboard_api_rejects_unknown_run(tmp_path):
     response = client.get("/api/runs/" + "0" * 32)
     assert response.status_code == 404
 
+
 def test_dashboard_api_lists_repair_ready_public_cases(tmp_path):
     repository = tmp_path / "repository"
     input_root = repository / "benchmarks" / "public" / "case_0021" / "public_input"
