@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
-from gpu_agent.agent.adaptive_policy import predictable_action, selected_planner_policy
+from gpu_agent.agent.adaptive_policy import (\n    evidence_scoped_rule_fallback,\n    predictable_action,\n    selected_planner_policy,\n)
 from gpu_agent.agent.langchain_components import LangChainModelComponents, component_layer
 from gpu_agent.agent.models import (
     ACTION_ADAPTER,
@@ -89,8 +89,7 @@ def run_langgraph_investigation(
             proposed = controller.rule_router.next_action(evidence, controller.budget)
             selection = "RULE_BASELINE"
         elif policy == "adaptive-v1" and state.get("replanned", False):
-            proposed = controller.rule_router.next_action(evidence, controller.budget)
-            selection = "REJECTED_ACTION_FALLBACK"
+            proposed = evidence_scoped_rule_fallback(\n                evidence, controller.budget, controller.rule_router\n            )\n            selection = "REJECTED_ACTION_FALLBACK"
         elif (
             policy == "adaptive-v1"
             and (skip := predictable_action(evidence, controller.budget, controller.rule_router))
@@ -115,8 +114,7 @@ def run_langgraph_investigation(
                     raise
                 # A completed, schema-rejected model output is safe to replace
                 # by a deterministic action. Never retry uncertain requests.
-                proposed = controller.rule_router.next_action(evidence, controller.budget)
-                selection = "INVALID_OUTPUT_FALLBACK"
+                proposed = evidence_scoped_rule_fallback(\n                    evidence, controller.budget, controller.rule_router\n                )\n                selection = "INVALID_OUTPUT_FALLBACK"
         if policy == "adaptive-v1":
             controller.store.put(
                 run_id,
