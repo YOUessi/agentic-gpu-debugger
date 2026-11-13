@@ -95,3 +95,32 @@ jobs:
         run: >-
           echo 'CI passed offline checks only; this is not GPU, live-model,
           paid-evaluation, or release-acceptance evidence.'
+
+
+  dashboard:
+    name: Frontend dashboard tests and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/package-lock.json
+      - name: Install dashboard dependencies
+        working-directory: dashboard
+        run: npm ci --no-audit --no-fund
+      - name: Unit test, type-check build and lint
+        working-directory: dashboard
+        run: |
+          npm run test
+          npm run build
+          npm run lint
+      - name: Install Playwright Chromium
+        working-directory: dashboard
+        run: npx playwright install --with-deps chromium
+      - name: Run browser E2E tests
+        working-directory: dashboard
+        run: npm run test:e2e

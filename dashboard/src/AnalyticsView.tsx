@@ -1,0 +1,1359 @@
+import { useCallback, useEffect, useMemo, useState } from 'react'
+import {
+  getAnalyticsArtifact,
+  getAnalyticsOverview,
+  compareEvaluations,
+  evaluationExportUrl,
+  getAnalyticsRun,
+  getBatchDetail,
+  getEvaluationDetail,
+} from './api'
+import { formatTime, humanize, shortId, statusTone } from './format'
+import type {
+  AnalyticsOverview,
+  BatchCard,
+  BatchDetail,
+  EvaluationCard,
+  EvaluationComparison,
+  EvaluationDetail,
+  EvaluationModeSummary,
+  EvaluationRecordRow,
+  RunDetail,
+} from './types'
+
+function StatusPill({ value }: { value: string | null | undefined }) {
+  return <span className={'status-pill ' + statusTone(value)}>{humanize(value)}</span>
+}
+
+function percent(value: number | null): string {
+  return value === null ? '—' : (value * 100).toFixed(1) + '%'
+}
+
+function seconds(value: number | null): string {
+  return value === null ? '—' : (value / 1000).toFixed(1) + 's'
+}
+
+function compact(value: number | null): string {
+  if (value === null) return '—'
+  if (Math.abs(value) >= 1000000) return (value / 1000000).toFixed(1) + 'M'
+  if (Math.abs(value) >= 1000) return (value / 1000).toFixed(1) + 'K'
+  return value.toFixed(value % 1 === 0 ? 0 : 1)
+}
+
+function money(value: number | null): string {
+  return value === null ? '—' : '$' + value.toFixed(4)
+}
+
+type JsonObject = Record<string, unknown>
+
+function asObject(value: unknown): JsonObject {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as JsonObject)
+    : {}
+}
+
+function asString(value: unknown): string {
+  return typeof value === 'string' ? value : ''
+}
+
+type ModeMetricKey = 'verified_rate' | 'latency_mean_ms' | 'llm_calls_mean'
+
+function ModeBarChart({
+  metrics,
+  metric,
+  title,
+}: {
+  metrics: EvaluationModeSummary[]
+  metric: ModeMetricKey
+  title: string
+}) {
+  const values = metrics
+    .map((item) => item[metric])
+    .filter((value): value is number => typeof value === 'number')
+  const max = metric === 'verified_rate' ? 1 : Math.max(...values, 1)
+
+  function format(value: number | null): string {
+    if (metric === 'verified_rate') return percent(value)
+    if (metric === 'latency_mean_ms') return seconds(value)
+    return compact(value)
+  }
+
+  return (
+    <article className="mode-chart">
+      <div className="mode-chart-head">
+        <span>{title}</span>
+        <small>descriptive · public records</small>
+      </div>
+      <div className="mode-chart-bars">
+        {metrics.map((item) => {
+          const value = item[metric]
+          const width = value === null ? 0 : Math.max(2, (value / max) * 100)
+          return (
+            <div className="mode-chart-row" key={item.mode}>
+              <span className="mode-chart-label">{item.mode}</span>
+              <div className="mode-chart-track">
+                <i style={{ width: width + '%' }} />
+              </div>
+              <strong>{format(value)}</strong>
+            </div>
+          )
+        })}
+      </div>
+    </article>
+  )
+}
+
+function Metric({
+  label,
+  value,
+  hint,
+}: {
+  label: string
+  value: string | number
+  hint: string
+}) {
+  return (
+    <article className="analytics-metric">
+      <span>{label}</span>
+      <strong>{value}</strong>
+      <small>{hint}</small>
+    </article>
+  )
+}
+
+function ModeCard({ metric }: { metric: EvaluationModeSummary }) {
+  return (
+    <article className="mode-card">
+      <div className="mode-head">
+        <span>Mode {metric.mode}</span>
+        <strong>{percent(metric.verified_rate)}</strong>
+      </div>
+      <div className="mode-stats">
+        <div><span>Units</span><strong>{metric.record_count}</strong></div>
+        <div><span>Diagnosed</span><strong>{metric.diagnosed}</strong></div>
+        <div><span>Latency</span><strong>{seconds(metric.latency_mean_ms)}</strong></div>
+        <div><span>LLM calls</span><strong>{compact(metric.llm_calls_mean)}</strong></div>
+      </div>
+    </article>
+  )
+}
+
+function FailureDistribution({ families }: { families: Record<string, number> }) {
+  const entries = Object.entries(families).sort((a, b) => b[1] - a[1])
+  const max = Math.max(...entries.map(([, value]) => value), 1)
+  return (
+    <div className="analytics-family-list">
+      {entries.length === 0 && <div className="empty-mini">No diagnosed failure families.</div>}
+      {entries.slice(0, 10).map(([family, count]) => (
+        <div className="analytics-family-row" key={family}>
+          <div><span>{humanize(family)}</span><strong>{count}</strong></div>
+          <div className="analytics-family-track">
+            <i style={{ width: Math.max(5, count / max * 100) + '%' }} />
+          </div>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function EvaluationRecordInspector({
+  record,
+  onClose,
+  onOpenDiagnosis,
+}: {
+  record: EvaluationRecordRow
+  onClose: () => void
+  onOpenDiagnosis: (runId: string) => void
+}) {
+  return (
+    <div className="record-inspector-backdrop" onMouseDown={onClose}>
+      <aside className="record-inspector" onMouseDown={(event) => event.stopPropagation()}>
+        <header>
+          <div>
+            <span className="eyebrow">Evaluation unit</span>
+            <h3>{record.case_id} · Mode {record.mode}</h3>
+            <p>{record.template_id} · repeat {record.repeat}</p>
+          </div>
+          <button className="icon-button small" onClick={onClose} aria-label="Close record">×</button>
+        </header>
+
+        <div className="record-inspector-body">
+          <div className="record-inspector-grid">
+            <div><span>Verdict</span><StatusPill value={record.verdict} /></div>
+            <div><span>Diagnosis</span><StatusPill value={record.diagnosis_outcome} /></div>
+            <div><span>Failure family</span><strong>{humanize(record.failure_family)}</strong></div>
+            <div><span>Latency</span><strong>{seconds(record.latency_ms)}</strong></div>
+            <div><span>LLM calls</span><strong>{record.physical_calls ?? '—'}</strong></div>
+            <div><span>Sanitizer calls</span><strong>{record.sanitizer_calls ?? '—'}</strong></div>
+            <div><span>Tokens</span><strong>{compact(record.total_tokens)}</strong></div>
+            <div><span>Cost</span><strong>{money(record.cost_usd)}</strong></div>
+          </div>
+
+          {record.failure_reason && (
+            <div className="record-failure-reason">
+              <span>Failure reason</span>
+              <strong>{humanize(record.failure_reason)}</strong>
+            </div>
+          )}
+
+          <section className="lineage-card">
+            <div className="analytics-section-head">
+              <div><span className="eyebrow">Immutable lineage</span><h3>Public run links</h3></div>
+            </div>
+            <div className="lineage-row">
+              <span>Diagnosis</span>
+              <code>{record.diagnosis_run_id ?? '—'}</code>
+            </div>
+            <div className="lineage-row">
+              <span>Candidate</span>
+              <code>{record.candidate_run_id ?? '—'}</code>
+            </div>
+            <div className="lineage-row">
+              <span>Verification</span>
+              <code>{record.verification_run_id ?? '—'}</code>
+            </div>
+          </section>
+
+          <button
+            className="primary-button record-open-button"
+            disabled={!record.diagnosis_run_id}
+            onClick={() => {
+              if (record.diagnosis_run_id) onOpenDiagnosis(record.diagnosis_run_id)
+            }}
+          >
+            Open diagnosis run
+          </button>
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function AnalyticsDiagnosisDrawer({
+  runId,
+  onClose,
+}: {
+  runId: string
+  onClose: () => void
+}) {
+  const [detail, setDetail] = useState<RunDetail | null>(null)
+  const [error, setError] = useState('')
+  const [artifactContent, setArtifactContent] = useState('')
+  const [selectedArtifact, setSelectedArtifact] = useState('')
+  const [artifactLoading, setArtifactLoading] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+    void getAnalyticsRun(runId)
+      .then((value) => {
+        if (!cancelled) setDetail(value)
+      })
+      .catch((caught) => {
+        if (!cancelled) {
+          setError(caught instanceof Error ? caught.message : 'Diagnosis run unavailable')
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [runId])
+
+  async function openArtifact(artifactId: string) {
+    setSelectedArtifact(artifactId)
+    setArtifactLoading(true)
+    try {
+      setArtifactContent(await getAnalyticsArtifact(runId, artifactId))
+    } catch (caught) {
+      setArtifactContent(caught instanceof Error ? caught.message : 'Artifact unavailable')
+    } finally {
+      setArtifactLoading(false)
+    }
+  }
+
+  const diagnosis = asObject(detail?.diagnosis)
+  const candidate = asObject(detail?.candidate)
+  const claimGroups = [
+    ['Observed facts', diagnosis.observed_facts],
+    ['Tool findings', diagnosis.tool_findings],
+    ['Documentation', diagnosis.documentation_evidence],
+  ] as const
+
+  return (
+    <div className="analytics-run-backdrop" onMouseDown={onClose}>
+      <aside className="analytics-run-drawer" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="drawer-header">
+          <div>
+            <span className="eyebrow">Historical public diagnosis</span>
+            <h2>{shortId(runId, 14)}</h2>
+            <p>Read-only drill-down from the evaluation record</p>
+          </div>
+          <div className="analytics-run-head-actions">
+            <span className="readonly-badge">Read only</span>
+            <button className="icon-button" onClick={onClose} aria-label="Close diagnosis run">×</button>
+          </div>
+        </header>
+
+        <div className="analytics-drawer-scroll">
+          {error && <div className="error-banner">{error}</div>}
+          {!detail && !error && <div className="table-message">Loading diagnosis run…</div>}
+
+          {detail && (
+            <>
+              <section className="analytics-run-summary">
+                <div>
+                  <span>Status</span>
+                  <StatusPill value={detail.summary.status} />
+                </div>
+                <div>
+                  <span>Failure family</span>
+                  <strong>{humanize(detail.summary.failure_family)}</strong>
+                </div>
+                <div>
+                  <span>Confidence</span>
+                  <strong>{humanize(detail.summary.confidence)}</strong>
+                </div>
+                <div>
+                  <span>Artifacts</span>
+                  <strong>{detail.summary.artifact_count}</strong>
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Controller</span><h3>Run timeline</h3></div>
+                  <span className="section-count">{detail.events.length} events</span>
+                </div>
+                <div className="analytics-run-timeline">
+                  {detail.events.map((raw, index) => {
+                    const event = asObject(raw)
+                    return (
+                      <div className="analytics-run-event" key={asString(event.at) + index}>
+                        <i className={'timeline-dot ' + statusTone(asString(event.status))} />
+                        <div>
+                          <strong>{humanize(asString(event.phase) || asString(event.status))}</strong>
+                          <span>{formatTime(asString(event.at) || null)}</span>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Grounded analysis</span><h3>Diagnosis</h3></div>
+                  <StatusPill value={detail.summary.diagnosis_outcome} />
+                </div>
+                <div className="analytics-diagnosis-copy">
+                  <div>
+                    <span>Root cause</span>
+                    <p>{asString(diagnosis.root_cause) || 'No root cause persisted.'}</p>
+                  </div>
+                  <div>
+                    <span>Recommended change</span>
+                    <p>{asString(diagnosis.recommended_change) || 'No change persisted.'}</p>
+                  </div>
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Evidence</span><h3>Claims & citations</h3></div>
+                  <span className="section-count">{Object.keys(detail.citations).length} resolved</span>
+                </div>
+                <div className="analytics-evidence-grid">
+                  <div className="analytics-evidence-claims">
+                    {claimGroups.map(([label, value]) => {
+                      const claims = Array.isArray(value) ? value : []
+                      if (claims.length === 0) return null
+                      return (
+                        <div className="analytics-claim-group" key={label}>
+                          <h4>{label}</h4>
+                          {claims.map((rawClaim, index) => {
+                            const claim = asObject(rawClaim)
+                            const ids = Array.isArray(claim.citation_ids)
+                              ? claim.citation_ids.filter(
+                                  (item): item is string => typeof item === 'string',
+                                )
+                              : []
+                            return (
+                              <article key={label + index}>
+                                <p>{asString(claim.text)}</p>
+                                <div>
+                                  {ids.map((id) => {
+                                    const target = detail.citations[id]
+                                    return target ? (
+                                      <button
+                                        className="citation-chip"
+                                        key={id}
+                                        onClick={() => void openArtifact(target.artifact_id)}
+                                      >
+                                        {target.kind === 'document' ? 'DOC' : 'ART'} · {shortId(id, 10)}
+                                      </button>
+                                    ) : (
+                                      <span className="citation-chip unresolved" key={id}>
+                                        UNRESOLVED · {shortId(id, 10)}
+                                      </span>
+                                    )
+                                  })}
+                                </div>
+                              </article>
+                            )
+                          })}
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <pre className="analytics-evidence-preview">
+                    {artifactLoading
+                      ? 'Loading persisted evidence…'
+                      : selectedArtifact
+                        ? artifactContent
+                        : 'Select a citation to inspect the public persisted artifact.'}
+                  </pre>
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Patch lineage</span><h3>Candidate & verification</h3></div>
+                </div>
+                <div className="analytics-candidate-grid">
+                  <div>
+                    <span>Candidate diff</span>
+                    <pre>{asString(candidate.unified_diff) || 'No candidate diff registered.'}</pre>
+                  </div>
+                  <div>
+                    <span>Verification records</span>
+                    <div className="analytics-verification-stack">
+                      {detail.verifications.length === 0 && (
+                        <div className="empty-mini">No public verification child.</div>
+                      )}
+                      {detail.verifications.map((item) => (
+                        <div key={asString(item.run_id)}>
+                          <StatusPill value={asString(item.verdict)} />
+                          <span>{humanize(asString(item.reason_code))}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              <section className="analytics-section">
+                <div className="analytics-section-head">
+                  <div><span className="eyebrow">Public RunStore</span><h3>Artifacts</h3></div>
+                  <span className="section-count">{detail.artifacts.length}</span>
+                </div>
+                <div className="analytics-artifact-list">
+                  {detail.artifacts.map((artifact) => (
+                    <button
+                      key={artifact.id}
+                      className={selectedArtifact === artifact.id ? 'active' : ''}
+                      onClick={() => void openArtifact(artifact.id)}
+                    >
+                      <span>{artifact.name}</span>
+                      <small>{compact(artifact.byte_count)} B</small>
+                    </button>
+                  ))}
+                </div>
+              </section>
+            </>
+          )}
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function EvaluationDrawer({
+  run,
+  onClose,
+}: {
+  run: EvaluationCard
+  onClose: () => void
+}) {
+  const [detail, setDetail] = useState<EvaluationDetail | null>(null)
+  const [page, setPage] = useState(1)
+  const [mode, setMode] = useState('')
+  const [verdict, setVerdict] = useState('')
+  const [query, setQuery] = useState('')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [selectedRecord, setSelectedRecord] = useState<EvaluationRecordRow | null>(null)
+  const [selectedDiagnosisRun, setSelectedDiagnosisRun] = useState<string | null>(null)
+  const pageSize = 40
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setDetail(
+        await getEvaluationDetail(run.run_id, {
+          page,
+          pageSize,
+          mode: mode || undefined,
+          verdict: verdict || undefined,
+          query: query || undefined,
+        }),
+      )
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Evaluation analytics unavailable')
+    } finally {
+      setLoading(false)
+    }
+  }, [mode, page, query, run.run_id, verdict])
+
+  useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect
+    void load()
+  }, [load])
+
+  const pages = Math.max(1, Math.ceil((detail?.total ?? 0) / pageSize))
+
+  return (
+    <div className="drawer-backdrop" onMouseDown={onClose}>
+      <aside className="analytics-drawer" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="drawer-header">
+          <div>
+            <span className="eyebrow">Evaluation analytics</span>
+            <h2>{shortId(run.run_id, 14)}</h2>
+            <p>{humanize(run.split)} · {run.executed_units} executed units</p>
+          </div>
+          <div className="analytics-header-actions">
+            <a
+              className="ghost-button export-link"
+              href={evaluationExportUrl(run.run_id, 'csv')}
+              download
+            >
+              Export CSV
+            </a>
+            <a
+              className="ghost-button export-link"
+              href={evaluationExportUrl(run.run_id, 'json')}
+              download
+            >
+              Export JSON
+            </a>
+            <button className="icon-button" onClick={onClose} aria-label="Close analytics">×</button>
+          </div>
+        </header>
+        <div className="analytics-drawer-scroll">
+          <section className="analytics-summary-strip">
+            <Metric label="Verified" value={percent(run.verified_rate)} hint={String(run.verified_fixed) + ' fixed'} />
+            <Metric label="Diagnosed" value={run.diagnosed} hint="grounded diagnoses" />
+            <Metric label="Latency" value={seconds(run.latency_mean_ms)} hint="mean / unit" />
+            <Metric label="LLM calls" value={compact(run.llm_calls_mean)} hint="mean / unit" />
+            <Metric label="Tokens" value={compact(run.tokens_mean)} hint="mean / unit" />
+            <Metric label="Known cost" value={money(run.known_cost_usd)} hint="public records" />
+          </section>
+
+          {error && <div className="error-banner">{error}</div>}
+
+          <section className="analytics-section">
+            <div className="analytics-section-head">
+              <div><span className="eyebrow">Ablation view</span><h3>Mode comparison</h3></div>
+            </div>
+            <div className="mode-grid">
+              {(detail?.mode_metrics ?? []).map((metric) => <ModeCard key={metric.mode} metric={metric} />)}
+            </div>
+            <div className="mode-chart-grid">
+              <ModeBarChart
+                metrics={detail?.mode_metrics ?? []}
+                metric="verified_rate"
+                title="Verified rate by mode"
+              />
+              <ModeBarChart
+                metrics={detail?.mode_metrics ?? []}
+                metric="latency_mean_ms"
+                title="Mean latency by mode"
+              />
+              <ModeBarChart
+                metrics={detail?.mode_metrics ?? []}
+                metric="llm_calls_mean"
+                title="LLM calls by mode"
+              />
+            </div>
+          </section>
+
+          <section className="analytics-section two-column">
+            <div>
+              <div className="analytics-section-head">
+                <div><span className="eyebrow">Diagnosis mix</span><h3>Failure families</h3></div>
+              </div>
+              <FailureDistribution families={detail?.failure_families ?? {}} />
+            </div>
+            <div className="evaluation-meta">
+              <div><span>Corpus cutoff</span><strong>{run.corpus_cutoff ?? '—'}</strong></div>
+              <div><span>Expected units</span><strong>{run.expected_units ?? '—'}</strong></div>
+              <div><span>Executed units</span><strong>{run.executed_units}</strong></div>
+              <div><span>Repeats</span><strong>{run.repeats ?? '—'}</strong></div>
+              <div className="wide"><span>Modes</span><strong>{run.modes.join(' · ') || '—'}</strong></div>
+            </div>
+          </section>
+
+          <section className="analytics-section">
+            <div className="analytics-section-head records-head">
+              <div><span className="eyebrow">Data grid</span><h3>Evaluation records</h3></div>
+              <span className="section-count">{detail?.total ?? 0}</span>
+            </div>
+            <div className="analytics-filters">
+              <input
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value)
+                  setPage(1)
+                }}
+                placeholder="Case, template, or failure family"
+              />
+              <select
+                value={mode}
+                onChange={(event) => {
+                  setMode(event.target.value)
+                  setPage(1)
+                }}
+              >
+                <option value="">All modes</option>
+                {run.modes.map((item) => <option key={item} value={item}>Mode {item}</option>)}
+              </select>
+              <select
+                value={verdict}
+                onChange={(event) => {
+                  setVerdict(event.target.value)
+                  setPage(1)
+                }}
+              >
+                <option value="">All verdicts</option>
+                <option value="VERIFIED_FIXED">Verified fixed</option>
+                <option value="NOT_FIXED">Not fixed</option>
+                <option value="INCONCLUSIVE">Inconclusive</option>
+                <option value="REGRESSION_DETECTED">Regression</option>
+              </select>
+              <button className="ghost-button" onClick={() => void load()}>Refresh</button>
+            </div>
+            <div className="analytics-table-wrap">
+              <table className="analytics-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Case</th>
+                    <th>Mode</th>
+                    <th>Diagnosis</th>
+                    <th>Failure</th>
+                    <th>Verdict</th>
+                    <th>Latency</th>
+                    <th>LLM</th>
+                    <th>San.</th>
+                    <th>Tokens</th>
+                    <th>Cost</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {loading && (
+                    <tr><td colSpan={11} className="table-message">Loading evaluation records…</td></tr>
+                  )}
+                  {!loading && (detail?.records.length ?? 0) === 0 && (
+                    <tr><td colSpan={11} className="table-message">No records match the filters.</td></tr>
+                  )}
+                  {!loading && detail?.records.map((record) => (
+                    <tr
+                      key={record.record_id}
+                      className="analytics-record-row"
+                      onClick={() => setSelectedRecord(record)}
+                    >
+                      <td>{record.ordinal}</td>
+                      <td>
+                        <strong>{record.case_id}</strong>
+                        <small>{record.template_id}</small>
+                      </td>
+                      <td><span className="mode-badge">{record.mode}</span></td>
+                      <td><StatusPill value={record.diagnosis_outcome} /></td>
+                      <td>{humanize(record.failure_family)}</td>
+                      <td><StatusPill value={record.verdict} /></td>
+                      <td>{seconds(record.latency_ms)}</td>
+                      <td>{record.physical_calls ?? '—'}</td>
+                      <td>{record.sanitizer_calls ?? '—'}</td>
+                      <td>{compact(record.total_tokens)}</td>
+                      <td>{money(record.cost_usd)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="pagination">
+              <span>Page {page} of {pages}</span>
+              <div>
+                <button disabled={page <= 1} onClick={() => setPage((value) => value - 1)}>
+                  Previous
+                </button>
+                <button disabled={page >= pages} onClick={() => setPage((value) => value + 1)}>
+                  Next
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+      </aside>
+      {selectedRecord && (
+        <EvaluationRecordInspector
+          record={selectedRecord}
+          onClose={() => setSelectedRecord(null)}
+          onOpenDiagnosis={(diagnosisRunId) => {
+            setSelectedRecord(null)
+            setSelectedDiagnosisRun(diagnosisRunId)
+          }}
+        />
+      )}
+      {selectedDiagnosisRun && (
+        <AnalyticsDiagnosisDrawer
+          runId={selectedDiagnosisRun}
+          onClose={() => setSelectedDiagnosisRun(null)}
+        />
+      )}
+    </div>
+  )
+}
+
+function BatchDrawer({ run, onClose }: { run: BatchCard; onClose: () => void }) {
+  const [detail, setDetail] = useState<BatchDetail | null>(null)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    void getBatchDetail(run.run_id)
+      .then((value) => {
+        if (!cancelled) setDetail(value)
+      })
+      .catch((caught) => {
+        if (!cancelled) setError(caught instanceof Error ? caught.message : 'Batch unavailable')
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [run.run_id])
+
+  return (
+    <div className="drawer-backdrop" onMouseDown={onClose}>
+      <aside className="analytics-drawer batch-drawer" onMouseDown={(event) => event.stopPropagation()}>
+        <header className="drawer-header">
+          <div>
+            <span className="eyebrow">Seed validation batch</span>
+            <h2>{shortId(run.run_id, 14)}</h2>
+            <p>{run.case_count} cases · {formatTime(run.finished_at)}</p>
+          </div>
+          <button className="icon-button" onClick={onClose} aria-label="Close batch">×</button>
+        </header>
+        <div className="analytics-drawer-scroll">
+          <section className="analytics-summary-strip batch">
+            <Metric label="Cases" value={run.case_count} hint="public seeds" />
+            <Metric label="Registered" value={run.registered} hint="ledger registered" />
+            <Metric label="Validated" value={run.validated} hint="validation passed" />
+            <Metric label="Failed" value={run.failed} hint="blocked cases" />
+            <Metric label="Running" value={run.running} hint="in progress" />
+          </section>
+
+          {error && <div className="error-banner">{error}</div>}
+
+          <section className="analytics-section">
+            <div className="analytics-section-head">
+              <div><span className="eyebrow">Clean / mutant</span><h3>Seed case results</h3></div>
+              <StatusPill value={run.status} />
+            </div>
+            <div className="analytics-table-wrap">
+              <table className="analytics-table batch-table">
+                <thead>
+                  <tr>
+                    <th>Case</th>
+                    <th>Tool</th>
+                    <th>Status</th>
+                    <th>Clean runtime</th>
+                    <th>Clean sanitizer</th>
+                    <th>Mutant runtime</th>
+                    <th>Mutant sanitizer</th>
+                    <th>Detection</th>
+                    <th>Reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {!detail && !error && (
+                    <tr><td colSpan={9} className="table-message">Loading batch…</td></tr>
+                  )}
+                  {detail?.cases.map((item) => (
+                    <tr key={item.case_id}>
+                      <td>
+                        <strong>{item.case_id}</strong>
+                        <small>{item.repetitions}× sanitizer</small>
+                      </td>
+                      <td>{humanize(item.target_tool)}</td>
+                      <td><StatusPill value={item.status} /></td>
+                      <td>{humanize(item.clean_runtime_status)}</td>
+                      <td>{item.clean_sanitizer_outcomes.join(' · ') || '—'}</td>
+                      <td>{humanize(item.mutant_runtime_status)}</td>
+                      <td>{item.mutant_sanitizer_outcomes.join(' · ') || '—'}</td>
+                      <td>
+                        {item.target_detections.length
+                          ? String(item.target_detections.filter(Boolean).length) +
+                            '/' +
+                            String(item.target_detections.length)
+                          : '—'}
+                      </td>
+                      <td>{humanize(item.reason_code)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {detail?.stopped_reason && (
+              <div className="error-banner">{humanize(detail.stopped_reason)}</div>
+            )}
+          </section>
+        </div>
+      </aside>
+    </div>
+  )
+}
+
+function EvaluationTrend({ evaluations }: { evaluations: EvaluationCard[] }) {
+  const ordered = [...evaluations].sort((left, right) => {
+    const leftTime = left.last_event_at ? new Date(left.last_event_at).getTime() : 0
+    const rightTime = right.last_event_at ? new Date(right.last_event_at).getTime() : 0
+    return leftTime - rightTime
+  })
+  const maxLatency = Math.max(
+    ...ordered.map((item) => item.latency_mean_ms ?? 0),
+    1,
+  )
+
+  return (
+    <section className="panel analytics-panel trend-panel">
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">History</span>
+          <h2>Evaluation trend</h2>
+        </div>
+        <span className="panel-count">{ordered.length}</span>
+      </div>
+      <div className="trend-note">
+        Timeline only. Direct regression comparison is gated by split/corpus/mode/repeat compatibility.
+      </div>
+      <div className="trend-scroll">
+        {ordered.length === 0 && <div className="table-message">No evaluation history.</div>}
+        {ordered.map((item) => (
+          <article className="trend-card" key={item.run_id}>
+            <div className="trend-card-head">
+              <strong>{shortId(item.run_id, 10)}</strong>
+              <StatusPill value={item.status} />
+            </div>
+            <span className="trend-date">{formatTime(item.last_event_at)}</span>
+            <div className="trend-population">
+              <span>{humanize(item.split)}</span>
+              <span>cutoff {item.corpus_cutoff ?? '—'}</span>
+              <span>{item.executed_units} units</span>
+            </div>
+            <div className="trend-measure">
+              <div><span>Verified</span><strong>{percent(item.verified_rate)}</strong></div>
+              <div className="trend-track">
+                <i style={{ width: Math.max(2, (item.verified_rate ?? 0) * 100) + '%' }} />
+              </div>
+            </div>
+            <div className="trend-measure latency">
+              <div><span>Latency</span><strong>{seconds(item.latency_mean_ms)}</strong></div>
+              <div className="trend-track">
+                <i
+                  style={{
+                    width:
+                      Math.max(
+                        2,
+                        ((item.latency_mean_ms ?? 0) / maxLatency) * 100,
+                      ) + '%',
+                  }}
+                />
+              </div>
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function deltaPercent(value: number | null): string {
+  if (value === null) return '—'
+  const points = value * 100
+  return (points >= 0 ? '+' : '') + points.toFixed(1) + ' pp'
+}
+
+function deltaNumber(value: number | null, suffix = ''): string {
+  if (value === null) return '—'
+  return (value >= 0 ? '+' : '') + value.toFixed(1) + suffix
+}
+
+function ComparisonWorkbench({
+  evaluations,
+  onOpenDiagnosis,
+}: {
+  evaluations: EvaluationCard[]
+  onOpenDiagnosis: (runId: string) => void
+}) {
+  const [baseline, setBaseline] = useState('')
+  const [candidate, setCandidate] = useState('')
+  const [comparison, setComparison] = useState<EvaluationComparison | null>(null)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+  const ordered = [...evaluations].sort((left, right) => {
+    const leftTime = left.last_event_at ? new Date(left.last_event_at).getTime() : 0
+    const rightTime = right.last_event_at ? new Date(right.last_event_at).getTime() : 0
+    return rightTime - leftTime
+  })
+  const effectiveCandidate = candidate || ordered[0]?.run_id || ''
+  const effectiveBaseline = baseline || ordered[1]?.run_id || ''
+
+  async function compare() {
+    if (
+      !effectiveBaseline ||
+      !effectiveCandidate ||
+      effectiveBaseline === effectiveCandidate
+    ) {
+      return
+    }
+    setLoading(true)
+    setError('')
+    try {
+      setComparison(await compareEvaluations(effectiveBaseline, effectiveCandidate))
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Comparison unavailable')
+      setComparison(null)
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <section className="panel analytics-panel comparison-panel">
+      <div className="panel-heading">
+        <div>
+          <span className="eyebrow">Regression analysis</span>
+          <h2>Evaluation comparison</h2>
+        </div>
+        <span className="panel-count">public records</span>
+      </div>
+      <div className="comparison-controls">
+        <label>
+          Baseline
+          <select
+            value={effectiveBaseline}
+            onChange={(event) => setBaseline(event.target.value)}
+          >
+            <option value="">Select run</option>
+            {evaluations.map((item) => (
+              <option key={item.run_id} value={item.run_id}>
+                {shortId(item.run_id, 10)} · {item.split ?? 'unknown'} · cutoff {item.corpus_cutoff ?? '—'}
+              </option>
+            ))}
+          </select>
+        </label>
+        <span className="comparison-arrow">→</span>
+        <label>
+          Candidate
+          <select
+            value={effectiveCandidate}
+            onChange={(event) => setCandidate(event.target.value)}
+          >
+            <option value="">Select run</option>
+            {evaluations.map((item) => (
+              <option key={item.run_id} value={item.run_id}>
+                {shortId(item.run_id, 10)} · {item.split ?? 'unknown'} · cutoff {item.corpus_cutoff ?? '—'}
+              </option>
+            ))}
+          </select>
+        </label>
+        <button
+          className="primary-button"
+          disabled={
+            loading ||
+            evaluations.length < 2 ||
+            !effectiveBaseline ||
+            !effectiveCandidate ||
+            effectiveBaseline === effectiveCandidate
+          }
+          onClick={() => void compare()}
+        >
+          {loading ? 'Comparing…' : 'Compare'}
+        </button>
+      </div>
+
+      {evaluations.length < 2 && (
+        <div className="comparison-empty">
+          At least two public evaluation runs are required for regression comparison.
+        </div>
+      )}
+      {error && <div className="error-banner comparison-error">{error}</div>}
+
+      {comparison && (
+        <div className="comparison-body">
+          {!comparison.comparable && (
+            <div className="comparison-incompatible">
+              <strong>Comparison blocked</strong>
+              <p>
+                Unit-level regression classification is disabled because these runs do not
+                represent the same complete population.
+              </p>
+              <div>
+                {comparison.reasons.map((reason) => (
+                  <span key={reason}>{humanize(reason)}</span>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {comparison.comparable && (
+            <>
+              <div className="comparison-metrics">
+                <Metric
+                  label="Verified Δ"
+                  value={deltaPercent(comparison.overall_delta.verified_rate_delta)}
+                  hint="candidate − baseline"
+                />
+                <Metric
+                  label="Latency Δ"
+                  value={deltaNumber(
+                    comparison.overall_delta.latency_mean_ms_delta === null
+                      ? null
+                      : comparison.overall_delta.latency_mean_ms_delta / 1000,
+                    's',
+                  )}
+                  hint="mean / unit"
+                />
+                <Metric
+                  label="LLM calls Δ"
+                  value={deltaNumber(comparison.overall_delta.llm_calls_mean_delta)}
+                  hint="mean / unit"
+                />
+                <Metric
+                  label="Tokens Δ"
+                  value={deltaNumber(comparison.overall_delta.tokens_mean_delta)}
+                  hint="mean / unit"
+                />
+                <Metric
+                  label="Cost Δ"
+                  value={
+                    comparison.overall_delta.known_cost_usd_delta === null
+                      ? '—'
+                      : (comparison.overall_delta.known_cost_usd_delta >= 0 ? '+' : '') +
+                        '$' +
+                        comparison.overall_delta.known_cost_usd_delta.toFixed(4)
+                  }
+                  hint="known public records"
+                />
+              </div>
+
+              <div className="regression-counts">
+                <div><span>Matched units</span><strong>{comparison.matched_units}</strong></div>
+                <div className="regression"><span>Regressions</span><strong>{comparison.regressions}</strong></div>
+                <div className="improvement"><span>Improvements</span><strong>{comparison.improvements}</strong></div>
+                <div><span>Unchanged</span><strong>{comparison.unchanged}</strong></div>
+              </div>
+
+              <div className="analytics-table-wrap comparison-mode-table">
+                <table className="analytics-table">
+                  <thead>
+                    <tr>
+                      <th>Mode</th>
+                      <th>Baseline verified</th>
+                      <th>Candidate verified</th>
+                      <th>Verified Δ</th>
+                      <th>Baseline latency</th>
+                      <th>Candidate latency</th>
+                      <th>Latency Δ</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {comparison.mode_comparisons.map((item) => (
+                      <tr key={item.mode}>
+                        <td><span className="mode-badge">{item.mode}</span></td>
+                        <td>{percent(item.baseline?.verified_rate ?? null)}</td>
+                        <td>{percent(item.candidate?.verified_rate ?? null)}</td>
+                        <td>{deltaPercent(item.delta.verified_rate_delta)}</td>
+                        <td>{seconds(item.baseline?.latency_mean_ms ?? null)}</td>
+                        <td>{seconds(item.candidate?.latency_mean_ms ?? null)}</td>
+                        <td>
+                          {deltaNumber(
+                            item.delta.latency_mean_ms_delta === null
+                              ? null
+                              : item.delta.latency_mean_ms_delta / 1000,
+                            's',
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              <section className="regression-list">
+                <div className="analytics-section-head">
+                  <div>
+                    <span className="eyebrow">Fixed → not fixed</span>
+                    <h3>Regression signals</h3>
+                  </div>
+                  <span className="section-count">{comparison.regressions}</span>
+                </div>
+                {comparison.regression_rows.length === 0 ? (
+                  <div className="comparison-empty">No unit changed from VERIFIED_FIXED to another verdict.</div>
+                ) : (
+                  <div className="analytics-table-wrap">
+                    <table className="analytics-table">
+                      <thead>
+                        <tr>
+                          <th>Case</th>
+                          <th>Mode</th>
+                          <th>Repeat</th>
+                          <th>Baseline</th>
+                          <th>Candidate</th>
+                          <th>Lineage</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {comparison.regression_rows.map((row) => (
+                          <tr key={row.case_id + row.mode + row.repeat}>
+                            <td><strong>{row.case_id}</strong><small>{row.template_id}</small></td>
+                            <td><span className="mode-badge">{row.mode}</span></td>
+                            <td>{row.repeat}</td>
+                            <td><StatusPill value={row.baseline_verdict} /></td>
+                            <td><StatusPill value={row.candidate_verdict} /></td>
+                            <td>
+                              <div className="regression-lineage-actions">
+                                <button
+                                  disabled={!row.baseline_diagnosis_run_id}
+                                  onClick={() => {
+                                    if (row.baseline_diagnosis_run_id) {
+                                      onOpenDiagnosis(row.baseline_diagnosis_run_id)
+                                    }
+                                  }}
+                                >
+                                  Baseline run
+                                </button>
+                                <button
+                                  disabled={!row.candidate_diagnosis_run_id}
+                                  onClick={() => {
+                                    if (row.candidate_diagnosis_run_id) {
+                                      onOpenDiagnosis(row.candidate_diagnosis_run_id)
+                                    }
+                                  }}
+                                >
+                                  Candidate run
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+        </div>
+      )}
+    </section>
+  )
+}
+
+export default function AnalyticsView() {
+  const [overview, setOverview] = useState<AnalyticsOverview | null>(null)
+  const [selectedEvaluation, setSelectedEvaluation] = useState<EvaluationCard | null>(null)
+  const [selectedBatch, setSelectedBatch] = useState<BatchCard | null>(null)
+  const [selectedComparisonDiagnosis, setSelectedComparisonDiagnosis] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      setOverview(await getAnalyticsOverview())
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Analytics unavailable')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    // oxlint-disable-next-line react/set-state-in-effect
+    void load()
+  }, [load])
+
+  const totals = useMemo(() => {
+    const evaluations = overview?.evaluations ?? []
+    const units = evaluations.reduce((sum, item) => sum + item.executed_units, 0)
+    const fixed = evaluations.reduce((sum, item) => sum + item.verified_fixed, 0)
+    const cost = evaluations.reduce((sum, item) => sum + (item.known_cost_usd ?? 0), 0)
+    const weightedLatency = evaluations.reduce(
+      (sum, item) => sum + (item.latency_mean_ms ?? 0) * item.executed_units,
+      0,
+    )
+    return {
+      units,
+      fixed,
+      rate: units ? fixed / units : null,
+      cost: evaluations.some((item) => item.known_cost_usd !== null) ? cost : null,
+      latency: units ? weightedLatency / units : null,
+    }
+  }, [overview])
+
+  return (
+    <main className="analytics-page">
+      <section className="analytics-hero">
+        <div>
+          <span className="eyebrow">Test intelligence</span>
+          <h1>Batch & Evaluation Analytics</h1>
+          <p>
+            Public operational summaries for CUDA seed validation and A–E evaluation runs.
+            Evaluator/private artifacts are not exposed here.
+          </p>
+        </div>
+        <div className="analytics-source">
+          <span>Public analytics store</span>
+          <code>{overview?.store_root ?? 'Loading…'}</code>
+          <button className="ghost-button" onClick={() => void load()}>Refresh</button>
+        </div>
+      </section>
+
+      {error && <div className="global-error">{error}</div>}
+      {(overview?.projection_errors?.length ?? 0) > 0 && (
+        <div className="analytics-warning">
+          <strong>Projection warning</strong>
+          <span>
+            {overview?.projection_errors.length} public analytics run(s) could not be projected.
+            The console did not silently count them as successful or empty runs.
+          </span>
+        </div>
+      )}
+
+      <section className="analytics-overview-grid">
+        <Metric label="Evaluation runs" value={overview?.evaluation_count ?? 0} hint="public manifests" />
+        <Metric label="Executed units" value={totals.units} hint="across visible evaluations" />
+        <Metric label="Verified rate" value={percent(totals.rate)} hint={String(totals.fixed) + ' fixed'} />
+        <Metric label="Mean latency" value={seconds(totals.latency)} hint="weighted / unit" />
+        <Metric label="Known cost" value={money(totals.cost)} hint="public records only" />
+        <Metric label="Seed batches" value={overview?.batch_count ?? 0} hint="public validation runs" />
+      </section>
+
+      <EvaluationTrend evaluations={overview?.evaluations ?? []} />
+
+      <ComparisonWorkbench
+        evaluations={overview?.evaluations ?? []}
+        onOpenDiagnosis={setSelectedComparisonDiagnosis}
+      />
+
+      <section className="analytics-layout">
+        <section className="panel analytics-panel">
+          <div className="panel-heading">
+            <div><span className="eyebrow">A–E runs</span><h2>Evaluation history</h2></div>
+            <span className="panel-count">{overview?.evaluations.length ?? 0}</span>
+          </div>
+          <div className="analytics-table-wrap">
+            <table className="analytics-table evaluation-list">
+              <thead>
+                <tr>
+                  <th>Run</th>
+                  <th>Split</th>
+                  <th>Units</th>
+                  <th>Modes</th>
+                  <th>Verified</th>
+                  <th>Diagnosed</th>
+                  <th>Latency</th>
+                  <th>LLM calls</th>
+                  <th>Tokens</th>
+                  <th>Cost</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && (
+                  <tr><td colSpan={10} className="table-message">Loading evaluation manifests…</td></tr>
+                )}
+                {!loading && (overview?.evaluations.length ?? 0) === 0 && (
+                  <tr><td colSpan={10} className="table-message">No public evaluation runs in this store.</td></tr>
+                )}
+                {!loading && overview?.evaluations.map((item) => (
+                  <tr
+                    key={item.run_id}
+                    className="analytics-click-row"
+                    onClick={() => setSelectedEvaluation(item)}
+                  >
+                    <td><strong>{shortId(item.run_id, 10)}</strong><small>{item.status}</small></td>
+                    <td>{humanize(item.split)}</td>
+                    <td>{item.executed_units}/{item.expected_units ?? '—'}</td>
+                    <td>{item.modes.join(' · ')}</td>
+                    <td><strong className="rate-value">{percent(item.verified_rate)}</strong></td>
+                    <td>{item.diagnosed}</td>
+                    <td>{seconds(item.latency_mean_ms)}</td>
+                    <td>{compact(item.llm_calls_mean)}</td>
+                    <td>{compact(item.tokens_mean)}</td>
+                    <td>{money(item.known_cost_usd)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="panel analytics-panel">
+          <div className="panel-heading">
+            <div><span className="eyebrow">GPU seed validation</span><h2>Batch history</h2></div>
+            <span className="panel-count">{overview?.batches.length ?? 0}</span>
+          </div>
+          <div className="batch-card-grid">
+            {!loading && (overview?.batches.length ?? 0) === 0 && (
+              <div className="table-message">No seed batches in this store.</div>
+            )}
+            {overview?.batches.map((item) => (
+              <button
+                className="batch-summary-card"
+                key={item.run_id}
+                onClick={() => setSelectedBatch(item)}
+              >
+                <div className="batch-summary-head">
+                  <div>
+                    <strong>{shortId(item.run_id, 11)}</strong>
+                    <small>{formatTime(item.finished_at)}</small>
+                  </div>
+                  <StatusPill value={item.status} />
+                </div>
+                <div className="batch-summary-stats">
+                  <div><span>Cases</span><strong>{item.case_count}</strong></div>
+                  <div><span>Registered</span><strong>{item.registered}</strong></div>
+                  <div><span>Failed</span><strong>{item.failed}</strong></div>
+                  <div><span>Tools</span><strong>{Object.keys(item.target_tools).length}</strong></div>
+                </div>
+                <div className="tool-tags">
+                  {Object.entries(item.target_tools).map(([tool, count]) => (
+                    <span key={tool}>{humanize(tool)} · {count}</span>
+                  ))}
+                </div>
+              </button>
+            ))}
+          </div>
+        </section>
+      </section>
+
+      {selectedEvaluation && (
+        <EvaluationDrawer
+          run={selectedEvaluation}
+          onClose={() => setSelectedEvaluation(null)}
+        />
+      )}
+      {selectedBatch && (
+        <BatchDrawer run={selectedBatch} onClose={() => setSelectedBatch(null)} />
+      )}
+      {selectedComparisonDiagnosis && (
+        <AnalyticsDiagnosisDrawer
+          runId={selectedComparisonDiagnosis}
+          onClose={() => setSelectedComparisonDiagnosis(null)}
+        />
+      )}
+    </main>
+  )
+}
