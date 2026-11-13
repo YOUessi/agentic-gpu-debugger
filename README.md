@@ -20,6 +20,33 @@ self-check and revise using public evidence, then verify independently.
 [演示与复现](docs/demo.md) · [公开证据摘要与补丁](docs/evidence/portfolio-summary.json) ·
 [项目介绍与讲解](docs/portfolio-CN.md) · [能力边界](docs/limitations.md)
 
+## Full-stack CUDA Test & Repair Console（V3 分支）
+
+`feat/v3-fullstack-ai-test-console` 在现有 Agent 核心上增加 React/TypeScript 操作台与
+FastAPI adapter。Web 层直接读取 public RunStore，并通过 `ApplicationService` 发起
+repair/strict verification；不会复制 Agent、执行器或 verifier，也不接受任意宿主机路径。
+
+```bash
+python -I -m pip install -e '.[web]'
+cd dashboard && npm install && npm run build && cd ..
+gpu-agent web --host 127.0.0.1 --port 8000
+```
+
+Dashboard 展示 RunStore 分页/筛选、Agent investigation trajectory、grounded diagnosis、
+多轮 repair candidate/diff、public self-check、strict verification 和注册 artifact/log。
+前端使用 Vitest 与 Playwright；API 使用临时 RunStore 测试。Round 2 增加 public case
+catalog、运行中自动轮询和可点击 evidence citation；Round 3 将 Repair 改为持久化异步
+Web Job，提交后立即返回 job ID，并在 controller 创建 diagnosis run 后自动挂接实时
+RunManifest timeline，同时提供 Original Source / Selected Candidate Diff 并排查看。Round 4
+新增 Batch & Evaluation Analytics，可对 public seed batch 和 A–E evaluation 做服务端投影、
+mode 对比、大规模记录表、failure-family 分布、latency/调用量/token/cost 分析；可单独挂载
+历史 public RunStore，且不会读取 evaluator/private evidence。Round 5 又补充了 mode 可视化图表
+和 evaluation record → diagnosis run → evidence/candidate/verification 的只读 lineage drill-down；
+Round 6 增加 evaluation trend、兼容性门控的 regression comparison，以及 CSV/JSON export。
+设计与安全边界见
+[Full-stack Console](docs/fullstack-console.md)，开发中遇到的问题与修复过程持续记录在
+[Full-stack 开发日志](docs/fullstack-development-log.md)。
+
 ## 实验证据与版本边界
 
 当前已实现证据驱动诊断、单候选与多轮补丁修订、Docker GPU 隔离、四种 Compute
@@ -204,6 +231,21 @@ python -I -m pytest tests/gpu/test_clean_kernel.py --require-live --gpu-run-root
 
 真实验证与安装调整见 [T01 记录](docs/t01-validation.md) 和 [T02/M0 记录](docs/t02-validation.md)。设计与依赖顺序见 [V2 规格](PROJECT_SPEC_CN_V2.md) 和 [实施计划](IMPLEMENTATION_PLAN_CN_V2.md)。不按开发天数安排任务。
 
+
+## 集成版：LangGraph + LangChain + Fullstack（2026-11-14）
+
+此集成分支从 PR #8 的后端出发合入 Fullstack Console；修复 Web
+`on_run_created` 在 LangGraph public-repair 路径未透传的问题。仅在本分支
+完成新 SHA 的 API、前端与 GPU 验收后才能报告产品级交付。
+
+- 开发机 Mac：`cd dashboard && npm ci && npm run test && npm run build && npm run lint`。
+- Python 环境：`python -m pip install -r requirements.lock`，
+  `python -m pip install --no-deps -e '.[dev,web]'`。
+- 启用图与组件：`GPU_AGENT_ORCHESTRATOR=langgraph`，
+  `GPU_AGENT_COMPONENT_LAYER=langchain`；与旧流程等预算对照前不改默认组件。
+- Web：`gpu-agent web --host 127.0.0.1 --port 8000`，当前仍只接受受控的 public case。
+- 严格验证只读取独立 evaluator store，Graph 不能读取隐藏输入或绕过 policy。
+- 不宣称生产级恢复/恶意 CUDA 沙箱/新的真实 GPU 成功率。
 
 ## LangChain Core 组件层（2026-11-13，开发分支）
 

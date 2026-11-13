@@ -7,6 +7,7 @@ No checkpoint saver is configured until side effects are replay-safe.
 """
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, TypedDict
 
@@ -34,6 +35,8 @@ def run_langgraph_public_repair(
     source: Path,
     policy: RepairPolicy,
     mode: EvaluationMode,
+    *,
+    on_run_created: Callable[[RunManifest], None] | None = None,
 ) -> tuple[RunManifest, VerificationResult | None]:
     """Preserve the old service contract while making verification a graph boundary."""
     manifest: RunManifest | None = None
@@ -50,6 +53,7 @@ def run_langgraph_public_repair(
             expected_source_hash=None,
             evaluation_unit=None,
             repair_policy=policy,
+            _on_run_created=on_run_created,
         )
         return {"run_id": manifest.id}
 

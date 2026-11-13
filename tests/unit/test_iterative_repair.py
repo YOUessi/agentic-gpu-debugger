@@ -299,3 +299,60 @@ def test_repair_refuses_bound_evaluation_and_ablations(oob_service):
     with pytest.raises(ValueError, match="non-evaluation"):
         service.repair(source)
     assert not provider.kinds
+
+
+def test_repair_reports_run_id_before_external_work(oob_service, monkeypatch):
+    service, _, source = oob_service
+    observed = []
+
+    monkeypatch.setattr(
+        "gpu_agent.repair.self_check",
+        lambda *args: PublicCheck(
+            run_id="a" * 32,
+            status="UNAVAILABLE",
+            checks={},
+            feedback=[],
+        ),
+    )
+
+    run, verdict = service.repair(source, on_run_created=observed.append)
+
+    assert verdict is None
+    assert len(observed) == 1
+    assert observed[0].id == run.id
+    assert observed[0].status == "QUEUED"
+    assert service.store.load(run.id).status == "COMPLETED"
+
+
+
+@pytest.mark.parametrize(
+    "engine,component",
+    [("legacy", "native"), ("langgraph", "native"), ("langgraph", "langchain")],
+)
+def test_integrated_web_observer_receives_run_with_graph(
+    oob_service, monkeypatch, engine, component
+):
+    """Web job must know its actual RunStore id before public checking finishes."""
+    service, provider, source = oob_service
+    monkeypatch.setenv("GPU_AGENT_ORCHESTRATOR", engine)
+    monkeypatch.setenv("GPU_AGENT_COMPONENT_LAYER", component)
+    monkeypatch.setattr(
+        "gpu_agent.repair.self_check",
+        lambda *args: PublicCheck(
+            run_id="a" * 32, status="PASSED", checks={"memcheck": "CLEAN"}, feedback=[]
+        ),
+    )
+    verified = []
+
+    def strict_check(run_id, strict):
+        assert strict
+        verified.append(run_id)
+        return SimpleNamespace(verdict="VERIFIED_FIXED"), "b" * 32
+
+    monkeypatch.setattr(service, "verify_exact", strict_check)
+    bound_runs = []
+    run, result = service.repair(source, on_run_created=bound_runs.append)
+    assert [r.id for r in bound_runs] == [run.id]
+    assert verified == [run.id]
+    assert result is not None and result.verdict == "VERIFIED_FIXED"
+    assert provider.kinds.count("patch") == 1
