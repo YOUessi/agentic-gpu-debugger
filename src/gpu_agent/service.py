@@ -441,6 +441,19 @@ class ApplicationService:
     ) -> RunManifest:
         if mode not in {"A", "B", "C", "D", "E"}:
             raise ValueError("invalid acquisition mode")
+        from gpu_agent.agent.adaptive_policy import selected_planner_policy
+
+        if selected_planner_policy() == "adaptive-v1":
+            if (
+                mode != "E"
+                or self._binding is not None
+                or evaluation_unit is not None
+                or os.environ.get("GPU_AGENT_ORCHESTRATOR", "langgraph") != "langgraph"
+            ):
+                raise ValueError(
+                    "adaptive-v1 is restricted to LangGraph E public development; "
+                    "never use it for signed evaluation or rule baselines"
+                )
         if mode in {"D", "E"}:
             from gpu_agent.agent.langchain_components import component_layer
 

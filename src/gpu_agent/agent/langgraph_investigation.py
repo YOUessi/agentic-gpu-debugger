@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict, cast
 from langgraph.graph import END, START, StateGraph
 from pydantic import ValidationError
 
+from gpu_agent.agent.adaptive_policy import predictable_action, selected_planner_policy
 from gpu_agent.agent.langchain_components import LangChainModelComponents, component_layer
 from gpu_agent.agent.models import (
     ACTION_ADAPTER,
@@ -59,6 +60,9 @@ def run_langgraph_investigation(
 
     layer = component_layer()
     components = LangChainModelComponents(controller.provider) if layer == "langchain" else None
+    policy = selected_planner_policy()
+    if policy == "adaptive-v1" and mode != "E":
+        raise ValueError("adaptive-v1 requires E acquisition")
 
     def observe(state: InvestigationState) -> dict[str, Any]:
         budget = controller.budget
@@ -80,8 +84,19 @@ def run_langgraph_investigation(
     def plan(state: InvestigationState) -> dict[str, Any]:
         evidence = public_evidence(controller.store, run_id)
         feedback = state.get("feedback") or None
+        selection = "LLM_PLANNER"
         if mode == "D":
             proposed = controller.rule_router.next_action(evidence, controller.budget)
+            selection = "RULE_BASELINE"
+        elif policy == "adaptive-v1" and state.get("replanned", False):
+            proposed = controller.rule_router.next_action(evidence, controller.budget)
+            selection = "REJECTED_ACTION_FALLBACK"
+        elif (
+            policy == "adaptive-v1"
+            and (skip := predictable_action(evidence, controller.budget, controller.rule_router))
+            is not None
+        ):
+            proposed, selection = skip
         else:
             reservation = controller._reserve("planner_llm")
             try:
@@ -94,9 +109,24 @@ def run_langgraph_investigation(
                     )
                 )
                 controller.ledger.settle(reservation)
-            except ProviderError:
+            except ProviderError as exc:
                 controller.ledger.settle(reservation, "FAILED")
-                raise
+                if policy != "adaptive-v1" or exc.code != "LLM_INVALID_OUTPUT":
+                    raise
+                # A completed, schema-rejected model output is safe to replace
+                # by a deterministic action. Never retry uncertain requests.
+                proposed = controller.rule_router.next_action(evidence, controller.budget)
+                selection = "INVALID_OUTPUT_FALLBACK"
+        if policy == "adaptive-v1":
+            controller.store.put(
+                run_id,
+                f"agent/adaptive-policy/{controller.budget.agent_steps}.json",
+                json.dumps(
+                    {"version": "adaptive-v1", "selection": selection},
+                    sort_keys=True,
+                ).encode(),
+                controller.store.visibility,
+            )
         try:
             action = ACTION_ADAPTER.validate_python(proposed.model_dump())
         except ValidationError:
