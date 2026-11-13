@@ -232,6 +232,25 @@ python -I -m pytest tests/gpu/test_clean_kernel.py --require-live --gpu-run-root
 真实验证与安装调整见 [T01 记录](docs/t01-validation.md) 和 [T02/M0 记录](docs/t02-validation.md)。设计与依赖顺序见 [V2 规格](PROJECT_SPEC_CN_V2.md) 和 [实施计划](IMPLEMENTATION_PLAN_CN_V2.md)。不按开发天数安排任务。
 
 
+## Agent Planner 自适应实验（2026-11-14，独立研究分支）
+
+为了同时研究严格修复率和 Planning 成本，新增**仅公开开发模式可选**的
+\`GPU_AGENT_PLANNER_POLICY=adaptive-v1\`。它只跳过强制首轮 memcheck 的
+模型规划，以及规则 Router 与证据门禁都同意时的结束规划；模糊故障仍
+由 LLM 自主决定调查动作。遇到已完成但 schema 无效的模型规划，
+可经规则路由器做安全降级，**不会**重试超时等不确定请求。
+
+\`\`\`bash
+export GPU_AGENT_ORCHESTRATOR=langgraph
+export GPU_AGENT_COMPONENT_LAYER=langchain
+export GPU_AGENT_PLANNER_POLICY=adaptive-v1  # 默认 baseline
+\`\`\`
+
+每步选择来源写入 public RunStore 的 \`agent/adaptive-policy/*.json\`；
+实际工具调用仍由 \`decide_action\`、预算、白名单和 GPU 隔离检查。
+拒绝在 D / A–C / 正式评测和旧 Orchestrator 上启用，不影响冻结的
+历史实验。**目前只是一项需对照检验的研究假设，未证明提高修复率。**
+
 ## 集成版：LangGraph + LangChain + Fullstack（2026-11-14）
 
 此集成分支从 PR #8 的后端出发合入 Fullstack Console；修复 Web
