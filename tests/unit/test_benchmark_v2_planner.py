@@ -35,6 +35,7 @@ def catalog_and_policy():
                 }
             )
     data = {
+        "schema_version": "neurips2026_v1",
         "n_instances": len(items),
         "instances": items,
         "task_families": dict(Counter(e["task_family"] for e in items)),
@@ -48,6 +49,8 @@ def catalog_and_policy():
             "commit_sha": "a" * 40,
             "manifest_git_blob_sha1": git_blob_sha1(raw),
             "expected_instances": len(items),
+            "expected_manifest_schema": "neurips2026_v1",
+            "quarantined_instance_ids": [],
         },
         "selection": {
             "seed": 20261119,
@@ -158,3 +161,29 @@ def test_invalid_quotas_or_seed_are_rejected():
     policy["selection"]["development_quotas"] = {"compile_error": 5}
     with pytest.raises(ValueError, match="quotas"):
         plan_candidates(items, policy)
+
+
+def test_exact_quarantine_is_reported_without_falsifying_universe_count():
+    data, _, policy = catalog_and_policy()
+    bad_id = data["instances"][0]["id"]
+    data["instances"][0]["broken_start_hash"] = "manual_v1"
+    raw = json.dumps(data, sort_keys=True).encode()
+    policy["upstream"]["manifest_git_blob_sha1"] = git_blob_sha1(raw)
+    policy["upstream"]["quarantined_instance_ids"] = [bad_id]
+    selected = build_selection(raw, policy)
+    assert selected["universe_count"] == 25
+    assert selected["metadata_eligible_count"] == 24
+    assert selected["quarantined_instance_ids"] == [bad_id]
+    assert bad_id not in [
+        c["id"] for part in selected["splits"].values() for c in part
+    ]
+    policy["upstream"]["quarantined_instance_ids"] = []
+    with pytest.raises(ValueError, match="unexpected upstream source-hash"):
+        parse_catalog(raw, policy)
+
+
+def test_quarantine_must_match_actual_snapshot_anomalies():
+    data, raw, policy = catalog_and_policy()
+    policy["upstream"]["quarantined_instance_ids"] = [data["instances"][0]["id"]]
+    with pytest.raises(ValueError, match="quarantine allowlist"):
+        parse_catalog(raw, policy)
