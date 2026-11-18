@@ -55,9 +55,7 @@ def catalog_and_policy():
         "selection": {
             "seed": 20261119,
             "development_quotas": {category: 1 for category in CATEGORIES},
-            "frozen_public_eval_candidate_quotas": {
-                category: 2 for category in CATEGORIES
-            },
+            "frozen_public_eval_candidate_quotas": {category: 2 for category in CATEGORIES},
             "group_disjoint_by": "base_stem_before_double_underscore_category",
         },
     }
@@ -174,9 +172,7 @@ def test_exact_quarantine_is_reported_without_falsifying_universe_count():
     assert selected["universe_count"] == 25
     assert selected["metadata_eligible_count"] == 24
     assert selected["quarantined_instance_ids"] == [bad_id]
-    assert bad_id not in [
-        c["id"] for part in selected["splits"].values() for c in part
-    ]
+    assert bad_id not in [c["id"] for part in selected["splits"].values() for c in part]
     policy["upstream"]["quarantined_instance_ids"] = []
     with pytest.raises(ValueError, match="unexpected upstream source-hash"):
         parse_catalog(raw, policy)
