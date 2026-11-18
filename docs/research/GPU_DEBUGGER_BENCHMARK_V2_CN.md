@@ -6,7 +6,7 @@
 
 仓库现有 \`case_0001\`–\`case_0016\` 基于同一 Vector Add 类模板的大量故障注入；\`case_0017\`–\`case_0022\` 引入 6 个额外工作负载。当前 \`PublicTask\` 只支持七种 Oracle 语义以及 \`n,a,b → float32 vector\` 数据协议；模型补丁只修改 \`kernel.cu\`。这非常适合受控正确性实验，却不是充分代表真实 GPU 工程的任务空间。
 
-2026-11-14 的真实 DeepSeek + RTX 4090 五臂探索（[原始报告](../docs/repair-log/2026-11-14-five-arm-real-gpu-llm-comparison.md)）只有两道开发集公开任务各执行一次：固定规则 D 2/2、E_ADAPTIVE 2/2；后者调用模型 8 次而 D 只要 4 次。不能据此证明 Agent 优势；也不应靠单纯增加相似 OOB 用例证明算法改进。
+2026-11-14 的真实 DeepSeek + RTX 4090 五臂探索（[原始报告](../repair-log/2026-11-14-five-arm-real-gpu-llm-comparison.md)）只有两道开发集公开任务各执行一次：固定规则 D 2/2、E_ADAPTIVE 2/2；后者调用模型 8 次而 D 只要 4 次。不能据此证明 Agent 优势；也不应靠单纯增加相似 OOB 用例证明算法改进。
 
 ## 1. 对标的公开数据资源与用途
 
