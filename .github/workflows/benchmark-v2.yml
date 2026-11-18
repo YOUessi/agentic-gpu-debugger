@@ -1,0 +1,65 @@
+name: Benchmark V2 metadata integrity
+
+on:
+  pull_request:
+    paths:
+      - "scripts/plan_debugger_benchmark_v2.py"
+      - "tests/unit/test_benchmark_v2_planner.py"
+      - "benchmarks/v2/**"
+      - "docs/research/GPU_DEBUGGER_BENCHMARK_V2_CN.md"
+      - ".github/workflows/benchmark-v2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  metadata-only:
+    name: CUDABeaver pinned-manifest candidate selection (no GPU, no LLM)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install offline-only Python checks
+        run: python -m pip install --disable-pip-version-check pytest==9.1.1 ruff==0.16.7
+      - name: Validate source and synthetic selection tests
+        run: |
+          python -m ruff check scripts/plan_debugger_benchmark_v2.py tests/unit/test_benchmark_v2_planner.py
+          python -m ruff format --check scripts/plan_debugger_benchmark_v2.py tests/unit/test_benchmark_v2_planner.py
+          PYTHONPATH="$PWD/src" python -m pytest -q tests/unit/test_benchmark_v2_planner.py
+      - name: Fetch upstream metadata by immutable commit (never execute it)
+        run: |
+          curl --fail --silent --show-error --location --max-time 30 \
+            --output /tmp/cudabeaver-manifest-pinned.json \
+            https://raw.githubusercontent.com/UMN-APEX-Lab/CUDABeaver/991f0df14367e64907b9244295d5997e7717ffc3/manifest.json
+      - name: Audit manifest identity and plan disjoint candidate splits
+        run: |
+          python scripts/plan_debugger_benchmark_v2.py \
+            --manifest /tmp/cudabeaver-manifest-pinned.json \
+            --output benchmarks/v2/_selection_candidate.json
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path("benchmarks/v2/_selection_candidate.json").read_text())
+          assert report["universe_count"] == 199
+          assert report["metadata_eligible_count"] == 196
+          assert len(report["quarantined_instance_ids"]) == 3
+          assert report["counts"] == {
+              "development": 12,
+              "frozen_public_eval_candidates": 24,
+          }
+          parts = [case for group in report["splits"].values() for case in group]
+          assert len({case["base_stem"] for case in parts}) == 36
+          assert all(case["candidate_only"] for case in parts)
+          assert all(case["execution_eligibility"] == "PENDING_NATIVE_PREFLIGHT" for case in parts)
+          print("PASSED: 199 catalog records, 3 quarantined, 12+24 unique candidates; no GPU run")
+          PY
+      - name: Retain metadata-only candidate list
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-benchmark-v2-metadata-selection
+          path: benchmarks/v2/_selection_candidate.json
+          if-no-files-found: error
+          retention-days: 30
