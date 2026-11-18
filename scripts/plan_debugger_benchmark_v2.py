@@ -4,6 +4,7 @@ This tool only reads upstream *metadata*. It neither fetches nor executes
 untrusted CUDA code, build commands or testbench scripts. Its output is a
 candidate list, not validated cases, an independent holdout, or a score.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -14,9 +15,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-CATEGORIES = frozenset(
-    {"compile_error", "logic_error", "memory_crash", "perf_broken", "timeout"}
-)
+CATEGORIES = frozenset({"compile_error", "logic_error", "memory_crash", "perf_broken", "timeout"})
 DIFFICULTIES = frozenset({"easy", "medium", "hard"})
 _ID = re.compile(
     r"^[a-z0-9_]+__(?:compile_error|logic_error|memory_crash|perf_broken|timeout)__[0-9a-f]{8}$"
@@ -180,9 +179,7 @@ def plan_candidates(
         # Deterministic but opaque ordering; it is NOT an LLM action schedule.
         return sorted(
             result,
-            key=lambda e: hashlib.sha256(
-                f"order:{seed}:{name}:{e['id']}".encode()
-            ).hexdigest(),
+            key=lambda e: hashlib.sha256(f"order:{seed}:{name}:{e['id']}".encode()).hexdigest(),
         )
 
     # Freeze the evaluation *candidates* before selecting development examples.
@@ -211,9 +208,7 @@ def build_selection(raw: bytes, policy: dict[str, Any]) -> dict[str, Any]:
         "upstream_manifest_sha256": hashlib.sha256(raw).hexdigest(),
         "universe_count": policy["upstream"]["expected_instances"],
         "metadata_eligible_count": len(items),
-        "quarantined_instance_ids": sorted(
-            policy["upstream"].get("quarantined_instance_ids", [])
-        ),
+        "quarantined_instance_ids": sorted(policy["upstream"].get("quarantined_instance_ids", [])),
         "seed": policy["selection"]["seed"],
         "counts": {name: len(cases) for name, cases in parts.items()},
         "splits": parts,
