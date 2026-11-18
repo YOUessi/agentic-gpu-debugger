@@ -49,8 +49,19 @@ def parse_catalog(raw: bytes, policy: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(manifest, dict) or not isinstance(manifest.get("instances"), list):
         raise ValueError("manifest instances must be a list")
     items = manifest["instances"]
+    if manifest.get("schema_version") != pin.get("expected_manifest_schema"):
+        raise ValueError("upstream manifest schema changed")
     if len(items) != pin["expected_instances"] or manifest.get("n_instances") != len(items):
         raise ValueError("manifest instance count changed")
+    quarantine_list = pin.get("quarantined_instance_ids", [])
+    if (
+        not isinstance(quarantine_list, list)
+        or any(not isinstance(id_, str) for id_ in quarantine_list)
+        or len(set(quarantine_list)) != len(quarantine_list)
+    ):
+        raise ValueError("invalid quarantine policy")
+    quarantined = set(quarantine_list)
+    observed_anomalies: set[str] = set()
     ids: set[str] = set()
     cleaned: list[dict[str, Any]] = []
     by_category: Counter[str] = Counter()
@@ -74,36 +85,42 @@ def parse_catalog(raw: bytes, policy: dict[str, Any]) -> list[dict[str, Any]]:
             or re.fullmatch(r"[a-z][a-z0-9_]*", family) is None
             or difficulty not in DIFFICULTIES
             or not isinstance(digest, str)
-            or _HASH.fullmatch(digest) is None
             or not isinstance(lines, int)
             or isinstance(lines, bool)
             or lines <= 0
         ):
             raise ValueError("invalid or duplicate instance metadata")
         base, id_category, id_hash = identifier.rsplit("__", 2)
-        if (
-            id_category != category
-            or not digest.startswith(id_hash)
-            or item.get("path") != f"data/{identifier}/"
-        ):
+        if id_category != category or item.get("path") != f"data/{identifier}/":
             raise ValueError("instance metadata and identity disagree")
+        # A few pinned upstream records have an ID suffix differing from the
+        # declared broken source hash. Never silently admit or erase them:
+        # quarantine exactly the pre-registered anomalies before selecting.
+        anomalous = _HASH.fullmatch(digest) is None or not digest.startswith(id_hash)
+        if anomalous:
+            if identifier not in quarantined:
+                raise ValueError("unexpected upstream source-hash inconsistency")
+            observed_anomalies.add(identifier)
         ids.add(identifier)
         by_category[category] += 1
         by_family[family] += 1
-        cleaned.append(
-            {
-                "id": identifier,
-                "base_stem": base,
-                "task_family": family,
-                "error_category": category,
-                "difficulty_label": difficulty,
-                "broken_start_lines": lines,
-            }
-        )
+        if not anomalous:
+            cleaned.append(
+                {
+                    "id": identifier,
+                    "base_stem": base,
+                    "task_family": family,
+                    "error_category": category,
+                    "difficulty_label": difficulty,
+                    "broken_start_lines": lines,
+                }
+            )
     if dict(by_category) != manifest.get("error_category_distribution"):
         raise ValueError("declared failure category distribution disagrees")
     if dict(by_family) != manifest.get("task_families"):
         raise ValueError("declared task family distribution disagrees")
+    if observed_anomalies != quarantined:
+        raise ValueError("quarantine allowlist differs from observed upstream anomalies")
     return cleaned
 
 
@@ -192,7 +209,11 @@ def build_selection(raw: bytes, policy: dict[str, Any]) -> dict[str, Any]:
         "upstream_commit": policy["upstream"]["commit_sha"],
         "upstream_manifest_git_blob_sha1": git_blob_sha1(raw),
         "upstream_manifest_sha256": hashlib.sha256(raw).hexdigest(),
-        "universe_count": len(items),
+        "universe_count": policy["upstream"]["expected_instances"],
+        "metadata_eligible_count": len(items),
+        "quarantined_instance_ids": sorted(
+            policy["upstream"].get("quarantined_instance_ids", [])
+        ),
         "seed": policy["selection"]["seed"],
         "counts": {name: len(cases) for name, cases in parts.items()},
         "splits": parts,
