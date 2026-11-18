@@ -7,7 +7,13 @@
     "manifest_path": "manifest.json",
     "manifest_git_blob_sha1": "91d66049492e08765933af0b04cfe19a350454a3",
     "expected_instances": 199,
-    "license": "CC BY 4.0"
+    "license": "CC BY 4.0",
+    "expected_manifest_schema": "neurips2026_v1",
+    "quarantined_instance_ids": [
+      "cuda_164__compile_error__6de38688",
+      "cuda_59__logic_error__501f0dd2",
+      "cuda_87__compile_error__0e66ba5e"
+    ]
   },
   "selection": {
     "seed": 20261119,
@@ -33,6 +39,7 @@
     "Public upstream content is not private holdout; it may have appeared in model training.",
     "Never show upstream reference, oracle, error labels, or testbench internals to the Agent.",
     "Do not execute build_command or test_command obtained from untrusted metadata.",
-    "Do not compare CUDABeaver scores with the existing fixed-vector harness without protocol alignment."
+    "Do not compare CUDABeaver scores with the existing fixed-vector harness without protocol alignment.",
+    "Three upstream IDs have source-hash suffix inconsistency, quarantined before any model execution; no model-result-based exclusion."
   ]
 }
