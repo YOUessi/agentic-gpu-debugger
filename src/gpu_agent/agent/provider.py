@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime
 from threading import Event
-from typing import Any, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 from urllib.parse import urlsplit
 
 import openai
@@ -48,6 +48,9 @@ __all__ = [
     "FakeProvider",
     "LLMProvider",
 ]
+if TYPE_CHECKING:
+    from gpu_agent.benchmark.hardset_v2_graph import PlannerSnapshot, ProbeChoice
+
 Output = TypeVar("Output", bound=BaseModel)
 
 
@@ -501,7 +504,12 @@ def invoke_sdk(
         ]:
             logging.getLogger(name).disabled = True
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
-    output_model = WIRE_MODELS[request.kind]
+    if request.kind == "plan" and request.payload.get("hardset_probe_contract") == "hardset-v2":
+        from gpu_agent.benchmark.hardset_v2_graph import HardsetProbePlanOutput
+
+        output_model = HardsetProbePlanOutput
+    else:
+        output_model = WIRE_MODELS[request.kind]
     metadata: dict[str, object] = {}
     client = None
     value: dict[str, object] | None = None
@@ -941,6 +949,20 @@ class OpenAIResponsesProvider:
             wire_model=PlannerOutput,
             convert=lambda wire: wire.to_action_output(new_id()),
         ).action
+
+    def plan_hardset_v2(self, snapshot: "PlannerSnapshot") -> "ProbeChoice":
+        """Use the existing budgeted killable worker for a *typed* HardSet action."""
+        from gpu_agent.benchmark.hardset_v2_graph import HardsetProbePlanOutput
+
+        output = self._call(
+            "plan",
+            {
+                "hardset_probe_contract": "hardset-v2",
+                "snapshot": snapshot.model_dump(mode="json"),
+            },
+            HardsetProbePlanOutput,
+        )
+        return output.action
 
     def diagnose(self, evidence: PublicEvidence) -> DiagnosisResult:
         def validate(value: DiagnosisResult) -> DiagnosisResult:
