@@ -33,7 +33,7 @@ HARDSET_CASES = {
     "h002": "tail-rmsnorm32-v2",
     "h003": "two-stage-group-center32-v2",
 }
-SIZES = (1, 31, 32, 33, 65, 129, 257)
+SIZES = (1, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256, 257, 511, 513)
 HARNESS = ("harness/vector_io.cpp", "harness/vector_api.h", "harness/vendor/json.hpp")
 
 
@@ -96,9 +96,18 @@ def load_registry(root: Path) -> tuple[HardsetRegistry, str]:
 def sample_input(case_id: str, n: int) -> bytes:
     if case_id not in HARDSET_CASES or n not in SIZES:
         raise ValueError("unsupported fixed acceptance input")
-    base = 95.0 if case_id == "h001" else 0.0
+    # Stress values appear only on pre-registered OOD shapes. Unstable expf
+    # must not be trivially detectable on every ordinary input.
+    if case_id == "h001":
+        base = 95.0 if n in {33, 65, 257, 513} else 2.0
+    else:
+        base = 0.0
     a = [f32(base + ((i * 7) % 17 - 8) / 4) for i in range(n)]
     b = [f32(((i * 5) % 11 - 5) / 8) for i in range(n)]
+    if case_id == "h003" and n == 32:
+        # Stage-one bug is masked when the omitted input has zero mean.
+        # A one-size public test could mistakenly approve this mutant.
+        b = [f32(0.5 if i % 2 else -0.5) for i in range(n)]
     return json.dumps({"n": n, "a": a, "b": b}, separators=(",", ":")).encode()
 
 
@@ -186,6 +195,7 @@ def exercise(
         "passed": False,
     }
     failure_count = 0
+    mutant_pass_count = 0
     try:
         handle = backend.prepare(
             WorkspaceRequest(
@@ -224,8 +234,11 @@ def exercise(
             )
             if role == "clean" and not correct:
                 raise ValueError("CLEAN_NUMERICAL_ORACLE_FAILED")
-            if role == "mutant" and not correct:
-                failure_count += 1
+            if role == "mutant":
+                if correct:
+                    mutant_pass_count += 1
+                else:
+                    failure_count += 1
         if role == "clean":
             # Four NVIDIA tools still gate the clean reference. A mutant with
             # a wrong number is NOT required to produce a sanitizer finding.
@@ -258,8 +271,11 @@ def exercise(
         else:
             if not failure_count:
                 raise ValueError("MUTATION_DID_NOT_BREAK_FUNCTION")
+            if not mutant_pass_count:
+                raise ValueError("MUTATION_FAILED_ALL_INPUTS_NOT_DISCRIMINATIVE")
         report["passed"] = True
         report["observed_functional_failures"] = failure_count
+        report["mutant_passing_inputs"] = mutant_pass_count
     except (ValueError, OSError) as exc:
         report["error"] = str(exc)
     finally:

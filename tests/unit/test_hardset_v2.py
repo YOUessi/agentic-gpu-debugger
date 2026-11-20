@@ -63,6 +63,16 @@ def test_group_center_has_zero_mean_even_with_tail(n):
         assert abs(sum(group)) < 1e-5
 
 
+def test_predeclared_easy_and_stress_inputs_are_distinct():
+    low = json.loads(sample_input("h001", 32))
+    extreme = json.loads(sample_input("h001", 33))
+    assert max(low["a"]) < 20
+    assert min(extreme["a"]) > 90
+    centered = json.loads(sample_input("h003", 32))
+    assert sum(centered["b"]) == 0
+    assert len(SIZES) >= 15
+
+
 def test_rmsnorm_tail_divisor_error_is_detectable():
     payload = sample_input("h002", 33)
     actual = expected_output("h002", payload)

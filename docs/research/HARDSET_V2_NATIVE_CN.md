@@ -26,8 +26,8 @@
 - 所有输入在受控 JSON 域上验证，\`n\` 严格正整数，\`a,b\` 为等长有限浮点列表。
 - \`Softmax32\` 使用数值稳定 \`exp(x-max)\`；\`RMSNorm32\` 用有效长度统计；两阶段 Center 先计算**两数组合成**的组均值。
 - 检验形状包括 \`1,31,32,33,65,129,257\`，即空尾、单元素尾、不规则最后一个组和跨 block 情形。使用浮点容差 \`atol=rtol=3e-5\`，保证阈值在真实 GPU 结果出现前冻结。
-- 每个 clean 源码在全部尺寸上必须通过 CPU Oracle，并对长度 65 的输入分别通过 \`memcheck/racecheck/initcheck/synccheck\`，且 instrumented 程序结果数值仍正确。
-- 每个 mutant 必须**实际编译并运行**，有至少一个预声明输入通过独立 Oracle 判定功能错误（可以是数值 mismatch 或 C++ harness 拒绝非有限输出）；不得以源码 diff 猜测成功。
+- 每个 clean 源码在全部 15 个尺寸上必须通过 CPU Oracle，并对长度 65 的输入分别通过 \`memcheck/racecheck/initcheck/synccheck\`，且 instrumented 程序结果数值仍正确。
+- 每个 mutant 必须**实际编译并运行**，有至少一个普通输入通过且至少一个边界/极端输入被独立 Oracle 判定为功能错误（可以是数值 mismatch 或 C++ harness 拒绝非有限输出）；不得以源码 diff 猜测成功。
 - 每次编译/运行/Sanitizer 的真实日志写入当前任务的不可变 RunStore，并生成单独的 \`report.json\`；已有输出目录禁止覆盖。
 
 ## 本地及 Tang 验证
@@ -55,3 +55,10 @@ gpu-agent benchmark validate-hardset \
 2. 可信注册 CPU Oracle、case 的 SHA256、独立 evaluator 种子，严格隔离模型与参考实现；不能直接复用旧 \`VerificationTruth\` 对象冒充已经批准的新算法。
 3. 在代码和工作流冻结之后开展 D / E baseline / E adaptive 实际 GPU+LLM 多种子配对，对照源错误、补丁范围、严格修复、Token 与 GPU 开销；**离线成功不代表 Agent 优于 D**。
 4. 多文件 CUDA 工程、Stream/Event、KernelBench/CUDABeaver 外部基准仍需另加可信 Adapter，不运行元数据中的任意 Shell。
+
+### 2026-11-21：新增的区分性约束
+
+- Softmax 使用常规 logits 与极端 logits 两档；普通输入可能通过的 Mutant，必须在 33/65/257/513 等预先冻结的 stress 长度下暴露数值溢出。
+- RMSNorm 在 32/64/128 等完整组可能通过，尾部不足 32 时分母错误才会显现。
+- Two-stage Group Center 在 n=32 的零均值 b 输入上可能通过，但在其他输入上必须被 CPU Oracle 拒绝。
+- 新验收同时要求 Mutant 至少有一个真实运行通过、至少一个失败；拒绝“全部样本都崩溃”的简单伪挑战。
