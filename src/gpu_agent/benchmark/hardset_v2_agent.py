@@ -350,14 +350,15 @@ def run_autonomous_hardset(
     with HardsetFunctionalProbe(
         root, output / "investigation", case_id, max_probes=max_probes
     ) as probe:
-        assert probe.run_id is not None
+        active_run_id = probe.run_id
+        assert active_run_id is not None
         store = probe.public_store
 
         def audit(event: dict[str, object]) -> None:
             index = len(history) + 1
             history.append(event)
             store.put(
-                probe.run_id,
+                active_run_id,
                 f"hardset/agent-trace/{index:03d}.json",
                 json.dumps(event, ensure_ascii=False, sort_keys=True).encode(),
                 "public",
@@ -367,7 +368,7 @@ def run_autonomous_hardset(
             immutable = Path(source_dir)
             IsolatedGPUBackend._write_snapshot(immutable / "kernel.cu", original)
             snapshot = SourceSnapshot(
-                parent_run_id=probe.run_id,
+                parent_run_id=active_run_id,
                 root=immutable,
                 hashes={"kernel.cu": case.mutant_source_sha256},
             )
@@ -379,7 +380,7 @@ def run_autonomous_hardset(
 
             if provider_factory is None:
                 settings = OpenAIProviderSettings.from_environment()
-                provider: HardsetRepairProvider = OpenAIResponsesProvider(
+                real_provider = OpenAIResponsesProvider(
                     settings,
                     LLMCallGate(
                         AgentBudget(
@@ -388,18 +389,19 @@ def run_autonomous_hardset(
                         )
                     ),
                     store,
-                    probe.run_id,
+                    active_run_id,
                     diff_validator=lambda diff: validate_candidate(diff),
                     call_policy=DevelopmentCallPolicy(max_llm_calls=max_llm_calls),
                 )
-                provider.ensure_available()
+                real_provider.ensure_available()
+                provider: HardsetRepairProvider = real_provider
             else:
-                provider = provider_factory(store, probe.run_id, validate_candidate)
+                provider = provider_factory(store, active_run_id, validate_candidate)
 
             def check(code: bytes, attempt: int) -> HardsetPublicCheck:
                 return check_candidate_publicly(
                     store=store,
-                    parent_run_id=probe.run_id,
+                    parent_run_id=active_run_id,
                     repository=root,
                     case_id=case_id,
                     candidate=code,
