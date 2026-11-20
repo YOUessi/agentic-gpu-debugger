@@ -1,6 +1,7 @@
 #include "vector_api.h"
 #include <cuda_runtime.h>
 #include <cmath>
+#include <cfloat>
 #include <cstddef>
 
 namespace {
@@ -11,7 +12,7 @@ __global__ void softmax32(const float* a, const float* b, float* out, std::size_
     const std::size_t i = start + lane;
     if (i >= n) return;
     const unsigned int valid = static_cast<unsigned int>((n - start) < 32 ? (n - start) : 32);
-    float maximum = -CUDART_INF_F;
+    float maximum = -FLT_MAX;
     for (unsigned int j = 0; j < valid; ++j) {
         const float x = a[start + j] + b[start + j];
         maximum = fmaxf(maximum, x);

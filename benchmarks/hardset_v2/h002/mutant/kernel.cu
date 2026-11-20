@@ -1,6 +1,7 @@
 #include "vector_api.h"
 #include <cuda_runtime.h>
 #include <cmath>
+#include <cfloat>
 #include <cstddef>
 
 namespace {
