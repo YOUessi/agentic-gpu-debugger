@@ -1,0 +1,162 @@
+{
+  "aggregate": {
+    "D": {
+      "model_calls": 6,
+      "strict_fixed": 3,
+      "tokens": 13423,
+      "units": 3
+    },
+    "E": {
+      "model_calls": 15,
+      "strict_fixed": 3,
+      "tokens": 28841,
+      "units": 3
+    }
+  },
+  "benchmark": "HardSet V2 public development, 3 algorithms, 1 attempt each per arm",
+  "comparison": "D fixed probes + LLM diagnosis/repair vs E LLM probes + LLM diagnosis/repair",
+  "estimated_api_cost_usd": null,
+  "provider_model": "deepseek-v4-pro",
+  "schema_version": "hardset-v2-real-deepseek-six-arm-1",
+  "source_sha": "ca01ec6deb02ecade2a23e21ded52552d9409f83",
+  "units": [
+    {
+      "audit_phases": 5,
+      "candidate_attempts": 1,
+      "candidate_sha256": "89086edf97ef6efd25976288a358dd719c931a37ab931f2d48c691c0965fe45a",
+      "case": "h001",
+      "hidden_numeric_checks": 9,
+      "hidden_sanitizers": 4,
+      "matches_frozen_clean_reference_sha": false,
+      "mode": "D",
+      "model_calls": 2,
+      "model_calls_by_kind": {
+        "diagnose": 1,
+        "patch": 1,
+        "plan": 0
+      },
+      "model_total_tokens": 4661,
+      "no_private_runstore_artifacts_in_public": true,
+      "probes": 3,
+      "report_sha256": "2afa6793f4d0b2d8d815337ddab6849e924dc71af736f4ff82a295a5c131658b",
+      "run_id": "6fd739043da84ef3849681cb715225a6",
+      "strict_verified": true,
+      "verdict": "VERIFIED_FIXED"
+    },
+    {
+      "audit_phases": 5,
+      "candidate_attempts": 1,
+      "candidate_sha256": "88dd297b8a0bc53dc3b93b7d1a4678551346b4855d7139b4edaddecef0070ba4",
+      "case": "h001",
+      "hidden_numeric_checks": 9,
+      "hidden_sanitizers": 4,
+      "matches_frozen_clean_reference_sha": true,
+      "mode": "E",
+      "model_calls": 5,
+      "model_calls_by_kind": {
+        "diagnose": 1,
+        "patch": 1,
+        "plan": 3
+      },
+      "model_total_tokens": 9726,
+      "no_private_runstore_artifacts_in_public": true,
+      "probes": 2,
+      "report_sha256": "53377688769f9c3653e23c4e00a4bf34a6d2bb933d46c1a2101d1413821f1fea",
+      "run_id": "771879714e8d4e3f8fba472e463aa8f4",
+      "strict_verified": true,
+      "verdict": "VERIFIED_FIXED"
+    },
+    {
+      "audit_phases": 5,
+      "candidate_attempts": 1,
+      "candidate_sha256": "abf6255def68191772c018477aec90e89f0f068cb7228726e34b855e7835c6c1",
+      "case": "h002",
+      "hidden_numeric_checks": 9,
+      "hidden_sanitizers": 4,
+      "matches_frozen_clean_reference_sha": false,
+      "mode": "D",
+      "model_calls": 2,
+      "model_calls_by_kind": {
+        "diagnose": 1,
+        "patch": 1,
+        "plan": 0
+      },
+      "model_total_tokens": 4273,
+      "no_private_runstore_artifacts_in_public": true,
+      "probes": 3,
+      "report_sha256": "6434901c7244a26d841323863ac598c0ced78d6036b549fa709634b3c95e0828",
+      "run_id": "ab845dc8a31a43608efc9c24dc1acb08",
+      "strict_verified": true,
+      "verdict": "VERIFIED_FIXED"
+    },
+    {
+      "audit_phases": 5,
+      "candidate_attempts": 1,
+      "candidate_sha256": "2a6b46543d50286749e7eb310fa1ed630db93c6d32dd25693c38ca2dc607b567",
+      "case": "h002",
+      "hidden_numeric_checks": 9,
+      "hidden_sanitizers": 4,
+      "matches_frozen_clean_reference_sha": true,
+      "mode": "E",
+      "model_calls": 5,
+      "model_calls_by_kind": {
+        "diagnose": 1,
+        "patch": 1,
+        "plan": 3
+      },
+      "model_total_tokens": 9395,
+      "no_private_runstore_artifacts_in_public": true,
+      "probes": 3,
+      "report_sha256": "a6e48606271445a5588b448dd1d440278c3b28cdfc3a2f4f0ab5ed68c6c3091a",
+      "run_id": "3d46190369bb4aee83548fcb3fd39037",
+      "strict_verified": true,
+      "verdict": "VERIFIED_FIXED"
+    },
+    {
+      "audit_phases": 5,
+      "candidate_attempts": 1,
+      "candidate_sha256": "dd2f7ba2889c6870416f3aabca6bcdf18b16a00fea0cbe1fd1124ea3b17519e4",
+      "case": "h003",
+      "hidden_numeric_checks": 9,
+      "hidden_sanitizers": 4,
+      "matches_frozen_clean_reference_sha": true,
+      "mode": "D",
+      "model_calls": 2,
+      "model_calls_by_kind": {
+        "diagnose": 1,
+        "patch": 1,
+        "plan": 0
+      },
+      "model_total_tokens": 4489,
+      "no_private_runstore_artifacts_in_public": true,
+      "probes": 3,
+      "report_sha256": "e35f0ab30cabf7bdc48da8e5bd3946e6d8c9666e89cf5b76f813b413f5727687",
+      "run_id": "f7d3e224d56844e38801191a7799a1f2",
+      "strict_verified": true,
+      "verdict": "VERIFIED_FIXED"
+    },
+    {
+      "audit_phases": 5,
+      "candidate_attempts": 1,
+      "candidate_sha256": "dd2f7ba2889c6870416f3aabca6bcdf18b16a00fea0cbe1fd1124ea3b17519e4",
+      "case": "h003",
+      "hidden_numeric_checks": 9,
+      "hidden_sanitizers": 4,
+      "matches_frozen_clean_reference_sha": true,
+      "mode": "E",
+      "model_calls": 5,
+      "model_calls_by_kind": {
+        "diagnose": 1,
+        "patch": 1,
+        "plan": 3
+      },
+      "model_total_tokens": 9720,
+      "no_private_runstore_artifacts_in_public": true,
+      "probes": 3,
+      "report_sha256": "161e73ce39203c0648330093bb4d98dc0a9acdbbda93009581734dd62ed66a2a",
+      "run_id": "b87ef4221b264249a07ad87c2ae16105",
+      "strict_verified": true,
+      "verdict": "VERIFIED_FIXED"
+    }
+  ]
+}
