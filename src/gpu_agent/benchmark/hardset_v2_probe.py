@@ -97,6 +97,9 @@ class HardsetFunctionalProbe:
         self._root = root
         self._manifest = manifest
         self._case: HardsetCase = case
+        self._public_source = (
+            root / "hardset_v2" / case.case_id / "mutant" / "kernel.cu"
+        ).read_text(encoding="utf-8")
         self._registry_sha = registry_sha
         self._output = output
         self._max_probes = max_probes
@@ -110,6 +113,17 @@ class HardsetFunctionalProbe:
     @property
     def calls(self) -> int:
         return len(self._seen)
+
+    @property
+    def public_source(self) -> str:
+        return self._public_source
+
+    @property
+    def public_store(self) -> RunStore:
+        """Controller-only handle; never include this object in the model snapshot."""
+        if self._store is None or self._closed:
+            raise ValueError("probe store is not active")
+        return self._store
 
     @property
     def allowed_sizes(self) -> tuple[int, ...]:

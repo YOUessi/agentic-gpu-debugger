@@ -116,6 +116,94 @@ def probe_hardset(
         raise typer.Exit(2) from None
 
 
+@benchmark_app.command("investigate-hardset")
+def investigate_hardset(
+    output: Annotated[Path, typer.Option()],
+    case: Annotated[str, typer.Option("--case")],
+    mode: Annotated[Literal["D", "E"], typer.Option("--mode")] = "D",
+    max_probes: Annotated[int, typer.Option("--max-probes", min=1, max=15)] = 3,
+    max_llm_calls: Annotated[int, typer.Option("--max-llm-calls", min=4, max=40)] = 8,
+    allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    repository: Annotated[Path, typer.Option()] = Path("."),
+) -> None:
+    """D fixed-rule vs E audited-model probes; this does not generate a patch."""
+    import json
+
+    from gpu_agent.agent.models import AgentBudget
+    from gpu_agent.agent.policy import LLMCallGate
+    from gpu_agent.agent.provider import (
+        DevelopmentCallPolicy,
+        OpenAIProviderSettings,
+        OpenAIResponsesProvider,
+    )
+    from gpu_agent.benchmark.hardset_v2 import PUBLIC_REQUIREMENTS
+    from gpu_agent.benchmark.hardset_v2_graph import run_hardset_probe_graph
+    from gpu_agent.benchmark.hardset_v2_probe import HardsetFunctionalProbe
+
+    if case not in PUBLIC_REQUIREMENTS:
+        raise typer.BadParameter("unregistered public HardSet case")
+    if mode == "E" and not allow_paid_calls:
+        raise typer.BadParameter("E requires explicit --allow-paid-calls")
+    if mode == "D" and allow_paid_calls:
+        raise typer.BadParameter("D does not make paid model calls")
+    if mode == "E" and max_llm_calls < max_probes + 3:
+        raise typer.BadParameter("E must reserve enough calls for bounded planning")
+    settings = OpenAIProviderSettings.from_environment() if mode == "E" else None
+    if mode == "E" and (
+        settings is None or not settings.endpoint or not settings.model or settings.api_key is None
+    ):
+        raise typer.BadParameter("explicit configured model and API key required")
+    try:
+        with HardsetFunctionalProbe(repository, output, case, max_probes=max_probes) as probe:
+            planner = None
+            provider = None
+            if mode == "E":
+                assert settings is not None and probe.run_id is not None
+                provider = OpenAIResponsesProvider(
+                    settings,
+                    LLMCallGate(
+                        AgentBudget(
+                            max_llm_calls=max_llm_calls,
+                            max_wall_time_seconds=600,
+                        )
+                    ),
+                    probe.public_store,
+                    probe.run_id,
+                    call_policy=DevelopmentCallPolicy(max_llm_calls=max_llm_calls),
+                )
+                provider.ensure_available()
+                planner = provider.plan_hardset_v2
+            state = run_hardset_probe_graph(
+                probe,
+                case_id=case,
+                mode=mode,
+                max_probes=max_probes,
+                planner=planner,
+                public_source=probe.public_source,
+                functional_requirement=PUBLIC_REQUIREMENTS[case],
+            )
+            physical_calls = len(provider.invocations()) if provider is not None else 0
+        result = {
+            "schema_version": "hardset-v2-research-probe-1",
+            "type": "PUBLIC_INVESTIGATION_NOT_AGENT_REPAIR",
+            "case_id": case,
+            "mode": mode,
+            "max_probes": max_probes,
+            "observations": state["observations"],
+            "model_physical_calls": physical_calls,
+            "found_public_failure": any(obs["outcome"] != "PASS" for obs in state["observations"]),
+            "completion_reason": state["completion_reason"],
+        }
+        (output / "investigation.json").write_text(
+            json.dumps(result, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        typer.echo(f"Investigation: {output / 'investigation.json'}")
+    except (ValueError, OSError) as exc:
+        typer.echo(f"HARDSET_INVESTIGATION_REJECTED: {type(exc).__name__}", err=True)
+        raise typer.Exit(2) from None
+
+
 @benchmark_app.command("verify-hardset")
 def verify_hardset(
     output: Annotated[Path, typer.Option()],

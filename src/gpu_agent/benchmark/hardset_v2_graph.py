@@ -9,10 +9,10 @@ module does not introduce a second, unaudited network/model transport.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Literal, Protocol, TypedDict, cast
+from typing import Annotated, Any, Literal, Protocol, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.benchmark.hardset_v2_probe import (
     FunctionalProbeAction,
@@ -30,11 +30,21 @@ class FinishProbeAction(BaseModel):
 ProbeChoice = FunctionalProbeAction | FinishProbeAction
 
 
+class HardsetProbePlanOutput(BaseModel):
+    """Restricted model-wire shape; no tool arguments except registered size."""
+
+    model_config = ConfigDict(extra="forbid")
+    action: Annotated[ProbeChoice, Field(discriminator="action_type")]
+
+
 class PlannerSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
     case_id: str
     remaining_probes: int
     observations: tuple[FunctionalProbeObservation, ...]
+    public_source: str = Field(default="", max_length=4 * 1024 * 1024)
+    functional_requirement: str = Field(default="", max_length=2000)
+    available_sizes: tuple[int, ...] = ()
 
 
 class ControlledProbe(Protocol):
@@ -70,6 +80,8 @@ def run_hardset_probe_graph(
     mode: ResearchMode,
     max_probes: int = 3,
     planner: Planner | None = None,
+    public_source: str = "",
+    functional_requirement: str = "",
 ) -> ProbeGraphState:
     """Execute bounded shared tool access; no candidate is generated or scored.
 
@@ -105,6 +117,9 @@ def run_hardset_probe_graph(
                 case_id=case_id,
                 remaining_probes=max_probes - len(observations),
                 observations=observations,
+                public_source=public_source,
+                functional_requirement=functional_requirement,
+                available_sizes=probe.allowed_sizes,
             )
             proposed = planner(snapshot)
             # Pydantic typed action is mandatory; a model must not pass a

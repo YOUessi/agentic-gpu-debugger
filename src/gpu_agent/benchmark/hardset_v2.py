@@ -33,6 +33,20 @@ HARDSET_CASES = {
     "h002": "tail-rmsnorm32-v2",
     "h003": "two-stage-group-center32-v2",
 }
+PUBLIC_REQUIREMENTS = {
+    "h001": (
+        "For every consecutive group of at most 32 indices, output the stable "
+        "softmax of a[i] + b[i] across only the valid indices in that group."
+    ),
+    "h002": (
+        "For every consecutive group of at most 32 indices, compute RMSNorm "
+        "on a[i]+b[i] with epsilon 1e-5 and divide by the actual valid group size."
+    ),
+    "h003": (
+        "Two successive CUDA kernels must compute the group mean of a[i]+b[i], "
+        "then output each a[i]+b[i] minus that mean, using only valid indices."
+    ),
+}
 SIZES = (1, 17, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256, 257, 511, 513)
 HARNESS = ("harness/vector_io.cpp", "harness/vector_api.h", "harness/vendor/json.hpp")
 
