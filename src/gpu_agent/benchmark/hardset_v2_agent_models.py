@@ -38,7 +38,7 @@ class HardsetPublicCheck(BaseModel):
     """Untrusted feedback from an actual public candidate GPU execution."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    candidate_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    candidate_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     passed: bool
     failure_code: Literal[
         "PUBLIC_CHECKS_PASSED",
