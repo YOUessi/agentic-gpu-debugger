@@ -49,6 +49,11 @@ __all__ = [
     "LLMProvider",
 ]
 if TYPE_CHECKING:
+    from gpu_agent.benchmark.hardset_v2_agent_models import (
+        HardsetAgentContext,
+        HardsetDiagnosis,
+        HardsetPublicCheck,
+    )
     from gpu_agent.benchmark.hardset_v2_graph import PlannerSnapshot, ProbeChoice
 
 Output = TypeVar("Output", bound=BaseModel)
@@ -509,6 +514,13 @@ def invoke_sdk(
         from gpu_agent.benchmark.hardset_v2_graph import HardsetProbePlanOutput
 
         output_model = HardsetProbePlanOutput
+    elif (
+        request.kind == "diagnose"
+        and request.payload.get("hardset_diagnose_contract") == "hardset-v2"
+    ):
+        from gpu_agent.benchmark.hardset_v2_agent_models import HardsetDiagnosis
+
+        output_model = HardsetDiagnosis
     else:
         output_model = WIRE_MODELS[request.kind]
     metadata: dict[str, object] = {}
@@ -964,6 +976,62 @@ class OpenAIResponsesProvider:
             HardsetProbePlanOutput,
         )
         return output.action
+
+    def diagnose_hardset_v2(self, context: "HardsetAgentContext") -> "HardsetDiagnosis":
+        """Use the bounded worker to diagnose real observed public functional failures."""
+        from gpu_agent.benchmark.hardset_v2_agent_models import HardsetDiagnosis
+
+        actual_ids = {item.evidence_ref_id for item in context.observations}
+        source_lines = len(context.public_source.splitlines())
+
+        def validate(value: HardsetDiagnosis) -> HardsetDiagnosis:
+            if not set(value.cited_public_probe_ids) <= actual_ids or any(
+                line < 1 or line > source_lines for line in value.suspected_lines
+            ):
+                raise ProviderError("LLM_INVALID_OUTPUT", state="FAILED")
+            return value
+
+        return self._call(
+            "diagnose",
+            {
+                "hardset_diagnose_contract": "hardset-v2",
+                "context": context.model_dump(mode="json"),
+            },
+            HardsetDiagnosis,
+            validate,
+        )
+
+    def propose_patch_hardset_v2(
+        self,
+        context: "HardsetAgentContext",
+        diagnosis: "HardsetDiagnosis",
+        public_feedback: list["HardsetPublicCheck"],
+        previous_candidate_hashes: list[str],
+    ) -> str:
+        """Return a source-bound diff; never pass private verifier data to the LLM."""
+
+        def validate(value: PatchOutput) -> PatchOutput:
+            try:
+                diff = normalize_unified_diff_offsets(context.public_source, value.unified_diff)
+                if self._diff_validator is not None:
+                    self._diff_validator(diff)
+            except ValueError as exc:
+                raise _DomainRejected(patch_rejection_code(exc)) from None
+            return value.model_copy(update={"unified_diff": diff})
+
+        result = self._call(
+            "patch",
+            {
+                "hardset_patch_contract": "hardset-v2",
+                "context": context.model_dump(mode="json"),
+                "diagnosis": diagnosis.model_dump(mode="json"),
+                "public_feedback": [item.model_dump(mode="json") for item in public_feedback],
+                "previous_candidate_hashes": previous_candidate_hashes,
+            },
+            PatchOutput,
+            validate,
+        )
+        return result.unified_diff
 
     def diagnose(self, evidence: PublicEvidence) -> DiagnosisResult:
         def validate(value: DiagnosisResult) -> DiagnosisResult:

@@ -204,6 +204,58 @@ def investigate_hardset(
         raise typer.Exit(2) from None
 
 
+@benchmark_app.command("run-hardset-agent")
+def run_hardset_agent(
+    output: Annotated[Path, typer.Option()],
+    case: Annotated[str, typer.Option("--case")],
+    evaluator_secret_file: Annotated[Path, typer.Option("--evaluator-secret-file")],
+    mode: Annotated[Literal["D", "E"], typer.Option("--mode")] = "E",
+    max_probes: Annotated[int, typer.Option("--max-probes", min=1, max=15)] = 3,
+    max_candidates: Annotated[int, typer.Option("--max-candidates", min=1, max=3)] = 3,
+    max_llm_calls: Annotated[int, typer.Option("--max-llm-calls", min=5, max=40)] = 20,
+    allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    repository: Annotated[Path, typer.Option()] = Path("."),
+) -> None:
+    """Real LangGraph CUDA Agent: probe, diagnose, patch, revise, verify."""
+    import stat
+
+    from gpu_agent.agent.models import ProviderError
+    from gpu_agent.benchmark.hardset_v2_agent import run_autonomous_hardset
+    from gpu_agent.store import read_regular
+
+    if not allow_paid_calls:
+        raise typer.BadParameter("actual model diagnosis and patch require --allow-paid-calls")
+    secret_path = evaluator_secret_file.absolute()
+    repository_path = repository.resolve()
+    if secret_path.is_relative_to(repository_path):
+        raise typer.BadParameter("private evaluator key cannot be in source repository")
+    try:
+        info = secret_path.lstat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
+            raise ValueError("evaluator key must be a regular 0600 private file")
+        key = read_regular(secret_path, 4096)
+        result = run_autonomous_hardset(
+            repository,
+            output,
+            case,
+            mode=mode,
+            evaluator_secret=key,
+            max_probes=max_probes,
+            max_candidates=max_candidates,
+            max_llm_calls=max_llm_calls,
+            allow_paid_calls=True,
+        )
+        typer.echo(result.model_dump_json())
+        if not result.verified:
+            raise typer.Exit(1)
+    except ProviderError as exc:
+        typer.echo(f"HARDSET_MODEL_FAILED: {exc.code}", err=True)
+        raise typer.Exit(1) from None
+    except (OSError, ValueError) as exc:
+        typer.echo(f"HARDSET_AGENT_REJECTED: {type(exc).__name__}", err=True)
+        raise typer.Exit(2) from None
+
+
 @benchmark_app.command("verify-hardset")
 def verify_hardset(
     output: Annotated[Path, typer.Option()],

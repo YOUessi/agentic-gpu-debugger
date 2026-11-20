@@ -8,7 +8,6 @@ This is the feedback loop for Agent revisions, *not* the private verifier.
 from __future__ import annotations
 
 import hashlib
-import json
 import tempfile
 from pathlib import Path
 
@@ -75,9 +74,7 @@ def check_candidate_publicly(
             if not backend.availability().ready:
                 raise ValueError("PUBLIC_EXECUTION_UNAVAILABLE")
             handle = backend.prepare(
-                WorkspaceRequest(
-                    run_id=run.id, source_manifest=manifest, trust_level="UNTRUSTED"
-                )
+                WorkspaceRequest(run_id=run.id, source_manifest=manifest, trust_level="UNTRUSTED")
             )
             build = backend.build(BuildRequest(workspace_id=handle.id))
             if not build.success:
@@ -93,9 +90,7 @@ def check_candidate_publicly(
                     payload = sample_input(case_id, size)
                     ref = store.put(run.id, f"hardset/public-input-n{size}.json", payload, "public")
                     execution = backend.run(
-                        ExecutionRequest(
-                            workspace_id=handle.id, stdin_ref=ref, timeout_seconds=120
-                        )
+                        ExecutionRequest(workspace_id=handle.id, stdin_ref=ref, timeout_seconds=120)
                     )
                     if (
                         execution.tool_result.tool_error
@@ -108,9 +103,7 @@ def check_candidate_publicly(
                     if execution.runtime_status != "SUCCESS":
                         failure = ("PROGRAM_FAILED", size)
                         break
-                    if not verify_numeric(
-                        case_id, payload, store.read(execution.output_ref)
-                    ):
+                    if not verify_numeric(case_id, payload, store.read(execution.output_ref)):
                         failure = ("NUMERIC_MISMATCH", size)
                         break
                 if failure is not None:
@@ -125,7 +118,9 @@ def check_candidate_publicly(
                         update={"passed": True, "failure_code": "PUBLIC_CHECKS_PASSED"}
                     )
                     input_data = sample_input(case_id, 65)
-                    ref = store.put(run.id, "hardset/public-sanitizer-input.json", input_data, "public")
+                    ref = store.put(
+                        run.id, "hardset/public-sanitizer-input.json", input_data, "public"
+                    )
                     for tool in SanitizerTool:
                         result = backend.run_sanitizer(
                             SanitizerRequest(
@@ -140,9 +135,7 @@ def check_candidate_publicly(
                             not result.completed
                             or result.check_outcome != "CLEAN"
                             or output_ref is None
-                            or not verify_numeric(
-                                case_id, input_data, store.read(output_ref)
-                            )
+                            or not verify_numeric(case_id, input_data, store.read(output_ref))
                         ):
                             feedback = feedback.model_copy(
                                 update={
