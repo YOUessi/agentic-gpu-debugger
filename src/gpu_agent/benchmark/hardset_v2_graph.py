@@ -9,7 +9,7 @@ module does not introduce a second, unaudited network/model transport.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, Literal, Protocol, TypedDict
+from typing import Any, Literal, Protocol, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, ConfigDict
@@ -139,7 +139,10 @@ def run_hardset_probe_graph(
     )
     graph.add_edge("execute", "plan")
     graph.add_edge("finish", END)
-    return graph.compile().invoke(
-        {"case_id": case_id, "mode": mode, "observations": [], "decision_steps": 0},
-        config={"recursion_limit": (max_probes + 3) * 4},
+    return cast(
+        ProbeGraphState,
+        graph.compile().invoke(
+            {"case_id": case_id, "mode": mode, "observations": [], "decision_steps": 0},
+            config={"recursion_limit": (max_probes + 3) * 4},
+        ),
     )

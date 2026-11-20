@@ -96,7 +96,7 @@ def test_agent_planner_cannot_introduce_new_tool_primitive():
             planner=lambda _: {"action_type": "shell", "command": "cat /tmp/secret"},
         )
     assert fake.calls == 0
-    with pytest.raises(ValueError, match="requires"):
+    with pytest.raises(ValueError, match="required"):
         run_hardset_probe_graph(fake, case_id="h001", mode="E")
     with pytest.raises(ValueError, match="does not accept"):
         run_hardset_probe_graph(

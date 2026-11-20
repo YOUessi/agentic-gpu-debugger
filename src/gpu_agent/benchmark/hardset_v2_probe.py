@@ -157,7 +157,7 @@ class HardsetFunctionalProbe:
                 raise ValueError("registered hardset mutant failed to build")
             self._store.transition(run.id, "RUNNING", "DIAGNOSING")
         except BaseException:
-            self.__exit__(None, None, None, force_failure=True)
+            self._close(failed=True)
             raise
         return self
 
@@ -221,18 +221,10 @@ class HardsetFunctionalProbe:
         )
         return FunctionalProbeObservation.model_validate({**body, "evidence_ref_id": ref.id})
 
-    def __exit__(
-        self,
-        exc_type: object,
-        exc_val: object,
-        exc_tb: object,
-        *,
-        force_failure: bool = False,
-    ) -> None:
+    def _close(self, *, failed: bool) -> None:
         if self._closed:
             return
         self._closed = True
-        failed = bool(exc_type is not None or force_failure)
         if self._backend is not None and self._handle is not None:
             try:
                 self._backend.cleanup(self._handle)
@@ -250,3 +242,6 @@ class HardsetFunctionalProbe:
             run = self._store.load(self.run_id)
             if run.status.value == "RUNNING":
                 self._store.transition(self.run_id, "COMPLETED" if not failed else "FAILED", None)
+
+    def __exit__(self, exc_type: object, exc_val: object, exc_tb: object) -> None:
+        self._close(failed=exc_type is not None)
