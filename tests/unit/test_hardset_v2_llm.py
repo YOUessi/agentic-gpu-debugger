@@ -115,7 +115,8 @@ def test_wire_model_and_trusted_prompt_are_opt_in():
     assert version == HARDSET_V2_PROBE_PROMPT_VERSION
     assert "run_functional_probe" in instructions
     assert "shell" in instructions.lower()
-    assert "ground truth" not in instructions.lower()
+    assert "never request secrets" in instructions.lower()
+    assert "you have no shell" in instructions.lower()
     from openai.lib._pydantic import to_strict_json_schema
 
     schema = to_strict_json_schema(HardsetProbePlanOutput)

@@ -504,6 +504,7 @@ def invoke_sdk(
         ]:
             logging.getLogger(name).disabled = True
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
+    output_model: type[BaseModel]
     if request.kind == "plan" and request.payload.get("hardset_probe_contract") == "hardset-v2":
         from gpu_agent.benchmark.hardset_v2_graph import HardsetProbePlanOutput
 
