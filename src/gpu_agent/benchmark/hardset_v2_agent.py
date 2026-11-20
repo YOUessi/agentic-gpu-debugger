@@ -140,7 +140,7 @@ def run_repair_graph(
 
     def context(state: AgentGraphState) -> HardsetAgentContext:
         return HardsetAgentContext(
-            case_id=case_id,
+            case_id=cast(Literal["h001", "h002", "h003"], case_id),
             source_sha256=source_hash,
             public_source=public_source,
             functional_requirement=functional_requirement,
