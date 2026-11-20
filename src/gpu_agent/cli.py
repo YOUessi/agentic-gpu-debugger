@@ -58,6 +58,25 @@ def validate_diversity(
         raise typer.Exit(1)
 
 
+@benchmark_app.command("validate-hardset")
+def validate_hardset(
+    output: Annotated[Path, typer.Option()],
+    repository: Annotated[Path, typer.Option()] = Path("."),
+    case: Annotated[list[str] | None, typer.Option("--case")] = None,
+) -> None:
+    """Native GPU acceptance of self-authored numerical and multi-kernel faults."""
+    from gpu_agent.benchmark.hardset_v2 import run_hardset
+
+    try:
+        report = run_hardset(repository, output, tuple(case or ()))
+    except (OSError, ValueError) as exc:
+        typer.echo(f"HARDSET_INPUT_INVALID: {exc}", err=True)
+        raise typer.Exit(2) from None
+    typer.echo(f"Native report: {output / 'report.json'}")
+    if not report["passed"]:
+        raise typer.Exit(1)
+
+
 @knowledge_app.command("metadata")
 def knowledge_metadata(
     manifest: Annotated[Path, typer.Option()],

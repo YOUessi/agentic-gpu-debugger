@@ -1,0 +1,33 @@
+{
+  "cases": [
+    {
+      "case_id": "h001",
+      "clean_source_sha256": "add9952b7eae60ed4c70a92b93abf1ea3044f7e047da118e55538cdd90c1fb88",
+      "difficulty": "numerical-stability",
+      "fault_class": "functional_numeric_overflow",
+      "model_visible_reference": false,
+      "mutant_source_sha256": "1449bb0d75f6b39401f88423cacf7d8976d9e9440c039fea1b6c07741e21054e",
+      "oracle_id": "stable-softmax32-v2"
+    },
+    {
+      "case_id": "h002",
+      "clean_source_sha256": "d71f9ce1a826d70879276ff6538cb748cf6c3b8713414ab511245f64c29b492f",
+      "difficulty": "partial-group",
+      "fault_class": "functional_wrong_tail_divisor",
+      "model_visible_reference": false,
+      "mutant_source_sha256": "acf47e41fd916fe32d2424880aba4d56125e1c9c0be82edfcc88c5014b707f76",
+      "oracle_id": "tail-rmsnorm32-v2"
+    },
+    {
+      "case_id": "h003",
+      "clean_source_sha256": "52e9dc3b247026e2c506a846b2d86a814fbcd025072ccc66629dc6e0ce567ad0",
+      "difficulty": "multi-kernel-dataflow",
+      "fault_class": "functional_cross_kernel_dependency",
+      "model_visible_reference": false,
+      "mutant_source_sha256": "d74a3dcdb74c27e12c049e0eda561981dc7a1c7772a1efd225ffa4eb2eccbb21",
+      "oracle_id": "two-stage-group-center32-v2"
+    }
+  ],
+  "schema_version": "hardset-v2-native-1",
+  "status": "NOT_YET_GPU_VALIDATED"
+}

@@ -1,0 +1,41 @@
+name: HardSet V2 native-contract validation
+
+on:
+  pull_request:
+    paths:
+      - "scripts/generate_hardset_v2.py"
+      - "src/gpu_agent/benchmark/hardset_v2.py"
+      - "src/gpu_agent/cli.py"
+      - "tests/unit/test_hardset_v2.py"
+      - "benchmarks/hardset_v2/**"
+      - "docs/research/HARDSET_V2_NATIVE_CN.md"
+      - ".github/workflows/hardset-v2.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  offline-hardset:
+    name: HardSet V2 source hashes, CPU oracles and bounded inputs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install frozen runtime without GPU or API
+        run: |
+          python -m pip install --disable-pip-version-check -r requirements.lock
+          python -m pip install --disable-pip-version-check --no-deps -e .
+      - name: Fixture hash and generator reproducibility
+        run: python scripts/generate_hardset_v2.py --verify
+      - name: Lint, format and test reference semantics
+        run: |
+          python -m ruff check scripts/generate_hardset_v2.py src/gpu_agent/benchmark/hardset_v2.py src/gpu_agent/cli.py tests/unit/test_hardset_v2.py
+          python -m ruff format --check scripts/generate_hardset_v2.py src/gpu_agent/benchmark/hardset_v2.py src/gpu_agent/cli.py tests/unit/test_hardset_v2.py
+          python -m pytest -q tests/unit/test_hardset_v2.py
+      - name: Declare test scope
+        run: echo 'Offline CPU contract only. Not real GPU, Agent repair, hidden evaluation, or release evidence.'
