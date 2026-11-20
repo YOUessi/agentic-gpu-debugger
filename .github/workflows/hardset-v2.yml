@@ -5,10 +5,15 @@ on:
     paths:
       - "scripts/generate_hardset_v2.py"
       - "src/gpu_agent/benchmark/hardset_v2.py"
+      - "src/gpu_agent/benchmark/hardset_v2_probe.py"
+      - "src/gpu_agent/benchmark/hardset_v2_graph.py"
+      - "src/gpu_agent/benchmark/hardset_v2_verifier.py"
       - "src/gpu_agent/cli.py"
       - "tests/unit/test_hardset_v2.py"
+      - "tests/unit/test_hardset_v2_probe.py"
       - "benchmarks/hardset_v2/**"
       - "docs/research/HARDSET_V2_NATIVE_CN.md"
+      - "docs/research/HARDSET_V2_PROBE_AND_STRICT_CN.md"
       - ".github/workflows/hardset-v2.yml"
   workflow_dispatch:
 
@@ -34,8 +39,8 @@ jobs:
         run: python scripts/generate_hardset_v2.py --verify
       - name: Lint, format and test reference semantics
         run: |
-          python -m ruff check scripts/generate_hardset_v2.py src/gpu_agent/benchmark/hardset_v2.py src/gpu_agent/cli.py tests/unit/test_hardset_v2.py
-          python -m ruff format --check scripts/generate_hardset_v2.py src/gpu_agent/benchmark/hardset_v2.py src/gpu_agent/cli.py tests/unit/test_hardset_v2.py
-          python -m pytest -q tests/unit/test_hardset_v2.py
+          python -m ruff check scripts/generate_hardset_v2.py src/gpu_agent/benchmark/hardset_v2.py src/gpu_agent/benchmark/hardset_v2_probe.py src/gpu_agent/benchmark/hardset_v2_graph.py src/gpu_agent/benchmark/hardset_v2_verifier.py src/gpu_agent/cli.py tests/unit/test_hardset_v2.py tests/unit/test_hardset_v2_probe.py
+          python -m ruff format --check scripts/generate_hardset_v2.py src/gpu_agent/benchmark/hardset_v2.py src/gpu_agent/benchmark/hardset_v2_probe.py src/gpu_agent/benchmark/hardset_v2_graph.py src/gpu_agent/benchmark/hardset_v2_verifier.py src/gpu_agent/cli.py tests/unit/test_hardset_v2.py tests/unit/test_hardset_v2_probe.py
+          python -m pytest -q tests/unit/test_hardset_v2.py tests/unit/test_hardset_v2_probe.py
       - name: Declare test scope
         run: echo 'Offline CPU contract only. Not real GPU, Agent repair, hidden evaluation, or release evidence.'

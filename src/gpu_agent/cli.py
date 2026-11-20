@@ -77,6 +77,84 @@ def validate_hardset(
         raise typer.Exit(1)
 
 
+@benchmark_app.command("probe-hardset")
+def probe_hardset(
+    output: Annotated[Path, typer.Option()],
+    case: Annotated[str, typer.Option("--case")],
+    size: Annotated[list[int], typer.Option("--size")],
+    repository: Annotated[Path, typer.Option()] = Path("."),
+) -> None:
+    """Operator-only bounded public functional probes (never hidden evaluation)."""
+    import json
+
+    from gpu_agent.benchmark.hardset_v2_probe import FunctionalProbeAction, HardsetFunctionalProbe
+
+    if not size or len(size) > 15 or len(size) != len(set(size)) or type(case) is not str:
+        raise typer.BadParameter("provide 1-15 unique probe sizes and one registered case")
+    try:
+        with HardsetFunctionalProbe(repository, output, case, max_probes=len(size)) as session:
+            observations = [
+                session.invoke(FunctionalProbeAction(size=n)).model_dump(mode="json") for n in size
+            ]
+        (output / "public-probe-results.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": "hardset-public-probe-cli-v2",
+                    "case_id": case,
+                    "observations": observations,
+                    "type": "PUBLIC_EVIDENCE_NOT_STRICT_VERIFICATION",
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        typer.echo(f"Public probe report: {output / 'public-probe-results.json'}")
+    except (ValueError, OSError) as exc:
+        typer.echo(f"FUNCTIONAL_PROBE_REJECTED: {exc}", err=True)
+        raise typer.Exit(2) from None
+
+
+@benchmark_app.command("verify-hardset")
+def verify_hardset(
+    output: Annotated[Path, typer.Option()],
+    case: Annotated[str, typer.Option("--case")],
+    patch: Annotated[Path, typer.Option("--patch")],
+    evaluator_secret_file: Annotated[Path, typer.Option("--evaluator-secret-file")],
+    repository: Annotated[Path, typer.Option()] = Path("."),
+) -> None:
+    """Operator-only experimental strict evaluator; never exposed to an Agent."""
+    import stat
+
+    from gpu_agent.benchmark.hardset_v2_verifier import run_strict_hardset_verification
+    from gpu_agent.store import read_regular
+
+    try:
+        # Secret must be stored in an operator-controlled, private regular file,
+        # outside the repository and outside any public RunStore.
+        secret = evaluator_secret_file.absolute()
+        if secret.is_symlink() or stat.S_IMODE(secret.stat().st_mode) & 0o077:
+            raise ValueError("secret must be a private regular 0600 file")
+        secret_bytes = read_regular(secret, 4096)
+        diff = read_regular(patch.absolute(), 4 * 1024 * 1024).decode("utf-8")
+        result = run_strict_hardset_verification(
+            repository,
+            output,
+            case_id=case,
+            unified_diff=diff,
+            evaluator_secret=secret_bytes,
+        )
+        # Print only the bounded public projection, never private run IDs, raw
+        # inputs or reference values.
+        typer.echo(result.model_dump_json())
+        if result.verdict != "VERIFIED_FIXED":
+            raise typer.Exit(1)
+    except (ValueError, OSError, UnicodeError) as exc:
+        typer.echo(f"HARDSET_VERIFIER_REJECTED: {type(exc).__name__}", err=True)
+        raise typer.Exit(2) from None
+
+
 @knowledge_app.command("metadata")
 def knowledge_metadata(
     manifest: Annotated[Path, typer.Option()],
