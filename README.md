@@ -1,5 +1,33 @@
 # Agentic GPU Debugger
 
+## 真实 LLM 自主 CUDA 修复 Agent（HardSet V2，2026-11-21 实测）
+
+**在 Tang 的 RTX 4090 Laptop GPU 上，真正的 `deepseek-v4-pro` 已完成 Softmax32、RMSNorm32 和双 Kernel Center 的自主诊断、Patch 生成、真实 CUDA 公开检查和独立隐藏验证，E 模式首轮 **3/3 `VERIFIED_FIXED`**；不是脚本化 FakeProvider。实际执行源码 SHA 为 `ca01ec6deb02ecade2a23e21ded52552d9409f83`。源码可重放验证，但后续仅写文档的提交不能算作新代码的 GPU 成绩。
+
+```bash
+# 要求配置受控模型环境、可用 CUDA/Docker 和独立保管的 evaluator secret
+gpu-agent benchmark run-hardset-agent \
+  --repository "$PWD" --case h001 --mode E \
+  --max-probes 3 --max-candidates 2 --max-llm-calls 15 \
+  --allow-paid-calls \
+  --evaluator-secret-file /operator-private/secret.bin \
+  --output /fresh/path/real-agent-run
+```
+
+**完整 Agent Loop**：LLM 自主选 Probe → 真 GPU 工具 → 引证证据的 LLM 诊断 → LLM 生成受限 `kernel.cu` Diff → GPU 公开功能自检和四种 Sanitizer → 失败反馈后修订（有界）→ 模型循环结束后独立隐藏验证。所有模型真实物理调用有审计和 Token 记录，私有验证不成为模型工具。
+
+| 首次开发集测试 | 修复成功 | 模型物理请求 | 已记录 Tokens |
+|---|---:|---:|---:|
+| 自主规划 E + 真实 LLM 修补 | **3/3** | 15 | 28,841 |
+| 固定规则 D + 同模型修补 | **3/3** | **6** | **13,423** |
+
+**限制：** 仅三道已知公开开发题、每臂每题一次尝试；D 更节省模型费用，因此**不能宣称 Agent 优于规则基线**。HardSet V2 verifier 是实验性版本，未证明跨分布泛化、生产安全或真实美元费用。
+
+[真实 DeepSeek 六单元实验报告](docs/repair-log/2026-11-21-hardset-v2-real-deepseek-six-arm.md) ·
+[原始运行哈希及调用统计 JSON](docs/repair-log/2026-11-21-hardset-v2-real-deepseek-six-arm.json) ·
+[完整 Agent 源码](src/gpu_agent/benchmark/hardset_v2_agent.py) ·
+[验收与实现说明](docs/research/HARDSET_V2_AUTONOMOUS_AGENT_CN.md)
+
 An evidence-grounded CUDA debugging agent: investigate with GPU tools, propose a patch,
 self-check and revise using public evidence, then verify independently.
 
