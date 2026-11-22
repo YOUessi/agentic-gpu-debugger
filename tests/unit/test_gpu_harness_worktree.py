@@ -156,7 +156,6 @@ def test_worktree_rejects_path_traversal_or_special_names() -> None:
             _parts(path)
 
 
-
 def test_integrity_detects_unrelated_tracked_and_staged_changes(tmp_path: Path) -> None:
     source, sha = _repository(tmp_path)
     project = PinnedGitWorkspace(origin=source, root=tmp_path / "run", sha=sha)
