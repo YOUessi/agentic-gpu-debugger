@@ -154,3 +154,42 @@ def test_worktree_rejects_path_traversal_or_special_names() -> None:
     ):
         with pytest.raises(ValueError):
             _parts(path)
+
+
+
+def test_integrity_detects_unrelated_tracked_and_staged_changes(tmp_path: Path) -> None:
+    source, sha = _repository(tmp_path)
+    project = PinnedGitWorkspace(origin=source, root=tmp_path / "run", sha=sha)
+    project.replace_exact("src/kernel.cu", "1.0f", "2.0f")
+    # A verifier mutation may not disappear because the diff only lists edited files.
+    target = project.root / "tests/test_kernel.py"
+    target.write_text("def test_kernel(): assert False\n")
+    with pytest.raises(ValueError, match="unauthorized worktree change"):
+        project.integrity()
+    _git(project.root, "add", "tests/test_kernel.py")
+    with pytest.raises(ValueError, match="unauthorized worktree change"):
+        project.diff()
+    assert "assert True" in (source / "tests/test_kernel.py").read_text()
+
+
+def test_integrity_detects_ignored_or_untracked_new_files(tmp_path: Path) -> None:
+    source, sha = _repository(tmp_path)
+    project = PinnedGitWorkspace(origin=source, root=tmp_path / "run", sha=sha)
+    unexpected = project.root / "src/untracked.cu"
+    unexpected.write_text("void unexpected() {}\n")
+    with pytest.raises(ValueError, match="untracked"):
+        project.list_files()
+    unexpected.unlink()
+    assert "src/kernel.cu" in project.list_files()
+
+
+def test_integrity_detects_external_rewrite_of_approved_source(tmp_path: Path) -> None:
+    source, sha = _repository(tmp_path)
+    project = PinnedGitWorkspace(origin=source, root=tmp_path / "run", sha=sha)
+    project.replace_exact("src/kernel.cu", "1.0f", "2.0f")
+    edited = project.root / "src/kernel.cu"
+    edited.write_text(edited.read_text().replace("2.0f", "9.0f"))
+    with pytest.raises(ValueError, match="outside controller"):
+        project.read("src/kernel.cu")
+    with pytest.raises(ValueError, match="outside controller"):
+        project.replace_exact("src/other.cuh", "return v;", "return 3 * v;")
