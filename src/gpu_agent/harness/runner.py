@@ -108,7 +108,7 @@ def run_tool_agent(
             "decision": decision.model_dump(mode="json"),
         }
 
-    def tool(state: AgentLoopState) -> dict[str, Any]:
+    def tool(state: AgentLoopState) -> AgentLoopState:
         decision = HarnessDecision.model_validate(state["decision"])
         if on_event:
             on_event(
