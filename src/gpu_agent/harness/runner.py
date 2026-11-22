@@ -85,7 +85,7 @@ def run_tool_agent(
             raise ValueError("invalid resumed turn count")
         if len(initial_state.get("history", [])) != previous:
             raise ValueError("resumed history length is inconsistent")
-        start_state = dict(initial_state)
+        start_state = initial_state.copy()
         if start_state.get("reason") == "SESSION_PAUSED":
             start_state["stop"] = False
             start_state["reason"] = "CONTINUE"
@@ -129,7 +129,7 @@ def run_tool_agent(
             "decision": decision.model_dump(mode="json"),
         }
 
-    def tool(state: AgentLoopState) -> dict[str, Any]:
+    def tool(state: AgentLoopState) -> AgentLoopState:
         decision = HarnessDecision.model_validate(state["decision"])
         if on_event:
             on_event(
