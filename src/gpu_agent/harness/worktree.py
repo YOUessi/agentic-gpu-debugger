@@ -252,6 +252,10 @@ class PinnedGitWorkspace:
         for index in range(0, len(values), 2):
             status, name = values[index], values[index + 1]
             if status != "M" or name not in self._edited:
+                # Report unsafe symlink/type substitution accurately, without
+                # allowing it to be mistaken for an approved content edit.
+                if name in self._tracked:
+                    self._checked(name, editable=False)
                 raise ValueError("unauthorized worktree change detected")
             observed.add(name)
         for name in self._edited:
