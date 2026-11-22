@@ -243,7 +243,7 @@ class PinnedGitWorkspace:
             self.root, "diff", "--no-ext-diff", "--no-textconv",
             "--name-status", "-z", "HEAD", "--",
         )
-        values = raw.split("\\x00") if raw else []
+        values = raw.split("\x00") if raw else []
         if values and values[-1] == "":
             values.pop()
         if len(values) % 2:
