@@ -41,8 +41,8 @@ def harness_run(
     case: Annotated[str, typer.Option("--case")],
     goal: Annotated[str, typer.Option("--goal")],
     evaluator_secret_file: Annotated[Path, typer.Option("--evaluator-secret-file")],
-    max_steps: Annotated[int, typer.Option("--max-steps", min=1, max=40)] = 16,
-    max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=4, max=40)] = 24,
+    max_steps: Annotated[int, typer.Option("--max-steps", min=1, max=40)] = 24,
+    max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=4, max=40)] = 32,
     allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
     repository: Annotated[Path, typer.Option()] = Path("."),
 ) -> None:

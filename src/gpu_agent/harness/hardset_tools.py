@@ -103,6 +103,8 @@ class HardsetWorkspaceTools:
         self._checks = 0
         self._events = 0
         self._attempted_hashes: set[str] = set()
+        self._read_cache: set[tuple[str, int, int, str | None]] = set()
+        self._search_cache: set[tuple[str, str | None]] = set()
 
     @property
     def run_id(self) -> str:
@@ -155,6 +157,7 @@ class HardsetWorkspaceTools:
             current_candidate_sha256=self._candidate_hash,
             public_checks_passed=self._public_passed,
             allowed_tools=self.ALLOWED_TOOLS,
+            allowed_probe_sizes=self._probe.allowed_sizes,
             remaining_steps=steps,
             history=tuple(history[-30:]),
         )
@@ -186,6 +189,7 @@ class HardsetWorkspaceTools:
                     "tool": action.tool,
                     "status": result.status,
                     "output_hash": hashlib.sha256(result.content.encode()).hexdigest(),
+                    "public_result_excerpt": result.content[:700],
                     "candidate_sha256": self._candidate_hash,
                     "checks": self._checks,
                 },
@@ -205,6 +209,15 @@ class HardsetWorkspaceTools:
                 "kernel.cu [editable]\nvector_api.h [read-only]\nvector_io.cpp [read-only]",
             )
         if isinstance(action, ReadFile):
+            key = (action.path, action.start_line, action.lines, self._candidate_hash)
+            if key in self._read_cache:
+                return self._observation(
+                    action.tool,
+                    "REJECTED",
+                    "Identical file region was already read; use the earlier observation. "
+                    "Choose an informative new tool (probe, patch or check) instead.",
+                )
+            self._read_cache.add(key)
             lines = self._file_bytes(action.path).decode("utf-8").splitlines()
             start = action.start_line - 1
             selected = lines[start : start + action.lines]
@@ -216,6 +229,14 @@ class HardsetWorkspaceTools:
             )
         if isinstance(action, SearchCode):
             needle = action.needle
+            key = (needle, self._candidate_hash)
+            if key in self._search_cache:
+                return self._observation(
+                    action.tool,
+                    "REJECTED",
+                    "Identical source search already performed; use prior result.",
+                )
+            self._search_cache.add(key)
             lines = self._file_bytes("kernel.cu").decode("utf-8").splitlines()
             hits = [f"{n}: {line}" for n, line in enumerate(lines, 1) if needle in line]
             return self._observation(action.tool, "OK", "\n".join(hits[:20]) or "No matches")

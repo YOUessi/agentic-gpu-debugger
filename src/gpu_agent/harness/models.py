@@ -78,6 +78,7 @@ class SessionSnapshot(StrictModel):
     current_candidate_sha256: str | None = None
     public_checks_passed: bool = False
     allowed_tools: tuple[str, ...]
+    allowed_probe_sizes: tuple[int, ...] = ()
     remaining_steps: int = Field(ge=0)
     history: tuple[dict[str, str], ...] = Field(max_length=30)
 

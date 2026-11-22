@@ -98,7 +98,7 @@ def run_tool_agent(
         entry = {
             "tool": obs.tool,
             "status": obs.status,
-            "content": obs.content[:2000],
+            "content": obs.content[:3900],
         }
         if on_event:
             on_event(
@@ -152,8 +152,8 @@ def run_gpu_coding_harness(
     case_id: str,
     goal: str,
     evaluator_secret: bytes,
-    max_steps: int = 16,
-    max_model_calls: int = 24,
+    max_steps: int = 24,
+    max_model_calls: int = 32,
     max_probes: int = 6,
     max_public_checks: int = 3,
     allow_paid_calls: bool = False,
