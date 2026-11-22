@@ -187,7 +187,7 @@ def run_gpu_coding_harness(
                 LLMCallGate(
                     AgentBudget(
                         max_llm_calls=max_model_calls,
-                        max_wall_time_seconds=1200,
+                        max_wall_time_seconds=600,
                     )
                 ),
                 tools._probe.public_store,
