@@ -49,6 +49,11 @@ class SessionJournal:
         self._sequence = 0
         self._closed = False
 
+    @property
+    def head_sha256(self) -> str:
+        """Last fsynced event hash; used to bind a completed tool checkpoint."""
+        return self._prev_hash
+
     def append(self, kind: EventKind, payload: dict[str, object]) -> str:
         if self._closed:
             raise ValueError("session journal is closed")

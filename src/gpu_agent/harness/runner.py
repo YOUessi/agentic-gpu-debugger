@@ -22,6 +22,7 @@ from gpu_agent.agent.provider import (
     OpenAIResponsesProvider,
 )
 from gpu_agent.benchmark.hardset_v2_verifier import run_strict_hardset_verification
+from gpu_agent.harness.checkpoints import TurnCheckpointStore
 from gpu_agent.harness.hardset_tools import HardsetWorkspaceTools
 from gpu_agent.harness.journal import EventKind, SessionJournal
 from gpu_agent.harness.models import (
@@ -65,6 +66,7 @@ def run_tool_agent(
     goal: str,
     max_steps: int = 16,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    on_checkpoint: Callable[[AgentLoopState], None] | None = None,
 ) -> AgentLoopState:
     """Model chooses all actions; policy gates tool execution and completion."""
     if type(max_steps) is not int or not 1 <= max_steps <= 40:
@@ -152,7 +154,7 @@ def run_tool_agent(
             if done
             else "CONTINUE"
         )
-        return {
+        next_state: AgentLoopState = {
             "history": [*state.get("history", []), entry][-max_steps:],
             "observation": obs.model_dump(mode="json"),
             "stop": done or state["turns"] >= max_steps,
@@ -164,6 +166,11 @@ def run_tool_agent(
                 else "CONTINUE"
             ),
         }
+        if on_checkpoint is not None:
+            # StateGraph emits partial updates; persist a FULL merged state
+            # after the tool_completed journal event, never only a delta.
+            on_checkpoint({**state, **next_state})
+        return next_state
 
     graph = StateGraph(AgentLoopState)
     graph.add_node("model", observe)
@@ -277,9 +284,29 @@ def run_gpu_coding_harness(
                     "public",
                 )
 
-            state = run_tool_agent(
-                model, tools, goal=goal, max_steps=max_steps, on_event=persist_event
-            )
+            with TurnCheckpointStore(
+                output / "turn-checkpoints.sqlite3",
+                base_sha=tools.source_hash,
+                run_id=tools.run_id,
+            ) as checkpoints:
+
+                def checkpoint_completed(state: AgentLoopState) -> None:
+                    checkpoints.save(
+                        state,
+                        journal_sha256=journal.head_sha256,
+                        worktree_diff_sha256=hashlib.sha256(
+                            (tools._candidate_hash or "").encode()
+                        ).hexdigest(),
+                    )
+
+                state = run_tool_agent(
+                    model,
+                    tools,
+                    goal=goal,
+                    max_steps=max_steps,
+                    on_event=persist_event,
+                    on_checkpoint=checkpoint_completed,
+                )
             diff = tools.accepted_diff
             candidate_sha = tools._candidate_hash if diff else None
             run_id = tools.run_id

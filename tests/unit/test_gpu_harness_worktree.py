@@ -139,6 +139,22 @@ def test_worktree_enforces_budget_and_no_overwrite(tmp_path: Path) -> None:
         project.replace_exact("src/other.cuh", "return invalid;", "return v;")
 
 
+def test_workspace_integrity_catches_out_of_band_test_changes(
+    tmp_path: Path,
+) -> None:
+    source, sha = _repository(tmp_path)
+    workspace = PinnedGitWorkspace(origin=source, root=tmp_path / "sandbox", sha=sha)
+    workspace.replace_exact("src/kernel.cu", "1.0f", "2.0f")
+    (workspace.root / "tests/test_kernel.py").write_text("def test_kernel(): assert False\n")
+    with pytest.raises(ValueError, match="worktree drift"):
+        workspace.integrity()
+    (workspace.root / "tests/test_kernel.py").write_text("def test_kernel(): assert True\n")
+    assert workspace.integrity()["edited_files"] == 1
+    (workspace.root / "src/untracked.cu").write_text("int x = 0;\n")
+    with pytest.raises(ValueError, match="untracked"):
+        workspace.diff()
+
+
 def test_worktree_rejects_path_traversal_or_special_names() -> None:
     from gpu_agent.harness.worktree import _parts
 

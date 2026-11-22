@@ -19,6 +19,7 @@ from gpu_agent.agent.provider import (
     OpenAIProviderSettings,
     OpenAIResponsesProvider,
 )
+from gpu_agent.harness.checkpoints import TurnCheckpointStore
 from gpu_agent.harness.journal import EventKind, SessionJournal
 from gpu_agent.harness.models import (
     HarnessDecision,
@@ -26,7 +27,7 @@ from gpu_agent.harness.models import (
     SessionSnapshot,
 )
 from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
-from gpu_agent.harness.runner import run_tool_agent
+from gpu_agent.harness.runner import AgentLoopState, run_tool_agent
 
 
 class RepositoryDecisionModel(Protocol):
@@ -133,13 +134,27 @@ def run_repository_coding_session(
                     "public",
                 )
 
-            state = run_tool_agent(
-                model,
-                tools,
-                goal=goal,
-                max_steps=max_steps,
-                on_event=save_event,
-            )
+            with TurnCheckpointStore(
+                output / "turn-checkpoints.sqlite3",
+                base_sha=base_sha,
+                run_id=tools.run_id,
+            ) as checkpoints:
+
+                def persist_checkpoint(state: AgentLoopState) -> None:
+                    checkpoints.save(
+                        state,
+                        journal_sha256=journal.head_sha256,
+                        worktree_diff_sha256=str(tools.workspace.integrity()["diff_sha256"]),
+                    )
+
+                state = run_tool_agent(
+                    model,
+                    tools,
+                    goal=goal,
+                    max_steps=max_steps,
+                    on_event=save_event,
+                    on_checkpoint=persist_checkpoint,
+                )
             inv = getattr(model, "invocations", None)
             records = inv() if callable(inv) else []
             token_counts = [

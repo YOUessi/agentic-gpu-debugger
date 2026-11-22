@@ -129,6 +129,17 @@ def test_model_directed_multi_file_worktree_and_durable_audit(tmp_path: Path) ->
     assert len(model.snapshots) == 7
     assert model.snapshots[-1].current_candidate_sha256 == report.diff_sha256
 
+    from gpu_agent.harness.checkpoints import read_latest_checkpoint
+
+    checkpoint = read_latest_checkpoint(
+        out / "turn-checkpoints.sqlite3",
+        journal=out / "session-events.jsonl",
+    )
+    assert checkpoint["turn"] == 7
+    assert checkpoint["recovery_disposition"] == "FINISHED"
+    assert checkpoint["automatic_replay_permitted"] is False
+    assert checkpoint["worktree_diff_sha256"] == report.diff_sha256
+
     journal = read_verified_journal(out / "session-events.jsonl")
     assert recovery_disposition(journal) == "FINISHED"
     assert journal[-1]["payload"]["status"] == "DIFF_STAGED_UNVERIFIED"

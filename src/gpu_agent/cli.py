@@ -35,6 +35,29 @@ knowledge_app = typer.Typer(no_args_is_help=True, help="Offline knowledge inspec
 app.add_typer(knowledge_app, name="knowledge")
 
 
+@harness_app.command("inspect-checkpoint")
+def harness_inspect_checkpoint(
+    database: Annotated[Path, typer.Option("--database")],
+    journal: Annotated[Path, typer.Option("--journal")],
+) -> None:
+    """Check a completed tool checkpoint without re-running the tool or LLM."""
+    import json
+
+    from gpu_agent.harness.checkpoints import read_latest_checkpoint
+
+    try:
+        snapshot = read_latest_checkpoint(database, journal=journal)
+        typer.echo(
+            json.dumps(
+                {key: value for key, value in snapshot.items() if key != "state"},
+                sort_keys=True,
+            )
+        )
+    except (OSError, ValueError) as exc:
+        typer.echo(f"INVALID_CHECKPOINT: {type(exc).__name__}", err=True)
+        raise typer.Exit(2) from None
+
+
 @harness_app.command("inspect-session")
 def harness_inspect_session(
     journal: Annotated[Path, typer.Option("--journal")],

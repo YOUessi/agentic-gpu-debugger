@@ -236,6 +236,11 @@ class PinnedGitWorkspace:
 
     def diff(self) -> str:
         paths = self.edited_files
+        changed = frozenset(_run_git(self.root, "diff", "--name-only", "--").splitlines())
+        if changed != frozenset(paths):
+            raise ValueError("worktree drift: unexpected or missing file modifications")
+        if _run_git(self.root, "ls-files", "--others", "--exclude-standard"):
+            raise ValueError("worktree drift: unexpected untracked files")
         if not paths:
             return ""
         _run_git(self.root, "diff", "--check", "--", *paths)
