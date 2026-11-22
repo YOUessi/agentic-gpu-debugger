@@ -154,10 +154,47 @@ class PinnedGitWorkspace:
             raise ValueError("repository has too many tracked files for this harness")
         self._tracked = frozenset(items)
         self._edited: set[str] = set()
+        self._accepted_hashes: dict[str, str] = {}
 
     @property
     def edited_files(self) -> tuple[str, ...]:
         return tuple(sorted(self._edited))
+
+    def _verify_boundary(self) -> None:
+        """Fail closed on ANY unstaged, staged, untracked or post-edit drift.
+
+        A diff limited to the model's edited_files silently misses a separately
+        modified verifier, test or kernel. Validate the entire checkout first.
+        Git output is NUL-delimited: filenames may contain newlines or spaces.
+        """
+        if _run_git(self.root, "rev-parse", "HEAD") != self.base_sha:
+            raise ValueError("worktree HEAD drift detected")
+        if _run_git(self.root, "ls-files", "--others", "-z"):
+            raise ValueError("untracked worktree content detected")
+        raw = _run_git(
+            self.root, "diff", "--no-ext-diff", "--no-textconv",
+            "--name-status", "-z", "HEAD", "--",
+        )
+        values = raw.split("\\x00") if raw else []
+        if values and values[-1] == "":
+            values.pop()
+        if len(values) % 2:
+            raise ValueError("ambiguous Git status output")
+        observed: set[str] = set()
+        for index in range(0, len(values), 2):
+            status, name = values[index], values[index + 1]
+            if status != "M" or name not in self._edited:
+                raise ValueError("unauthorized worktree change detected")
+            observed.add(name)
+        for name in self._edited:
+            expected = self._accepted_hashes.get(name)
+            if expected is None:
+                raise ValueError("edited file is missing controller provenance")
+            actual = hashlib.sha256(
+                read_regular(self._checked(name, editable=True), MAX_SOURCE_BYTES)
+            ).hexdigest()
+            if actual != expected:
+                raise ValueError("edited source changed outside controller")
 
     def _checked(self, name: str, *, editable: bool) -> Path:
         parts = _parts(name)
@@ -183,6 +220,7 @@ class PinnedGitWorkspace:
         return candidate
 
     def list_files(self, *, suffix: str = "", max_files: int = 100) -> tuple[str, ...]:
+        self._verify_boundary()
         if not 1 <= max_files <= 500 or len(suffix) > 20:
             raise ValueError("file listing out of bounds")
         return tuple(
@@ -194,6 +232,7 @@ class PinnedGitWorkspace:
         )[:max_files]
 
     def read(self, name: str, *, start: int = 1, lines: int = 120) -> str:
+        self._verify_boundary()
         if not 1 <= start <= 100_000 or not 1 <= lines <= 200:
             raise ValueError("bounded source read parameters required")
         source = read_regular(self._checked(name, editable=False), MAX_SOURCE_BYTES)
@@ -204,6 +243,7 @@ class PinnedGitWorkspace:
         ]
 
     def replace_exact(self, name: str, before: str, after: str) -> str:
+        self._verify_boundary()
         target = self._checked(name, editable=True)
         if name not in self._edited and len(self._edited) >= self.max_edited_files:
             raise ValueError("workspace modified-file budget exhausted")
@@ -231,10 +271,13 @@ class PinnedGitWorkspace:
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)
+        digest = hashlib.sha256(modified).hexdigest()
         self._edited.add(name)
-        return hashlib.sha256(modified).hexdigest()
+        self._accepted_hashes[name] = digest
+        return digest
 
     def diff(self) -> str:
+        self._verify_boundary()
         paths = self.edited_files
         if not paths:
             return ""
@@ -245,8 +288,7 @@ class PinnedGitWorkspace:
         return value
 
     def integrity(self) -> dict[str, str | int]:
-        if _run_git(self.root, "rev-parse", "HEAD") != self.base_sha:
-            raise ValueError("worktree HEAD drift detected")
+        self._verify_boundary()
         return {
             "base_sha": self.base_sha,
             "edited_files": len(self._edited),
