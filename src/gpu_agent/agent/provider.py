@@ -55,6 +55,7 @@ if TYPE_CHECKING:
         HardsetPublicCheck,
     )
     from gpu_agent.benchmark.hardset_v2_graph import PlannerSnapshot, ProbeChoice
+    from gpu_agent.harness.models import HarnessDecision, SessionSnapshot
 
 Output = TypeVar("Output", bound=BaseModel)
 
@@ -510,7 +511,11 @@ def invoke_sdk(
             logging.getLogger(name).disabled = True
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
     output_model: type[BaseModel]
-    if request.kind == "plan" and request.payload.get("hardset_probe_contract") == "hardset-v2":
+    if request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
+        from gpu_agent.harness.models import HarnessDecision
+
+        output_model = HarnessDecision
+    elif request.kind == "plan" and request.payload.get("hardset_probe_contract") == "hardset-v2":
         from gpu_agent.benchmark.hardset_v2_graph import HardsetProbePlanOutput
 
         output_model = HardsetProbePlanOutput
@@ -962,6 +967,19 @@ class OpenAIResponsesProvider:
             wire_model=PlannerOutput,
             convert=lambda wire: wire.to_action_output(new_id()),
         ).action
+
+    def choose_harness_v1(self, snapshot: "SessionSnapshot") -> "HarnessDecision":
+        """Audited model decision, one tool per turn, without a fixed stage order."""
+        from gpu_agent.harness.models import HarnessDecision
+
+        return self._call(
+            "plan",
+            {
+                "gpu_coding_harness": "v1",
+                "snapshot": snapshot.model_dump(mode="json"),
+            },
+            HarnessDecision,
+        )
 
     def plan_hardset_v2(self, snapshot: "PlannerSnapshot") -> "ProbeChoice":
         """Use the existing budgeted killable worker for a *typed* HardSet action."""

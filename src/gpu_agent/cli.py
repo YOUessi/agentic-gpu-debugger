@@ -29,8 +29,58 @@ benchmark_app = typer.Typer(no_args_is_help=True)
 release_app = typer.Typer(no_args_is_help=True)
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(release_app, name="release")
+harness_app = typer.Typer(no_args_is_help=True, help="Model-directed GPU coding-agent harness.")
+app.add_typer(harness_app, name="harness")
 knowledge_app = typer.Typer(no_args_is_help=True, help="Offline knowledge inspection.")
 app.add_typer(knowledge_app, name="knowledge")
+
+
+@harness_app.command("run")
+def harness_run(
+    output: Annotated[Path, typer.Option()],
+    case: Annotated[str, typer.Option("--case")],
+    goal: Annotated[str, typer.Option("--goal")],
+    evaluator_secret_file: Annotated[Path, typer.Option("--evaluator-secret-file")],
+    max_steps: Annotated[int, typer.Option("--max-steps", min=1, max=40)] = 16,
+    max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=4, max=40)] = 24,
+    allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    repository: Annotated[Path, typer.Option()] = Path("."),
+) -> None:
+    """Real model-driven tool loop on a pinned CUDA workspace."""
+    import stat
+
+    from gpu_agent.agent.models import ProviderError
+    from gpu_agent.harness.runner import run_gpu_coding_harness
+    from gpu_agent.store import read_regular
+
+    if not allow_paid_calls:
+        raise typer.BadParameter("real model requires explicit --allow-paid-calls")
+    secret = evaluator_secret_file.absolute()
+    if secret.is_relative_to(repository.resolve()):
+        raise typer.BadParameter("private evaluator key must be outside the source")
+    try:
+        mode = secret.lstat().st_mode
+        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) & 0o077:
+            raise ValueError("evaluator key must be a regular 0600 file")
+        outcome = run_gpu_coding_harness(
+            repository,
+            output,
+            case_id=case,
+            goal=goal,
+            evaluator_secret=read_regular(secret, 4096),
+            max_steps=max_steps,
+            max_model_calls=max_model_calls,
+            allow_paid_calls=True,
+        )
+        typer.echo(outcome.model_dump_json())
+        if outcome.status != "VERIFIED_FIXED":
+            raise typer.Exit(1)
+    except ProviderError as exc:
+        typer.echo(f"HARNESS_MODEL_FAILURE: {exc.code}", err=True)
+        raise typer.Exit(1) from None
+    except (OSError, ValueError) as exc:
+        typer.echo(f"HARNESS_REJECTED: {type(exc).__name__}", err=True)
+        raise typer.Exit(2) from None
 
 
 @benchmark_app.command("validate-diversity")
