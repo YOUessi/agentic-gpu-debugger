@@ -75,6 +75,10 @@ def harness_repo_run(
     max_steps: Annotated[int, typer.Option("--max-steps", min=1, max=38)] = 18,
     max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=4, max=40)] = 24,
     allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    resume: Annotated[bool, typer.Option("--resume")] = False,
+    pause_after_turns: Annotated[
+        int | None, typer.Option("--pause-after-turns", min=1, max=37)
+    ] = None,
 ) -> None:
     """Model-directed, multi-file editing in an isolated Git worktree.
 
@@ -95,9 +99,11 @@ def harness_repo_run(
             max_steps=max_steps,
             max_model_calls=max_model_calls,
             allow_paid_calls=True,
+            resume=resume,
+            pause_after_turns=pause_after_turns,
         )
         typer.echo(result.model_dump_json())
-        if result.status != "DIFF_STAGED_UNVERIFIED":
+        if result.status not in {"DIFF_STAGED_UNVERIFIED", "PAUSED_RESUMABLE"}:
             raise typer.Exit(1)
     except ProviderError as exc:
         typer.echo(f"REPOSITORY_AGENT_MODEL_FAILED: {exc.code}", err=True)
