@@ -29,6 +29,10 @@ TOOL_REGISTRY: tuple[ToolDescriptor, ...] = (
     ToolDescriptor("replace_snippet", "edit", "Make an exact, uniquely matched source edit"),
     ToolDescriptor("run_public_checks", "gpu", "Build and check the staged CUDA candidate"),
     ToolDescriptor("finish", "finish", "Finish only after public checks pass"),
+    ToolDescriptor("repo_list_files", "read", "List frozen Git worktree files"),
+    ToolDescriptor("repo_read_file", "read", "Read an allowed Git worktree file"),
+    ToolDescriptor("repo_replace_snippet", "edit", "Exact edit of allowed source file"),
+    ToolDescriptor("repo_git_diff", "read", "Inspect bounded Git changes"),
 )
 _NAMES = {tool.name: tool for tool in TOOL_REGISTRY}
 

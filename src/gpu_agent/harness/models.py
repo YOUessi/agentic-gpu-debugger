@@ -52,6 +52,29 @@ class RunPublicChecks(StrictModel):
     tool: Literal["run_public_checks"] = "run_public_checks"
 
 
+class RepoListFiles(StrictModel):
+    tool: Literal["repo_list_files"] = "repo_list_files"
+    suffix: str = Field(default="", max_length=20)
+
+
+class RepoReadFile(StrictModel):
+    tool: Literal["repo_read_file"] = "repo_read_file"
+    path: str = Field(min_length=1, max_length=300)
+    start_line: int = Field(default=1, ge=1, le=100_000)
+    lines: int = Field(default=120, ge=1, le=200)
+
+
+class RepoReplaceSnippet(StrictModel):
+    tool: Literal["repo_replace_snippet"] = "repo_replace_snippet"
+    path: str = Field(min_length=1, max_length=300)
+    old_text: str = Field(min_length=1, max_length=4000)
+    new_text: str = Field(max_length=4000)
+
+
+class RepoGitDiff(StrictModel):
+    tool: Literal["repo_git_diff"] = "repo_git_diff"
+
+
 class FinishTask(StrictModel):
     tool: Literal["finish"] = "finish"
     summary: str = Field(min_length=5, max_length=700)
@@ -65,6 +88,10 @@ HarnessAction = Annotated[
     | ApplyPatch
     | ReplaceSnippet
     | RunPublicChecks
+    | RepoListFiles
+    | RepoReadFile
+    | RepoReplaceSnippet
+    | RepoGitDiff
     | FinishTask,
     Field(discriminator="tool"),
 ]
@@ -86,9 +113,10 @@ class ToolObservation(StrictModel):
 
 class SessionSnapshot(StrictModel):
     goal: str = Field(min_length=3, max_length=1500)
-    case_id: Literal["h001", "h002", "h003"]
+    case_id: str = Field(min_length=1, max_length=80)
     source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     functional_requirement: str = Field(min_length=5, max_length=2000)
+    base_git_commit: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
     current_candidate_sha256: str | None = None
     public_checks_passed: bool = False
     allowed_tools: tuple[str, ...]
@@ -99,6 +127,20 @@ class SessionSnapshot(StrictModel):
     context_summary: str = Field(default="", max_length=2800)
     total_public_actions: int = Field(default=0, ge=0)
     remaining_public_checks: int = Field(default=3, ge=0)
+
+
+class RepoHarnessOutcome(StrictModel):
+    schema_version: Literal["gpu-repository-harness-v1"] = "gpu-repository-harness-v1"
+    status: Literal["DIFF_STAGED_UNVERIFIED", "INCONCLUSIVE"]
+    base_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
+    diff_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    edited_files: tuple[str, ...]
+    turns: int = Field(ge=0, le=40)
+    tool_calls: int = Field(ge=0)
+    model_calls: int = Field(ge=0)
+    model_tokens: int | None = Field(default=None, ge=0)
+    reason: str = Field(max_length=200)
+    public_run_id: str
 
 
 class HarnessOutcome(StrictModel):

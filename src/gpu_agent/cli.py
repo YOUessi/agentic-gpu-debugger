@@ -66,6 +66,50 @@ def harness_inspect_session(
         raise typer.Exit(2) from None
 
 
+@harness_app.command("repo-run")
+def harness_repo_run(
+    output: Annotated[Path, typer.Option()],
+    goal: Annotated[str, typer.Option("--goal")],
+    base_sha: Annotated[str, typer.Option("--base-sha")],
+    repository: Annotated[Path, typer.Option()] = Path("."),
+    max_steps: Annotated[int, typer.Option("--max-steps", min=1, max=38)] = 18,
+    max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=4, max=40)] = 24,
+    allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+) -> None:
+    """Model-directed, multi-file editing in an isolated Git worktree.
+
+    The output is staged and explicitly UNVERIFIED: no host shell, tests or
+    evaluator are available in the repository editing tool collection.
+    """
+    from gpu_agent.agent.models import ProviderError
+    from gpu_agent.harness.repo_runner import run_repository_coding_session
+
+    if not allow_paid_calls:
+        raise typer.BadParameter("real LLM use requires --allow-paid-calls")
+    try:
+        result = run_repository_coding_session(
+            repository=repository,
+            output=output,
+            base_sha=base_sha,
+            goal=goal,
+            max_steps=max_steps,
+            max_model_calls=max_model_calls,
+            allow_paid_calls=True,
+        )
+        typer.echo(result.model_dump_json())
+        if result.status != "DIFF_STAGED_UNVERIFIED":
+            raise typer.Exit(1)
+    except ProviderError as exc:
+        typer.echo(f"REPOSITORY_AGENT_MODEL_FAILED: {exc.code}", err=True)
+        raise typer.Exit(1) from None
+    except (OSError, ValueError) as exc:
+        typer.echo(
+            f"REPOSITORY_AGENT_REJECTED: {type(exc).__name__}",
+            err=True,
+        )
+        raise typer.Exit(2) from None
+
+
 @harness_app.command("run")
 def harness_run(
     output: Annotated[Path, typer.Option()],

@@ -511,7 +511,10 @@ def invoke_sdk(
             logging.getLogger(name).disabled = True
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
     output_model: type[BaseModel]
-    if request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
+    if request.kind == "plan" and (
+        request.payload.get("gpu_coding_harness") == "v1"
+        or request.payload.get("gpu_repo_harness") == "v1"
+    ):
         from gpu_agent.harness.models import HarnessDecision
 
         output_model = HarnessDecision
@@ -972,10 +975,15 @@ class OpenAIResponsesProvider:
         """Audited model decision, one tool per turn, without a fixed stage order."""
         from gpu_agent.harness.models import HarnessDecision
 
+        marker = (
+            {"gpu_repo_harness": "v1"}
+            if snapshot.case_id == "repository"
+            else {"gpu_coding_harness": "v1"}
+        )
         return self._call(
             "plan",
             {
-                "gpu_coding_harness": "v1",
+                **marker,
                 "snapshot": snapshot.model_dump(mode="json"),
             },
             HarnessDecision,

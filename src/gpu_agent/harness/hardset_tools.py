@@ -35,7 +35,7 @@ from gpu_agent.harness.models import (
     SessionSnapshot,
     ToolObservation,
 )
-from gpu_agent.harness.registry import ToolPermissionPolicy, registered_tool_names
+from gpu_agent.harness.registry import ToolPermissionPolicy
 from gpu_agent.patching import (
     SourceSnapshot,
     apply_generated_candidate,
@@ -47,7 +47,16 @@ from gpu_agent.store import RunStore, read_regular, reject_symlinks
 class HardsetWorkspaceTools:
     """Typed tool adapter over the existing verified GPU/RunStore implementation."""
 
-    ALLOWED_TOOLS = registered_tool_names()
+    ALLOWED_TOOLS = (
+        "list_files",
+        "read_file",
+        "search_code",
+        "functional_probe",
+        "apply_patch",
+        "replace_snippet",
+        "run_public_checks",
+        "finish",
+    )
 
     def __init__(
         self,
@@ -158,7 +167,9 @@ class HardsetWorkspaceTools:
             functional_requirement=self.functional_requirement,
             current_candidate_sha256=self._candidate_hash,
             public_checks_passed=self._public_passed,
-            allowed_tools=self.permission_policy.available_tools,
+            allowed_tools=tuple(
+                name for name in self.ALLOWED_TOOLS if self.permission_policy.check(name) == "ALLOW"
+            ),
             allowed_probe_sizes=self._probe.allowed_sizes,
             remaining_steps=steps,
             remaining_public_checks=max(0, self.max_checks - self._checks),

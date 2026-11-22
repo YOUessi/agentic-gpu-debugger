@@ -1,0 +1,181 @@
+"""Model-directed multi-file Git coding session with no untrusted host shell.
+
+This runner stages code edits for review; it intentionally never claims that
+staged changes passed CUDA execution or independent hidden verification.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any, Protocol
+
+from gpu_agent.agent.models import AgentBudget
+from gpu_agent.agent.policy import LLMCallGate
+from gpu_agent.agent.provider import (
+    DevelopmentCallPolicy,
+    OpenAIProviderSettings,
+    OpenAIResponsesProvider,
+)
+from gpu_agent.harness.journal import EventKind, SessionJournal
+from gpu_agent.harness.models import (
+    HarnessDecision,
+    RepoHarnessOutcome,
+    SessionSnapshot,
+)
+from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
+from gpu_agent.harness.runner import run_tool_agent
+
+
+class RepositoryDecisionModel(Protocol):
+    def choose_harness_v1(self, snapshot: SessionSnapshot) -> HarnessDecision: ...
+
+
+def run_repository_coding_session(
+    *,
+    repository: Path,
+    output: Path,
+    base_sha: str,
+    goal: str,
+    max_steps: int = 18,
+    max_model_calls: int = 24,
+    max_edited_files: int = 8,
+    allow_paid_calls: bool = False,
+    model_factory: (Callable[[RepositoryWorkspaceTools], RepositoryDecisionModel] | None) = None,
+) -> RepoHarnessOutcome:
+    """Execute a real Agent loop and stage independent Git worktree modifications.
+
+    No code execution, host Shell or private verifier is part of this adapter.
+    Physical model calls use the same killable SDK worker and on-disk audit as
+    the CUDA single-file Harness.
+    """
+    if model_factory is None and not allow_paid_calls:
+        raise ValueError("real model use requires explicit allow_paid_calls")
+    if not 1 <= max_steps <= 38 or not max_steps + 2 <= max_model_calls <= 40:
+        raise ValueError("model calls must exceed step budget, within operator cap")
+    if not goal.strip() or len(goal) > 1500:
+        raise ValueError("invalid task goal")
+    if output.exists() or output.is_symlink():
+        raise ValueError("workspace output cannot overwrite existing evidence")
+
+    with RepositoryWorkspaceTools(
+        origin=repository,
+        output=output,
+        sha=base_sha,
+        max_edited_files=max_edited_files,
+    ) as tools:
+        if model_factory is None:
+            provider = OpenAIResponsesProvider(
+                OpenAIProviderSettings.from_environment(),
+                LLMCallGate(
+                    AgentBudget(
+                        max_llm_calls=max_model_calls,
+                        max_wall_time_seconds=600,
+                    )
+                ),
+                tools.store,
+                tools.run_id,
+                call_policy=DevelopmentCallPolicy(max_llm_calls=max_model_calls),
+            )
+            provider.ensure_available()
+            model: RepositoryDecisionModel = provider
+        else:
+            model = model_factory(tools)
+        journal = SessionJournal(output / "session-events.jsonl")
+        try:
+            journal.append(
+                "session_started",
+                {
+                    "base_git_commit": base_sha,
+                    "public_run_id": tools.run_id,
+                    "goal_sha256": hashlib.sha256(goal.encode()).hexdigest(),
+                },
+            )
+            events = 0
+
+            def save_event(event: dict[str, Any]) -> None:
+                nonlocal events
+                events += 1
+                stage = str(event.get("stage", ""))
+                kinds: dict[str, EventKind] = {
+                    "model_started": "model_started",
+                    "model": "model_selected",
+                    "tool_started": "tool_started",
+                    "tool": "tool_completed",
+                }
+                kind = kinds.get(stage)
+                if kind:
+                    journal.append(
+                        kind,
+                        {
+                            "turn": event.get("turn", 0),
+                            "tool": str(event.get("tool", ""))[:64],
+                            "status": str(event.get("status", ""))[:24],
+                        },
+                    )
+                tools.store.put(
+                    tools.run_id,
+                    f"repo-harness/v1/trace-{events:03d}.json",
+                    json.dumps(
+                        {
+                            "turn": event.get("turn", 0),
+                            "stage": stage,
+                            "tool": event.get("tool", ""),
+                            "status": event.get("status", ""),
+                            "record_sha256": hashlib.sha256(
+                                json.dumps(event, sort_keys=True).encode()
+                            ).hexdigest(),
+                        },
+                        sort_keys=True,
+                    ).encode(),
+                    "public",
+                )
+
+            state = run_tool_agent(
+                model,
+                tools,
+                goal=goal,
+                max_steps=max_steps,
+                on_event=save_event,
+            )
+            inv = getattr(model, "invocations", None)
+            records = inv() if callable(inv) else []
+            token_counts = [
+                item.usage.total_tokens
+                for item in records
+                if item.usage is not None and item.usage.total_tokens is not None
+            ]
+            tokens = sum(token_counts) if len(token_counts) == len(records) else None
+            integrity = tools.workspace.integrity()
+            succeeded = state.get("reason") == "WORKSPACE_DIFF_STAGED_UNVERIFIED"
+            outcome = RepoHarnessOutcome(
+                status="DIFF_STAGED_UNVERIFIED" if succeeded else "INCONCLUSIVE",
+                base_sha=base_sha,
+                diff_sha256=str(integrity["diff_sha256"]),
+                edited_files=tools.workspace.edited_files,
+                turns=state.get("turns", 0),
+                tool_calls=tools.tool_calls,
+                model_calls=len(records),
+                model_tokens=tokens,
+                reason=state.get("reason", "UNKNOWN"),
+                public_run_id=tools.run_id,
+            )
+            (output / "result.json").write_text(
+                outcome.model_dump_json(indent=2) + "\n", encoding="utf-8"
+            )
+            journal.append(
+                "session_finished",
+                {
+                    "status": outcome.status,
+                    "edited_files": len(outcome.edited_files),
+                    "diff_sha256": outcome.diff_sha256,
+                },
+            )
+            return outcome
+        except Exception as exc:
+            journal.append("session_failed", {"error_type": type(exc).__name__})
+            raise
+        finally:
+            journal.close()

@@ -147,12 +147,17 @@ def run_tool_agent(
                 }
             )
         done = isinstance(decision.action, FinishTask) and obs.status == "OK"
+        completion_reason = (
+            str(getattr(host, "completion_reason", "PUBLIC_CANDIDATE_ACCEPTED"))
+            if done
+            else "CONTINUE"
+        )
         return {
             "history": [*state.get("history", []), entry][-max_steps:],
             "observation": obs.model_dump(mode="json"),
             "stop": done or state["turns"] >= max_steps,
             "reason": (
-                "PUBLIC_CANDIDATE_ACCEPTED"
+                completion_reason
                 if done
                 else "STEP_BUDGET_EXHAUSTED"
                 if state["turns"] >= max_steps
