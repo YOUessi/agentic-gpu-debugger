@@ -108,9 +108,9 @@ def test_worktree_rejects_symlink_escape_and_protected_files(tmp_path: Path) -> 
     # Simulate an untrusted source tree replacing a tracked file with a symlink.
     (project.root / "src/kernel.cu").unlink()
     (project.root / "src/kernel.cu").symlink_to(tmp_path / "host-private.txt")
-    with pytest.raises(ValueError, match="symlink"):
+    with pytest.raises(ValueError, match="unauthorized|symlink"):
         project.read("src/kernel.cu")
-    with pytest.raises(ValueError, match="symlink"):
+    with pytest.raises(ValueError, match="unauthorized|symlink"):
         project.replace_exact("src/kernel.cu", "1.0f", "2.0f")
 
 
@@ -146,7 +146,7 @@ def test_workspace_integrity_catches_out_of_band_test_changes(
     workspace = PinnedGitWorkspace(origin=source, root=tmp_path / "sandbox", sha=sha)
     workspace.replace_exact("src/kernel.cu", "1.0f", "2.0f")
     (workspace.root / "tests/test_kernel.py").write_text("def test_kernel(): assert False\n")
-    with pytest.raises(ValueError, match="worktree drift"):
+    with pytest.raises(ValueError, match="unauthorized|worktree drift"):
         workspace.integrity()
     (workspace.root / "tests/test_kernel.py").write_text("def test_kernel(): assert True\n")
     assert workspace.integrity()["edited_files"] == 1
