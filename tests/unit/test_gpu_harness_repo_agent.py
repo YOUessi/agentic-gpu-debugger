@@ -6,6 +6,7 @@ import hashlib
 import subprocess
 from pathlib import Path
 
+import pytest
 from pydantic import SecretStr
 
 from gpu_agent.agent.models import AgentBudget
@@ -16,7 +17,7 @@ from gpu_agent.agent.provider import (
     OpenAIResponsesProvider,
     SDKResult,
 )
-from gpu_agent.harness.journal import read_verified_journal, recovery_disposition
+from gpu_agent.harness.journal import SessionJournal, read_verified_journal, recovery_disposition
 from gpu_agent.harness.models import HarnessDecision, RepoReadFile
 from gpu_agent.harness.registry import ToolPermissionPolicy
 from gpu_agent.harness.repo_runner import run_repository_coding_session
@@ -214,3 +215,121 @@ def test_repo_harness_model_wire_uses_distinct_versioned_prompt(tmp_path: Path) 
     assert calls[0].payload["gpu_repo_harness"] == "v1"
     assert calls[0].kind == "plan"
     assert provider.invocations()[0].prompt_version == GPU_REPOSITORY_HARNESS_PROMPT_VERSION
+
+
+
+def _pause_session(tmp_path: Path) -> tuple[Path, str, Path]:
+    repository, sha = _repo(tmp_path)
+    output = tmp_path / "resumable"
+    report = run_repository_coding_session(
+        repository=repository,
+        output=output,
+        base_sha=sha,
+        goal="Edit the CUDA kernel and helper without altering tests",
+        max_steps=9,
+        max_model_calls=12,
+        pause_after_turns=3,
+        model_factory=lambda _: ScriptedLLM(),
+    )
+    assert report.status == "PAUSED_RESUMABLE"
+    assert report.turns == report.tool_calls == 3
+    assert not (output / "result.json").exists()
+    assert (output / "session-checkpoint.json").exists()
+    assert recovery_disposition(read_verified_journal(output / "session-events.jsonl")) == (
+        "QUIESCENT_INSPECTION_ONLY"
+    )
+    return repository, sha, output
+
+
+def test_repository_agent_pause_resume_preserves_budget_and_exactly_once_actions(
+    tmp_path: Path,
+) -> None:
+    repository, sha, output = _pause_session(tmp_path)
+    assert RunStore(output / "public").load(
+        read_verified_journal(output / "session-events.jsonl")[0]["payload"]["public_run_id"]
+    ).status == "RUNNING"
+    model = ScriptedLLM()
+    model.position = 3  # Simulate a new model that continues from saved observations.
+    final = run_repository_coding_session(
+        repository=repository,
+        output=output,
+        base_sha=sha,
+        goal="Edit the CUDA kernel and helper without altering tests",
+        max_steps=9,
+        max_model_calls=12,
+        resume=True,
+        model_factory=lambda _: model,
+    )
+    assert final.status == "DIFF_STAGED_UNVERIFIED"
+    assert final.turns == final.tool_calls == 7
+    assert final.edited_files == ("src/helper.cuh", "src/kernel.cu")
+    assert len(model.snapshots) == 4
+    assert model.snapshots[0].total_public_actions == 3
+    assert final.model_calls == 0
+    events = read_verified_journal(output / "session-events.jsonl")
+    assert recovery_disposition(events) == "FINISHED"
+    assert sum(item["kind"] == "session_resumed" for item in events) == 1
+    assert sum(item["kind"] == "tool_completed" for item in events) == 7
+    assert "2.0f" in (output / "worktree/src/kernel.cu").read_text()
+    assert "1.0f" in (repository / "src/kernel.cu").read_text()
+    assert (output / "result.json").exists()
+    assert RunStore(output / "public").load(final.public_run_id).status == "COMPLETED"
+
+
+def test_resume_rejects_tampered_source_or_mismatched_budget(tmp_path: Path) -> None:
+    repository, sha, output = _pause_session(tmp_path)
+    kwargs = {
+        "repository": repository,
+        "output": output,
+        "base_sha": sha,
+        "goal": "Edit the CUDA kernel and helper without altering tests",
+        "max_steps": 9,
+        "max_model_calls": 12,
+        "resume": True,
+        "model_factory": lambda _: ScriptedLLM(),
+    }
+    with pytest.raises(ValueError, match="budgets differ"):
+        run_repository_coding_session(**{**kwargs, "max_steps": 8})
+    (output / "worktree/src/kernel.cu").write_text("float x = 9.0f;\n")
+    with pytest.raises(ValueError, match="outside controller"):
+        run_repository_coding_session(**kwargs)
+
+
+def test_resume_rejects_unknown_inflight_external_action(tmp_path: Path) -> None:
+    repository, sha, output = _pause_session(tmp_path)
+    journal_path = output / "session-events.jsonl"
+    before = read_verified_journal(journal_path)
+    with SessionJournal.reopen(journal_path, expected_head=before[-1]["sha256"]) as journal:
+        journal.append("tool_started", {"turn": 4, "tool": "repo_replace_snippet"})
+    assert "UNCERTAIN" in recovery_disposition(read_verified_journal(journal_path))
+    with pytest.raises(ValueError, match="completed tool boundary"):
+        run_repository_coding_session(
+            repository=repository,
+            output=output,
+            base_sha=sha,
+            goal="Edit the CUDA kernel and helper without altering tests",
+            max_steps=9,
+            max_model_calls=12,
+            resume=True,
+            model_factory=lambda _: ScriptedLLM(),
+        )
+
+
+def test_resume_rejects_checkpoint_journal_mismatch(tmp_path: Path) -> None:
+    repository, sha, output = _pause_session(tmp_path)
+    # Even a legitimate append after the checkpoint must be reconciled.
+    journal_path = output / "session-events.jsonl"
+    previous = read_verified_journal(journal_path)
+    with SessionJournal.reopen(journal_path, expected_head=previous[-1]["sha256"]) as journal:
+        journal.append("session_resumed", {"previous_turns": 3})
+    with pytest.raises(ValueError, match="completed tool boundary"):
+        run_repository_coding_session(
+            repository=repository,
+            output=output,
+            base_sha=sha,
+            goal="Edit the CUDA kernel and helper without altering tests",
+            max_steps=9,
+            max_model_calls=12,
+            resume=True,
+            model_factory=lambda _: ScriptedLLM(),
+        )
