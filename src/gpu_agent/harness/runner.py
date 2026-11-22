@@ -65,12 +65,35 @@ def run_tool_agent(
     goal: str,
     max_steps: int = 16,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    on_checkpoint: Callable[[AgentLoopState], None] | None = None,
+    initial_state: AgentLoopState | None = None,
+    pause_after_turns: int | None = None,
 ) -> AgentLoopState:
     """Model chooses all actions; policy gates tool execution and completion."""
     if type(max_steps) is not int or not 1 <= max_steps <= 40:
         raise ValueError("agent step budget must be between 1 and 40")
     if not goal or len(goal) > 1500:
         raise ValueError("invalid goal")
+    if pause_after_turns is not None and (
+        type(pause_after_turns) is not int or not 1 <= pause_after_turns < max_steps
+    ):
+        raise ValueError("pause boundary must precede total step budget")
+    start_state: AgentLoopState = {"history": [], "turns": 0, "stop": False}
+    if initial_state is not None:
+        previous = initial_state.get("turns", -1)
+        if type(previous) is not int or not 1 <= previous <= max_steps:
+            raise ValueError("invalid resumed turn count")
+        if len(initial_state.get("history", [])) != previous:
+            raise ValueError("resumed history length is inconsistent")
+        start_state = dict(initial_state)
+        if start_state.get("reason") == "SESSION_PAUSED":
+            start_state["stop"] = False
+            start_state["reason"] = "CONTINUE"
+        elif start_state.get("stop"):
+            # A successful finish is never executed twice after a crash.
+            return initial_state
+        if previous == max_steps:
+            raise ValueError("cannot exceed the persisted total step budget")
 
     def observe(state: AgentLoopState) -> dict[str, Any]:
         n = state.get("turns", 0)
@@ -152,18 +175,29 @@ def run_tool_agent(
             if done
             else "CONTINUE"
         )
-        return {
+        paused = (
+            not done
+            and pause_after_turns is not None
+            and state["turns"] >= pause_after_turns
+            and state["turns"] < max_steps
+        )
+        update: AgentLoopState = {
             "history": [*state.get("history", []), entry][-max_steps:],
             "observation": obs.model_dump(mode="json"),
-            "stop": done or state["turns"] >= max_steps,
+            "stop": done or paused or state["turns"] >= max_steps,
             "reason": (
                 completion_reason
                 if done
                 else "STEP_BUDGET_EXHAUSTED"
                 if state["turns"] >= max_steps
+                else "SESSION_PAUSED"
+                if paused
                 else "CONTINUE"
             ),
         }
+        if on_checkpoint is not None:
+            on_checkpoint({**state, **update})
+        return update
 
     graph = StateGraph(AgentLoopState)
     graph.add_node("model", observe)
@@ -178,7 +212,7 @@ def run_tool_agent(
     return cast(
         AgentLoopState,
         graph.compile().invoke(
-            {"history": [], "turns": 0, "stop": False},
+            start_state,
             config={"recursion_limit": max_steps * 3 + 12},
         ),
     )
