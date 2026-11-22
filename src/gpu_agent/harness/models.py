@@ -131,7 +131,7 @@ class SessionSnapshot(StrictModel):
 
 class RepoHarnessOutcome(StrictModel):
     schema_version: Literal["gpu-repository-harness-v1"] = "gpu-repository-harness-v1"
-    status: Literal["DIFF_STAGED_UNVERIFIED", "INCONCLUSIVE"]
+    status: Literal["DIFF_STAGED_UNVERIFIED", "INCONCLUSIVE", "PAUSED_RESUMABLE"]
     base_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
     diff_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     edited_files: tuple[str, ...]
