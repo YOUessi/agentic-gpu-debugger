@@ -145,7 +145,7 @@ def test_hardset_host_has_no_unrestricted_fs_or_terminal_capability(tmp_path):
     assert "run_command" not in host.ALLOWED_TOOLS
     with pytest.raises(ValueError, match="read permission denied"):
         host._file_bytes("../../private.json")
-    with pytest.raises(ValueError, match="cannot finish"):
+    with pytest.raises(ValueError, match="RunStore has not been initialized"):
         host._execute(FinishTask(summary="Everything is complete"))
 
 
