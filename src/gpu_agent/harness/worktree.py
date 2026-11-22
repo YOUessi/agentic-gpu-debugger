@@ -223,6 +223,11 @@ class PinnedGitWorkspace:
     def edited_files(self) -> tuple[str, ...]:
         return tuple(sorted(self._edited))
 
+    @property
+    def accepted_hashes(self) -> dict[str, str]:
+        self._verify_boundary()
+        return dict(self._accepted_hashes)
+
     def _verify_boundary(self) -> None:
         """Fail closed on ANY unstaged, staged, untracked or post-edit drift.
 
