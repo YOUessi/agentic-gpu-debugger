@@ -23,6 +23,7 @@ from gpu_agent.agent.provider import (
 )
 from gpu_agent.benchmark.hardset_v2_verifier import run_strict_hardset_verification
 from gpu_agent.harness.hardset_tools import HardsetWorkspaceTools
+from gpu_agent.harness.journal import EventKind, SessionJournal
 from gpu_agent.harness.models import (
     FinishTask,
     HarnessDecision,
@@ -75,7 +76,20 @@ def run_tool_agent(
         n = state.get("turns", 0)
         remaining = max_steps - n
         snapshot = host.snapshot(goal, state.get("history", []), remaining)
-        decision = model.choose_harness_v1(snapshot)
+        if on_event:
+            on_event({"stage": "model_started", "turn": n + 1})
+        try:
+            decision = model.choose_harness_v1(snapshot)
+        except Exception as exc:
+            if on_event:
+                on_event(
+                    {
+                        "stage": "model_uncertain",
+                        "turn": n + 1,
+                        "error_type": type(exc).__name__,
+                    }
+                )
+            raise
         if not isinstance(decision, HarnessDecision):
             raise ValueError("model must return exactly one typed action")
         if on_event:
@@ -94,7 +108,27 @@ def run_tool_agent(
 
     def tool(state: AgentLoopState) -> dict[str, Any]:
         decision = HarnessDecision.model_validate(state["decision"])
-        obs = host.invoke(decision.action)
+        if on_event:
+            on_event(
+                {
+                    "stage": "tool_started",
+                    "turn": state["turns"],
+                    "tool": decision.action.tool,
+                }
+            )
+        try:
+            obs = host.invoke(decision.action)
+        except Exception as exc:
+            if on_event:
+                on_event(
+                    {
+                        "stage": "tool_uncertain",
+                        "turn": state["turns"],
+                        "tool": decision.action.tool,
+                        "error_type": type(exc).__name__,
+                    }
+                )
+            raise
         entry = {
             "tool": obs.tool,
             "status": obs.status,
@@ -114,7 +148,7 @@ def run_tool_agent(
             )
         done = isinstance(decision.action, FinishTask) and obs.status == "OK"
         return {
-            "history": [*state.get("history", []), entry][-30:],
+            "history": [*state.get("history", []), entry][-max_steps:],
             "observation": obs.model_dump(mode="json"),
             "stop": done or state["turns"] >= max_steps,
             "reason": (
@@ -174,75 +208,126 @@ def run_gpu_coding_harness(
         raise ValueError("do not overwrite previous harness evidence")
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     events: list[dict[str, Any]] = []
-    with HardsetWorkspaceTools(
-        repository,
-        output / "session",
-        case_id,
-        max_probes=max_probes,
-        max_checks=max_public_checks,
-    ) as tools:
-        if model_factory is None:
-            provider = OpenAIResponsesProvider(
-                OpenAIProviderSettings.from_environment(),
-                LLMCallGate(
-                    AgentBudget(
-                        max_llm_calls=max_model_calls,
-                        max_wall_time_seconds=600,
-                    )
-                ),
-                tools._probe.public_store,
-                tools.run_id,
-                call_policy=DevelopmentCallPolicy(max_llm_calls=max_model_calls),
-            )
-            provider.ensure_available()
-            model: DecisionModel = provider
-        else:
-            model = model_factory(tools)
-        state = run_tool_agent(model, tools, goal=goal, max_steps=max_steps, on_event=events.append)
-        diff = tools.accepted_diff
-        candidate_sha = tools._candidate_hash if diff else None
-        run_id = tools.run_id
-        tool_calls = tools.tool_calls
-        inv = getattr(model, "invocations", None)
-        records = inv() if callable(inv) else []
-        total_tokens = [
-            i.usage.total_tokens
-            for i in records
-            if i.usage is not None and i.usage.total_tokens is not None
-        ]
-        tokens = sum(total_tokens) if len(total_tokens) == len(records) else None
-        for i, event in enumerate(events, 1):
-            tools._probe.public_store.put(
-                run_id,
-                f"harness/v1/trace-{i:03d}.json",
-                json.dumps(event, ensure_ascii=False, sort_keys=True).encode(),
-                "public",
-            )
-    reason = state.get("reason", "UNKNOWN")
-    verdict: Literal["VERIFIED_FIXED", "NOT_VERIFIED", "INCONCLUSIVE"] = "INCONCLUSIVE"
-    verified = False
-    if diff:
-        projection = run_strict_hardset_verification(
+    journal = SessionJournal(output / "session-events.jsonl")
+    try:
+        with HardsetWorkspaceTools(
             repository,
-            output / "strict",
+            output / "session",
+            case_id,
+            max_probes=max_probes,
+            max_checks=max_public_checks,
+        ) as tools:
+            if model_factory is None:
+                provider = OpenAIResponsesProvider(
+                    OpenAIProviderSettings.from_environment(),
+                    LLMCallGate(
+                        AgentBudget(
+                            max_llm_calls=max_model_calls,
+                            max_wall_time_seconds=600,
+                        )
+                    ),
+                    tools._probe.public_store,
+                    tools.run_id,
+                    call_policy=DevelopmentCallPolicy(max_llm_calls=max_model_calls),
+                )
+                provider.ensure_available()
+                model: DecisionModel = provider
+            else:
+                model = model_factory(tools)
+            journal.append(
+                "session_started",
+                {
+                    "case_id": case_id,
+                    "public_run_id": tools.run_id,
+                    "source_sha256": tools.source_hash,
+                    "goal_sha256": hashlib.sha256(goal.encode()).hexdigest(),
+                },
+            )
+
+            def persist_event(event: dict[str, Any]) -> None:
+                events.append(event)
+                index = len(events)
+                kind_map: dict[str, EventKind] = {
+                    "model_started": "model_started",
+                    "model": "model_selected",
+                    "tool_started": "tool_started",
+                    "tool": "tool_completed",
+                }
+                stage = str(event.get("stage", ""))
+                kind = kind_map.get(stage)
+                if kind is not None:
+                    journal.append(
+                        kind,
+                        {
+                            "turn": event.get("turn", 0),
+                            "tool": str(event.get("tool", ""))[:64],
+                            "status": str(event.get("status", ""))[:32],
+                            "evidence_sha256": str(event.get("observation_sha256", ""))[:64],
+                        },
+                    )
+                tools._probe.public_store.put(
+                    tools.run_id,
+                    f"harness/v2/trace-{index:03d}.json",
+                    json.dumps(event, ensure_ascii=False, sort_keys=True).encode(),
+                    "public",
+                )
+
+            state = run_tool_agent(
+                model, tools, goal=goal, max_steps=max_steps, on_event=persist_event
+            )
+            diff = tools.accepted_diff
+            candidate_sha = tools._candidate_hash if diff else None
+            run_id = tools.run_id
+            tool_calls = tools.tool_calls
+            inv = getattr(model, "invocations", None)
+            records = inv() if callable(inv) else []
+            total_tokens = [
+                i.usage.total_tokens
+                for i in records
+                if i.usage is not None and i.usage.total_tokens is not None
+            ]
+            tokens = sum(total_tokens) if len(total_tokens) == len(records) else None
+
+        reason = state.get("reason", "UNKNOWN")
+        verdict: Literal["VERIFIED_FIXED", "NOT_VERIFIED", "INCONCLUSIVE"] = "INCONCLUSIVE"
+        verified = False
+        if diff:
+            projection = run_strict_hardset_verification(
+                repository,
+                output / "strict",
+                case_id=case_id,
+                unified_diff=diff,
+                evaluator_secret=evaluator_secret,
+            )
+            verdict = projection.verdict
+            verified = verdict == "VERIFIED_FIXED"
+            reason = projection.reason_code
+        outcome = HarnessOutcome(
             case_id=case_id,
-            unified_diff=diff,
-            evaluator_secret=evaluator_secret,
+            status=verdict,
+            model_tool_turns=state.get("turns", 0),
+            candidate_sha256=candidate_sha,
+            tool_calls=tool_calls,
+            model_physical_calls=len(records),
+            model_tokens=tokens,
+            reason=reason,
+            public_run_id=run_id,
+            private_verification=verified,
         )
-        verdict = projection.verdict
-        verified = verdict == "VERIFIED_FIXED"
-        reason = projection.reason_code
-    outcome = HarnessOutcome(
-        case_id=case_id,
-        status=verdict,
-        model_tool_turns=state.get("turns", 0),
-        candidate_sha256=candidate_sha,
-        tool_calls=tool_calls,
-        model_physical_calls=len(records),
-        model_tokens=tokens,
-        reason=reason,
-        public_run_id=run_id,
-        private_verification=verified,
-    )
-    (output / "result.json").write_text(outcome.model_dump_json(indent=2) + "\n", encoding="utf-8")
-    return outcome
+        (output / "result.json").write_text(
+            outcome.model_dump_json(indent=2) + "\n", encoding="utf-8"
+        )
+        journal.append(
+            "session_finished",
+            {
+                "status": outcome.status,
+                "turns": outcome.model_tool_turns,
+                "candidate_sha256": outcome.candidate_sha256,
+            },
+        )
+        return outcome
+    except Exception as exc:
+        journal.append("session_failed", {"error_type": type(exc).__name__})
+        raise
+    finally:
+        journal.close()

@@ -35,6 +35,37 @@ knowledge_app = typer.Typer(no_args_is_help=True, help="Offline knowledge inspec
 app.add_typer(knowledge_app, name="knowledge")
 
 
+@harness_app.command("inspect-session")
+def harness_inspect_session(
+    journal: Annotated[Path, typer.Option("--journal")],
+) -> None:
+    """Validate the durable event chain; never replay uncertain GPU/model calls."""
+    import json
+
+    from gpu_agent.harness.journal import (
+        read_verified_journal,
+        recovery_disposition,
+    )
+
+    try:
+        events = read_verified_journal(journal)
+        typer.echo(
+            json.dumps(
+                {
+                    "events": len(events),
+                    "recovery_disposition": recovery_disposition(events),
+                    "last_event": events[-1]["kind"],
+                    "journal_sha256": hashlib.sha256(journal.read_bytes()).hexdigest(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    except (OSError, ValueError):
+        typer.echo("INVALID_OR_UNTRUSTED_SESSION_JOURNAL", err=True)
+        raise typer.Exit(2) from None
+
+
 @harness_app.command("run")
 def harness_run(
     output: Annotated[Path, typer.Option()],

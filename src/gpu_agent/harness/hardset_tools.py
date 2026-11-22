@@ -20,6 +20,8 @@ from gpu_agent.benchmark.hardset_v2_probe import (
 )
 from gpu_agent.benchmark.hardset_v2_selfcheck import check_candidate_publicly
 from gpu_agent.execution.isolated import IsolatedGPUBackend
+from gpu_agent.harness.context import compact_public_context
+from gpu_agent.harness.editing import exact_replace_diff
 from gpu_agent.harness.models import (
     ApplyPatch,
     FinishTask,
@@ -27,11 +29,13 @@ from gpu_agent.harness.models import (
     HarnessAction,
     ListFiles,
     ReadFile,
+    ReplaceSnippet,
     RunPublicChecks,
     SearchCode,
     SessionSnapshot,
     ToolObservation,
 )
+from gpu_agent.harness.registry import ToolPermissionPolicy, registered_tool_names
 from gpu_agent.patching import (
     SourceSnapshot,
     apply_generated_candidate,
@@ -43,15 +47,7 @@ from gpu_agent.store import RunStore, read_regular, reject_symlinks
 class HardsetWorkspaceTools:
     """Typed tool adapter over the existing verified GPU/RunStore implementation."""
 
-    ALLOWED_TOOLS = (
-        "list_files",
-        "read_file",
-        "search_code",
-        "functional_probe",
-        "apply_patch",
-        "run_public_checks",
-        "finish",
-    )
+    ALLOWED_TOOLS = registered_tool_names()
 
     def __init__(
         self,
@@ -61,6 +57,7 @@ class HardsetWorkspaceTools:
         *,
         max_probes: int = 6,
         max_checks: int = 3,
+        permission_policy: ToolPermissionPolicy | None = None,
     ) -> None:
         if case_id not in HARDSET_CASES:
             raise ValueError("unknown HardSet problem")
@@ -88,6 +85,7 @@ class HardsetWorkspaceTools:
         self.source_hash = case.mutant_source_sha256
         self.functional_requirement = PUBLIC_REQUIREMENTS[case_id]
         self.max_probes, self.max_checks = max_probes, max_checks
+        self.permission_policy = permission_policy or ToolPermissionPolicy()
         self._probe = HardsetFunctionalProbe(
             self.root, self.output / "workspace", case_id, max_probes=max_probes
         )
@@ -149,6 +147,10 @@ class HardsetWorkspaceTools:
         raise ValueError("read permission denied")
 
     def snapshot(self, goal: str, history: list[dict[str, str]], steps: int) -> SessionSnapshot:
+        projection = compact_public_context(
+            history,
+            self._file_bytes("kernel.cu").decode("utf-8"),
+        )
         return SessionSnapshot(
             goal=goal,
             case_id=cast(Literal["h001", "h002", "h003"], self.case_id),
@@ -156,10 +158,14 @@ class HardsetWorkspaceTools:
             functional_requirement=self.functional_requirement,
             current_candidate_sha256=self._candidate_hash,
             public_checks_passed=self._public_passed,
-            allowed_tools=self.ALLOWED_TOOLS,
+            allowed_tools=self.permission_policy.available_tools,
             allowed_probe_sizes=self._probe.allowed_sizes,
             remaining_steps=steps,
-            history=tuple(history[-30:]),
+            remaining_public_checks=max(0, self.max_checks - self._checks),
+            history=projection.recent,
+            context_summary=projection.summary,
+            workspace_source=projection.source,
+            total_public_actions=projection.total_actions,
         )
 
     def _observation(
@@ -175,12 +181,20 @@ class HardsetWorkspaceTools:
         if self._snapshot is None or self._store is None or self._finished:
             raise ValueError("workspace not active")
         self._events += 1
-        try:
-            result = self._execute(action)
-        except (OSError, ValueError) as exc:
-            # Only controller-owned bounded reason categories are model-visible.
-            msg = type(exc).__name__ + ": " + str(exc)[:300]
-            result = self._observation(action.tool, "REJECTED", msg)
+        permission = self.permission_policy.check(action.tool)
+        if permission != "ALLOW":
+            result = self._observation(
+                action.tool,
+                "REJECTED",
+                f"TOOL_{permission}: this tool is not approved for this workspace.",
+            )
+        else:
+            try:
+                result = self._execute(action)
+            except (OSError, ValueError) as exc:
+                # Only bounded public controller errors are model-visible.
+                msg = type(exc).__name__ + ": " + str(exc)[:300]
+                result = self._observation(action.tool, "REJECTED", msg)
         self._store.put(
             self.run_id,
             f"harness/v1/event-{self._events:03d}.json",
@@ -198,6 +212,26 @@ class HardsetWorkspaceTools:
             "public",
         )
         return result
+
+    def _stage_diff(self, tool: str, diff: str) -> ToolObservation:
+        if self._snapshot is None:
+            raise ValueError("source snapshot missing")
+        patch = apply_generated_candidate(self._snapshot, diff)
+        new_source = materialize_candidate(self._snapshot, patch)["kernel.cu"]
+        digest = hashlib.sha256(new_source).hexdigest()
+        if digest in self._attempted_hashes:
+            raise ValueError("candidate was previously proposed; revise it")
+        self._attempted_hashes.add(digest)
+        self._candidate = new_source
+        self._candidate_hash = digest
+        self._patch_diff = diff
+        self._public_passed = False
+        return self._observation(
+            tool,
+            "OK",
+            f"Patch accepted in isolated workspace; candidate_sha256={digest}. "
+            "Call run_public_checks before finish.",
+        )
 
     def _execute(self, action: HarnessAction) -> ToolObservation:
         if self._store is None:
@@ -244,24 +278,11 @@ class HardsetWorkspaceTools:
             evidence = self._probe.invoke(FunctionalProbeAction(size=action.size))
             return self._observation(action.tool, "OK", evidence.model_dump_json())
         if isinstance(action, ApplyPatch):
-            if self._snapshot is None:
-                raise ValueError("source snapshot missing")
-            patch = apply_generated_candidate(self._snapshot, action.unified_diff)
-            new_source = materialize_candidate(self._snapshot, patch)["kernel.cu"]
-            digest = hashlib.sha256(new_source).hexdigest()
-            if digest in self._attempted_hashes:
-                raise ValueError("candidate was previously proposed; revise it")
-            self._attempted_hashes.add(digest)
-            self._candidate = new_source
-            self._candidate_hash = digest
-            self._patch_diff = action.unified_diff
-            self._public_passed = False
-            return self._observation(
-                action.tool,
-                "OK",
-                f"Patch accepted to isolated workspace; candidate sha256={digest}. "
-                "Run run_public_checks before finish.",
-            )
+            return self._stage_diff(action.tool, action.unified_diff)
+        if isinstance(action, ReplaceSnippet):
+            current = self._file_bytes("kernel.cu")
+            diff = exact_replace_diff(self.original, current, action.old_text, action.new_text)
+            return self._stage_diff(action.tool, diff)
         if isinstance(action, RunPublicChecks):
             if self._candidate is None:
                 raise ValueError("no candidate: apply a patch first")

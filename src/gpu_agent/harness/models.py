@@ -41,6 +41,13 @@ class ApplyPatch(StrictModel):
     unified_diff: str = Field(min_length=20, max_length=200_000)
 
 
+class ReplaceSnippet(StrictModel):
+    tool: Literal["replace_snippet"] = "replace_snippet"
+    path: Literal["kernel.cu"] = "kernel.cu"
+    old_text: str = Field(min_length=1, max_length=4000)
+    new_text: str = Field(max_length=4000)
+
+
 class RunPublicChecks(StrictModel):
     tool: Literal["run_public_checks"] = "run_public_checks"
 
@@ -51,7 +58,14 @@ class FinishTask(StrictModel):
 
 
 HarnessAction = Annotated[
-    ListFiles | ReadFile | SearchCode | FunctionalProbe | ApplyPatch | RunPublicChecks | FinishTask,
+    ListFiles
+    | ReadFile
+    | SearchCode
+    | FunctionalProbe
+    | ApplyPatch
+    | ReplaceSnippet
+    | RunPublicChecks
+    | FinishTask,
     Field(discriminator="tool"),
 ]
 
@@ -81,6 +95,10 @@ class SessionSnapshot(StrictModel):
     allowed_probe_sizes: tuple[int, ...] = ()
     remaining_steps: int = Field(ge=0)
     history: tuple[dict[str, str], ...] = Field(max_length=30)
+    workspace_source: str = Field(default="", max_length=13000)
+    context_summary: str = Field(default="", max_length=2800)
+    total_public_actions: int = Field(default=0, ge=0)
+    remaining_public_checks: int = Field(default=3, ge=0)
 
 
 class HarnessOutcome(StrictModel):
