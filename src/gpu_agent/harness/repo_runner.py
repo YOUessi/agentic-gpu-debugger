@@ -25,12 +25,12 @@ from gpu_agent.harness.models import (
     RepoHarnessOutcome,
     SessionSnapshot,
 )
-from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
 from gpu_agent.harness.recovery import (
     RepositoryCheckpoint,
     validated_quiescent_repository_checkpoint,
     write_repository_checkpoint,
 )
+from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
 from gpu_agent.harness.runner import AgentLoopState, run_tool_agent
 
 
