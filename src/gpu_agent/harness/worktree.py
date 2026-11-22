@@ -156,9 +156,77 @@ class PinnedGitWorkspace:
         self._edited: set[str] = set()
         self._accepted_hashes: dict[str, str] = {}
 
+    @classmethod
+    def attach_existing(
+        cls,
+        *,
+        origin: Path,
+        root: Path,
+        sha: str,
+        accepted_hashes: dict[str, str],
+        max_edited_files: int = 8,
+    ) -> PinnedGitWorkspace:
+        """Reattach only a controller-owned worktree; never silently recreate it.
+
+        The tracked checkout, Git common directory and every modified file
+        must still match the frozen workspace and durable checkpoint.
+        """
+        if not re.fullmatch(r"[0-9a-f]{40}", sha):
+            raise ValueError("full SHA-1 Git commit hash is required")
+        if type(max_edited_files) is not int or not 1 <= max_edited_files <= 20:
+            raise ValueError("invalid edit count limit")
+        reject_symlinks(origin)
+        reject_symlinks(root)
+        if not origin.is_dir() or not root.is_dir():
+            raise ValueError("resume requires original Git repository and worktree")
+        trusted = origin.resolve()
+        checkout = root.resolve()
+        if checkout.is_relative_to(trusted) or trusted.is_relative_to(checkout):
+            raise ValueError("worktree must not overlap source repository")
+        gitfile = checkout / ".git"
+        if not gitfile.is_file() or gitfile.is_symlink():
+            raise ValueError("resume requires a real Git worktree pointer")
+        if _run_git(checkout, "rev-parse", "--show-toplevel") != str(checkout):
+            raise ValueError("resumed worktree root mismatch")
+        if _run_git(checkout, "rev-parse", "HEAD") != sha:
+            raise ValueError("resumed worktree commit mismatch")
+
+        def common_dir(path: Path) -> Path:
+            value = Path(_run_git(path, "rev-parse", "--git-common-dir"))
+            return (value if value.is_absolute() else path / value).resolve(strict=True)
+
+        if common_dir(checkout) != common_dir(trusted):
+            raise ValueError("resumed worktree belongs to another Git repository")
+        if len(accepted_hashes) > max_edited_files:
+            raise ValueError("resumed edited-file budget exceeded")
+        project = object.__new__(cls)
+        project.root = checkout
+        project.origin = trusted
+        project.base_sha = sha
+        project.max_edited_files = max_edited_files
+        tracked = tuple(_run_git(checkout, "ls-files").splitlines())
+        if len(tracked) > MAX_TRACKED_FILES:
+            raise ValueError("resumed repository exceeds tracked-file limit")
+        project._tracked = frozenset(tracked)
+        project._edited = set()
+        project._accepted_hashes = {}
+        for name, digest in accepted_hashes.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+                raise ValueError("invalid resumed file digest")
+            project._checked(name, editable=True)
+            project._edited.add(name)
+            project._accepted_hashes[name] = digest
+        project._verify_boundary()
+        return project
+
     @property
     def edited_files(self) -> tuple[str, ...]:
         return tuple(sorted(self._edited))
+
+    @property
+    def accepted_hashes(self) -> dict[str, str]:
+        self._verify_boundary()
+        return dict(self._accepted_hashes)
 
     def _verify_boundary(self) -> None:
         """Fail closed on ANY unstaged, staged, untracked or post-edit drift.
@@ -172,8 +240,14 @@ class PinnedGitWorkspace:
         if _run_git(self.root, "ls-files", "--others", "-z"):
             raise ValueError("untracked worktree content detected")
         raw = _run_git(
-            self.root, "diff", "--no-ext-diff", "--no-textconv",
-            "--name-status", "-z", "HEAD", "--",
+            self.root,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-status",
+            "-z",
+            "HEAD",
+            "--",
         )
         values = raw.split("\x00") if raw else []
         if values and values[-1] == "":
