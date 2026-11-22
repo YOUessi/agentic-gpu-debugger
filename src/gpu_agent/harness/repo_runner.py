@@ -10,7 +10,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from gpu_agent.agent.models import AgentBudget
 from gpu_agent.agent.policy import LLMCallGate
@@ -26,7 +26,12 @@ from gpu_agent.harness.models import (
     SessionSnapshot,
 )
 from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
-from gpu_agent.harness.runner import run_tool_agent
+from gpu_agent.harness.recovery import (
+    RepositoryCheckpoint,
+    validated_quiescent_repository_checkpoint,
+    write_repository_checkpoint,
+)
+from gpu_agent.harness.runner import AgentLoopState, run_tool_agent
 
 
 class RepositoryDecisionModel(Protocol):
@@ -43,6 +48,8 @@ def run_repository_coding_session(
     max_model_calls: int = 24,
     max_edited_files: int = 8,
     allow_paid_calls: bool = False,
+    resume: bool = False,
+    pause_after_turns: int | None = None,
     model_factory: (Callable[[RepositoryWorkspaceTools], RepositoryDecisionModel] | None) = None,
 ) -> RepoHarnessOutcome:
     """Execute a real Agent loop and stage independent Git worktree modifications.
@@ -57,15 +64,40 @@ def run_repository_coding_session(
         raise ValueError("model calls must exceed step budget, within operator cap")
     if not goal.strip() or len(goal) > 1500:
         raise ValueError("invalid task goal")
-    if output.exists() or output.is_symlink():
-        raise ValueError("workspace output cannot overwrite existing evidence")
+    checkpoint = None
+    if resume:
+        if not output.is_dir() or output.is_symlink():
+            raise ValueError("resume requires an existing safe session output")
+        checkpoint = validated_quiescent_repository_checkpoint(
+            output,
+            goal=goal,
+            base_sha=base_sha,
+            max_steps=max_steps,
+            max_model_calls=max_model_calls,
+            max_edited_files=max_edited_files,
+        )
+        host = RepositoryWorkspaceTools.reopen(
+            origin=repository,
+            output=output,
+            sha=base_sha,
+            run_id=checkpoint.public_run_id,
+            tool_calls=checkpoint.state["turns"],
+            accepted_hashes=checkpoint.accepted_hashes,
+            max_edited_files=max_edited_files,
+        )
+        if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
+            raise ValueError("resumed workspace diff disagrees with checkpoint")
+    else:
+        if output.exists() or output.is_symlink():
+            raise ValueError("workspace output cannot overwrite existing evidence")
+        host = RepositoryWorkspaceTools(
+            origin=repository,
+            output=output,
+            sha=base_sha,
+            max_edited_files=max_edited_files,
+        )
 
-    with RepositoryWorkspaceTools(
-        origin=repository,
-        output=output,
-        sha=base_sha,
-        max_edited_files=max_edited_files,
-    ) as tools:
+    with host as tools:
         if model_factory is None:
             provider = OpenAIResponsesProvider(
                 OpenAIProviderSettings.from_environment(),
@@ -83,17 +115,31 @@ def run_repository_coding_session(
             model: RepositoryDecisionModel = provider
         else:
             model = model_factory(tools)
-        journal = SessionJournal(output / "session-events.jsonl")
-        try:
-            journal.append(
-                "session_started",
-                {
-                    "base_git_commit": base_sha,
-                    "public_run_id": tools.run_id,
-                    "goal_sha256": hashlib.sha256(goal.encode()).hexdigest(),
-                },
+        journal = (
+            SessionJournal.reopen(
+                output / "session-events.jsonl",
+                expected_head=checkpoint.journal_head_sha256,
             )
-            events = 0
+            if checkpoint is not None
+            else SessionJournal(output / "session-events.jsonl")
+        )
+        try:
+            if checkpoint is not None:
+                journal.append(
+                    "session_resumed",
+                    {"previous_turns": checkpoint.state["turns"]},
+                )
+                events = checkpoint.event_counter
+            else:
+                journal.append(
+                    "session_started",
+                    {
+                        "base_git_commit": base_sha,
+                        "public_run_id": tools.run_id,
+                        "goal_sha256": hashlib.sha256(goal.encode()).hexdigest(),
+                    },
+                )
+                events = 0
 
             def save_event(event: dict[str, Any]) -> None:
                 nonlocal events
@@ -133,12 +179,38 @@ def run_repository_coding_session(
                     "public",
                 )
 
+            def persist_checkpoint(state: AgentLoopState) -> None:
+                # Tool completion and trace have been fsynced before this
+                # state becomes resumable. A crash in the gap fails closed.
+                integrity = tools.workspace.integrity()
+                write_repository_checkpoint(
+                    output / "session-checkpoint.json",
+                    RepositoryCheckpoint(
+                        base_sha=base_sha,
+                        goal_sha256=hashlib.sha256(goal.encode()).hexdigest(),
+                        public_run_id=tools.run_id,
+                        journal_head_sha256=journal.head_hash,
+                        diff_sha256=str(integrity["diff_sha256"]),
+                        event_counter=events,
+                        max_steps=max_steps,
+                        max_model_calls=max_model_calls,
+                        max_edited_files=max_edited_files,
+                        accepted_hashes=tools.workspace.accepted_hashes,
+                        state=dict(state),
+                    ),
+                )
+
             state = run_tool_agent(
                 model,
                 tools,
                 goal=goal,
                 max_steps=max_steps,
                 on_event=save_event,
+                on_checkpoint=persist_checkpoint,
+                initial_state=cast(AgentLoopState, checkpoint.state)
+                if checkpoint is not None
+                else None,
+                pause_after_turns=pause_after_turns,
             )
             inv = getattr(model, "invocations", None)
             records = inv() if callable(inv) else []
@@ -150,8 +222,19 @@ def run_repository_coding_session(
             tokens = sum(token_counts) if len(token_counts) == len(records) else None
             integrity = tools.workspace.integrity()
             succeeded = state.get("reason") == "WORKSPACE_DIFF_STAGED_UNVERIFIED"
+            paused = state.get("reason") == "SESSION_PAUSED"
+            if succeeded:
+                # This can be restored from a checkpoint after a crash that
+                # happened after FinishTask but before the terminal result.
+                tools._finished = True
             outcome = RepoHarnessOutcome(
-                status="DIFF_STAGED_UNVERIFIED" if succeeded else "INCONCLUSIVE",
+                status=(
+                    "DIFF_STAGED_UNVERIFIED"
+                    if succeeded
+                    else "PAUSED_RESUMABLE"
+                    if paused
+                    else "INCONCLUSIVE"
+                ),
                 base_sha=base_sha,
                 diff_sha256=str(integrity["diff_sha256"]),
                 edited_files=tools.workspace.edited_files,
@@ -162,6 +245,11 @@ def run_repository_coding_session(
                 reason=state.get("reason", "UNKNOWN"),
                 public_run_id=tools.run_id,
             )
+            if paused:
+                # No final result/terminal journal event. RunStore remains
+                # RUNNING and only an explicit, validated --resume can proceed.
+                tools._suspended = True
+                return outcome
             (output / "result.json").write_text(
                 outcome.model_dump_json(indent=2) + "\n", encoding="utf-8"
             )
