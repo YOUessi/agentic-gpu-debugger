@@ -63,9 +63,54 @@ class RepositoryWorkspaceTools:
         self._run = self._store.create_run("gpu_repository_agent")
         self._tool_calls = 0
         self._finished = False
+        self._suspended = False
+        self._resuming = False
         self._last_file: str | None = None
         self._last_file_read: str = ""
         self._source_version = sha
+
+    @classmethod
+    def reopen(
+        cls,
+        *,
+        origin: Path,
+        output: Path,
+        sha: str,
+        run_id: str,
+        tool_calls: int,
+        accepted_hashes: dict[str, str],
+        max_edited_files: int = 8,
+        permissions: ToolPermissionPolicy | None = None,
+    ) -> RepositoryWorkspaceTools:
+        """Reattach a still-running public session with matching Git evidence."""
+        if output.is_symlink() or not output.is_dir():
+            raise ValueError("missing or unsafe repository session output")
+        if type(tool_calls) is not int or not 0 <= tool_calls <= 40:
+            raise ValueError("invalid persisted tool counter")
+        host = object.__new__(cls)
+        host.output = output
+        host.workspace = PinnedGitWorkspace.attach_existing(
+            origin=origin,
+            root=output / "worktree",
+            sha=sha,
+            accepted_hashes=accepted_hashes,
+            max_edited_files=max_edited_files,
+        )
+        host._store = RunStore(output / "public")
+        host._run = host._store.load(run_id)
+        if host._run.kind != "gpu_repository_agent" or host._run.status != "RUNNING":
+            raise ValueError("resumed public RunStore must be an active repository run")
+        host._policy = permissions or ToolPermissionPolicy()
+        host._tool_calls = tool_calls
+        host._finished = False
+        host._suspended = False
+        host._resuming = True
+        # Do not trust stale line ranges after process restart. The complete
+        # model history is restored separately from the audited checkpoint.
+        host._last_file = None
+        host._last_file_read = ""
+        host._source_version = sha
+        return host
 
     @property
     def run_id(self) -> str:
@@ -84,10 +129,14 @@ class RepositoryWorkspaceTools:
         return self.workspace.diff() if self._finished else None
 
     def __enter__(self) -> RepositoryWorkspaceTools:
-        self._store.transition(self._run.id, "RUNNING", "DIAGNOSING")
+        if not self._resuming:
+            self._store.transition(self._run.id, "RUNNING", "DIAGNOSING")
         return self
 
     def __exit__(self, typ: object, val: object, tb: object) -> None:
+        if self._suspended and typ is None:
+            # A deliberate pause preserves RUNNING authority for explicit resume.
+            return
         try:
             self._store.transition(
                 self.run_id,
