@@ -240,8 +240,14 @@ class PinnedGitWorkspace:
         if _run_git(self.root, "ls-files", "--others", "-z"):
             raise ValueError("untracked worktree content detected")
         raw = _run_git(
-            self.root, "diff", "--no-ext-diff", "--no-textconv",
-            "--name-status", "-z", "HEAD", "--",
+            self.root,
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--name-status",
+            "-z",
+            "HEAD",
+            "--",
         )
         values = raw.split("\x00") if raw else []
         if values and values[-1] == "":
