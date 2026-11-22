@@ -8,9 +8,11 @@ This is a journal, not yet a transparent cross-process LangGraph checkpointer.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 from typing import Any, Literal
 
@@ -23,6 +25,7 @@ EventKind = Literal[
     "tool_completed",
     "session_finished",
     "session_failed",
+    "session_resumed",
 ]
 
 
@@ -45,9 +48,60 @@ class SessionJournal:
             flags |= os.O_NOFOLLOW
         fd = os.open(self.path, flags, 0o600)
         self._file = os.fdopen(fd, "ab", buffering=0)
+        try:
+            fcntl.flock(self._file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            self._file.close()
+            raise ValueError("session journal already has a writer") from exc
         self._prev_hash = ZERO_HASH
         self._sequence = 0
         self._closed = False
+
+    @classmethod
+    def reopen(cls, path: Path, *, expected_head: str) -> SessionJournal:
+        """Append to a verified quiet journal, under an exclusive writer lock."""
+        if not isinstance(expected_head, str) or len(expected_head) != 64:
+            raise ValueError("expected journal head is required")
+        if path.is_symlink():
+            raise ValueError("session journal cannot be a symlink")
+        flags = os.O_WRONLY | os.O_APPEND
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+                raise ValueError("journal must remain a private regular file")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            records = read_verified_journal(path)
+            if (
+                recovery_disposition(records) != "QUIESCENT_INSPECTION_ONLY"
+                or records[-1]["sha256"] != expected_head
+            ):
+                raise ValueError("journal is not at a resumable quiet boundary")
+            if (info.st_dev, info.st_ino) != (
+                path.stat(follow_symlinks=False).st_dev,
+                path.stat(follow_symlinks=False).st_ino,
+            ):
+                raise ValueError("session journal changed while reopening")
+            journal = object.__new__(cls)
+            journal.path = path
+            journal._file = os.fdopen(fd, "ab", buffering=0)
+            journal._prev_hash = expected_head
+            journal._sequence = len(records)
+            journal._closed = False
+            return journal
+        except BaseException:
+            os.close(fd)
+            raise
+
+    @property
+    def head_hash(self) -> str:
+        return self._prev_hash
+
+    @property
+    def event_count(self) -> int:
+        return self._sequence
 
     def append(self, kind: EventKind, payload: dict[str, object]) -> str:
         if self._closed:
@@ -60,6 +114,7 @@ class SessionJournal:
             "tool_completed",
             "session_finished",
             "session_failed",
+            "session_resumed",
         }:
             raise ValueError("unrecognized session event kind")
         if any(key in payload for key in ("api_key", "evaluator_secret", "hidden_input")):
