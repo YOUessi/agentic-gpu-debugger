@@ -217,7 +217,6 @@ def test_repo_harness_model_wire_uses_distinct_versioned_prompt(tmp_path: Path) 
     assert provider.invocations()[0].prompt_version == GPU_REPOSITORY_HARNESS_PROMPT_VERSION
 
 
-
 def _pause_session(tmp_path: Path) -> tuple[Path, str, Path]:
     repository, sha = _repo(tmp_path)
     output = tmp_path / "resumable"
@@ -245,9 +244,12 @@ def test_repository_agent_pause_resume_preserves_budget_and_exactly_once_actions
     tmp_path: Path,
 ) -> None:
     repository, sha, output = _pause_session(tmp_path)
-    assert RunStore(output / "public").load(
-        read_verified_journal(output / "session-events.jsonl")[0]["payload"]["public_run_id"]
-    ).status == "RUNNING"
+    assert (
+        RunStore(output / "public")
+        .load(read_verified_journal(output / "session-events.jsonl")[0]["payload"]["public_run_id"])
+        .status
+        == "RUNNING"
+    )
     model = ScriptedLLM()
     model.position = 3  # Simulate a new model that continues from saved observations.
     final = run_repository_coding_session(
