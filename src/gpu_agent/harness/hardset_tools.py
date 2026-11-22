@@ -196,6 +196,8 @@ class HardsetWorkspaceTools:
         return result
 
     def _execute(self, action: HarnessAction) -> ToolObservation:
+        if self._store is None:
+            raise ValueError("RunStore has not been initialized")
         if isinstance(action, ListFiles):
             return self._observation(
                 action.tool,

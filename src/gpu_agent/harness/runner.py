@@ -10,7 +10,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, TypedDict, cast
+from typing import Any, Literal, Protocol, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 
@@ -219,7 +219,7 @@ def run_gpu_coding_harness(
                 "public",
             )
     reason = state.get("reason", "UNKNOWN")
-    verdict = "INCONCLUSIVE"
+    verdict: Literal["VERIFIED_FIXED", "NOT_VERIFIED", "INCONCLUSIVE"] = "INCONCLUSIVE"
     verified = False
     if diff:
         projection = run_strict_hardset_verification(
