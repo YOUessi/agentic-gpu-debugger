@@ -62,11 +62,15 @@ def _validated_state(value: dict[str, Any], max_steps: int) -> dict[str, Any]:
             raise ValueError("checkpoint contains invalid tool history")
     decision = HarnessDecision.model_validate(value["decision"])
     observation = ToolObservation.model_validate(value["observation"])
-    if history[-1] != {
-        "tool": observation.tool,
-        "status": observation.status,
-        "content": observation.content[:3900],
-    } or decision.action.tool != observation.tool:
+    if (
+        history[-1]
+        != {
+            "tool": observation.tool,
+            "status": observation.status,
+            "content": observation.content[:3900],
+        }
+        or decision.action.tool != observation.tool
+    ):
         raise ValueError("checkpoint action and observation disagree")
     if type(value["stop"]) is not bool or not isinstance(value["reason"], str):
         raise ValueError("invalid checkpoint stop metadata")
@@ -117,9 +121,7 @@ def read_repository_checkpoint(path: Path) -> RepositoryCheckpoint:
     info = path.stat(follow_symlinks=False)
     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
         raise ValueError("checkpoint must be a private regular file")
-    checkpoint = RepositoryCheckpoint.model_validate_json(
-        read_regular(path, MAX_CHECKPOINT_BYTES)
-    )
+    checkpoint = RepositoryCheckpoint.model_validate_json(read_regular(path, MAX_CHECKPOINT_BYTES))
     _validated_state(checkpoint.state, checkpoint.max_steps)
     if checkpoint.event_counter != 4 * checkpoint.state["turns"]:
         raise ValueError("checkpoint action trace is inconsistent")
