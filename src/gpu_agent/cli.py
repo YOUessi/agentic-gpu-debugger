@@ -75,6 +75,8 @@ def harness_repo_run(
     max_steps: Annotated[int, typer.Option("--max-steps", min=1, max=38)] = 18,
     max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=4, max=40)] = 24,
     allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    public_case: Annotated[str | None, typer.Option("--public-case")] = None,
+    max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     resume: Annotated[bool, typer.Option("--resume")] = False,
     pause_after_turns: Annotated[
         int | None, typer.Option("--pause-after-turns", min=1, max=37)
@@ -82,8 +84,8 @@ def harness_repo_run(
 ) -> None:
     """Model-directed, multi-file editing in an isolated Git worktree.
 
-    The output is staged and explicitly UNVERIFIED: no host shell, tests or
-    evaluator are available in the repository editing tool collection.
+    Only --public-case h001/h002/h003 enables registered Docker GPU public checks.
+    Output remains UNVERIFIED without the separate independent evaluator.
     """
     from gpu_agent.agent.models import ProviderError
     from gpu_agent.harness.repo_runner import run_repository_coding_session
@@ -99,6 +101,8 @@ def harness_repo_run(
             max_steps=max_steps,
             max_model_calls=max_model_calls,
             allow_paid_calls=True,
+            public_case_id=public_case,
+            max_public_checks=max_public_checks,
             resume=resume,
             pause_after_turns=pause_after_turns,
         )
