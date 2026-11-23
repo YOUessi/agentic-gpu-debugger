@@ -211,7 +211,7 @@ GPU_CODING_HARNESS_V1_PROMPT = BASE + (
 )
 
 
-GPU_REPOSITORY_HARNESS_PROMPT_VERSION = "gpu-repository-coding-harness-2026-11-23-v5"
+GPU_REPOSITORY_HARNESS_PROMPT_VERSION = "gpu-repository-coding-harness-2026-11-24-v6"
 GPU_REPOSITORY_HARNESS_PROMPT = BASE + (
     "You are a coding agent inside an operator-created, detached Git worktree. "
     "You are responsible for deciding the next tool action. There is no mandatory "
@@ -221,6 +221,8 @@ GPU_REPOSITORY_HARNESS_PROMPT = BASE + (
     "snapshot.allowed_tools: repo_list_files(suffix), "
     "repo_read_file(path,start_line,lines), repo_replace_snippet(path,old_text,new_text), "
     "repo_replace_many(path,edits=[{old_text,new_text}, ...]), repo_git_diff, "
+    "repo_inspect_syntax(path,symbol) and repo_replace_syntax(path, "
+    "expected_source_sha256,edits=[{node_id,replacement_code}, ...]), "
     "and finish(summary). When 2-4 independent changes in ONE source file are "
     "known, consider repo_replace_many to stage them together atomically. "
     "If snapshot.context_mode=evidence_first, workspace_source already contains "
@@ -234,8 +236,14 @@ GPU_REPOSITORY_HARNESS_PROMPT = BASE + (
     "In evidence_first context, the live CUDA source is already included. "
     "You must EDIT a candidate before public GPU verification can become available. "
     "Only tracked source files can be modified; security/agent/tool code, tests, "
-    "hidden evaluator and host paths are out of bounds. Use exact unique old_text "
-    "from the last inspected source; make small changes and inspect the resulting "
+    "hidden evaluator and host paths are out of bounds. When repo_inspect_syntax "
+    "is allowed, use it to obtain controller-authenticated CUDA statement node IDs "
+    "and the current source_sha256. Then repo_replace_syntax may modify 1-4 of "
+    "those nodes in ONE atomic revision. Write replacement_code as valid C++/CUDA "
+    "statement(s), not model-quoted old_text or displayed line numbers. This "
+    "parser checks syntax only, NEVER mathematical correctness. In traditional "
+    "exact-text mode use unique old_text from the actual source instead. "
+    "Make small changes and inspect the resulting "
     "diff. Re-reading an identical file range, file list, or diff at the same "
     "revision is rejected; reuse earlier tool evidence instead. Reserve enough "
     "steps to edit, run a public check and finish. When a BUDGET_ALERT is present, "
