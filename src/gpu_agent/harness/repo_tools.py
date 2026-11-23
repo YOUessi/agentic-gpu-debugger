@@ -88,7 +88,9 @@ class RepositoryWorkspaceTools:
         self._last_checked_candidate_sha: str | None = None
         self._last_public_passed = False
 
-    def _configure_public_case(self, case_id: str | None, max_public_checks: int) -> None:
+    def _configure_public_case(
+        self, case_id: str | None, max_public_checks: int, *, resuming: bool = False
+    ) -> None:
         if type(max_public_checks) is not int or not 1 <= max_public_checks <= 3:
             raise ValueError("public check budget must be between 1 and 3")
         if case_id is not None and case_id not in HARDSET_CASES:
@@ -97,19 +99,20 @@ class RepositoryWorkspaceTools:
         self._max_public_checks = max_public_checks
         self._public_kernel_path: str | None = None
         if case_id is not None:
-            # Only the registry's original mutant is eligible for this public
-            # oracle. The agent cannot select a different problem or expected output.
+            # Initial bind proves the frozen checkout contains the registered
+            # mutant and public harness. On resume its mutant is deliberately
+            # modified, so rely on the verified original journal + Git HEAD.
             root = self.workspace.root / "benchmarks"
-            registry, _ = load_registry(root)
-            case = next(case for case in registry.cases if case.case_id == case_id)
-            manifest = manifest_for(root, case, "mutant")
             name = f"benchmarks/hardset_v2/{case_id}/mutant/kernel.cu"
-            if manifest[f"hardset_v2/{case_id}/mutant/kernel.cu"] != (
-                case.mutant_source_sha256
-            ):
-                raise ValueError("public case mutant does not match the registered SHA")
-            if name not in self.workspace.list_files(suffix=".cu"):
-                raise ValueError("registered public kernel is not in frozen checkout")
+            self.workspace._checked(name, editable=True)
+            if not resuming:
+                registry, _ = load_registry(root)
+                case = next(case for case in registry.cases if case.case_id == case_id)
+                manifest = manifest_for(root, case, "mutant")
+                if manifest[f"hardset_v2/{case_id}/mutant/kernel.cu"] != (
+                    case.mutant_source_sha256
+                ):
+                    raise ValueError("public mutant does not match registered SHA")
             self._public_kernel_path = name
 
     @property
@@ -180,7 +183,7 @@ class RepositoryWorkspaceTools:
         if host._run.kind != "gpu_repository_agent" or host._run.status != "RUNNING":
             raise ValueError("resumed public RunStore must be an active repository run")
         host._policy = permissions or ToolPermissionPolicy()
-        host._configure_public_case(public_case_id, max_public_checks)
+        host._configure_public_case(public_case_id, max_public_checks, resuming=True)
         if (
             type(public_checks_attempted) is not int
             or not 0 <= public_checks_attempted <= max_public_checks
