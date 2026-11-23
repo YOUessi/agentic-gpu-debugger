@@ -34,8 +34,8 @@ def _plan() -> TaskPlan:
             "milestones": [
                 {
                     "gate": "inspect",
-                    "objective": "Inspect the current registered CUDA source for the numerical fault",
-                    "success_evidence": "Registered source inspected or supplied in initial snapshot",
+                    "objective": "Inspect the registered CUDA source for numerical faults",
+                    "success_evidence": "Registered CUDA source inspected or supplied",
                 },
                 {
                     "gate": "edit",
