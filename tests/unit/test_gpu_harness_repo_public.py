@@ -19,6 +19,7 @@ from gpu_agent.harness.metrics import summarize_repository_trajectory
 from gpu_agent.harness.models import HarnessDecision, RepoRunPublicChecks
 from gpu_agent.harness.repo_runner import run_repository_coding_session
 from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
+from gpu_agent.harness.repo_verification import verify_repository_hardset_candidate
 from gpu_agent.store import RunStore
 
 BENCH = Path(__file__).resolve().parents[2] / "benchmarks"
@@ -374,3 +375,147 @@ def test_public_success_metrics_remain_unverified(
     assert metrics.public_checks_passed_final
     assert not metrics.independently_verified
     assert not metrics.independent_hidden_verification
+
+
+
+def test_operator_verifier_receives_exact_scoped_cuda_diff_only_after_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gpu_agent.benchmark.hardset_v2_verifier import HardsetPrivateProjection
+
+    repository, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    session = tmp_path / "public-verified-separate"
+    report = run_repository_coding_session(
+        repository=repository,
+        output=session,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        max_steps=6,
+        max_model_calls=8,
+        model_factory=lambda _: Model([_edit_numerator(), _edit_denominator(), _check(), _finish()]),
+    )
+    assert report.public_checks_passed and report.status == "DIFF_STAGED_UNVERIFIED"
+    calls = []
+
+    def strict_stub(origin, output, *, case_id, unified_diff, evaluator_secret):
+        assert origin == repository.resolve()
+        assert case_id == "h001"
+        assert evaluator_secret == b"operator-owned-experimental-secret-00001"
+        assert not output.exists()
+        assert unified_diff.startswith("--- a/kernel.cu\n+++ b/kernel.cu\n")
+        assert "expf(own - maximum)" in unified_diff
+        assert "denominator += expf(x - maximum)" in unified_diff
+        calls.append(unified_diff)
+        return HardsetPrivateProjection(
+            case_id=case_id,
+            candidate_sha256=report.public_checked_candidate_sha256,
+            verdict="VERIFIED_FIXED",
+            reason_code="ALL_REQUIRED_CHECKS_PASSED",
+        )
+
+    monkeypatch.setattr(
+        "gpu_agent.harness.repo_verification.run_strict_hardset_verification", strict_stub
+    )
+    private_output = tmp_path / "outside-private-evaluator"
+    projection = verify_repository_hardset_candidate(
+        repository=repository,
+        session_output=session,
+        output=private_output,
+        evaluator_secret=b"operator-owned-experimental-secret-00001",
+    )
+    assert projection.verdict == "VERIFIED_FIXED" and len(calls) == 1
+    # This is a *stubbed* unit test: no real hidden GPU verification was run.
+    assert not private_output.exists()
+    assert report.status == "DIFF_STAGED_UNVERIFIED"
+    assert RunStore(session / "public").load(report.public_run_id).status.value == "COMPLETED"
+    assert all(
+        ref.visibility == "public"
+        for ref in RunStore(session / "public").load(report.public_run_id).artifact_refs
+    )
+
+
+def test_operator_verifier_rejects_external_source_drift_and_private_output_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, sha = _registered_repository(tmp_path)
+    monkeypatch.setattr(
+        "gpu_agent.harness.repo_tools.check_candidate_publicly", FakePublicChecker([True])
+    )
+    session = tmp_path / "public-drift"
+    run_repository_coding_session(
+        repository=repository,
+        output=session,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        max_steps=6,
+        max_model_calls=8,
+        model_factory=lambda _: Model([_edit_numerator(), _edit_denominator(), _check(), _finish()]),
+    )
+
+    kwargs = dict(
+        repository=repository,
+        session_output=session,
+        output=tmp_path / "private-eval",
+        evaluator_secret=b"operator-owned-experimental-secret-00001",
+    )
+    with pytest.raises(ValueError, match="private secret"):
+        verify_repository_hardset_candidate(**{**kwargs, "evaluator_secret": b"too-short"})
+    with pytest.raises(ValueError, match="outside repository"):
+        verify_repository_hardset_candidate(
+            **{**kwargs, "output": session / "private-evaluator"}
+        )
+    candidate = session / "worktree" / KERNEL
+    candidate.write_text(candidate.read_text().replace("maximum", "wrongname", 1))
+    with pytest.raises(ValueError, match="outside controller"):
+        verify_repository_hardset_candidate(**kwargs)
+    assert not (tmp_path / "private-eval").exists()
+
+
+def test_operator_verifier_preflight_rejects_source_scope_even_if_public_stub_lies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, sha = _registered_repository(tmp_path)
+    monkeypatch.setattr(
+        "gpu_agent.harness.repo_tools.check_candidate_publicly", FakePublicChecker([True])
+    )
+    tampered_include = {
+        "tool": "repo_replace_snippet",
+        "path": KERNEL,
+        "old_text": "#include <cmath>",
+        "new_text": "#include <math.h>",
+    }
+    session = tmp_path / "scope-refusal"
+    result = run_repository_coding_session(
+        repository=repository,
+        output=session,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        max_steps=6,
+        max_model_calls=8,
+        model_factory=lambda _: Model([tampered_include, _check(), _finish()]),
+    )
+    assert result.public_checks_passed
+    called = []
+
+    def forbidden_verifier(*args, **kwargs):
+        called.append(True)
+        raise AssertionError("strict verifier must never receive an invalid scoped patch")
+
+    monkeypatch.setattr(
+        "gpu_agent.harness.repo_verification.run_strict_hardset_verification",
+        forbidden_verifier,
+    )
+    with pytest.raises(ValueError, match="include directives"):
+        verify_repository_hardset_candidate(
+            repository=repository,
+            session_output=session,
+            output=tmp_path / "invalid-eval-output",
+            evaluator_secret=b"operator-owned-experimental-secret-00001",
+        )
+    assert not called
+    assert not (tmp_path / "invalid-eval-output").exists()
