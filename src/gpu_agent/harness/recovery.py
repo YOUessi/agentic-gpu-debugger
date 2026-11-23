@@ -41,6 +41,7 @@ class RepositoryCheckpoint(BaseModel):
     max_public_checks: int = Field(default=2, ge=1, le=3)
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     attempted_candidate_hashes: tuple[str, ...] = ()
+    observed_query_fingerprints: tuple[str, ...] = ()
     last_public_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     last_checked_diff_sha: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     last_checked_candidate_sha: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
@@ -110,6 +111,18 @@ def write_repository_checkpoint(path: Path, checkpoint: RepositoryCheckpoint) ->
         or (checkpoint.public_case_id is None and checkpoint.public_checks_attempted)
     ):
         raise ValueError("checkpoint public GPU check budget invalid")
+    if (
+        len(checkpoint.observed_query_fingerprints) > checkpoint.state["turns"]
+        or len(set(checkpoint.observed_query_fingerprints))
+        != len(checkpoint.observed_query_fingerprints)
+        or any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(ch not in "0123456789abcdef" for ch in value)
+            for value in checkpoint.observed_query_fingerprints
+        )
+    ):
+        raise ValueError("checkpoint inspection keys are invalid")
     for name, digest in checkpoint.accepted_hashes.items():
         if not isinstance(name, str) or not isinstance(digest, str) or len(digest) != 64:
             raise ValueError("invalid checkpoint edited-file manifest")
@@ -147,6 +160,18 @@ def read_repository_checkpoint(path: Path) -> RepositoryCheckpoint:
         or (checkpoint.public_case_id is None and checkpoint.public_checks_attempted)
     ):
         raise ValueError("checkpoint public GPU check evidence invalid")
+    if (
+        len(checkpoint.observed_query_fingerprints) > checkpoint.state["turns"]
+        or len(set(checkpoint.observed_query_fingerprints))
+        != len(checkpoint.observed_query_fingerprints)
+        or any(
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(ch not in "0123456789abcdef" for ch in value)
+            for value in checkpoint.observed_query_fingerprints
+        )
+    ):
+        raise ValueError("checkpoint inspection keys are invalid")
     return checkpoint
 
 

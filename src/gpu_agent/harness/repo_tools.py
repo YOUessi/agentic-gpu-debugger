@@ -87,6 +87,22 @@ class RepositoryWorkspaceTools:
         self._last_checked_diff_sha: str | None = None
         self._last_checked_candidate_sha: str | None = None
         self._last_public_passed = False
+        self._observed_query_fingerprints: set[str] = set()
+
+    @property
+    def observed_query_fingerprints(self) -> tuple[str, ...]:
+        """Hashed read/list/diff queries; no source code is persisted here."""
+        return tuple(sorted(self._observed_query_fingerprints))
+
+    def _query_fingerprint(self, payload: dict[str, str | int]) -> str:
+        """Bind inspection requests to their exact revision, not LLM claims."""
+        return hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def _require_new_observation(self, fingerprint: str, code: str) -> None:
+        if fingerprint in self._observed_query_fingerprints:
+            raise ValueError(f"{code}: unchanged inspection already completed; use prior evidence")
 
     def _configure_public_case(
         self, case_id: str | None, max_public_checks: int, *, resuming: bool = False
@@ -163,6 +179,7 @@ class RepositoryWorkspaceTools:
         last_checked_diff_sha: str | None = None,
         last_checked_candidate_sha: str | None = None,
         last_public_passed: bool = False,
+        observed_query_fingerprints: tuple[str, ...] = (),
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -197,6 +214,18 @@ class RepositoryWorkspaceTools:
         host._last_checked_diff_sha = last_checked_diff_sha
         host._last_checked_candidate_sha = last_checked_candidate_sha
         host._last_public_passed = last_public_passed
+        if (
+            len(observed_query_fingerprints) > tool_calls
+            or any(
+                not isinstance(value, str)
+                or len(value) != 64
+                or any(ch not in "0123456789abcdef" for ch in value)
+                for value in observed_query_fingerprints
+            )
+            or len(set(observed_query_fingerprints)) != len(observed_query_fingerprints)
+        ):
+            raise ValueError("invalid resumed inspection query fingerprints")
+        host._observed_query_fingerprints = set(observed_query_fingerprints)
         if public_checks_attempted:
             if not public_case_id or not last_public_run_id or not last_checked_candidate_sha:
                 raise ValueError("missing recovered public GPU evidence")
@@ -295,6 +324,27 @@ class RepositoryWorkspaceTools:
                 f"\nRegistered public GPU case: {self._public_case_id}. "
                 + PUBLIC_REQUIREMENTS[self._public_case_id]
             )
+        # Controller advice is non-prescriptive: the model still chooses each
+        # action, but a late patch cannot consume the same turns as validation.
+        guidance = ""
+        if self._public_case_id is not None and steps <= 5:
+            if not self.workspace.edited_files:
+                guidance = (
+                    "BUDGET_ALERT: no candidate source edit yet. Editing, one public "
+                    "GPU check and finish require three separate remaining actions."
+                )
+            elif not self.public_checks_passed:
+                guidance = (
+                    "BUDGET_ALERT: current source is not publicly checked. "
+                    "Prioritize an informative edit or registered public GPU check; "
+                    "finish will be rejected until this exact diff passes."
+                )
+            else:
+                guidance = (
+                    "BUDGET_ALERT: this exact diff already passed public checks. "
+                    "Call finish before losing the remaining step budget."
+                )
+        summary = (guidance + "\n" + context.summary)[:2800] if guidance else context.summary
         return SessionSnapshot(
             goal=goal,
             case_id="repository",
@@ -312,7 +362,7 @@ class RepositoryWorkspaceTools:
                 else 0
             ),
             history=context.recent,
-            context_summary=context.summary,
+            context_summary=summary,
             workspace_source=context.source,
             total_public_actions=context.total_actions,
         )
@@ -347,6 +397,12 @@ class RepositoryWorkspaceTools:
                     "observation_sha256": hashlib.sha256(result.content.encode()).hexdigest(),
                     "edited_files": self.workspace.edited_files,
                     "diff_sha256": self.workspace.integrity()["diff_sha256"],
+                    "rejection_code": (
+                        result.content.split(":", 2)[1].strip()
+                        if result.status == "REJECTED"
+                        and result.content.startswith("ValueError: REDUNDANT_")
+                        else None
+                    ),
                 },
                 sort_keys=True,
             ).encode(),
@@ -356,15 +412,29 @@ class RepositoryWorkspaceTools:
 
     def _dispatch(self, action: HarnessAction) -> ToolObservation:
         if isinstance(action, RepoListFiles):
+            key = self._query_fingerprint({"tool": action.tool, "suffix": action.suffix})
+            self._require_new_observation(key, "REDUNDANT_LIST")
             files = self.workspace.list_files(suffix=action.suffix)
+            self._observed_query_fingerprints.add(key)
             return ToolObservation(
                 tool=action.tool,
                 status="OK",
                 content="\n".join(files)[:4000] or "No allowed source files found.",
             )
         if isinstance(action, RepoReadFile):
-            self._last_file = action.path
+            key = self._query_fingerprint(
+                {
+                    "tool": action.tool,
+                    "path": action.path,
+                    "start_line": action.start_line,
+                    "lines": action.lines,
+                    "source_diff_sha256": str(self.workspace.integrity()["diff_sha256"]),
+                }
+            )
+            self._require_new_observation(key, "REDUNDANT_READ")
             text = self.workspace.read(action.path, start=action.start_line, lines=action.lines)
+            self._observed_query_fingerprints.add(key)
+            self._last_file = action.path
             self._last_file_read = text
             return ToolObservation(
                 tool=action.tool,
@@ -389,6 +459,11 @@ class RepositoryWorkspaceTools:
             return self._run_registered_public_checks()
         if isinstance(action, RepoGitDiff):
             diff = self.workspace.diff()
+            key = self._query_fingerprint(
+                {"tool": action.tool, "source_diff_sha256": str(self.workspace.integrity()["diff_sha256"])}
+            )
+            self._require_new_observation(key, "REDUNDANT_DIFF")
+            self._observed_query_fingerprints.add(key)
             return ToolObservation(
                 tool=action.tool,
                 status="OK",

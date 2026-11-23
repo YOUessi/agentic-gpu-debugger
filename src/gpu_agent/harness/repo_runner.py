@@ -97,6 +97,7 @@ def run_repository_coding_session(
             last_checked_diff_sha=checkpoint.last_checked_diff_sha,
             last_checked_candidate_sha=checkpoint.last_checked_candidate_sha,
             last_public_passed=checkpoint.last_public_passed,
+            observed_query_fingerprints=checkpoint.observed_query_fingerprints,
         )
         if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
             raise ValueError("resumed workspace diff disagrees with checkpoint")
@@ -220,6 +221,7 @@ def run_repository_coding_session(
                         last_checked_diff_sha=tools.last_checked_diff_sha,
                         last_checked_candidate_sha=tools.last_checked_candidate_sha,
                         last_public_passed=tools._last_public_passed,
+                        observed_query_fingerprints=tools.observed_query_fingerprints,
                         accepted_hashes=tools.workspace.accepted_hashes,
                         state=dict(state),
                     ),
