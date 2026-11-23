@@ -118,8 +118,15 @@ class BudgetLedger:
 
 class LLMCallGate:
     def __init__(
-        self, budget: AgentBudget | None = None, clock: Callable[[], float] = time.monotonic
+        self,
+        budget: AgentBudget | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        *,
+        reserve_repair_stages: bool = True,
     ) -> None:
+        if type(reserve_repair_stages) is not bool:
+            raise ValueError("invalid model-call reservation policy")
+        self._reserve_repair_stages = reserve_repair_stages
         self._budget = budget or AgentBudget()
         self._clock, self._start = clock, clock()
         self._lock = threading.Lock()
@@ -153,9 +160,13 @@ class LLMCallGate:
                 raise ProviderError("LLM_INVALID_OUTPUT")
             remaining = self.remaining()
             reserve = (
-                (int(not self._diagnosed) + int(not self._patched))
-                if kind == "plan"
-                else (int(not self._patched) if kind == "diagnose" else 0)
+                (
+                    (int(not self._diagnosed) + int(not self._patched))
+                    if kind == "plan"
+                    else (int(not self._patched) if kind == "diagnose" else 0)
+                )
+                if self._reserve_repair_stages
+                else 0
             )
             if remaining <= 0 or self._calls + reserve >= self._budget.max_llm_calls:
                 raise ProviderError("AGENT_BUDGET_EXHAUSTED")

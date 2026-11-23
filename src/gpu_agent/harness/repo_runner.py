@@ -137,7 +137,10 @@ def run_repository_coding_session(
                     AgentBudget(
                         max_llm_calls=max_model_calls,
                         max_wall_time_seconds=600,
-                    )
+                    ),
+                    # Coding Agent issues plan/tool requests only. The old
+                    # Workflow D's diagnosis/patch reservations are unrelated.
+                    reserve_repair_stages=False,
                 ),
                 tools.store,
                 tools.run_id,
