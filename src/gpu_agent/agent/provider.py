@@ -66,6 +66,7 @@ class OpenAIProviderSettings(ExecutionModel):
     api_key: SecretStr | None = Field(default=None, repr=False, exclude=True)
     timeout_seconds: float = Field(default=60, gt=0, le=600, allow_inf_nan=False)
     supports_store_false: bool = False
+    allow_loopback_http: bool = False
 
     @field_validator("endpoint")
     @classmethod
@@ -73,16 +74,32 @@ class OpenAIProviderSettings(ExecutionModel):
         if value is None:
             return None
         url = urlsplit(value)
+        # A local inference engine may be used without weakening the security
+        # boundary for public HTTP endpoints. Require a *literal* loopback IP,
+        # an explicit port, and the OpenAI-compatible /v1 API root.
+        local = (
+            url.scheme == "http"
+            and url.hostname in {"127.0.0.1", "::1"}
+            and url.port is not None
+            and url.path.rstrip("/") == "/v1"
+        )
         if (
-            url.scheme != "https"
+            (url.scheme != "https" and not local)
             or not url.hostname
             or url.username is not None
             or url.password is not None
             or url.query
             or url.fragment
         ):
-            raise ValueError("endpoint must be an explicit HTTPS API root without credentials")
+            raise ValueError("endpoint must be HTTPS or a literal loopback /v1 root")
         return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def explicit_local_authority(self) -> "OpenAIProviderSettings":
+        if self.endpoint and urlsplit(self.endpoint).scheme == "http":
+            if not self.allow_loopback_http:
+                raise ValueError("local HTTP inference requires explicit operator opt-in")
+        return self
 
     @classmethod
     def from_environment(cls) -> "OpenAIProviderSettings":
@@ -92,6 +109,7 @@ class OpenAIProviderSettings(ExecutionModel):
             model=os.environ.get("OPENAI_MODEL") or None,
             api_key=SecretStr(key) if key else None,
             supports_store_false=os.environ.get("GPU_AGENT_STORE_FALSE_SUPPORTED") == "1",
+            allow_loopback_http=os.environ.get("GPU_AGENT_ALLOW_LOOPBACK_HTTP") == "1",
             timeout_seconds=float(os.environ.get("GPU_AGENT_LLM_TIMEOUT_SECONDS", "60")),
         )
 
