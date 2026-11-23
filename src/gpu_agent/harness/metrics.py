@@ -65,6 +65,8 @@ _READ_TOOLS = {"repo_list_files", "repo_read_file", "repo_git_diff"}
 def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics:
     """Read a terminal session without executing code, CUDA or paid-model calls."""
     result = RepoHarnessOutcome.model_validate_json(read_regular(output / "result.json", 32_000))
+    if result.status == "PAUSED_RESUMABLE":
+        raise ValueError("paused sessions have no terminal trajectory metrics")
     journal = read_verified_journal(output / "session-events.jsonl")
     if recovery_disposition(journal) != "FINISHED":
         raise ValueError("trajectory is not a finished, verified session journal")
