@@ -45,12 +45,13 @@ def harness_sweep_repo(
     max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=6, max=32)] = 14,
     max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     include_workflow_d: Annotated[bool, typer.Option("--include-workflow-d")] = False,
+    architecture_study: Annotated[bool, typer.Option("--architecture-study")] = False,
     evaluator_secret_file: Annotated[Path | None, typer.Option("--evaluator-secret-file")] = None,
     execute: Annotated[bool, typer.Option("--execute")] = False,
     allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
     allow_real_gpu: Annotated[bool, typer.Option("--allow-real-gpu")] = False,
 ) -> None:
-    """Freeze and optionally execute a paired REAL-model 2×2 CUDA Agent study.
+    """Freeze and optionally execute a 2x2 or three-arm coding Agent study.
 
     The default preflight makes ZERO GPU or paid model calls and creates no
     experiment output. --execute requires explicit paid/API, GPU and private
@@ -76,6 +77,7 @@ def harness_sweep_repo(
                 max_model_calls=max_model_calls,
                 max_public_checks=max_public_checks,
                 include_workflow_D=include_workflow_d,
+                architecture_study=architecture_study,
             )
             typer.echo(report.model_dump_json(indent=2))
             return
@@ -91,6 +93,7 @@ def harness_sweep_repo(
             max_model_calls=max_model_calls,
             max_public_checks=max_public_checks,
             include_workflow_D=include_workflow_d,
+            architecture_study=architecture_study,
             allow_paid_calls=allow_paid_calls,
             allow_real_gpu=allow_real_gpu,
         )
