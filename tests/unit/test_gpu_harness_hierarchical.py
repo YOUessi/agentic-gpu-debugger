@@ -275,3 +275,24 @@ def test_reflection_compacts_repeated_rejections_without_erasing_failures() -> N
                 "failure_risk": "No independent verification available",
             }
         )
+
+
+def test_plan_only_agent_does_not_reserve_nonexistent_repair_model_calls() -> None:
+    from gpu_agent.agent.models import AgentBudget, ProviderError
+    from gpu_agent.agent.policy import LLMCallGate
+
+    gate = LLMCallGate(AgentBudget(max_llm_calls=10), reserve_repair_stages=False)
+    for _ in range(10):
+        assert gate.reserve("plan") > 0
+    assert gate.snapshot().llm_calls == 10
+    with pytest.raises(ProviderError, match="AGENT_BUDGET_EXHAUSTED"):
+        gate.reserve("plan")
+
+    # Existing diagnosis/patch workflow retains its old safety reserve.
+    old = LLMCallGate(AgentBudget(max_llm_calls=10))
+    for _ in range(8):
+        assert old.reserve("plan") > 0
+    with pytest.raises(ProviderError, match="AGENT_BUDGET_EXHAUSTED"):
+        old.reserve("plan")
+    with pytest.raises(ValueError, match="invalid model-call reservation"):
+        LLMCallGate(AgentBudget(max_llm_calls=10), reserve_repair_stages="no")
