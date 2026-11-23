@@ -186,11 +186,7 @@ def test_all_planned_units_are_recorded_including_failures_without_retries(
         assert evaluator_secret == secret.read_bytes()
         assert plan.base_sha == _git(repo, "rev-parse", "HEAD")
         executed.append(spec.index)
-        verdict = (
-            "EXPERIMENTAL_STRICT_FIXED"
-            if spec.index in (1, 4)
-            else "MODEL_OR_RUNTIME_ERROR"
-        )
+        verdict = "EXPERIMENTAL_STRICT_FIXED" if spec.index in (1, 4) else "MODEL_OR_RUNTIME_ERROR"
         return TrialRecord(
             spec=spec,
             disposition=verdict,

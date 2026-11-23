@@ -410,9 +410,7 @@ def summarize_sweep(plan: BenchmarkPlan, records: tuple[TrialRecord, ...]) -> Sw
         by_arm[arm] = {
             "planned": sum(item.arm == arm for item in plan.units),
             "observed": len(group),
-            "strict_fixed": sum(
-                item.disposition == "EXPERIMENTAL_STRICT_FIXED" for item in group
-            ),
+            "strict_fixed": sum(item.disposition == "EXPERIMENTAL_STRICT_FIXED" for item in group),
             "failures": sum(item.disposition != "EXPERIMENTAL_STRICT_FIXED" for item in group),
             "measured_model_tokens": (
                 sum(value for value in reported if value is not None)
