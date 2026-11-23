@@ -7,7 +7,7 @@ the model still selects an action and all source edits itself.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
@@ -36,7 +36,11 @@ _REPO_ACTION_CLASSES: dict[str, type[BaseModel]] = {
 }
 
 
-def repository_decision_schema(allowed_tools: tuple[str, ...]) -> type[BaseModel]:
+def repository_decision_schema(
+    allowed_tools: tuple[str, ...],
+    *,
+    registered_kernel_path: str | None = None,
+) -> type[BaseModel]:
     """Return a strict Pydantic response schema for EXACTLY approved tools.
 
     The backend independently verifies these capabilities at execution time;
@@ -49,7 +53,17 @@ def repository_decision_schema(allowed_tools: tuple[str, ...]) -> type[BaseModel
         or any(name not in _REPO_ACTION_CLASSES for name in allowed_tools)
     ):
         raise ValueError("registered model tool grammar has invalid controller capability set")
-    options = tuple(_REPO_ACTION_CLASSES[name] for name in allowed_tools)
+    options: tuple[type[BaseModel], ...] = tuple(
+        create_model(
+            f"Bound{name.title().replace('_', '')}",
+            __base__=_REPO_ACTION_CLASSES[name],
+            path=(Literal[registered_kernel_path], ...),
+        )
+        if registered_kernel_path is not None
+        and name in {"repo_inspect_syntax", "repo_replace_syntax"}
+        else _REPO_ACTION_CLASSES[name]
+        for name in allowed_tools
+    )
     action: Any
     if len(options) == 1:
         action = options[0]

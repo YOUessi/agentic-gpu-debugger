@@ -551,7 +551,17 @@ def invoke_sdk(
         names = snapshot.get("allowed_tools")
         if not isinstance(names, list) or any(not isinstance(x, str) for x in names):
             raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
-        output_model = repository_decision_schema(tuple(names))
+        kernel_path = snapshot.get("registered_kernel_path")
+        case_id = snapshot.get("registered_public_case")
+        if case_id is not None:
+            expected = f"benchmarks/hardset_v2/{case_id}/mutant/kernel.cu"
+            if case_id not in {"h001", "h002", "h003"} or kernel_path != expected:
+                raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        elif kernel_path is not None:
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        output_model = repository_decision_schema(
+            tuple(names), registered_kernel_path=kernel_path
+        )
     elif request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
         from gpu_agent.harness.models import HarnessDecision
 

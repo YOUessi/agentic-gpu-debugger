@@ -481,6 +481,7 @@ class RepositoryWorkspaceTools:
             source_hash=hashlib.sha256(self.workspace.base_sha.encode()).hexdigest(),
             functional_requirement=requirement,
             registered_public_case=self._public_case_id,
+            registered_kernel_path=self._public_kernel_path,
             context_mode=self._context_mode,
             current_candidate_sha256=hashlib.sha256(delta.encode()).hexdigest() if delta else None,
             public_checks_passed=self.public_checks_passed,

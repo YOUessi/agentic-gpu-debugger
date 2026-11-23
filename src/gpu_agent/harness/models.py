@@ -200,6 +200,7 @@ class SessionSnapshot(StrictModel):
     functional_requirement: str = Field(min_length=5, max_length=2000)
     base_git_commit: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
     registered_public_case: str | None = Field(default=None, pattern=r"^h00[1-3]$")
+    registered_kernel_path: str | None = Field(default=None, max_length=300)
     context_mode: Literal["legacy", "evidence_first"] = "legacy"
     task_plan: TaskPlan | None = None
     task_progress: TaskProgress | None = None
