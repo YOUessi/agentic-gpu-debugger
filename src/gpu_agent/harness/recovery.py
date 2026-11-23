@@ -37,6 +37,14 @@ class RepositoryCheckpoint(BaseModel):
     max_steps: int = Field(ge=1, le=38)
     max_model_calls: int = Field(ge=4, le=40)
     max_edited_files: int = Field(ge=1, le=20)
+    public_case_id: str | None = Field(default=None, pattern=r"^h00[1-3]$")
+    max_public_checks: int = Field(default=2, ge=1, le=3)
+    public_checks_attempted: int = Field(default=0, ge=0, le=3)
+    attempted_candidate_hashes: tuple[str, ...] = ()
+    last_public_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
+    last_checked_diff_sha: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    last_checked_candidate_sha: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
+    last_public_passed: bool = False
     accepted_hashes: dict[str, str]
     state: dict[str, Any]
 
@@ -96,6 +104,13 @@ def write_repository_checkpoint(path: Path, checkpoint: RepositoryCheckpoint) ->
         raise ValueError("checkpoint trace count disagrees with completed turns")
     if len(checkpoint.accepted_hashes) > checkpoint.max_edited_files:
         raise ValueError("checkpoint file limit exceeded")
+    if (
+        checkpoint.public_checks_attempted > checkpoint.max_public_checks
+        or len(set(checkpoint.attempted_candidate_hashes))
+        != checkpoint.public_checks_attempted
+        or (checkpoint.public_case_id is None and checkpoint.public_checks_attempted)
+    ):
+        raise ValueError("checkpoint public GPU check budget invalid")
     for name, digest in checkpoint.accepted_hashes.items():
         if not isinstance(name, str) or not isinstance(digest, str) or len(digest) != 64:
             raise ValueError("invalid checkpoint edited-file manifest")
@@ -127,6 +142,13 @@ def read_repository_checkpoint(path: Path) -> RepositoryCheckpoint:
         raise ValueError("checkpoint action trace is inconsistent")
     if len(checkpoint.accepted_hashes) > checkpoint.max_edited_files:
         raise ValueError("checkpoint changed-file budget exceeded")
+    if (
+        checkpoint.public_checks_attempted > checkpoint.max_public_checks
+        or len(set(checkpoint.attempted_candidate_hashes))
+        != checkpoint.public_checks_attempted
+        or (checkpoint.public_case_id is None and checkpoint.public_checks_attempted)
+    ):
+        raise ValueError("checkpoint public GPU check evidence invalid")
     return checkpoint
 
 
@@ -138,6 +160,8 @@ def validated_quiescent_repository_checkpoint(
     max_steps: int,
     max_model_calls: int,
     max_edited_files: int,
+    public_case_id: str | None = None,
+    max_public_checks: int = 2,
 ) -> RepositoryCheckpoint:
     """Reject uncertain side effects, terminal sessions or mismatched settings."""
     records = read_verified_journal(output / "session-events.jsonl")
@@ -154,6 +178,8 @@ def validated_quiescent_repository_checkpoint(
         or checkpoint.max_steps != max_steps
         or checkpoint.max_model_calls != max_model_calls
         or checkpoint.max_edited_files != max_edited_files
+        or checkpoint.public_case_id != public_case_id
+        or checkpoint.max_public_checks != max_public_checks
     ):
         raise ValueError("checkpoint identity, journal head or budgets differ")
     first = records[0]
@@ -162,6 +188,8 @@ def validated_quiescent_repository_checkpoint(
         or first["payload"].get("base_git_commit") != base_sha
         or first["payload"].get("goal_sha256") != checkpoint.goal_sha256
         or first["payload"].get("public_run_id") != checkpoint.public_run_id
+        or first["payload"].get("public_case_id") != checkpoint.public_case_id
+        or first["payload"].get("max_public_checks", 2) != checkpoint.max_public_checks
     ):
         raise ValueError("checkpoint does not match session creation evidence")
     completed = sum(event["kind"] == "tool_completed" for event in records)
