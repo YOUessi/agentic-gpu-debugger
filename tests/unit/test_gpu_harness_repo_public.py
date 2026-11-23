@@ -787,3 +787,46 @@ def test_batch_ablation_permission_is_enforced_by_controller_and_resume(
             resume=True,
             model_factory=lambda _: Model([_edit_numerator()]),
         )
+
+
+def test_registered_gpu_tool_capabilities_follow_real_candidate_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([False, True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    with RepositoryWorkspaceTools(
+        origin=repository,
+        output=tmp_path / "state-scoped",
+        sha=sha,
+        public_case_id="h001",
+        context_mode="evidence_first",
+    ) as host:
+        initial = host.snapshot(GOAL, [], 7)
+        assert "repo_list_files" not in initial.allowed_tools
+        assert "repo_run_public_checks" not in initial.allowed_tools
+        assert "finish" not in initial.allowed_tools
+        forbidden = host.invoke(RepoRunPublicChecks())
+        assert forbidden.status == "REJECTED"
+        assert "CURRENT_STATE" in forbidden.content
+        assert host.invoke(
+            HarnessDecision.model_validate(
+                {"action": _edit_numerator(), "reason": "First source change"}
+            ).action
+        ).status == "OK"
+        edited = host.snapshot(GOAL, [], 6)
+        assert "repo_run_public_checks" in edited.allowed_tools
+        assert "finish" not in edited.allowed_tools
+        assert host.invoke(RepoRunPublicChecks()).status == "FAILED"
+        after_failed = host.snapshot(GOAL, [], 5)
+        assert "repo_run_public_checks" not in after_failed.allowed_tools
+        assert host.invoke(RepoRunPublicChecks()).status == "REJECTED"
+        assert host.invoke(
+            HarnessDecision.model_validate(
+                {"action": _edit_denominator(), "reason": "Complete the repair"}
+            ).action
+        ).status == "OK"
+        assert "repo_run_public_checks" in host.snapshot(GOAL, [], 4).allowed_tools
+        assert host.invoke(RepoRunPublicChecks()).status == "OK"
+        assert host.snapshot(GOAL, [], 3).allowed_tools == ("finish",)
+    assert len(checker.calls) == 2
