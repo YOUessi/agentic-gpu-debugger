@@ -47,6 +47,8 @@ def run_repository_coding_session(
     max_steps: int = 18,
     max_model_calls: int = 24,
     max_edited_files: int = 8,
+    public_case_id: str | None = None,
+    max_public_checks: int = 2,
     allow_paid_calls: bool = False,
     resume: bool = False,
     pause_after_turns: int | None = None,
@@ -54,7 +56,8 @@ def run_repository_coding_session(
 ) -> RepoHarnessOutcome:
     """Execute a real Agent loop and stage independent Git worktree modifications.
 
-    No code execution, host Shell or private verifier is part of this adapter.
+    Only operator-registered HardSet public GPU tests may execute in Docker.
+    Host Shell, arbitrary tests and the private verifier are never Agent tools.
     Physical model calls use the same killable SDK worker and on-disk audit as
     the CUDA single-file Harness.
     """
@@ -75,6 +78,8 @@ def run_repository_coding_session(
             max_steps=max_steps,
             max_model_calls=max_model_calls,
             max_edited_files=max_edited_files,
+            public_case_id=public_case_id,
+            max_public_checks=max_public_checks,
         )
         host = RepositoryWorkspaceTools.reopen(
             origin=repository,
@@ -84,6 +89,14 @@ def run_repository_coding_session(
             tool_calls=checkpoint.state["turns"],
             accepted_hashes=checkpoint.accepted_hashes,
             max_edited_files=max_edited_files,
+            public_case_id=checkpoint.public_case_id,
+            max_public_checks=checkpoint.max_public_checks,
+            public_checks_attempted=checkpoint.public_checks_attempted,
+            attempted_candidate_hashes=checkpoint.attempted_candidate_hashes,
+            last_public_run_id=checkpoint.last_public_run_id,
+            last_checked_diff_sha=checkpoint.last_checked_diff_sha,
+            last_checked_candidate_sha=checkpoint.last_checked_candidate_sha,
+            last_public_passed=checkpoint.last_public_passed,
         )
         if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
             raise ValueError("resumed workspace diff disagrees with checkpoint")
@@ -95,6 +108,8 @@ def run_repository_coding_session(
             output=output,
             sha=base_sha,
             max_edited_files=max_edited_files,
+            public_case_id=public_case_id,
+            max_public_checks=max_public_checks,
         )
 
     with host as tools:
@@ -137,6 +152,8 @@ def run_repository_coding_session(
                         "base_git_commit": base_sha,
                         "public_run_id": tools.run_id,
                         "goal_sha256": hashlib.sha256(goal.encode()).hexdigest(),
+                        "public_case_id": public_case_id,
+                        "max_public_checks": max_public_checks,
                     },
                 )
                 events = 0
@@ -195,6 +212,14 @@ def run_repository_coding_session(
                         max_steps=max_steps,
                         max_model_calls=max_model_calls,
                         max_edited_files=max_edited_files,
+                        public_case_id=public_case_id,
+                        max_public_checks=max_public_checks,
+                        public_checks_attempted=tools.public_checks_attempted,
+                        attempted_candidate_hashes=tools.attempted_candidate_hashes,
+                        last_public_run_id=tools.last_public_run_id,
+                        last_checked_diff_sha=tools.last_checked_diff_sha,
+                        last_checked_candidate_sha=tools.last_checked_candidate_sha,
+                        last_public_passed=tools._last_public_passed,
                         accepted_hashes=tools.workspace.accepted_hashes,
                         state=dict(state),
                     ),
@@ -244,6 +269,9 @@ def run_repository_coding_session(
                 model_tokens=tokens,
                 reason=state.get("reason", "UNKNOWN"),
                 public_run_id=tools.run_id,
+                public_checks_attempted=tools.public_checks_attempted,
+                public_checks_passed=tools.public_checks_passed,
+                public_checked_candidate_sha256=tools.last_checked_candidate_sha,
             )
             if paused:
                 # No final result/terminal journal event. RunStore remains
@@ -259,6 +287,8 @@ def run_repository_coding_session(
                     "status": outcome.status,
                     "edited_files": len(outcome.edited_files),
                     "diff_sha256": outcome.diff_sha256,
+                    "public_checks_attempted": outcome.public_checks_attempted,
+                    "public_checks_passed": outcome.public_checks_passed,
                 },
             )
             return outcome
