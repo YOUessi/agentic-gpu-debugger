@@ -194,7 +194,6 @@ def test_integrity_detects_external_rewrite_of_approved_source(tmp_path: Path) -
         project.replace_exact("src/other.cuh", "return v;", "return 3 * v;")
 
 
-
 def test_atomic_batch_replacement_preserves_checkout_on_invalid_edits(tmp_path: Path) -> None:
     source, sha = _repository(tmp_path)
     workspace = PinnedGitWorkspace(

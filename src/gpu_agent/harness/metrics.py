@@ -135,8 +135,7 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         (
             step.turn
             for step in sequence
-            if step.tool in {"repo_replace_snippet", "repo_replace_many"}
-            and step.status == "OK"
+            if step.tool in {"repo_replace_snippet", "repo_replace_many"} and step.status == "OK"
         ),
         None,
     )

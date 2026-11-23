@@ -524,7 +524,6 @@ def test_operator_verifier_preflight_rejects_source_scope_even_if_public_stub_li
     assert not (tmp_path / "invalid-eval-output").exists()
 
 
-
 def _complete_softmax_batch() -> dict[str, object]:
     return {
         "tool": "repo_replace_many",
