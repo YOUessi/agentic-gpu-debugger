@@ -398,3 +398,5 @@ edits remain staged and unverified.
 See [operator contract and limitations](docs/repair-log/2026-11-23-repo-registered-gpu-public-checks.md).
 Use `scripts/run_repository_hardset_public_gpu_smoke.py --help` for the
 **scripted**, opt-in real GPU backend connectivity test (zero model calls).
+
+真实 RTX 4090 Docker GPU 双轮公开检查的冻结实测记录（脚本化模型，无隐藏验证）：[2026-11-23 GPU acceptance](docs/repair-log/2026-11-23-repo-registered-gpu-real-acceptance.md)。
