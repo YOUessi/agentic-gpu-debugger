@@ -529,7 +529,15 @@ def invoke_sdk(
             logging.getLogger(name).disabled = True
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
     output_model: type[BaseModel]
-    if request.kind == "plan" and request.payload.get("gpu_repo_harness") == "v1":
+    if request.kind == "plan" and request.payload.get("gpu_repo_task_plan") == "v1":
+        from gpu_agent.harness.models import TaskPlan
+
+        output_model = TaskPlan
+    elif request.kind == "plan" and request.payload.get("gpu_repo_reflection") == "v1":
+        from gpu_agent.harness.models import TaskReflection
+
+        output_model = TaskReflection
+    elif request.kind == "plan" and request.payload.get("gpu_repo_harness") == "v1":
         from gpu_agent.harness.tool_schema import repository_decision_schema
 
         snapshot = request.payload.get("snapshot")
@@ -995,6 +1003,26 @@ class OpenAIResponsesProvider:
             wire_model=PlannerOutput,
             convert=lambda wire: wire.to_action_output(new_id()),
         ).action
+
+    def choose_repository_plan(self, snapshot: "SessionSnapshot") -> "TaskPlan":
+        """One model-generated global task plan, persisted at tool checkpoints."""
+        from gpu_agent.harness.models import TaskPlan
+
+        return self._call(
+            "plan",
+            {"gpu_repo_task_plan": "v1", "snapshot": snapshot.model_dump(mode="json")},
+            TaskPlan,
+        )
+
+    def reflect_repository_task(self, snapshot: "SessionSnapshot") -> "TaskReflection":
+        """One concise failure analysis at half budget, never private CoT."""
+        from gpu_agent.harness.models import TaskReflection
+
+        return self._call(
+            "plan",
+            {"gpu_repo_reflection": "v1", "snapshot": snapshot.model_dump(mode="json")},
+            TaskReflection,
+        )
 
     def choose_harness_v1(self, snapshot: "SessionSnapshot") -> "HarnessDecision":
         """Audited model decision, one tool per turn, without a fixed stage order."""
