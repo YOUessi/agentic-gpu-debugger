@@ -270,7 +270,6 @@ def test_preflight_rejects_registry_drift_and_case_duplication(tmp_path: Path) -
         create_benchmark_plan(repo)
 
 
-
 def test_partial_failed_repository_agent_keeps_audited_steps(tmp_path: Path) -> None:
     """Do not report zero steps merely because no final result.json exists."""
     from gpu_agent.harness.ablation import _failed_repository_public_audit

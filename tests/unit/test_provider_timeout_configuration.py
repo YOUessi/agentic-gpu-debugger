@@ -41,7 +41,6 @@ def test_default_timeout_is_preserved_and_worker_accepts_explicit_longer_deadlin
     assert request.timeout_seconds == 120
 
 
-
 def test_local_model_http_requires_literal_loopback_and_opt_in(monkeypatch) -> None:
     from pydantic import ValidationError
 
