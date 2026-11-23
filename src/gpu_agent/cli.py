@@ -45,9 +45,7 @@ def harness_sweep_repo(
     max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=6, max=32)] = 14,
     max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     include_workflow_d: Annotated[bool, typer.Option("--include-workflow-d")] = False,
-    evaluator_secret_file: Annotated[
-        Path | None, typer.Option("--evaluator-secret-file")
-    ] = None,
+    evaluator_secret_file: Annotated[Path | None, typer.Option("--evaluator-secret-file")] = None,
     execute: Annotated[bool, typer.Option("--execute")] = False,
     allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
     allow_real_gpu: Annotated[bool, typer.Option("--allow-real-gpu")] = False,
