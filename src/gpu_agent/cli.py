@@ -35,6 +35,75 @@ knowledge_app = typer.Typer(no_args_is_help=True, help="Offline knowledge inspec
 app.add_typer(knowledge_app, name="knowledge")
 
 
+@harness_app.command("sweep-repo")
+def harness_sweep_repo(
+    repository: Annotated[Path, typer.Option("--repository")],
+    output: Annotated[Path, typer.Option("--output")],
+    cases: Annotated[str, typer.Option("--cases")] = "h001",
+    repetitions: Annotated[int, typer.Option("--repetitions", min=1, max=3)] = 1,
+    max_steps: Annotated[int, typer.Option("--max-steps", min=4, max=24)] = 12,
+    max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=6, max=32)] = 14,
+    max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
+    include_workflow_d: Annotated[bool, typer.Option("--include-workflow-d")] = False,
+    evaluator_secret_file: Annotated[
+        Path | None, typer.Option("--evaluator-secret-file")
+    ] = None,
+    execute: Annotated[bool, typer.Option("--execute")] = False,
+    allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    allow_real_gpu: Annotated[bool, typer.Option("--allow-real-gpu")] = False,
+) -> None:
+    """Freeze and optionally execute a paired REAL-model 2×2 CUDA Agent study.
+
+    The default preflight makes ZERO GPU or paid model calls and creates no
+    experiment output. --execute requires explicit paid/API, GPU and private
+    evaluator authorization; failed/blocked units are never re-sampled.
+    """
+    from gpu_agent.harness.ablation import (
+        preflight_paired_experiment,
+        run_paired_experiment,
+    )
+
+    selected = tuple(part.strip() for part in cases.split(","))
+    if len(set(selected)) != len(selected):
+        raise typer.BadParameter("duplicate HardSet case in --cases")
+    try:
+        if not execute:
+            report = preflight_paired_experiment(
+                repository,
+                evaluator_secret_file=evaluator_secret_file,
+                output=output,
+                cases=selected,
+                repetitions=repetitions,
+                max_steps=max_steps,
+                max_model_calls=max_model_calls,
+                max_public_checks=max_public_checks,
+                include_workflow_D=include_workflow_d,
+            )
+            typer.echo(report.model_dump_json(indent=2))
+            return
+        if evaluator_secret_file is None:
+            raise typer.BadParameter("--evaluator-secret-file required to execute")
+        result = run_paired_experiment(
+            repository,
+            output,
+            evaluator_secret_file=evaluator_secret_file,
+            cases=selected,
+            repetitions=repetitions,
+            max_steps=max_steps,
+            max_model_calls=max_model_calls,
+            max_public_checks=max_public_checks,
+            include_workflow_D=include_workflow_d,
+            allow_paid_calls=allow_paid_calls,
+            allow_real_gpu=allow_real_gpu,
+        )
+        typer.echo(result.model_dump_json(indent=2))
+        if not getattr(result, "ready", True):
+            raise typer.Exit(3)
+    except (OSError, ValueError) as error:
+        typer.echo(f"PAIRED_BENCHMARK_REJECTED: {type(error).__name__}", err=True)
+        raise typer.Exit(2) from None
+
+
 @harness_app.command("verify-repo")
 def harness_verify_repo(
     repository: Annotated[Path, typer.Option("--repository")],
