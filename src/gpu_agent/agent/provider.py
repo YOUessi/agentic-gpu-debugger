@@ -559,9 +559,7 @@ def invoke_sdk(
                 raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
         elif kernel_path is not None:
             raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
-        output_model = repository_decision_schema(
-            tuple(names), registered_kernel_path=kernel_path
-        )
+        output_model = repository_decision_schema(tuple(names), registered_kernel_path=kernel_path)
     elif request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
         from gpu_agent.harness.models import HarnessDecision
 
