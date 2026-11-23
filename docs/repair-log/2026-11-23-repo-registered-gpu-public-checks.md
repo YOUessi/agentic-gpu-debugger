@@ -88,3 +88,17 @@ gpu-agent harness repo-run \
 以上是 **CPU 零费用测试**，并不是 GPU 通过率实验；CI 需以对应 commit 的工作流结论为准。尤其真实 `check_candidate_publicly()` 的 Docker 运行结果必须在 Tang RTX 4090 Laptop GPU 上冻结源码单独留存，不得挪用上一轮 scripted Harness V2 的成功数据。
 
 下一批：将注册 Case 的 GPU 调用做受控真实模型复测、复用之前失败 h001 的诊断轨迹，比较旧规则 Workflow、现有 HardSet agent 和新 repository Harness 的成功率、Token、工具冗余、修复延迟与成本，保留所有失败。
+
+
+## 无付费模型的真实 GPU 接线验收入口（仍需 Tang 实际执行）
+
+仓库新增 `scripts/run_repository_hardset_public_gpu_smoke.py`。这个脚本通过模型**测试替身**选择固定的六次工具动作：读取源码 → 先修复 Softmax 分子 → 第一次真实 GPU 检查（应数值失败）→ 修复分母 → 第二次真实 GPU 检查（应通过）→ `finish`。它不仅检查成功路径，也检查真实失败反馈触发下一次补丁。
+
+```bash
+python scripts/run_repository_hardset_public_gpu_smoke.py \
+  --repository /absolute/path/to/frozen-git-checkout \
+  --output /absolute/new/private/h001-scripted-gpu \
+  --allow-real-gpu
+```
+
+脚本只在明确提供 `--allow-real-gpu` 时执行真实 Docker/CUDA 检查，不发任何模型请求；期望 `model_physical_calls=0`、`public_checks_attempted=2`、`public_failure_sequence=[NUMERIC_MISMATCH,PUBLIC_CHECKS_PASSED]`。`--help` 可在无 GPU/无 API 的 CI 中执行，但不能代替上述 GPU 检查。运行前要确认 GPU 未被其他任务独占、受信 CUDA Docker 镜像/工具链锁可用，且输出目录全新。此处不提前填写 GPU 成功成绩。
