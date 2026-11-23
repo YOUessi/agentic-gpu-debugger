@@ -7,7 +7,7 @@ the model still selects an action and all source edits itself.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, Union
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
@@ -52,7 +52,10 @@ def repository_decision_schema(allowed_tools: tuple[str, ...]) -> type[BaseModel
     else:
         # Pydantic compiles a tagged union into a JSON-Schema discriminator,
         # so the model cannot choose a tool omitted by the operator.
-        action = Annotated[Union[options], Field(discriminator="tool")]
+        combined: Any = options[0]
+        for variant in options[1:]:
+            combined = combined | variant
+        action = Annotated[combined, Field(discriminator="tool")]
     return create_model(
         "ApprovedRepositoryHarnessDecision",
         action=(action, ...),
