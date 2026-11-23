@@ -669,3 +669,122 @@ def test_context_ablation_mode_is_bound_into_resume_identity(tmp_path: Path) -> 
     assert "QUIESCENT" in recovery_disposition(
         read_verified_journal(output / "session-events.jsonl")
     )
+
+
+
+class FactorialDecisionFixture:
+    """A deterministic A/B test policy, NOT evidence of real model quality."""
+
+    def choose_harness_v1(self, snapshot):
+        if snapshot.public_checks_passed:
+            action: dict[str, object] = _finish()
+        else:
+            visible = snapshot.workspace_source
+            denom_bad = "denominator += expf(x);" in visible
+            numerator_bad = "expf(own) / denominator" in visible
+            if not denom_bad and not numerator_bad and snapshot.current_candidate_sha256 is None:
+                action = {"tool": "repo_read_file", "path": KERNEL}
+            elif denom_bad and numerator_bad and "repo_replace_many" in snapshot.allowed_tools:
+                action = _complete_softmax_batch()
+            elif denom_bad:
+                action = _edit_denominator()
+            elif numerator_bad:
+                action = _edit_numerator()
+            else:
+                action = _check()
+        assert action["tool"] in snapshot.allowed_tools
+        return HarnessDecision.model_validate(
+            {"action": action, "reason": "Deterministic factorial ablation fixture"}
+        )
+
+
+def test_four_arm_factorial_ablation_separates_context_and_batch_edits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([True, True, True, True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    totals = {}
+    for context in ("legacy", "evidence_first"):
+        for batch in (False, True):
+            run = tmp_path / f"{context}-batch-{int(batch)}"
+            result = run_repository_coding_session(
+                repository=repository,
+                output=run,
+                base_sha=sha,
+                goal=GOAL,
+                public_case_id="h001",
+                context_mode=context,
+                allow_batch_edits=batch,
+                max_steps=7,
+                max_model_calls=9,
+                model_factory=lambda _: FactorialDecisionFixture(),
+            )
+            metrics = summarize_repository_trajectory(run)
+            assert result.status == "DIFF_STAGED_UNVERIFIED"
+            assert result.model_calls == 0
+            assert result.public_checks_passed
+            assert metrics.allow_batch_edits is batch
+            assert result.allow_batch_edits is batch
+            assert metrics.context_mode == context
+            totals[(context, batch)] = result.turns
+    assert totals == {
+        ("legacy", False): 5,
+        ("legacy", True): 4,
+        ("evidence_first", False): 4,
+        ("evidence_first", True): 3,
+    }
+    assert len(checker.calls) == 4
+    assert len(set(checker.calls)) == 1
+
+
+def test_batch_ablation_permission_is_enforced_by_controller_and_resume(
+    tmp_path: Path,
+) -> None:
+    repository, sha = _registered_repository(tmp_path)
+    with RepositoryWorkspaceTools(
+        origin=repository,
+        output=tmp_path / "no-atomic-permission",
+        sha=sha,
+        public_case_id="h001",
+        allow_batch_edits=False,
+    ) as host:
+        snapshot = host.snapshot(GOAL, [], 5)
+        assert "repo_replace_many" not in snapshot.allowed_tools
+        denied = HarnessDecision.model_validate(
+            {"action": _complete_softmax_batch(), "reason": "Try disabled batch edit"}
+        )
+        observation = host.invoke(denied.action)
+        assert observation.status == "REJECTED"
+        assert "disabled" in observation.content
+        assert host.workspace.edited_files == ()
+
+    output = tmp_path / "batch-policy-paused"
+    pause = run_repository_coding_session(
+        repository=repository,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        context_mode="evidence_first",
+        allow_batch_edits=False,
+        public_case_id="h001",
+        max_steps=6,
+        max_model_calls=8,
+        pause_after_turns=1,
+        model_factory=lambda _: Model([_edit_denominator()]),
+    )
+    assert pause.status == "PAUSED_RESUMABLE"
+    with pytest.raises(ValueError, match="budgets differ"):
+        run_repository_coding_session(
+            repository=repository,
+            output=output,
+            base_sha=sha,
+            goal=GOAL,
+            context_mode="evidence_first",
+            allow_batch_edits=True,
+            public_case_id="h001",
+            max_steps=6,
+            max_model_calls=8,
+            resume=True,
+            model_factory=lambda _: Model([_edit_numerator()]),
+        )
