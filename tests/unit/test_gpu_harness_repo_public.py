@@ -915,3 +915,113 @@ def test_syntax_mode_uses_controller_ast_ids_and_never_model_quoted_old_text(
         assert host.snapshot(GOAL, [], 4).allowed_tools == ("finish",)
     assert len(checker.calls) == 1
     assert "denominator += expf(x);" in (repo / KERNEL).read_text()
+
+
+def test_hierarchical_syntax_mode_persists_planner_reflection_and_verified_gates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gpu_agent.harness.models import TaskPlan, TaskReflection
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+
+    repo, sha = _registered_repository(tmp_path)
+    fake = FakePublicChecker([True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", fake)
+
+    class ModelWithPlan:
+        def __init__(self) -> None:
+            self.plans = 0
+            self.reflections = 0
+
+        def choose_repository_plan(self, snapshot):
+            self.plans += 1
+            return TaskPlan.model_validate(
+                {
+                    "milestones": [
+                        {
+                            "gate": gate,
+                            "objective": f"Perform the registered {gate} task with evidence",
+                            "success_evidence": f"Controller confirmed the {gate} gate passed",
+                        }
+                        for gate in ("inspect", "edit", "public_check", "finish")
+                    ],
+                    "failure_risk": "Avoid stale AST node IDs and mismatched source revisions",
+                }
+            )
+
+        def reflect_repository_task(self, snapshot):
+            self.reflections += 1
+            assert snapshot.task_plan is not None
+            return TaskReflection(
+                observed_failure="No public error in the scripted CPU fixture",
+                avoid_next="Avoid repeating already accepted CUDA source reads",
+                next_priority="Finish after the registered public GPU pass",
+            )
+
+        def choose_harness_v1(self, snapshot):
+            assert snapshot.task_plan is not None
+            if snapshot.public_checks_passed:
+                action = _finish()
+            elif snapshot.current_candidate_sha256 is not None:
+                action = _check()
+            elif snapshot.history and snapshot.history[-1]["tool"] == "repo_inspect_syntax":
+                mapping = json.loads(snapshot.history[-1]["content"])
+                nodes = mapping["nodes"]
+                d = next(n for n in nodes if n["code"] == "denominator += expf(x);")
+                n = next(n for n in nodes if n["code"] == "out[i] = expf(own) / denominator;")
+                action = {
+                    "tool": "repo_replace_syntax",
+                    "path": KERNEL,
+                    "expected_source_sha256": mapping["source_sha256"],
+                    "edits": [
+                        {
+                            "node_id": d["id"],
+                            "replacement_code": "denominator += expf(x - maximum);",
+                        },
+                        {
+                            "node_id": n["id"],
+                            "replacement_code": "out[i] = expf(own - maximum) / denominator;",
+                        },
+                    ],
+                }
+            else:
+                action = {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32"}
+            assert action["tool"] in snapshot.allowed_tools
+            return HarnessDecision.model_validate(
+                {"action": action, "reason": "Follow evidence-backed CUDA plan milestones"}
+            )
+
+    output = tmp_path / "hierarchical-syntax-agent"
+    model = ModelWithPlan()
+    result = run_repository_coding_session(
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        hierarchical_mode=True,
+        syntax_mode=True,
+        context_mode="evidence_first",
+        max_steps=6,
+        max_model_calls=8,
+        model_factory=lambda _: model,
+    )
+    assert result.status == "DIFF_STAGED_UNVERIFIED"
+    assert result.tool_calls == 4
+    assert result.model_calls == 0
+    assert result.public_checks_attempted == 1
+    assert model.plans == 1
+    assert model.reflections == 1
+    assert result.hierarchical_mode
+    assert result.syntax_mode
+    checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
+    assert checkpoint.hierarchical_mode
+    assert checkpoint.syntax_mode
+    assert checkpoint.state["task_reflection"]["next_priority"].startswith("Finish")
+    assert checkpoint.state["task_progress"]["finished"]
+    metrics = summarize_repository_trajectory(output)
+    assert metrics.hierarchical_mode
+    assert metrics.syntax_mode
+    assert metrics.first_accepted_edit_turn == 2
+    assert metrics.first_public_pass_turn == 3
+    assert metrics.first_accepted_finish_turn == 4
+    assert metrics.independently_verified is False
