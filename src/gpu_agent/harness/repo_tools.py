@@ -319,6 +319,65 @@ class RepositoryWorkspaceTools:
             if typ is None:
                 raise
 
+    def _currently_allowed_tools(self) -> tuple[str, ...]:
+        """Controller authority for the *current* source state.
+
+        In registered single-kernel tasks, a repository-wide file listing is
+        never needed and public GPU verification is unsafe before a fresh edit.
+        Model output schemas and actual execution use this SAME capability list.
+        """
+        if self._public_case_id is None:
+            return tuple(
+                name
+                for name in self.ALLOWED_TOOLS
+                if self._policy.check(name) == "ALLOW"
+                and (name != "repo_replace_many" or self._batch_enabled)
+                and name != "repo_run_public_checks"
+            )
+        delta = self.workspace.diff()
+        dirty = bool(delta)
+        passed = self.public_checks_passed
+        target_only = self.workspace.edited_files == (self._public_kernel_path,)
+        fresh_candidate = False
+        if dirty and target_only and self._public_kernel_path is not None:
+            source = read_regular(
+                self.workspace._checked(self._public_kernel_path, editable=True),
+                1024 * 1024,
+            )
+            fresh_candidate = hashlib.sha256(source).hexdigest() not in (
+                self._attempted_candidate_hashes
+            )
+        can_check = (
+            dirty
+            and target_only
+            and fresh_candidate
+            and self._public_checks_attempted < self._max_public_checks
+            and not passed
+        )
+        diff_key = self._query_fingerprint(
+            {"tool": "repo_git_diff", "source_diff_sha256": str(self.workspace.integrity()["diff_sha256"])}
+        )
+        available: list[str] = []
+        for name in self.ALLOWED_TOOLS:
+            if self._policy.check(name) != "ALLOW":
+                continue
+            if name == "repo_list_files":
+                continue
+            if name == "repo_replace_many" and not self._batch_enabled:
+                continue
+            if name in {"repo_replace_many", "repo_replace_snippet"} and passed:
+                continue
+            if name == "repo_git_diff" and (
+                not dirty or diff_key in self._observed_query_fingerprints
+            ):
+                continue
+            if name == "repo_run_public_checks" and not can_check:
+                continue
+            if name == "finish" and not passed:
+                continue
+            available.append(name)
+        return tuple(available)
+
     def snapshot(self, goal: str, history: list[dict[str, str]], steps: int) -> SessionSnapshot:
         if self._public_kernel_path is not None and self._context_mode == "evidence_first":
             # Only the operator-pinned MUTANT source is sent as upfront evidence.
@@ -335,21 +394,16 @@ class RepositoryWorkspaceTools:
             source = (
                 f"Current inspected file: {self._last_file}\n{self._last_file_read}"
                 if self._last_file is not None
-                else "No source file opened yet. Call repo_list_files then repo_read_file."
+                else (
+                    f"Registered editable kernel: {self._public_kernel_path}. "
+                    "Call repo_read_file on this exact path for source evidence."
+                    if self._public_kernel_path is not None
+                    else "No source file opened yet. Call repo_list_files then repo_read_file."
+                )
             )
         context = compact_public_context(history, source)
         delta = self.workspace.diff()
-        gpu_allowed = (
-            self._public_case_id is not None
-            and self._public_checks_attempted < self._max_public_checks
-        )
-        allowed_tools = tuple(
-            name
-            for name in self.ALLOWED_TOOLS
-            if self._policy.check(name) == "ALLOW"
-            and (name != "repo_run_public_checks" or gpu_allowed)
-            and (name != "repo_replace_many" or self._batch_enabled)
-        )
+        allowed_tools = self._currently_allowed_tools()
         requirement = goal
         if self._public_case_id is not None:
             requirement += (
@@ -408,14 +462,14 @@ class RepositoryWorkspaceTools:
         if (
             permission != "ALLOW"
             or action.tool not in self.ALLOWED_TOOLS
-            or (isinstance(action, RepoReplaceMany) and not self._batch_enabled)
+            or action.tool not in self._currently_allowed_tools()
         ):
             result = ToolObservation(
                 tool=action.tool,
                 status="REJECTED",
                 content=(
-                    "TOOL_DENY: atomic batch editing is disabled for this ablation"
-                    if isinstance(action, RepoReplaceMany) and not self._batch_enabled
+                    "TOOL_NOT_AVAILABLE_AT_CURRENT_STATE: follow the allowed tool list"
+                    if permission == "ALLOW"
                     else f"TOOL_{permission}: unavailable workspace capability"
                 ),
             )
