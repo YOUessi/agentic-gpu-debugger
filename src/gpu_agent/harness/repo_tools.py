@@ -346,8 +346,7 @@ class RepositoryWorkspaceTools:
                 and (name != "repo_replace_many" or self._batch_enabled)
                 and name != "repo_run_public_checks"
                 and (
-                    name not in {"repo_inspect_syntax", "repo_replace_syntax"}
-                    or self._syntax_mode
+                    name not in {"repo_inspect_syntax", "repo_replace_syntax"} or self._syntax_mode
                 )
                 and (
                     name not in {"repo_replace_snippet", "repo_replace_many"}
@@ -400,8 +399,12 @@ class RepositoryWorkspaceTools:
                     1024 * 1024,
                 )
                 syntax_key = self._query_fingerprint(
-                    {"tool": "repo_inspect_syntax", "path": self._public_kernel_path,
-                     "source_sha256": hashlib.sha256(original).hexdigest(), "symbol": ""}
+                    {
+                        "tool": "repo_inspect_syntax",
+                        "path": self._public_kernel_path,
+                        "source_sha256": hashlib.sha256(original).hexdigest(),
+                        "symbol": "",
+                    }
                 )
                 if syntax_key in self._observed_query_fingerprints:
                     continue
@@ -584,8 +587,12 @@ class RepositoryWorkspaceTools:
             target = self.workspace._checked(action.path, editable=False)
             digest = hashlib.sha256(read_regular(target, 1024 * 1024)).hexdigest()
             key = self._query_fingerprint(
-                {"tool": action.tool, "path": action.path,
-                 "source_sha256": digest, "symbol": action.symbol}
+                {
+                    "tool": action.tool,
+                    "path": action.path,
+                    "source_sha256": digest,
+                    "symbol": action.symbol,
+                }
             )
             self._require_new_observation(key, "REDUNDANT_SYNTAX_INSPECTION")
             mapping = self.workspace.inspect_syntax(action.path, symbol=action.symbol)
@@ -595,7 +602,8 @@ class RepositoryWorkspaceTools:
                 mapping["nodes"] = nodes[:12]
                 mapping["more_nodes_available"] = True
             return ToolObservation(
-                tool=action.tool, status="OK",
+                tool=action.tool,
+                status="OK",
                 content=json.dumps(mapping, ensure_ascii=False)[:3900],
             )
         if isinstance(action, RepoReplaceSyntax):
@@ -609,9 +617,12 @@ class RepositoryWorkspaceTools:
             self._last_file = action.path
             self._last_file_read = self.workspace.read(action.path)
             return ToolObservation(
-                tool=action.tool, status="OK",
-                content=(f"SHA-bound AST node edit accepted. source_sha256={digest}. "
-                         "Run public CUDA checks on this new candidate."),
+                tool=action.tool,
+                status="OK",
+                content=(
+                    f"SHA-bound AST node edit accepted. source_sha256={digest}. "
+                    "Run public CUDA checks on this new candidate."
+                ),
             )
         if isinstance(action, RepoReplaceMany):
             candidate_sha = self.workspace.replace_batch(
