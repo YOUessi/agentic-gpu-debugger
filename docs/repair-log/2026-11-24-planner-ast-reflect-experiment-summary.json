@@ -1,0 +1,135 @@
+{
+  "schema_version": "cuda-agent-planner-ast-reflection-experimental-v1",
+  "date": "2026-11-24",
+  "repository": "YOUessi/agentic-gpu-debugger",
+  "branch": "feat/gpu-native-coding-harness-20261123",
+  "implementation_status": {
+    "planner_executor": true,
+    "explicit_milestones": [
+      "inspect",
+      "edit",
+      "public_check",
+      "finish"
+    ],
+    "progress_source": "controller-verified tool observations",
+    "reflect_trigger": "at or beyond half tool-step budget, once per session",
+    "context_compaction": "model-visible view only; canonical RunStore and checkpoint retained",
+    "tree_sitter_cuda": true,
+    "sha_pinned_ast_node_edits": true,
+    "syntax_reparse": true,
+    "semantic_test_required": true,
+    "actual_ToT_beam_search": false,
+    "dynamic_replan": false,
+    "llm_budget_reservation_bug_fixed": true,
+    "ast_path_json_literal_schema": true
+  },
+  "frozen_real_gpu_scripted_smoke": {
+    "github_source_sha": "f32cbbf97ef8f030e464febd2ce3cbcb191b5b9f",
+    "case_id": "h001",
+    "device": "Tang RTX4090 Laptop GPU",
+    "model_calls": 0,
+    "tool_actions": 4,
+    "public_checks_attempted": 1,
+    "public_checks_passed": true,
+    "four_sanitizers": [
+      "CLEAN",
+      "CLEAN",
+      "CLEAN",
+      "CLEAN"
+    ],
+    "final_status": "DIFF_STAGED_UNVERIFIED",
+    "candidate_sha256": "88dd297b8a0bc53dc3b93b7d1a4678551346b4855d7139b4edaddecef0070ba4",
+    "strict_experimental_verdict": "VERIFIED_FIXED",
+    "strict_reason_code": "ALL_REQUIRED_CHECKS_PASSED",
+    "strict_evaluator_hidden_sizes_count": 9,
+    "private_artifact_count": 91,
+    "strict_public_projection_sha256": "221e0bf21588a87a98924275475b4fbcf1aa10237905a53f37d6be2639273c5a",
+    "independent_signed_holdout": false,
+    "model": "scripted deterministic test double; not trained LLM"
+  },
+  "real_qwen3_first_study": {
+    "source_sha": "9fce49150eb88adbd9fddc6b5718f58268e44fc4",
+    "model": "qwen3-8b-awq",
+    "case": "h001",
+    "max_steps": 8,
+    "max_llm_calls_configured": 10,
+    "strict_fixed": 0,
+    "actual_public_gpu_checks": 0,
+    "paired_report_sha256": "777a9a59ca03990910f2d7c115c7b2a647996c645ede4d8439b31400da28dd1a",
+    "arms": [
+      {
+        "name": "evidence_single",
+        "model_calls": 8,
+        "tokens": 22554,
+        "tool_turns": 8,
+        "status": "PUBLIC_NOT_ACCEPTED",
+        "observation": "one accepted source edit at final tool turn; no turn left for validation"
+      },
+      {
+        "name": "react_syntax",
+        "model_calls": 8,
+        "tokens": 19688,
+        "tool_turns": 8,
+        "status": "PUBLIC_NOT_ACCEPTED",
+        "observation": "incorrect AST path requested repeatedly before one successful inspect"
+      },
+      {
+        "name": "hierarchical_syntax",
+        "model_calls": 8,
+        "tokens": 24253,
+        "tool_turns": 6,
+        "status": "MODEL_OR_RUNTIME_ERROR",
+        "observation": "planner and reflect ran, NOOP AST edit, then LLMCallGate prematurely exhausted due legacy two-call reserve"
+      }
+    ]
+  },
+  "real_qwen3_after_budget_path_fix": {
+    "source_sha": "e4ab3fdc88e3a35365d52712392a4d8c33465301",
+    "model": "qwen3-8b-awq",
+    "case": "h001",
+    "max_steps": 8,
+    "max_model_calls": 10,
+    "strict_fixed": 0,
+    "actual_public_gpu_checks": 0,
+    "paired_report_sha256": "f76d3211f8e3b97f05fb4cd184b1bbfaf3708590668c00b328d89cd63adb48c6",
+    "arms": [
+      {
+        "name": "evidence_single",
+        "model_calls": 8,
+        "tokens": 22177,
+        "tool_turns": 8,
+        "status": "PUBLIC_NOT_ACCEPTED",
+        "observation": "repeated read and rejected snippet edits"
+      },
+      {
+        "name": "react_syntax",
+        "model_calls": 8,
+        "tokens": 24329,
+        "tool_turns": 8,
+        "status": "PUBLIC_NOT_ACCEPTED",
+        "observation": "one valid AST inspection then seven duplicate AST inspection rejections"
+      },
+      {
+        "name": "hierarchical_syntax",
+        "model_calls": 10,
+        "tokens": 30530,
+        "tool_turns": 8,
+        "status": "PUBLIC_NOT_ACCEPTED",
+        "observation": "full 10 physical calls now allowed; reflect occurred, but NOOP AST replacement and more redundant inspections"
+      }
+    ]
+  },
+  "key_limits": [
+    "Scripted model success is integration validation only, not autonomous Agent performance",
+    "Qwen3 0/3 per batch is a single h001 trial per arm and not a statistical conclusion",
+    "Experiments differ in code revisions and stochastic sampling and cannot be treated as paired causal comparison without repetition",
+    "Current hierarchical model produces one fixed four-gate plan, not full Tree-of-Thought search or dynamic replanning",
+    "Signed independent production holdout not executed",
+    "No DeepSeek repair trial on current hierarchical runtime"
+  ],
+  "raw_tang_dirs": {
+    "scripted_gpu": "/home/you/gpu-native-harness-validation-20261124/hierarchical-syntax-f32cbbf",
+    "qwen3_before": "/home/you/gpu-native-harness-validation-20261124/qwen3-architecture-9fce491",
+    "qwen3_after": "/home/you/gpu-native-harness-validation-20261124/qwen3-architecture-budget-bound-e4ab3fd"
+  }
+}
