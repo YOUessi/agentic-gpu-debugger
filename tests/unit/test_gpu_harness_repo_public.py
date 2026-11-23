@@ -522,3 +522,151 @@ def test_operator_verifier_preflight_rejects_source_scope_even_if_public_stub_li
         )
     assert not called
     assert not (tmp_path / "invalid-eval-output").exists()
+
+
+
+def _complete_softmax_batch() -> dict[str, object]:
+    return {
+        "tool": "repo_replace_many",
+        "path": KERNEL,
+        "edits": [
+            {
+                "old_text": "denominator += expf(x);",
+                "new_text": "denominator += expf(x - maximum);",
+            },
+            {
+                "old_text": "expf(own) / denominator",
+                "new_text": "expf(own - maximum) / denominator",
+            },
+        ],
+    }
+
+
+class EvidenceAwareScriptedModel:
+    """Ablation *fixture*: not a real LLM or demonstrated model improvement."""
+
+    def __init__(self) -> None:
+        self.snapshots = []
+
+    def choose_harness_v1(self, snapshot):
+        self.snapshots.append(snapshot)
+        if snapshot.public_checks_passed:
+            action = _finish()
+        elif snapshot.current_candidate_sha256 is not None:
+            action = _check()
+        elif "denominator += expf(x);" in snapshot.workspace_source:
+            action = _complete_softmax_batch()
+        else:
+            action = {"tool": "repo_read_file", "path": KERNEL}
+        assert action["tool"] in snapshot.allowed_tools
+        return HarnessDecision.model_validate(
+            {"action": action, "reason": "Deterministic evidence-sensitive unit test"}
+        )
+
+
+def test_evidence_first_source_bootstrap_and_atomic_batch_fixes_registered_kernel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repository, sha = _registered_repository(tmp_path)
+    monkeypatch.setattr(
+        "gpu_agent.harness.repo_tools.check_candidate_publicly", FakePublicChecker([True])
+    )
+    with RepositoryWorkspaceTools(
+        origin=repository,
+        output=tmp_path / "evidence-context-only",
+        sha=sha,
+        public_case_id="h001",
+        context_mode="evidence_first",
+    ) as host:
+        before = host.snapshot(GOAL, [], 4)
+        assert before.context_mode == "evidence_first"
+        assert "denominator += expf(x);" in before.workspace_source
+        assert "Registered editable CUDA kernel:" in before.workspace_source
+        assert "hardset_v2/h001/clean/kernel.cu" not in before.workspace_source
+        assert "repo_replace_many" in before.allowed_tools
+        edited = host.invoke(
+            HarnessDecision.model_validate(
+                {"action": _complete_softmax_batch(), "reason": "Apply disjoint fixes together"}
+            ).action
+        )
+        assert edited.status == "OK"
+        updated = host.snapshot(GOAL, [], 3)
+        assert "denominator += expf(x - maximum);" in updated.workspace_source
+        assert "expf(own - maximum) / denominator" in updated.workspace_source
+        assert len(host.workspace.edited_files) == 1
+        assert "maximum" in host.workspace.diff()
+        assert "expf(own) / denominator" in (repository / KERNEL).read_text()
+
+
+def test_evidence_first_vs_legacy_uses_one_fewer_scripted_step(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([True, True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    measured = {}
+    for mode in ("legacy", "evidence_first"):
+        model = EvidenceAwareScriptedModel()
+        output = tmp_path / mode
+        result = run_repository_coding_session(
+            repository=repo,
+            output=output,
+            base_sha=sha,
+            goal=GOAL,
+            public_case_id="h001",
+            context_mode=mode,
+            max_steps=6,
+            max_model_calls=8,
+            model_factory=lambda _, m=model: m,
+        )
+        assert result.status == "DIFF_STAGED_UNVERIFIED"
+        assert result.public_checks_passed is True
+        assert result.public_checks_attempted == 1
+        assert result.model_calls == 0
+        metrics = summarize_repository_trajectory(output)
+        assert metrics.context_mode == mode
+        measured[mode] = (result.turns, metrics.first_accepted_edit_turn, metrics.inspected_actions)
+        assert metrics.independently_verified is False
+    assert measured["legacy"] == (4, 2, 1)
+    assert measured["evidence_first"] == (3, 1, 0)
+    # Controlled scripted-model experiment only, not a claimed DeepSeek gain.
+    assert len(checker.calls) == 2
+    assert checker.calls[0] == checker.calls[1]
+
+
+def test_context_ablation_mode_is_bound_into_resume_identity(tmp_path: Path) -> None:
+    repo, sha = _registered_repository(tmp_path)
+    output = tmp_path / "context-resume"
+    pause = run_repository_coding_session(
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        context_mode="evidence_first",
+        max_steps=6,
+        max_model_calls=8,
+        pause_after_turns=1,
+        model_factory=lambda _: Model([_complete_softmax_batch()]),
+    )
+    assert pause.status == "PAUSED_RESUMABLE"
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+
+    checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
+    assert checkpoint.context_mode == "evidence_first"
+    with pytest.raises(ValueError, match="budgets differ"):
+        run_repository_coding_session(
+            repository=repo,
+            output=output,
+            base_sha=sha,
+            goal=GOAL,
+            public_case_id="h001",
+            context_mode="legacy",
+            max_steps=6,
+            max_model_calls=8,
+            resume=True,
+            model_factory=lambda _: Model([_check()]),
+        )
+    assert "QUIESCENT" in recovery_disposition(
+        read_verified_journal(output / "session-events.jsonl")
+    )
