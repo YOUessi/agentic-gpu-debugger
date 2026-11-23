@@ -1,0 +1,73 @@
+{
+  "schema_version": "gpu-repository-paired-preflight-blocked-v1",
+  "date": "2026-11-23",
+  "git_source": {
+    "repo": "YOUessi/agentic-gpu-debugger",
+    "branch": "feat/gpu-native-coding-harness-20261123",
+    "commit": "95a9b1f7d5153faa4e0a864303cc3974fb4fc83b",
+    "archive_sha256": "e5cf54ea7d35875746d748bd7374d55a4cf987d3d8c2858f8f1e4f9de9451917",
+    "local_reinitialized_git_sha": "7d1cf380c8b4b84dfe32741555ed78451d59417a"
+  },
+  "plan": {
+    "cases": [
+      "h001",
+      "h002",
+      "h003"
+    ],
+    "repetitions": 1,
+    "arms": [
+      "legacy_single",
+      "legacy_batch",
+      "evidence_single",
+      "evidence_batch"
+    ],
+    "planned_units": 12,
+    "max_steps": 12,
+    "max_model_calls": 14,
+    "max_public_checks": 2,
+    "include_workflow_D": false
+  },
+  "read_only_preflight": {
+    "ready": false,
+    "blockers": [
+      "MODEL_NOT_CONFIGURED"
+    ],
+    "no_paid_calls_made": true
+  },
+  "execute_gate": {
+    "flags_explicit": [
+      "--execute",
+      "--allow-paid-calls",
+      "--allow-real-gpu"
+    ],
+    "exit_code": 3,
+    "recorded_status": "MODEL_NOT_CONFIGURED",
+    "unit_dirs_created": 0,
+    "physical_model_calls": 0,
+    "public_gpu_checks": 0,
+    "experimental_model_success_results": null,
+    "preflight_sha256": "c1279193ffed3c398d6b8caf20277513d9dae50daf13cca31dd55b01bb8645e9",
+    "plan_sha256": "4b8c8910dc16d82bb4f94900788989c2ed782d9c44870a12f8d9d8ad95d70d14",
+    "printed_report_sha256": "c1279193ffed3c398d6b8caf20277513d9dae50daf13cca31dd55b01bb8645e9"
+  },
+  "env": {
+    "device": "Tang",
+    "gpu": "NVIDIA GeForce RTX 4090 Laptop GPU",
+    "docker_available": true,
+    "model_endpoint_configured": false,
+    "model_name_configured": false,
+    "model_api_key_present": false,
+    "evaluator_secret_private_file_present": true
+  },
+  "paths": {
+    "frozen_source": "/home/you/gpu-native-harness-validation-20261123/paired-p0-95a9b1f/source",
+    "root": "/home/you/gpu-native-harness-validation-20261123/paired-p0-95a9b1f",
+    "blocked_output": "/home/you/gpu-native-harness-validation-20261123/paired-p0-95a9b1f/model-pilot-blocked"
+  },
+  "limitations": [
+    "Blocked preflight is not a failed autonomous trial nor a verified repair",
+    "No API model throughput/latency or reward signal measured",
+    "Prior script-driven GPU successes and historical DeepSeek results are not comparable as this sweep's outcomes",
+    "No secret or private evaluator input is included in repository report"
+  ]
+}
