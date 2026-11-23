@@ -39,3 +39,47 @@ def test_default_timeout_is_preserved_and_worker_accepts_explicit_longer_deadlin
         attempt=0,
     )
     assert request.timeout_seconds == 120
+
+
+
+def test_local_model_http_requires_literal_loopback_and_opt_in(monkeypatch) -> None:
+    from pydantic import ValidationError
+
+    from gpu_agent.agent.provider import OpenAIProviderSettings
+
+    local = "http://127.0.0.1:18731/v1"
+    with pytest.raises(ValidationError, match="explicit operator opt-in"):
+        OpenAIProviderSettings(endpoint=local, model="qwen3-8b-awq")
+    valid = OpenAIProviderSettings(
+        endpoint=local,
+        model="qwen3-8b-awq",
+        allow_loopback_http=True,
+        supports_store_false=True,
+    )
+    assert valid.endpoint == local
+    for forbidden in (
+        "http://localhost:18731/v1",
+        "http://0.0.0.0:18731/v1",
+        "http://192.168.1.8:18731/v1",
+        "http://127.0.0.1:18731/other",
+        "http://127.0.0.1/v1",
+        "http://root:password@127.0.0.1:18731/v1",
+        "http://127.0.0.1:18731/v1?token=bad",
+    ):
+        with pytest.raises(ValidationError):
+            OpenAIProviderSettings(
+                endpoint=forbidden,
+                model="qwen3-8b-awq",
+                allow_loopback_http=True,
+            )
+    monkeypatch.setenv("OPENAI_BASE_URL", local)
+    monkeypatch.setenv("OPENAI_MODEL", "qwen3-8b-awq")
+    monkeypatch.setenv("OPENAI_API_KEY", "local-not-a-real-api-key")
+    monkeypatch.setenv("GPU_AGENT_STORE_FALSE_SUPPORTED", "1")
+    monkeypatch.delenv("GPU_AGENT_ALLOW_LOOPBACK_HTTP", raising=False)
+    with pytest.raises(ValidationError):
+        OpenAIProviderSettings.from_environment()
+    monkeypatch.setenv("GPU_AGENT_ALLOW_LOOPBACK_HTTP", "1")
+    actual = OpenAIProviderSettings.from_environment()
+    assert actual.allow_loopback_http
+    assert actual.endpoint == local
