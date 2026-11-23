@@ -608,15 +608,16 @@ class RepositoryWorkspaceTools:
                         item["start_line"],
                     ),
                 )
-                mapping["nodes"] = ordered[:12]
+                selected_nodes = ordered[:12]
+                mapping["nodes"] = selected_nodes
                 if len(ordered) > 12:
                     mapping["more_nodes_available"] = True
                 serialized = json.dumps(mapping, ensure_ascii=False)
-                while len(serialized) > 3900 and mapping["nodes"]:
-                    mapping["nodes"].pop()
+                while len(serialized) > 3900 and selected_nodes:
+                    selected_nodes.pop()
                     mapping["more_nodes_available"] = True
                     serialized = json.dumps(mapping, ensure_ascii=False)
-                if not mapping["nodes"]:
+                if not selected_nodes:
                     raise ValueError("CUDA_SYNTAX_RESPONSE_BUDGET_EXHAUSTED")
             else:
                 raise ValueError("invalid controller syntax node map")

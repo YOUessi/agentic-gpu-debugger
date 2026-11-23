@@ -8,6 +8,7 @@ never the immutable canonical event log.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from typing import Literal
 
 from gpu_agent.harness.models import TaskProgress, TaskReflection
 
@@ -43,7 +44,7 @@ def progress_from_tools(
             if status == "FAILED" and tool == "repo_run_public_checks":
                 public_checked = False
             last_failure = content.split(":", 2)[-1].strip()[:160] if content else status
-    stage = (
+    stage: Literal["inspect", "edit", "public_check", "finish", "done"] = (
         "done"
         if finished
         else "inspect"
