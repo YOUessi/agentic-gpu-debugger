@@ -473,7 +473,9 @@ class RepositoryWorkspaceTools:
                 tool=action.tool,
                 status="REJECTED",
                 content=(
-                    "TOOL_NOT_AVAILABLE_AT_CURRENT_STATE: follow the allowed tool list"
+                    "TOOL_DENY: atomic batch editing is disabled for this ablation"
+                    if isinstance(action, RepoReplaceMany) and not self._batch_enabled
+                    else "TOOL_NOT_AVAILABLE_AT_CURRENT_STATE: follow the allowed tool list"
                     if permission == "ALLOW"
                     else f"TOOL_{permission}: unavailable workspace capability"
                 ),
