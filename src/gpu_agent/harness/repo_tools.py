@@ -25,6 +25,8 @@ from gpu_agent.harness.models import (
     FinishTask,
     HarnessAction,
     RepoGitDiff,
+    RepoInspectSyntax,
+    RepoReplaceSyntax,
     RepoListFiles,
     RepoReadFile,
     RepoReplaceMany,
@@ -47,6 +49,8 @@ class RepositoryWorkspaceTools:
         "repo_replace_snippet",
         "repo_replace_many",
         "repo_git_diff",
+        "repo_inspect_syntax",
+        "repo_replace_syntax",
         "repo_run_public_checks",
         "finish",
     )
@@ -64,6 +68,7 @@ class RepositoryWorkspaceTools:
         max_public_checks: int = 2,
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
         allow_batch_edits: bool = True,
+        syntax_mode: bool = False,
     ) -> None:
         if output.exists() or output.is_symlink():
             raise ValueError("repository agent output already exists")
@@ -82,6 +87,9 @@ class RepositoryWorkspaceTools:
         if type(allow_batch_edits) is not bool:
             raise ValueError("invalid batch-edit policy")
         self._batch_enabled = allow_batch_edits
+        if type(syntax_mode) is not bool:
+            raise ValueError("invalid syntax editing policy")
+        self._syntax_mode = syntax_mode
         self._configure_public_case(public_case_id, max_public_checks)
         self._store = RunStore(output / "public")
         self._run = self._store.create_run("gpu_repository_agent")
@@ -193,6 +201,7 @@ class RepositoryWorkspaceTools:
         observed_query_fingerprints: tuple[str, ...] = (),
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
         allow_batch_edits: bool = True,
+        syntax_mode: bool = False,
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -218,6 +227,9 @@ class RepositoryWorkspaceTools:
         if type(allow_batch_edits) is not bool:
             raise ValueError("invalid resumed batch-edit policy")
         host._batch_enabled = allow_batch_edits
+        if type(syntax_mode) is not bool:
+            raise ValueError("invalid resumed syntax editing policy")
+        host._syntax_mode = syntax_mode
         host._policy = permissions or ToolPermissionPolicy()
         host._configure_public_case(public_case_id, max_public_checks, resuming=True)
         if (
@@ -333,6 +345,8 @@ class RepositoryWorkspaceTools:
                 if self._policy.check(name) == "ALLOW"
                 and (name != "repo_replace_many" or self._batch_enabled)
                 and name != "repo_run_public_checks"
+                and (name not in {"repo_inspect_syntax", "repo_replace_syntax"} or self._syntax_mode)
+                and (name not in {"repo_replace_snippet", "repo_replace_many"} or not self._syntax_mode)
             )
         delta = self.workspace.diff()
         dirty = bool(delta)
@@ -370,6 +384,21 @@ class RepositoryWorkspaceTools:
                 continue
             if name == "repo_replace_many" and not self._batch_enabled:
                 continue
+            if name in {"repo_inspect_syntax", "repo_replace_syntax"} and not self._syntax_mode:
+                continue
+            if name in {"repo_replace_many", "repo_replace_snippet"} and self._syntax_mode:
+                continue
+            if name == "repo_inspect_syntax" and self._public_kernel_path is not None:
+                original = read_regular(
+                    self.workspace._checked(self._public_kernel_path, editable=False),
+                    1024 * 1024,
+                )
+                syntax_key = self._query_fingerprint(
+                    {"tool": "repo_inspect_syntax", "path": self._public_kernel_path,
+                     "source_sha256": hashlib.sha256(original).hexdigest(), "symbol": ""}
+                )
+                if syntax_key in self._observed_query_fingerprints:
+                    continue
             if name in {"repo_replace_many", "repo_replace_snippet"} and passed:
                 continue
             if name == "repo_git_diff" and (
@@ -542,6 +571,41 @@ class RepositoryWorkspaceTools:
                 tool=action.tool,
                 status="OK",
                 content=text[:4000],
+            )
+        if isinstance(action, RepoInspectSyntax):
+            if self._public_kernel_path is not None and action.path != self._public_kernel_path:
+                raise ValueError("CUDA_SYNTAX_NOT_REGISTERED_KERNEL")
+            target = self.workspace._checked(action.path, editable=False)
+            digest = hashlib.sha256(read_regular(target, 1024 * 1024)).hexdigest()
+            key = self._query_fingerprint(
+                {"tool": action.tool, "path": action.path,
+                 "source_sha256": digest, "symbol": action.symbol}
+            )
+            self._require_new_observation(key, "REDUNDANT_SYNTAX_INSPECTION")
+            mapping = self.workspace.inspect_syntax(action.path, symbol=action.symbol)
+            self._observed_query_fingerprints.add(key)
+            nodes = mapping["nodes"]
+            if isinstance(nodes, list) and len(nodes) > 12:
+                mapping["nodes"] = nodes[:12]
+                mapping["more_nodes_available"] = True
+            return ToolObservation(
+                tool=action.tool, status="OK",
+                content=json.dumps(mapping, ensure_ascii=False)[:3900],
+            )
+        if isinstance(action, RepoReplaceSyntax):
+            if self._public_kernel_path is not None and action.path != self._public_kernel_path:
+                raise ValueError("CUDA_SYNTAX_NOT_REGISTERED_KERNEL")
+            digest = self.workspace.replace_syntax(
+                action.path,
+                expected_source_sha256=action.expected_source_sha256,
+                edits=[(e.node_id, e.replacement_code) for e in action.edits],
+            )
+            self._last_file = action.path
+            self._last_file_read = self.workspace.read(action.path)
+            return ToolObservation(
+                tool=action.tool, status="OK",
+                content=(f"SHA-bound AST node edit accepted. source_sha256={digest}. "
+                         "Run public CUDA checks on this new candidate."),
             )
         if isinstance(action, RepoReplaceMany):
             candidate_sha = self.workspace.replace_batch(
