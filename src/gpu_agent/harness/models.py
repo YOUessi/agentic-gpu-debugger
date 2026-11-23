@@ -75,6 +75,12 @@ class RepoGitDiff(StrictModel):
     tool: Literal["repo_git_diff"] = "repo_git_diff"
 
 
+class RepoRunPublicChecks(StrictModel):
+    """Public GPU check for an operator-bound registered HardSet case only."""
+
+    tool: Literal["repo_run_public_checks"] = "repo_run_public_checks"
+
+
 class FinishTask(StrictModel):
     tool: Literal["finish"] = "finish"
     summary: str = Field(min_length=5, max_length=700)
@@ -92,6 +98,7 @@ HarnessAction = Annotated[
     | RepoReadFile
     | RepoReplaceSnippet
     | RepoGitDiff
+    | RepoRunPublicChecks
     | FinishTask,
     Field(discriminator="tool"),
 ]
@@ -117,6 +124,7 @@ class SessionSnapshot(StrictModel):
     source_hash: str = Field(pattern=r"^[a-f0-9]{64}$")
     functional_requirement: str = Field(min_length=5, max_length=2000)
     base_git_commit: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
+    registered_public_case: str | None = Field(default=None, pattern=r"^h00[1-3]$")
     current_candidate_sha256: str | None = None
     public_checks_passed: bool = False
     allowed_tools: tuple[str, ...]
@@ -141,6 +149,11 @@ class RepoHarnessOutcome(StrictModel):
     model_tokens: int | None = Field(default=None, ge=0)
     reason: str = Field(max_length=200)
     public_run_id: str
+    public_checks_attempted: int = Field(default=0, ge=0, le=3)
+    public_checks_passed: bool = False
+    public_checked_candidate_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
 
 
 class HarnessOutcome(StrictModel):
