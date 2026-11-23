@@ -268,3 +268,79 @@ def test_preflight_rejects_registry_drift_and_case_duplication(tmp_path: Path) -
     kernel.write_text(kernel.read_text().replace("expf(x)", "expf(x - 1)", 1))
     with pytest.raises(ValueError, match="source does not match pinned registry"):
         create_benchmark_plan(repo)
+
+
+
+def test_partial_failed_repository_agent_keeps_audited_steps(tmp_path: Path) -> None:
+    """Do not report zero steps merely because no final result.json exists."""
+    from gpu_agent.harness.ablation import _failed_repository_public_audit
+    from gpu_agent.harness.models import HarnessDecision
+    from gpu_agent.harness.repo_runner import run_repository_coding_session
+
+    repo = _repo(tmp_path)
+    target = repo / "benchmarks/hardset_v2/h001/mutant/kernel.cu"
+    assert target.is_file()
+
+    class OneEditThenError:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def choose_harness_v1(self, snapshot):
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("injected model failure after durable first action")
+            return HarnessDecision.model_validate(
+                {
+                    "action": {
+                        "tool": "repo_replace_snippet",
+                        "path": "benchmarks/hardset_v2/h001/mutant/kernel.cu",
+                        "old_text": "denominator += expf(x);",
+                        "new_text": "denominator += expf(x - maximum);",
+                    },
+                    "reason": "Test one completed edit before the model fails",
+                }
+            )
+
+    trial_folder = tmp_path / "trial"
+    with pytest.raises(RuntimeError, match="injected model failure"):
+        run_repository_coding_session(
+            repository=repo,
+            output=trial_folder / "agent",
+            base_sha=_git(repo, "rev-parse", "HEAD"),
+            goal="Fix the registered h001 public softmax instability",
+            public_case_id="h001",
+            max_steps=6,
+            max_model_calls=8,
+            model_factory=lambda _: OneEditThenError(),
+        )
+    assert not (trial_folder / "agent/result.json").exists()
+    recovered = _failed_repository_public_audit(trial_folder)
+    assert recovered["tool_turns"] == 1
+    assert recovered["first_edit_turn"] == 1
+    assert recovered["model_calls"] == 0
+    assert recovered["model_tokens"] == 0
+    assert recovered["run_id"]
+
+
+def test_loopback_local_vllm_accepted_only_with_explicit_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo = _repo(tmp_path)
+    secret = _secret(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "local-only-dummy-not-a-real-provider-key")
+    monkeypatch.setenv("OPENAI_BASE_URL", "http://127.0.0.1:18731/v1")
+    monkeypatch.setenv("OPENAI_MODEL", "qwen3-8b-awq")
+    monkeypatch.setenv("GPU_AGENT_STORE_FALSE_SUPPORTED", "1")
+    monkeypatch.setenv("GPU_AGENT_ALLOW_LOOPBACK_HTTP", "1")
+    ready = preflight_paired_experiment(
+        repo,
+        evaluator_secret_file=secret,
+        output=tmp_path / "local-pilot",
+    )
+    assert ready.ready
+    assert ready.plan.model_name == "qwen3-8b-awq"
+    assert ready.plan.endpoint_host == "127.0.0.1"
+    assert "local-only-dummy-not-a-real-provider-key" not in ready.model_dump_json()
+    monkeypatch.delenv("GPU_AGENT_ALLOW_LOOPBACK_HTTP")
+    with pytest.raises(ValueError, match="opt-in"):
+        preflight_paired_experiment(repo, evaluator_secret_file=secret)
