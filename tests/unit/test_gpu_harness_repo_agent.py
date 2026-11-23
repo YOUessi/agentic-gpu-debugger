@@ -356,6 +356,7 @@ def test_repo_redundant_reads_lists_and_diffs_are_rejected_per_revision(
 ) -> None:
     source, sha = _repo(tmp_path)
     with RepositoryWorkspaceTools(origin=source, output=tmp_path / "dedup", sha=sha) as host:
+
         def invoke(value):
             return host.invoke(
                 HarnessDecision.model_validate(
