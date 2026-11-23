@@ -338,6 +338,8 @@ def test_public_resume_rejects_changed_gpu_contract_or_missing_evidence(
         ref for ref in child.artifact_refs if ref.name == "hardset/public-selfcheck.json"
     )
     artifact = output / "public" / result_ref.relative_path
-    artifact.write_bytes(b'{"passed":true,"candidate_sha256":"tampered"}')
+    # Artifact blobs are deliberately 0444; simulate removal instead of
+    # weakening RunStore file permissions to attempt byte replacement.
+    artifact.unlink()
     with pytest.raises(ValueError):
         run_repository_coding_session(**arguments)
