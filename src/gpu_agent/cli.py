@@ -35,6 +35,40 @@ knowledge_app = typer.Typer(no_args_is_help=True, help="Offline knowledge inspec
 app.add_typer(knowledge_app, name="knowledge")
 
 
+@harness_app.command("verify-repo")
+def harness_verify_repo(
+    repository: Annotated[Path, typer.Option("--repository")],
+    session: Annotated[Path, typer.Option("--session")],
+    output: Annotated[Path, typer.Option("--output")],
+    evaluator_secret_file: Annotated[Path, typer.Option("--evaluator-secret-file")],
+) -> None:
+    """Operator-only strict HardSet check; hidden data never becomes an Agent tool."""
+    import stat
+
+    from gpu_agent.harness.repo_verification import verify_repository_hardset_candidate
+    from gpu_agent.store import read_regular
+
+    secret = evaluator_secret_file.absolute()
+    if secret.is_relative_to(repository.resolve()) or secret.is_relative_to(session.resolve()):
+        raise typer.BadParameter("evaluator secret must be outside code and Agent session")
+    try:
+        info = secret.lstat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError("private evaluator secret must be a regular 0600 file")
+        projection = verify_repository_hardset_candidate(
+            repository=repository,
+            session_output=session,
+            output=output,
+            evaluator_secret=read_regular(secret, 4096),
+        )
+        typer.echo(projection.model_dump_json(indent=2))
+        if projection.verdict != "VERIFIED_FIXED":
+            raise typer.Exit(1)
+    except (OSError, ValueError):
+        typer.echo("OPERATOR_REPOSITORY_VERIFICATION_REJECTED", err=True)
+        raise typer.Exit(2) from None
+
+
 @harness_app.command("summarize-repo")
 def harness_summarize_repo(
     output: Annotated[Path, typer.Option("--output")],
