@@ -7,7 +7,6 @@ never start Docker/GPU or invoke the private evaluator.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import subprocess
 from pathlib import Path

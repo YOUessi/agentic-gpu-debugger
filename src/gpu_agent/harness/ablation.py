@@ -8,7 +8,6 @@ hidden evaluator input, evaluator secret, or shell command to model tools.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import stat
@@ -99,7 +98,9 @@ class TrialRecord(BenchmarkModel):
 
 
 class SweepReport(BenchmarkModel):
-    schema_version: Literal["repository-agent-paired-report-v1"] = "repository-agent-paired-report-v1"
+    schema_version: Literal["repository-agent-paired-report-v1"] = (
+        "repository-agent-paired-report-v1"
+    )
     plan_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
     expected_units: int
     completed_units: int
@@ -138,6 +139,14 @@ def _head(repository: Path) -> str:
     sha = proc.stdout.strip()
     if not _GIT_SHA.fullmatch(sha):
         raise ValueError("benchmark requires a full frozen SHA-1 Git commit")
+    status = subprocess.run(
+        ["git", "-C", str(repository), "status", "--porcelain=v1", "--untracked-files=all", "-z"],
+        capture_output=True,
+        timeout=20,
+        check=True,
+    )
+    if status.stdout:
+        raise ValueError("benchmark requires a clean, committed Git source snapshot")
     return sha
 
 
@@ -229,7 +238,10 @@ def preflight_paired_experiment(
     settings = OpenAIProviderSettings.from_environment()
     if not settings.api_key or not settings.endpoint or not settings.model:
         errors.append("MODEL_NOT_CONFIGURED")
-    elif urlsplit(settings.endpoint).hostname != "api.openai.com" and not settings.supports_store_false:
+    elif (
+        urlsplit(settings.endpoint).hostname != "api.openai.com"
+        and not settings.supports_store_false
+    ):
         errors.append("MODEL_CAPABILITY_NOT_VERIFIED")
     if evaluator_secret_file is None:
         errors.append("EVALUATOR_SECRET_NOT_CONFIGURED")
@@ -471,7 +483,12 @@ def run_paired_experiment(
             max_public_checks=max_public_checks,
             include_workflow_D=include_workflow_D,
         )
-        if snapshot.base_sha != preflight.plan.base_sha or snapshot.registry_sha256 != preflight.plan.registry_sha256:
+        if (
+            snapshot.base_sha != preflight.plan.base_sha
+            or snapshot.registry_sha256 != preflight.plan.registry_sha256
+            or snapshot.model_name != preflight.plan.model_name
+            or snapshot.endpoint_host != preflight.plan.endpoint_host
+        ):
             raise ValueError("frozen benchmark source changed during comparison")
         record = _run_one(repository, output, preflight.plan, spec, secret)
         _no_overwrite_write(output / f"unit-{spec.index:03d}.json", record)
