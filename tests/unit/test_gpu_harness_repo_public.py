@@ -7,6 +7,7 @@ They do NOT establish GPU compilation or CUDA numerical correctness.
 from __future__ import annotations
 
 import hashlib
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -828,3 +829,89 @@ def test_registered_gpu_tool_capabilities_follow_real_candidate_state(
         assert host.invoke(RepoRunPublicChecks()).status == "OK"
         assert host.snapshot(GOAL, [], 3).allowed_tools == ("finish",)
     assert len(checker.calls) == 2
+
+
+def test_syntax_mode_uses_controller_ast_ids_and_never_model_quoted_old_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    with RepositoryWorkspaceTools(
+        origin=repo,
+        output=tmp_path / "syntax-edits",
+        sha=sha,
+        public_case_id="h001",
+        syntax_mode=True,
+    ) as host:
+        first = host.snapshot(GOAL, [], 8)
+        assert "repo_inspect_syntax" in first.allowed_tools
+        assert "repo_replace_syntax" in first.allowed_tools
+        assert "repo_replace_snippet" not in first.allowed_tools
+        inspected = HarnessDecision.model_validate(
+            {
+                "action": {
+                    "tool": "repo_inspect_syntax",
+                    "path": KERNEL,
+                    "symbol": "softmax32",
+                },
+                "reason": "Inspect syntax nodes in the exact mutable CUDA kernel",
+            }
+        )
+        observation = host.invoke(inspected.action)
+        assert observation.status == "OK"
+        mapping = json.loads(observation.content)
+        assert mapping["source_sha256"] == hashlib.sha256((repo / KERNEL).read_bytes()).hexdigest()
+        nodes = mapping["nodes"]
+        denominator = next(node for node in nodes if node["code"] == "denominator += expf(x);")
+        numerator = next(
+            node for node in nodes if node["code"] == "out[i] = expf(own) / denominator;"
+        )
+        edits = [
+            {
+                "node_id": denominator["id"],
+                "replacement_code": "denominator += expf(x - maximum);",
+            },
+            {
+                "node_id": numerator["id"],
+                "replacement_code": "out[i] = expf(own - maximum) / denominator;",
+            },
+        ]
+        original = host.workspace.read(KERNEL)
+        stale = HarnessDecision.model_validate(
+            {
+                "action": {
+                    "tool": "repo_replace_syntax",
+                    "path": KERNEL,
+                    "expected_source_sha256": "f" * 64,
+                    "edits": edits,
+                },
+                "reason": "Test stale hash rejection before mutating worktree",
+            }
+        )
+        rejected = host.invoke(stale.action)
+        assert rejected.status == "REJECTED"
+        assert "CUDA_SOURCE_SHA_STALE" in rejected.content
+        assert host.workspace.read(KERNEL) == original
+        valid = HarnessDecision.model_validate(
+            {
+                "action": {
+                    "tool": "repo_replace_syntax",
+                    "path": KERNEL,
+                    "expected_source_sha256": mapping["source_sha256"],
+                    "edits": edits,
+                },
+                "reason": "Apply two stable-node CUDA fixes atomically",
+            }
+        )
+        accepted = host.invoke(valid.action)
+        assert accepted.status == "OK"
+        source = (host.workspace.root / KERNEL).read_text()
+        assert "denominator += expf(x - maximum);" in source
+        assert "out[i] = expf(own - maximum) / denominator;" in source
+        assert host.workspace.edited_files == (KERNEL,)
+        assert "repo_run_public_checks" in host.snapshot(GOAL, [], 5).allowed_tools
+        assert host.invoke(RepoRunPublicChecks()).status == "OK"
+        assert host.snapshot(GOAL, [], 4).allowed_tools == ("finish",)
+    assert len(checker.calls) == 1
+    assert "denominator += expf(x);" in (repo / KERNEL).read_text()
