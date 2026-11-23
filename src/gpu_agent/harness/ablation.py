@@ -15,14 +15,13 @@ import stat
 import subprocess
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Literal, TypedDict
 from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.agent.models import ProviderError
-from gpu_agent.agent.provider import provider_invocations
-from gpu_agent.agent.provider import OpenAIProviderSettings
+from gpu_agent.agent.provider import OpenAIProviderSettings, provider_invocations
 from gpu_agent.benchmark.hardset_v2 import HARDSET_CASES, load_registry
 from gpu_agent.benchmark.hardset_v2_agent import run_autonomous_hardset
 from gpu_agent.harness.journal import read_verified_journal
@@ -291,7 +290,16 @@ def _arm_configuration(arm: Arm) -> tuple[Literal["legacy", "evidence_first"], b
     return configs[arm]
 
 
-def _failed_repository_public_audit(unit_directory: Path) -> dict[str, int | str | None]:
+class PartialAudit(TypedDict, total=False):
+    run_id: str
+    model_calls: int
+    model_tokens: int | None
+    tool_turns: int
+    first_edit_turn: int | None
+    first_public_check_turn: int | None
+
+
+def _failed_repository_public_audit(unit_directory: Path) -> PartialAudit:
     """Recover verified *partial* model/tool counts after a failed trial.
 
     A terminal result.json does not exist after most model exceptions, but the
