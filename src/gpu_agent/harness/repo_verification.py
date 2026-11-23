@@ -104,9 +104,7 @@ def verify_repository_hardset_candidate(
         or child.status.value != "COMPLETED"
     ):
         raise ValueError("public check does not belong to this completed agent session")
-    references = [
-        ref for ref in child.artifact_refs if ref.name == "hardset/public-selfcheck.json"
-    ]
+    references = [ref for ref in child.artifact_refs if ref.name == "hardset/public-selfcheck.json"]
     if len(references) != 1:
         raise ValueError("public GPU pass has no unique immutable evidence")
     check = HardsetPublicCheck.model_validate_json(store.read(references[0]))

@@ -173,8 +173,7 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         first_accepted_finish_turn=first_finish,
         rejected_actions=sum(step.status == "REJECTED" for step in sequence),
         redundant_inspection_rejections=sum(
-            step.status == "REJECTED" and step.rejection_code in _REDUNDANT
-            for step in sequence
+            step.status == "REJECTED" and step.rejection_code in _REDUNDANT for step in sequence
         ),
         public_gpu_checks_attempted=result.public_checks_attempted,
         public_checks_passed_final=result.public_checks_passed,

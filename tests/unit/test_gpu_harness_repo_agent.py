@@ -339,7 +339,6 @@ def test_resume_rejects_checkpoint_journal_mismatch(tmp_path: Path) -> None:
         )
 
 
-
 class SelectActions:
     def __init__(self, actions: list[dict[str, object]]) -> None:
         self.actions = actions
@@ -356,9 +355,7 @@ def test_repo_redundant_reads_lists_and_diffs_are_rejected_per_revision(
     tmp_path: Path,
 ) -> None:
     source, sha = _repo(tmp_path)
-    with RepositoryWorkspaceTools(
-        origin=source, output=tmp_path / "dedup", sha=sha
-    ) as host:
+    with RepositoryWorkspaceTools(origin=source, output=tmp_path / "dedup", sha=sha) as host:
         def invoke(value):
             return host.invoke(
                 HarnessDecision.model_validate(
@@ -461,9 +458,7 @@ def test_repo_inspection_keys_survive_pause_and_metrics_are_provenanced(
     assert metrics.rejected_actions == 1
     assert metrics.independently_verified is False
     assert metrics.public_checks_passed_final is False
-    assert [step.status for step in metrics.tool_trajectory] == [
-        "OK", "REJECTED", "OK", "OK", "OK"
-    ]
+    assert [step.status for step in metrics.tool_trajectory] == ["OK", "REJECTED", "OK", "OK", "OK"]
     restored_keys = read_repository_checkpoint(
         output / "session-checkpoint.json"
     ).observed_query_fingerprints

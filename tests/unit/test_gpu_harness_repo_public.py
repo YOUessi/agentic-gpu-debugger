@@ -379,7 +379,6 @@ def test_public_success_metrics_remain_unverified(
     assert not metrics.independent_hidden_verification
 
 
-
 def test_operator_verifier_receives_exact_scoped_cuda_diff_only_after_finish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -471,9 +470,7 @@ def test_operator_verifier_rejects_external_source_drift_and_private_output_scop
     with pytest.raises(ValueError, match="private secret"):
         verify_repository_hardset_candidate(**{**kwargs, "evaluator_secret": b"too-short"})
     with pytest.raises(ValueError, match="outside repository"):
-        verify_repository_hardset_candidate(
-            **{**kwargs, "output": session / "private-evaluator"}
-        )
+        verify_repository_hardset_candidate(**{**kwargs, "output": session / "private-evaluator"})
     candidate = session / "worktree" / KERNEL
     candidate.write_text(candidate.read_text().replace("maximum", "wrongname", 1))
     with pytest.raises(ValueError, match="outside controller"):
