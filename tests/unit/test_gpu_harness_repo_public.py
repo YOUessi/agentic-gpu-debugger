@@ -362,7 +362,9 @@ def test_public_success_metrics_remain_unverified(
         public_case_id="h001",
         max_steps=6,
         max_model_calls=8,
-        model_factory=lambda _: Model([_edit_numerator(), _edit_denominator(), _check(), _finish()]),
+        model_factory=lambda _: Model(
+            [_edit_numerator(), _edit_denominator(), _check(), _finish()]
+        ),
     )
     assert outcome.public_checks_passed
     metrics = summarize_repository_trajectory(output)
@@ -395,7 +397,9 @@ def test_operator_verifier_receives_exact_scoped_cuda_diff_only_after_finish(
         public_case_id="h001",
         max_steps=6,
         max_model_calls=8,
-        model_factory=lambda _: Model([_edit_numerator(), _edit_denominator(), _check(), _finish()]),
+        model_factory=lambda _: Model(
+            [_edit_numerator(), _edit_denominator(), _check(), _finish()]
+        ),
     )
     assert report.public_checks_passed and report.status == "DIFF_STAGED_UNVERIFIED"
     calls = []
@@ -453,7 +457,9 @@ def test_operator_verifier_rejects_external_source_drift_and_private_output_scop
         public_case_id="h001",
         max_steps=6,
         max_model_calls=8,
-        model_factory=lambda _: Model([_edit_numerator(), _edit_denominator(), _check(), _finish()]),
+        model_factory=lambda _: Model(
+            [_edit_numerator(), _edit_denominator(), _check(), _finish()]
+        ),
     )
 
     kwargs = dict(

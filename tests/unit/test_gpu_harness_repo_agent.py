@@ -19,8 +19,8 @@ from gpu_agent.agent.provider import (
 )
 from gpu_agent.harness.journal import SessionJournal, read_verified_journal, recovery_disposition
 from gpu_agent.harness.metrics import summarize_repository_trajectory
-from gpu_agent.harness.recovery import read_repository_checkpoint
 from gpu_agent.harness.models import HarnessDecision, RepoReadFile
+from gpu_agent.harness.recovery import read_repository_checkpoint
 from gpu_agent.harness.registry import ToolPermissionPolicy
 from gpu_agent.harness.repo_runner import run_repository_coding_session
 from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
@@ -464,7 +464,10 @@ def test_repo_inspection_keys_survive_pause_and_metrics_are_provenanced(
     assert [step.status for step in metrics.tool_trajectory] == [
         "OK", "REJECTED", "OK", "OK", "OK"
     ]
-    assert len(read_repository_checkpoint(output / "session-checkpoint.json").observed_query_fingerprints) == 2
+    restored_keys = read_repository_checkpoint(
+        output / "session-checkpoint.json"
+    ).observed_query_fingerprints
+    assert len(restored_keys) == 2
     assert (source / "src/kernel.cu").read_text() == "float x = 1.0f;\n"
 
 
@@ -481,7 +484,9 @@ def test_repo_metric_reader_refuses_unfinished_or_removed_public_evidence(
         max_steps=6,
         max_model_calls=8,
         pause_after_turns=1,
-        model_factory=lambda _: SelectActions([{"tool": "repo_read_file", "path": "src/kernel.cu"}]),
+        model_factory=lambda _: SelectActions(
+            [{"tool": "repo_read_file", "path": "src/kernel.cu"}]
+        ),
     )
     with pytest.raises((ValueError, OSError)):
         summarize_repository_trajectory(output)
