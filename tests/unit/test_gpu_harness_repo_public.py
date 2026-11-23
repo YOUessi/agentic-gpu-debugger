@@ -15,6 +15,7 @@ import pytest
 
 from gpu_agent.benchmark.hardset_v2_agent_models import HardsetPublicCheck
 from gpu_agent.harness.journal import read_verified_journal, recovery_disposition
+from gpu_agent.harness.metrics import summarize_repository_trajectory
 from gpu_agent.harness.models import HarnessDecision, RepoRunPublicChecks
 from gpu_agent.harness.repo_runner import run_repository_coding_session
 from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
@@ -343,3 +344,33 @@ def test_public_resume_rejects_changed_gpu_contract_or_missing_evidence(
     artifact.unlink()
     with pytest.raises(ValueError):
         run_repository_coding_session(**arguments)
+
+
+def test_public_success_metrics_remain_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    output = tmp_path / "public-metrics"
+    outcome = run_repository_coding_session(
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        max_steps=6,
+        max_model_calls=8,
+        model_factory=lambda _: Model([_edit_numerator(), _edit_denominator(), _check(), _finish()]),
+    )
+    assert outcome.public_checks_passed
+    metrics = summarize_repository_trajectory(output)
+    assert metrics.public_case_id == "h001"
+    assert metrics.first_accepted_edit_turn == 1
+    assert metrics.first_public_check_request_turn == 3
+    assert metrics.first_public_pass_turn == 3
+    assert metrics.first_accepted_finish_turn == 4
+    assert metrics.public_gpu_checks_attempted == 1
+    assert metrics.public_checks_passed_final
+    assert not metrics.independently_verified
+    assert not metrics.independent_hidden_verification

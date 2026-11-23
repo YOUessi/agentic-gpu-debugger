@@ -35,6 +35,21 @@ knowledge_app = typer.Typer(no_args_is_help=True, help="Offline knowledge inspec
 app.add_typer(knowledge_app, name="knowledge")
 
 
+@harness_app.command("summarize-repo")
+def harness_summarize_repo(
+    output: Annotated[Path, typer.Option("--output")],
+) -> None:
+    """Summarize trusted PUBLIC tool events; never invoke models or CUDA."""
+    from gpu_agent.harness.metrics import summarize_repository_trajectory
+
+    try:
+        summary = summarize_repository_trajectory(output)
+        typer.echo(summary.model_dump_json(indent=2))
+    except (OSError, ValueError):
+        typer.echo("INVALID_OR_UNTRUSTED_REPOSITORY_TRAJECTORY", err=True)
+        raise typer.Exit(2) from None
+
+
 @harness_app.command("inspect-session")
 def harness_inspect_session(
     journal: Annotated[Path, typer.Option("--journal")],
