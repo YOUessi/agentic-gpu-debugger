@@ -179,8 +179,7 @@ def test_registered_case_can_finish_only_after_current_public_gpu_check(
     assert report.edited_files == (KERNEL,)
     assert _git(repository, "status", "--porcelain") == ""
     assert (
-        recovery_disposition(read_verified_journal(output / "session-events.jsonl"))
-        == "FINISHED"
+        recovery_disposition(read_verified_journal(output / "session-events.jsonl")) == "FINISHED"
     )
 
 
@@ -190,9 +189,7 @@ def test_failed_gpu_feedback_revised_candidate_and_duplicate_guard(
     repository, sha = _registered_repository(tmp_path)
     checker = FakePublicChecker([False, True])
     monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
-    model = Model([
-        _edit_numerator(), _check(), _check(), _edit_denominator(), _check(), _finish()
-    ])
+    model = Model([_edit_numerator(), _check(), _check(), _edit_denominator(), _check(), _finish()])
     report = run_repository_coding_session(
         repository=repository,
         output=tmp_path / "public-revision",
@@ -231,23 +228,27 @@ def test_public_checks_reject_wrong_scope_and_missing_operator_permission(
         sha=sha,
         public_case_id="h001",
     ) as host:
-        assert host.invoke(HarnessDecision.model_validate(
+        edit = HarnessDecision.model_validate(
             {"action": _edit_numerator(), "reason": "edit the public kernel"}
-        ).action).status == "OK"
-        other = HarnessDecision.model_validate({
-            "action": {
-                "tool": "repo_replace_snippet",
-                "path": "src/other.cuh",
-                "old_text": "return x;",
-                "new_text": "return x + 1;",
-            },
-            "reason": "modify a second file",
-        })
+        ).action
+        assert host.invoke(edit).status == "OK"
+        other = HarnessDecision.model_validate(
+            {
+                "action": {
+                    "tool": "repo_replace_snippet",
+                    "path": "src/other.cuh",
+                    "old_text": "return x;",
+                    "new_text": "return x + 1;",
+                },
+                "reason": "modify a second file",
+            }
+        )
         assert host.invoke(other.action).status == "OK"
         assert host.invoke(RepoRunPublicChecks()).status == "REJECTED"
-        assert host.invoke(HarnessDecision.model_validate({
-            "action": _finish(), "reason": "finish early"
-        }).action).status == "REJECTED"
+        finish = HarnessDecision.model_validate(
+            {"action": _finish(), "reason": "finish early"}
+        ).action
+        assert host.invoke(finish).status == "REJECTED"
     assert checker.calls == []
 
 

@@ -34,7 +34,8 @@ TOOL_REGISTRY: tuple[ToolDescriptor, ...] = (
     ToolDescriptor("repo_replace_snippet", "edit", "Exact edit of allowed source file"),
     ToolDescriptor("repo_git_diff", "read", "Inspect bounded Git changes"),
     ToolDescriptor(
-        "repo_run_public_checks", "gpu",
+        "repo_run_public_checks",
+        "gpu",
         "Run real isolated CUDA checks for one operator-registered public case",
     ),
 )

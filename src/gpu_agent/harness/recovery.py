@@ -106,8 +106,7 @@ def write_repository_checkpoint(path: Path, checkpoint: RepositoryCheckpoint) ->
         raise ValueError("checkpoint file limit exceeded")
     if (
         checkpoint.public_checks_attempted > checkpoint.max_public_checks
-        or len(set(checkpoint.attempted_candidate_hashes))
-        != checkpoint.public_checks_attempted
+        or len(set(checkpoint.attempted_candidate_hashes)) != checkpoint.public_checks_attempted
         or (checkpoint.public_case_id is None and checkpoint.public_checks_attempted)
     ):
         raise ValueError("checkpoint public GPU check budget invalid")
@@ -144,8 +143,7 @@ def read_repository_checkpoint(path: Path) -> RepositoryCheckpoint:
         raise ValueError("checkpoint changed-file budget exceeded")
     if (
         checkpoint.public_checks_attempted > checkpoint.max_public_checks
-        or len(set(checkpoint.attempted_candidate_hashes))
-        != checkpoint.public_checks_attempted
+        or len(set(checkpoint.attempted_candidate_hashes)) != checkpoint.public_checks_attempted
         or (checkpoint.public_case_id is None and checkpoint.public_checks_attempted)
     ):
         raise ValueError("checkpoint public GPU check evidence invalid")
