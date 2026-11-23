@@ -460,7 +460,10 @@ class RepositoryWorkspaceTools:
         if isinstance(action, RepoGitDiff):
             diff = self.workspace.diff()
             key = self._query_fingerprint(
-                {"tool": action.tool, "source_diff_sha256": str(self.workspace.integrity()["diff_sha256"])}
+                {
+                    "tool": action.tool,
+                    "source_diff_sha256": str(self.workspace.integrity()["diff_sha256"]),
+                }
             )
             self._require_new_observation(key, "REDUNDANT_DIFF")
             self._observed_query_fingerprints.add(key)
