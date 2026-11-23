@@ -39,6 +39,7 @@ class RepositoryCheckpoint(BaseModel):
     max_edited_files: int = Field(ge=1, le=20)
     public_case_id: str | None = Field(default=None, pattern=r"^h00[1-3]$")
     context_mode: Literal["legacy", "evidence_first"] = "evidence_first"
+    allow_batch_edits: bool = True
     max_public_checks: int = Field(default=2, ge=1, le=3)
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     attempted_candidate_hashes: tuple[str, ...] = ()
@@ -187,6 +188,7 @@ def validated_quiescent_repository_checkpoint(
     public_case_id: str | None = None,
     max_public_checks: int = 2,
     context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
+    allow_batch_edits: bool = True,
 ) -> RepositoryCheckpoint:
     """Reject uncertain side effects, terminal sessions or mismatched settings."""
     records = read_verified_journal(output / "session-events.jsonl")
@@ -206,6 +208,7 @@ def validated_quiescent_repository_checkpoint(
         or checkpoint.public_case_id != public_case_id
         or checkpoint.max_public_checks != max_public_checks
         or checkpoint.context_mode != context_mode
+        or checkpoint.allow_batch_edits != allow_batch_edits
     ):
         raise ValueError("checkpoint identity, journal head or budgets differ")
     first = records[0]
@@ -217,6 +220,7 @@ def validated_quiescent_repository_checkpoint(
         or first["payload"].get("public_case_id") != checkpoint.public_case_id
         or first["payload"].get("max_public_checks", 2) != checkpoint.max_public_checks
         or first["payload"].get("context_mode", "evidence_first") != checkpoint.context_mode
+        or first["payload"].get("allow_batch_edits", True) != checkpoint.allow_batch_edits
     ):
         raise ValueError("checkpoint does not match session creation evidence")
     completed = sum(event["kind"] == "tool_completed" for event in records)

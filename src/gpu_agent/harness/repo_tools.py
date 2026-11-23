@@ -63,6 +63,7 @@ class RepositoryWorkspaceTools:
         public_case_id: str | None = None,
         max_public_checks: int = 2,
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
+        allow_batch_edits: bool = True,
     ) -> None:
         if output.exists() or output.is_symlink():
             raise ValueError("repository agent output already exists")
@@ -78,6 +79,9 @@ class RepositoryWorkspaceTools:
         if context_mode not in {"legacy", "evidence_first"}:
             raise ValueError("unsupported repository context mode")
         self._context_mode = context_mode
+        if type(allow_batch_edits) is not bool:
+            raise ValueError("invalid batch-edit policy")
+        self._batch_enabled = allow_batch_edits
         self._configure_public_case(public_case_id, max_public_checks)
         self._store = RunStore(output / "public")
         self._run = self._store.create_run("gpu_repository_agent")
@@ -188,6 +192,7 @@ class RepositoryWorkspaceTools:
         last_public_passed: bool = False,
         observed_query_fingerprints: tuple[str, ...] = (),
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
+        allow_batch_edits: bool = True,
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -210,6 +215,9 @@ class RepositoryWorkspaceTools:
         if context_mode not in {"legacy", "evidence_first"}:
             raise ValueError("unsupported resumed context mode")
         host._context_mode = context_mode
+        if type(allow_batch_edits) is not bool:
+            raise ValueError("invalid resumed batch-edit policy")
+        host._batch_enabled = allow_batch_edits
         host._policy = permissions or ToolPermissionPolicy()
         host._configure_public_case(public_case_id, max_public_checks, resuming=True)
         if (
@@ -340,6 +348,7 @@ class RepositoryWorkspaceTools:
             for name in self.ALLOWED_TOOLS
             if self._policy.check(name) == "ALLOW"
             and (name != "repo_run_public_checks" or gpu_allowed)
+            and (name != "repo_replace_many" or self._batch_enabled)
         )
         requirement = goal
         if self._public_case_id is not None:
@@ -396,11 +405,19 @@ class RepositoryWorkspaceTools:
             raise ValueError("repository workspace already finalized")
         self._tool_calls += 1
         permission = self._policy.check(action.tool)
-        if permission != "ALLOW" or action.tool not in self.ALLOWED_TOOLS:
+        if (
+            permission != "ALLOW"
+            or action.tool not in self.ALLOWED_TOOLS
+            or (isinstance(action, RepoReplaceMany) and not self._batch_enabled)
+        ):
             result = ToolObservation(
                 tool=action.tool,
                 status="REJECTED",
-                content=f"TOOL_{permission}: unavailable workspace capability",
+                content=(
+                    "TOOL_DENY: atomic batch editing is disabled for this ablation"
+                    if isinstance(action, RepoReplaceMany) and not self._batch_enabled
+                    else f"TOOL_{permission}: unavailable workspace capability"
+                ),
             )
         else:
             try:

@@ -39,6 +39,7 @@ class RepositoryTrajectoryMetrics(BaseModel):
     base_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
     public_case_id: str | None = Field(default=None, pattern=r"^h00[1-3]$")
     context_mode: Literal["legacy", "evidence_first"] = "evidence_first"
+    allow_batch_edits: bool = True
     public_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     status: Literal["DIFF_STAGED_UNVERIFIED", "INCONCLUSIVE"]
     turns: int = Field(ge=1, le=40)
@@ -86,6 +87,9 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         raise ValueError("unsupported public context mode")
     if result.context_mode != context_mode:
         raise ValueError("session context mode changed between start and finish")
+    allow_batch = payload.get("allow_batch_edits", True)
+    if type(allow_batch) is not bool or result.allow_batch_edits != allow_batch:
+        raise ValueError("session batch-edit policy changed between start and finish")
     if public_case is not None and public_case not in {"h001", "h002", "h003"}:
         raise ValueError("unexpected public CUDA case in session")
     if journal[-1]["payload"].get("status") != result.status:
@@ -170,6 +174,7 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         base_sha=result.base_sha,
         public_case_id=public_case,
         context_mode=context_mode,
+        allow_batch_edits=allow_batch,
         public_run_id=result.public_run_id,
         status=result.status,
         turns=result.turns,

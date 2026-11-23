@@ -50,6 +50,7 @@ def run_repository_coding_session(
     public_case_id: str | None = None,
     max_public_checks: int = 2,
     context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
+    allow_batch_edits: bool = True,
     allow_paid_calls: bool = False,
     resume: bool = False,
     pause_after_turns: int | None = None,
@@ -82,6 +83,7 @@ def run_repository_coding_session(
             public_case_id=public_case_id,
             max_public_checks=max_public_checks,
             context_mode=context_mode,
+            allow_batch_edits=allow_batch_edits,
         )
         host = RepositoryWorkspaceTools.reopen(
             origin=repository,
@@ -101,6 +103,7 @@ def run_repository_coding_session(
             last_public_passed=checkpoint.last_public_passed,
             observed_query_fingerprints=checkpoint.observed_query_fingerprints,
             context_mode=checkpoint.context_mode,
+            allow_batch_edits=checkpoint.allow_batch_edits,
         )
         if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
             raise ValueError("resumed workspace diff disagrees with checkpoint")
@@ -115,6 +118,7 @@ def run_repository_coding_session(
             public_case_id=public_case_id,
             max_public_checks=max_public_checks,
             context_mode=context_mode,
+            allow_batch_edits=allow_batch_edits,
         )
 
     with host as tools:
@@ -160,6 +164,7 @@ def run_repository_coding_session(
                         "public_case_id": public_case_id,
                         "max_public_checks": max_public_checks,
                         "context_mode": context_mode,
+                        "allow_batch_edits": allow_batch_edits,
                     },
                 )
                 events = 0
@@ -221,6 +226,7 @@ def run_repository_coding_session(
                         public_case_id=public_case_id,
                         max_public_checks=max_public_checks,
                         context_mode=context_mode,
+                        allow_batch_edits=allow_batch_edits,
                         public_checks_attempted=tools.public_checks_attempted,
                         attempted_candidate_hashes=tools.attempted_candidate_hashes,
                         last_public_run_id=tools.last_public_run_id,
@@ -278,6 +284,7 @@ def run_repository_coding_session(
                 reason=state.get("reason", "UNKNOWN"),
                 public_run_id=tools.run_id,
                 context_mode=context_mode,
+                allow_batch_edits=allow_batch_edits,
                 public_checks_attempted=tools.public_checks_attempted,
                 public_checks_passed=tools.public_checks_passed,
                 public_checked_candidate_sha256=tools.last_checked_candidate_sha,

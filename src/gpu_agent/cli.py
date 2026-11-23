@@ -128,6 +128,7 @@ def harness_repo_run(
     context_mode: Annotated[
         Literal["legacy", "evidence_first"], typer.Option("--context-mode")
     ] = "evidence_first",
+    disable_batch_edits: Annotated[bool, typer.Option("--disable-batch-edits")] = False,
     max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     resume: Annotated[bool, typer.Option("--resume")] = False,
     pause_after_turns: Annotated[
@@ -156,6 +157,7 @@ def harness_repo_run(
             public_case_id=public_case,
             max_public_checks=max_public_checks,
             context_mode=context_mode,
+            allow_batch_edits=not disable_batch_edits,
             resume=resume,
             pause_after_turns=pause_after_turns,
         )
