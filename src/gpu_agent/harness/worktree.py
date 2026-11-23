@@ -15,7 +15,7 @@ import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
 
-from gpu_agent.store import read_regular, reject_symlinks
+from gpu_agent.store import read_regular, reject_symlinks, sync_directory
 
 SOURCE_EXTENSIONS = frozenset({".cu", ".cuh", ".cpp", ".cc", ".c", ".h", ".hpp"})
 PUBLIC_READ_EXTENSIONS = SOURCE_EXTENSIONS | {
@@ -320,6 +320,30 @@ class PinnedGitWorkspace:
             :20_000
         ]
 
+    def _stage_source(self, name: str, target: Path, original: bytes, modified: bytes) -> str:
+        """Host-controlled atomic write, shared by single and grouped edits."""
+        if modified == original or len(modified) > MAX_SOURCE_BYTES:
+            raise ValueError("no-op or overlarge source edit")
+        mode = stat.S_IMODE(target.stat().st_mode)
+        fd, temporary = tempfile.mkstemp(prefix=".gpu-agent-stage-", dir=target.parent)
+        try:
+            os.fchmod(fd, mode)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(modified)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if target.is_symlink():
+                raise ValueError("edited path became a symlink")
+            os.replace(temporary, target)
+            sync_directory(target.parent)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)
+        digest = hashlib.sha256(modified).hexdigest()
+        self._edited.add(name)
+        self._accepted_hashes[name] = digest
+        return digest
+
     def replace_exact(self, name: str, before: str, after: str) -> str:
         self._verify_boundary()
         target = self._checked(name, editable=True)
@@ -332,27 +356,49 @@ class PinnedGitWorkspace:
         if not before or text.count(before) != 1:
             raise ValueError("edit source must match exactly once")
         modified = text.replace(before, after, 1).encode("utf-8")
-        if modified == original or len(modified) > MAX_SOURCE_BYTES:
-            raise ValueError("no-op or overlarge source edit")
-        # Host-only atomic write in an isolated worktree; reject symlinks.
-        mode = stat.S_IMODE(target.stat().st_mode)
-        fd, temp = tempfile.mkstemp(prefix=".gpu-agent-stage-", dir=target.parent)
-        try:
-            os.fchmod(fd, mode)
-            with os.fdopen(fd, "wb") as handle:
-                handle.write(modified)
-                handle.flush()
-                os.fsync(handle.fileno())
-            if target.is_symlink():
-                raise ValueError("edited path became a symlink")
-            os.replace(temp, target)
-        finally:
-            if os.path.exists(temp):
-                os.unlink(temp)
-        digest = hashlib.sha256(modified).hexdigest()
-        self._edited.add(name)
-        self._accepted_hashes[name] = digest
-        return digest
+        return self._stage_source(name, target, original, modified)
+
+    def replace_batch(self, name: str, edits: list[tuple[str, str]]) -> str:
+        """Stage several disjoint, uniquely anchored edits as ONE atomic change.
+
+        Match all anchors against the same frozen current revision, rather than
+        letting one edit alter the matching semantics of a later edit. Invalid
+        or overlapping requests leave the checkout and edit ledger unchanged.
+        """
+        self._verify_boundary()
+        target = self._checked(name, editable=True)
+        if name not in self._edited and len(self._edited) >= self.max_edited_files:
+            raise ValueError("workspace modified-file budget exhausted")
+        if not 2 <= len(edits) <= 4:
+            raise ValueError("batch edit must include 2-4 exact snippets")
+        original = read_regular(target, MAX_SOURCE_BYTES)
+        text = original.decode("utf-8")
+        ranges: list[tuple[int, int, str]] = []
+        for before, after in edits:
+            if (
+                not before
+                or len(before) > 4_000
+                or len(after) > 4_000
+                or before == after
+                or "\x00" in before
+                or "\x00" in after
+            ):
+                raise ValueError("invalid bounded batch edit snippet")
+            if text.count(before) != 1:
+                raise ValueError("batch edit source must match exactly once")
+            start = text.find(before)
+            ranges.append((start, start + len(before), after))
+        ranges.sort(key=lambda item: item[0])
+        cursor = 0
+        pieces: list[str] = []
+        for start, end, replacement in ranges:
+            if start < cursor:
+                raise ValueError("overlapping batch edits are forbidden")
+            pieces.append(text[cursor:start])
+            pieces.append(replacement)
+            cursor = end
+        pieces.append(text[cursor:])
+        return self._stage_source(name, target, original, "".join(pieces).encode("utf-8"))
 
     def diff(self) -> str:
         self._verify_boundary()
