@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from gpu_agent.harness.models import (
     FinishTask,
     RepoGitDiff,
+    RepoInspectSyntax,
+    RepoReplaceSyntax,
     RepoListFiles,
     RepoReadFile,
     RepoReplaceMany,
@@ -27,6 +29,8 @@ _REPO_ACTION_CLASSES: dict[str, type[BaseModel]] = {
     "repo_replace_snippet": RepoReplaceSnippet,
     "repo_replace_many": RepoReplaceMany,
     "repo_git_diff": RepoGitDiff,
+    "repo_inspect_syntax": RepoInspectSyntax,
+    "repo_replace_syntax": RepoReplaceSyntax,
     "repo_run_public_checks": RepoRunPublicChecks,
     "finish": FinishTask,
 }

@@ -84,6 +84,28 @@ class RepoReplaceMany(StrictModel):
     edits: list[RepoSnippetEdit] = Field(min_length=2, max_length=4)
 
 
+class RepoInspectSyntax(StrictModel):
+    """Read registered CUDA syntax nodes without exposing source line decoration."""
+
+    tool: Literal["repo_inspect_syntax"] = "repo_inspect_syntax"
+    path: str = Field(min_length=1, max_length=300)
+    symbol: str = Field(default="", max_length=80)
+
+
+class RepoSyntaxEdit(StrictModel):
+    node_id: str = Field(min_length=24, max_length=24, pattern=r"^[a-f0-9]{24}$")
+    replacement_code: str = Field(min_length=1, max_length=1200)
+
+
+class RepoReplaceSyntax(StrictModel):
+    """Edit 1-4 AST-addressed statements in one frozen source revision."""
+
+    tool: Literal["repo_replace_syntax"] = "repo_replace_syntax"
+    path: str = Field(min_length=1, max_length=300)
+    expected_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    edits: list[RepoSyntaxEdit] = Field(min_length=1, max_length=4)
+
+
 class RepoGitDiff(StrictModel):
     tool: Literal["repo_git_diff"] = "repo_git_diff"
 
@@ -111,6 +133,8 @@ HarnessAction = Annotated[
     | RepoReadFile
     | RepoReplaceSnippet
     | RepoReplaceMany
+    | RepoInspectSyntax
+    | RepoReplaceSyntax
     | RepoGitDiff
     | RepoRunPublicChecks
     | FinishTask,

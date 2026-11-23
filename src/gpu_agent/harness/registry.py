@@ -39,6 +39,14 @@ TOOL_REGISTRY: tuple[ToolDescriptor, ...] = (
     ),
     ToolDescriptor("repo_git_diff", "read", "Inspect bounded Git changes"),
     ToolDescriptor(
+        "repo_inspect_syntax", "read",
+        "Inspect SHA-pinned CUDA AST statements with immutable node IDs",
+    ),
+    ToolDescriptor(
+        "repo_replace_syntax", "edit",
+        "Atomically rewrite CUDA syntax nodes using source SHA and parser validation",
+    ),
+    ToolDescriptor(
         "repo_run_public_checks",
         "gpu",
         "Run real isolated CUDA checks for one operator-registered public case",
