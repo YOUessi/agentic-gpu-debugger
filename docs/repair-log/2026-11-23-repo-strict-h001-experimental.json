@@ -1,0 +1,46 @@
+{
+  "schema_version": "gpu-repository-hardset-experimental-strict-v1",
+  "experiment_date": "2026-11-23",
+  "runner_origin": "operator-only independent strict verifier, not a model tool",
+  "source": {
+    "verifier_github_commit": "f715b6f6c6327f4a0888a4c4d4a84c4519d07379",
+    "verifier_tarball_sha256": "9103239cc94219afec10a195942cb6f9d3d5ef083ca1bf0b3fbde70fe37128d9",
+    "verifier_module_sha256": "92ef351ab100df6806d683062c426a0d77cdc3c27180a785d6aa105f752171fc",
+    "model_candidate_github_commit": "786bc35725edbfd4cd1a3dcaa94589cef9d72c21",
+    "candidate_sha256": "88dd297b8a0bc53dc3b93b7d1a4678551346b4855d7139b4edaddecef0070ba4",
+    "parent_public_run_id": "dd4b207acc4b4f27a2d9c16fa6a6ac29"
+  },
+  "environment": {
+    "device": "Tang",
+    "gpu": "NVIDIA GeForce RTX 4090 Laptop GPU",
+    "runtime": "IsolatedGPUBackend Docker, independent evaluator-only RunStore",
+    "cpu_regression": "26 passed in 11.91s using new verifier source and frozen dependencies"
+  },
+  "strict_result": {
+    "protocol": "hardset-experimental-strict-v2",
+    "case_id": "h001",
+    "verdict": "VERIFIED_FIXED",
+    "reason_code": "ALL_REQUIRED_CHECKS_PASSED",
+    "hidden_numeric_passed": 9,
+    "hidden_numeric_total": 9,
+    "hidden_sanitizers_passed": 4,
+    "hidden_sanitizers_total": 4,
+    "private_artifacts": 91,
+    "private_visibility_all_evaluator": true,
+    "public_projection_artifacts": [
+      "hardset/candidate-provenance.json",
+      "hardset/strict-verdict.json"
+    ],
+    "public_projection_run_id": "f991c5128da74a5e8e3a13bd9b7ca9f7",
+    "public_projection_sha256": "987936e8e588a274bb1df25f520fc927feb0614fe86033c34b26a9f1b6956e3e",
+    "private_output_location": "/home/you/gpu-native-harness-validation-20261123/repo-strict-verifier-f715b6f/strict-h001-operator-only",
+    "original_agent_public_store_unchanged": true
+  },
+  "limitations": [
+    "Candidate produced by deterministic scripted agent, physical LLM calls zero",
+    "Experimental HardSet V2 strict verifier, not signed v1 holdout certification",
+    "Only one registered case h001, no cross-case or seed generalization",
+    "This operator-only verdict does not mutate original Agent status or become model feedback",
+    "Evaluator secret and hidden inputs never uploaded to GitHub"
+  ]
+}

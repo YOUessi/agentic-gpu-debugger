@@ -67,3 +67,7 @@ R=/home/you/gpu-native-harness-validation-20261123/repo-public-gpu-786bc357
 ### 与研究目标的差距
 
 本次验证的是 **自研 LangGraph Harness → 受控 ModelTool host → 真 CUDA GPU 构建/反馈 → 修订 → 公共检查** 这一工程闭环；尚无本版本上的真实 DeepSeek 自主动作选择实验，不能说 Agent 比旧规则 Workflow 更好。下一阶段需要在同一冻结源码与预算上做真实模型、多种案例与独立隐藏评测，比较修复率、动作冗余、Tokens 和成本。通用多文件测试仍未建立合法的数值 Oracle，只能在明确的注册 Case 范围内判断通过。
+
+## 追加：模型停止后的实验性 Strict 验证（另一次实验）
+
+使用操作者专用 `verify_repository_hardset_candidate`，对本页公开检查通过的**同一候选**在 Tang RTX 4090 上进行了独立 HardSet V2 hidden evaluation：隐藏数值 **9/9**、隐藏 Sanitizer **4/4**，实验性 `VERIFIED_FIXED`，未向模型公开任何私有输入或校验器能力。注意 **模型仍为脚本化替身、物理调用 0**，本记录的原始 `DIFF_STAGED_UNVERIFIED` 不会被修改。见 [严格独立 GPU 验收详细记录](2026-11-23-repo-strict-h001-real-gpu.md)。
