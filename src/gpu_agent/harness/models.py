@@ -169,7 +169,7 @@ class TaskPlan(StrictModel):
     failure_risk: str = Field(min_length=8, max_length=230)
 
     @model_validator(mode="after")
-    def stage_contract(self) -> "TaskPlan":
+    def stage_contract(self) -> TaskPlan:
         gates = tuple(item.gate for item in self.milestones)
         if gates != ("inspect", "edit", "public_check", "finish"):
             raise ValueError("planner must cover evidence, patch, public check and finish")

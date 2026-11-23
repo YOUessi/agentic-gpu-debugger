@@ -27,10 +27,10 @@ from gpu_agent.harness.journal import EventKind, SessionJournal
 from gpu_agent.harness.models import (
     FinishTask,
     HarnessDecision,
-    TaskPlan,
-    TaskReflection,
     HarnessOutcome,
     SessionSnapshot,
+    TaskPlan,
+    TaskReflection,
     ToolObservation,
 )
 
@@ -148,7 +148,7 @@ def run_tool_agent(
         snapshot = host.snapshot(goal, state.get("history", []), remaining)
         if hierarchical_mode:
             from gpu_agent.harness.models import TaskProgress
-            from gpu_agent.harness.planning import reflection_context, progress_from_tools
+            from gpu_agent.harness.planning import progress_from_tools, reflection_context
 
             reflection = (
                 TaskReflection.model_validate(state["task_reflection"])

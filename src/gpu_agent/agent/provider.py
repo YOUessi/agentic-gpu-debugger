@@ -55,7 +55,12 @@ if TYPE_CHECKING:
         HardsetPublicCheck,
     )
     from gpu_agent.benchmark.hardset_v2_graph import PlannerSnapshot, ProbeChoice
-    from gpu_agent.harness.models import HarnessDecision, SessionSnapshot
+    from gpu_agent.harness.models import (
+        HarnessDecision,
+        SessionSnapshot,
+        TaskPlan,
+        TaskReflection,
+    )
 
 Output = TypeVar("Output", bound=BaseModel)
 

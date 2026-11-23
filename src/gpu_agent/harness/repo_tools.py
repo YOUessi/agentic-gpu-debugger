@@ -26,11 +26,11 @@ from gpu_agent.harness.models import (
     HarnessAction,
     RepoGitDiff,
     RepoInspectSyntax,
-    RepoReplaceSyntax,
     RepoListFiles,
     RepoReadFile,
     RepoReplaceMany,
     RepoReplaceSnippet,
+    RepoReplaceSyntax,
     RepoRunPublicChecks,
     SessionSnapshot,
     ToolObservation,
@@ -345,8 +345,14 @@ class RepositoryWorkspaceTools:
                 if self._policy.check(name) == "ALLOW"
                 and (name != "repo_replace_many" or self._batch_enabled)
                 and name != "repo_run_public_checks"
-                and (name not in {"repo_inspect_syntax", "repo_replace_syntax"} or self._syntax_mode)
-                and (name not in {"repo_replace_snippet", "repo_replace_many"} or not self._syntax_mode)
+                and (
+                    name not in {"repo_inspect_syntax", "repo_replace_syntax"}
+                    or self._syntax_mode
+                )
+                and (
+                    name not in {"repo_replace_snippet", "repo_replace_many"}
+                    or not self._syntax_mode
+                )
             )
         delta = self.workspace.diff()
         dirty = bool(delta)

@@ -15,11 +15,11 @@ from gpu_agent.harness.models import (
     FinishTask,
     RepoGitDiff,
     RepoInspectSyntax,
-    RepoReplaceSyntax,
     RepoListFiles,
     RepoReadFile,
     RepoReplaceMany,
     RepoReplaceSnippet,
+    RepoReplaceSyntax,
     RepoRunPublicChecks,
 )
 

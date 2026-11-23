@@ -73,7 +73,7 @@ def _entries(raw: bytes) -> tuple[str, list[SyntaxNode]]:
     source_sha256 = _source_digest(raw)
     entries: list[SyntaxNode] = []
     for function, function_node in _functions(tree.root_node, raw):
-        def visit(node: Node) -> None:
+        def visit(node: Node, function_name: str = function) -> None:
             if node.type in _NODE_TYPES:
                 chunk = raw[node.start_byte : node.end_byte]
                 node_id = hashlib.sha256(
@@ -83,7 +83,7 @@ def _entries(raw: bytes) -> tuple[str, list[SyntaxNode]]:
                 entries.append(
                     SyntaxNode(
                         node_id=node_id,
-                        function=function,
+                        function=function_name,
                         kind=node.type,
                         start_line=node.start_point.row + 1,
                         end_line=node.end_point.row + 1,
@@ -94,7 +94,7 @@ def _entries(raw: bytes) -> tuple[str, list[SyntaxNode]]:
                 )
                 return
             for child in node.named_children:
-                visit(child)
+                visit(child, function_name)
         visit(function_node)
     if len(entries) > _MAX_NODES:
         raise ValueError("CUDA syntax node listing exceeds controller bound")
