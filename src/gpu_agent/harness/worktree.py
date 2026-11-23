@@ -400,6 +400,43 @@ class PinnedGitWorkspace:
         pieces.append(text[cursor:])
         return self._stage_source(name, target, original, "".join(pieces).encode("utf-8"))
 
+    def inspect_syntax(self, name: str, *, symbol: str = "") -> dict[str, object]:
+        """Parse only an existing approved CUDA source file, without executing it."""
+        from gpu_agent.harness.syntax_tools import syntax_nodes
+
+        self._verify_boundary()
+        path = self._checked(name, editable=False)
+        if path.suffix not in {".cu", ".cuh"}:
+            raise ValueError("CUDA_SYNTAX_ONLY_CUDA_SOURCE")
+        raw = read_regular(path, MAX_SOURCE_BYTES)
+        return syntax_nodes(raw, symbol=symbol)
+
+    def replace_syntax(
+        self,
+        name: str,
+        *,
+        expected_source_sha256: str,
+        edits: list[tuple[str, str]],
+    ) -> str:
+        """Replace exact parsed nodes bound to a SHA-pinned current source.
+
+        Unlike model-quoted old_text, node IDs are produced by the controller
+        from the real parser. It rejects stale IDs and all malformed outputs.
+        """
+        from gpu_agent.harness.syntax_tools import rewrite_syntax_nodes
+
+        self._verify_boundary()
+        target = self._checked(name, editable=True)
+        if target.suffix not in {".cu", ".cuh"}:
+            raise ValueError("CUDA_SYNTAX_ONLY_CUDA_SOURCE")
+        if name not in self._edited and len(self._edited) >= self.max_edited_files:
+            raise ValueError("workspace modified-file budget exhausted")
+        original = read_regular(target, MAX_SOURCE_BYTES)
+        changed = rewrite_syntax_nodes(
+            original, expected_source_sha256=expected_source_sha256, edits=edits
+        )
+        return self._stage_source(name, target, original, changed)
+
     def diff(self) -> str:
         self._verify_boundary()
         paths = self.edited_files
