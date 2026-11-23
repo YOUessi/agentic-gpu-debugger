@@ -345,7 +345,6 @@ def test_loopback_local_vllm_accepted_only_with_explicit_authority(
         preflight_paired_experiment(repo, evaluator_secret_file=secret)
 
 
-
 def test_three_arm_architecture_plan_preserves_causal_separation(tmp_path: Path) -> None:
     from gpu_agent.harness.ablation import _arm_configuration
 
