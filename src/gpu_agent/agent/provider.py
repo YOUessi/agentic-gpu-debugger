@@ -529,10 +529,17 @@ def invoke_sdk(
             logging.getLogger(name).disabled = True
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
     output_model: type[BaseModel]
-    if request.kind == "plan" and (
-        request.payload.get("gpu_coding_harness") == "v1"
-        or request.payload.get("gpu_repo_harness") == "v1"
-    ):
+    if request.kind == "plan" and request.payload.get("gpu_repo_harness") == "v1":
+        from gpu_agent.harness.tool_schema import repository_decision_schema
+
+        snapshot = request.payload.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        names = snapshot.get("allowed_tools")
+        if not isinstance(names, list) or any(not isinstance(x, str) for x in names):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        output_model = repository_decision_schema(tuple(names))
+    elif request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
         from gpu_agent.harness.models import HarnessDecision
 
         output_model = HarnessDecision
