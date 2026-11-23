@@ -30,7 +30,10 @@ from gpu_agent.harness.repo_runner import run_repository_coding_session
 from gpu_agent.harness.repo_verification import verify_repository_hardset_candidate
 from gpu_agent.store import RunStore, read_regular, reject_symlinks, sync_directory
 
-Arm = Literal["legacy_single", "legacy_batch", "evidence_single", "evidence_batch", "workflow_D"]
+Arm = Literal[
+    "legacy_single", "legacy_batch", "evidence_single", "evidence_batch",
+    "react_syntax", "hierarchical_syntax", "workflow_D",
+]
 Disposition = Literal[
     "EXPERIMENTAL_STRICT_FIXED",
     "STRICT_NOT_FIXED",
@@ -38,6 +41,11 @@ Disposition = Literal[
     "MODEL_OR_RUNTIME_ERROR",
     "INCONCLUSIVE",
 ]
+_ARCHITECTURE_ARMS: tuple[Arm, ...] = (
+    "evidence_single",
+    "react_syntax",
+    "hierarchical_syntax",
+)
 _ARMS: tuple[Arm, ...] = (
     "legacy_single",
     "legacy_batch",
@@ -70,6 +78,7 @@ class BenchmarkPlan(BenchmarkModel):
     max_model_calls: int = Field(ge=6, le=32)
     max_public_checks: int = Field(ge=1, le=3)
     include_workflow_D: bool
+    architecture_study: bool = False
     units: tuple[TrialSpec, ...]
 
 
@@ -161,6 +170,7 @@ def create_benchmark_plan(
     max_model_calls: int = 14,
     max_public_checks: int = 2,
     include_workflow_D: bool = False,
+    architecture_study: bool = False,
 ) -> BenchmarkPlan:
     """Freeze case/arm order before seeing any model answer or GPU feedback."""
     reject_symlinks(repository)
@@ -177,6 +187,7 @@ def create_benchmark_plan(
         or type(max_public_checks) is not int
         or not 1 <= max_public_checks <= 3
         or type(include_workflow_D) is not bool
+        or type(architecture_study) is not bool
     ):
         raise ValueError("invalid registered paired experiment contract")
     root = repository.resolve(strict=True)
@@ -188,8 +199,9 @@ def create_benchmark_plan(
         for case_index, case_id in enumerate(cases):
             # Rotate precommitted order across cases and repeated trials to
             # avoid systematically giving the new arm the freshest GPU cache.
-            shift = (case_index + repetition - 1) % len(_ARMS)
-            sequence: tuple[Arm, ...] = _ARMS[shift:] + _ARMS[:shift]
+            arms = _ARCHITECTURE_ARMS if architecture_study else _ARMS
+            shift = (case_index + repetition - 1) % len(arms)
+            sequence: tuple[Arm, ...] = arms[shift:] + arms[:shift]
             for arm in (*sequence, *((("workflow_D",)) if include_workflow_D else ())):
                 units.append(
                     TrialSpec(
@@ -210,6 +222,7 @@ def create_benchmark_plan(
         max_model_calls=max_model_calls,
         max_public_checks=max_public_checks,
         include_workflow_D=include_workflow_D,
+        architecture_study=architecture_study,
         units=tuple(units),
     )
 
@@ -225,6 +238,7 @@ def preflight_paired_experiment(
     max_model_calls: int = 14,
     max_public_checks: int = 2,
     include_workflow_D: bool = False,
+    architecture_study: bool = False,
 ) -> Preflight:
     """NO model, GPU or Docker side effects; expose presence not secret contents."""
     plan = create_benchmark_plan(
@@ -235,6 +249,7 @@ def preflight_paired_experiment(
         max_model_calls=max_model_calls,
         max_public_checks=max_public_checks,
         include_workflow_D=include_workflow_D,
+        architecture_study=architecture_study,
     )
     errors: list[str] = []
     settings = OpenAIProviderSettings.from_environment()
@@ -278,12 +293,17 @@ def preflight_paired_experiment(
     return Preflight(plan=plan, ready=not errors, blockers=tuple(errors))
 
 
-def _arm_configuration(arm: Arm) -> tuple[Literal["legacy", "evidence_first"], bool]:
-    configs: dict[str, tuple[Literal["legacy", "evidence_first"], bool]] = {
-        "legacy_single": ("legacy", False),
-        "legacy_batch": ("legacy", True),
-        "evidence_single": ("evidence_first", False),
-        "evidence_batch": ("evidence_first", True),
+def _arm_configuration(
+    arm: Arm,
+) -> tuple[Literal["legacy", "evidence_first"], bool, bool, bool]:
+    # context, batch edits, Planner+Reflect, AST editing
+    configs: dict[str, tuple[Literal["legacy", "evidence_first"], bool, bool, bool]] = {
+        "legacy_single": ("legacy", False, False, False),
+        "legacy_batch": ("legacy", True, False, False),
+        "evidence_single": ("evidence_first", False, False, False),
+        "evidence_batch": ("evidence_first", True, False, False),
+        "react_syntax": ("evidence_first", False, False, True),
+        "hierarchical_syntax": ("evidence_first", False, True, True),
     }
     if arm not in configs:
         raise ValueError("fixed workflow is a separate control, not a repository ablation arm")
@@ -408,7 +428,7 @@ def _run_one(
                 public_gpu_checks=report.candidates,
                 elapsed_seconds=round(time.monotonic() - begin, 3),
             )
-        context, batch = _arm_configuration(mode)
+        context, batch, hierarchical, syntax = _arm_configuration(mode)
         result = run_repository_coding_session(
             repository=repository,
             output=folder / "agent",
@@ -420,6 +440,8 @@ def _run_one(
             public_case_id=spec.case_id,
             context_mode=context,
             allow_batch_edits=batch,
+            hierarchical_mode=hierarchical,
+            syntax_mode=syntax,
             max_steps=plan.max_steps,
             max_model_calls=plan.max_model_calls,
             max_public_checks=plan.max_public_checks,
@@ -486,7 +508,8 @@ def summarize_sweep(plan: BenchmarkPlan, records: tuple[TrialRecord, ...]) -> Sw
     ):
         raise ValueError("paired sweep result does not match frozen unit identities")
     by_arm: dict[str, dict[str, int | None]] = {}
-    for arm in (*_ARMS, *(("workflow_D",) if plan.include_workflow_D else ())):
+    arms = _ARCHITECTURE_ARMS if plan.architecture_study else _ARMS
+    for arm in (*arms, *(("workflow_D",) if plan.include_workflow_D else ())):
         group = [item for item in records if item.spec.arm == arm]
         reported = [item.model_tokens for item in group]
         by_arm[arm] = {
@@ -522,6 +545,7 @@ def run_paired_experiment(
     max_model_calls: int = 14,
     max_public_checks: int = 2,
     include_workflow_D: bool = False,
+    architecture_study: bool = False,
     allow_paid_calls: bool = False,
     allow_real_gpu: bool = False,
 ) -> SweepReport | Preflight:
@@ -542,6 +566,7 @@ def run_paired_experiment(
         max_model_calls=max_model_calls,
         max_public_checks=max_public_checks,
         include_workflow_D=include_workflow_D,
+        architecture_study=architecture_study,
     )
     if output.exists() or output.is_symlink():
         raise ValueError("experiment output already exists; evidence is immutable")
@@ -562,12 +587,14 @@ def run_paired_experiment(
             max_model_calls=max_model_calls,
             max_public_checks=max_public_checks,
             include_workflow_D=include_workflow_D,
+            architecture_study=architecture_study,
         )
         if (
             snapshot.base_sha != preflight.plan.base_sha
             or snapshot.registry_sha256 != preflight.plan.registry_sha256
             or snapshot.model_name != preflight.plan.model_name
             or snapshot.endpoint_host != preflight.plan.endpoint_host
+            or snapshot.architecture_study != preflight.plan.architecture_study
         ):
             raise ValueError("frozen benchmark source changed during comparison")
         record = _run_one(repository, output, preflight.plan, spec, secret)
