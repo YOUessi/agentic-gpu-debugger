@@ -33,7 +33,8 @@ TOOL_REGISTRY: tuple[ToolDescriptor, ...] = (
     ToolDescriptor("repo_read_file", "read", "Read an allowed Git worktree file"),
     ToolDescriptor("repo_replace_snippet", "edit", "Exact edit of allowed source file"),
     ToolDescriptor(
-        "repo_replace_many", "edit",
+        "repo_replace_many",
+        "edit",
         "Atomically stage 2-4 disjoint exact replacements in one source file",
     ),
     ToolDescriptor("repo_git_diff", "read", "Inspect bounded Git changes"),
