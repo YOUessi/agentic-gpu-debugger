@@ -18,6 +18,8 @@ from gpu_agent.agent.provider import (
     SDKResult,
 )
 from gpu_agent.harness.journal import SessionJournal, read_verified_journal, recovery_disposition
+from gpu_agent.harness.metrics import summarize_repository_trajectory
+from gpu_agent.harness.recovery import read_repository_checkpoint
 from gpu_agent.harness.models import HarnessDecision, RepoReadFile
 from gpu_agent.harness.registry import ToolPermissionPolicy
 from gpu_agent.harness.repo_runner import run_repository_coding_session
@@ -335,3 +337,151 @@ def test_resume_rejects_checkpoint_journal_mismatch(tmp_path: Path) -> None:
             resume=True,
             model_factory=lambda _: ScriptedLLM(),
         )
+
+
+
+class SelectActions:
+    def __init__(self, actions: list[dict[str, object]]) -> None:
+        self.actions = actions
+        self.seen = []
+
+    def choose_harness_v1(self, snapshot):
+        self.seen.append(snapshot)
+        return HarnessDecision.model_validate(
+            {"action": self.actions.pop(0), "reason": "Inspect or modify the bounded workspace"}
+        )
+
+
+def test_repo_redundant_reads_lists_and_diffs_are_rejected_per_revision(
+    tmp_path: Path,
+) -> None:
+    source, sha = _repo(tmp_path)
+    with RepositoryWorkspaceTools(
+        origin=source, output=tmp_path / "dedup", sha=sha
+    ) as host:
+        def invoke(value):
+            return host.invoke(
+                HarnessDecision.model_validate(
+                    {"action": value, "reason": "Choose a typed repository tool"}
+                ).action
+            )
+
+        files = {"tool": "repo_list_files", "suffix": ".cu"}
+        read = {"tool": "repo_read_file", "path": "src/kernel.cu"}
+        diff = {"tool": "repo_git_diff"}
+        edit = {
+            "tool": "repo_replace_snippet",
+            "path": "src/kernel.cu",
+            "old_text": "1.0f",
+            "new_text": "2.0f",
+        }
+        assert invoke(files).status == "OK"
+        duplicate_list = invoke(files)
+        assert duplicate_list.status == "REJECTED"
+        assert "REDUNDANT_LIST" in duplicate_list.content
+        assert invoke(read).status == "OK"
+        duplicate_read = invoke(read)
+        assert duplicate_read.status == "REJECTED"
+        assert "REDUNDANT_READ" in duplicate_read.content
+        assert invoke(diff).status == "OK"
+        duplicate_diff = invoke(diff)
+        assert duplicate_diff.status == "REJECTED"
+        assert "REDUNDANT_DIFF" in duplicate_diff.content
+        assert invoke(edit).status == "OK"
+        # Same line range and diff are useful again after the source revision changed.
+        assert invoke(read).status == "OK"
+        assert invoke(diff).status == "OK"
+        assert len(host.observed_query_fingerprints) == 5
+        refs = host.store.load(host.run_id).artifact_refs
+        records = [
+            __import__("json").loads(host.store.read(ref))
+            for ref in refs
+            if ref.name.endswith("tool-004.json")
+        ]
+        assert len(records) == 1
+        assert records[0]["rejection_code"] == "REDUNDANT_READ"
+
+
+def test_repo_inspection_keys_survive_pause_and_metrics_are_provenanced(
+    tmp_path: Path,
+) -> None:
+    source, sha = _repo(tmp_path)
+    output = tmp_path / "dedup-paused"
+    read = {"tool": "repo_read_file", "path": "src/kernel.cu"}
+    goal = "Inspect and repair the original CUDA kernel with bounded typed tools"
+    paused = run_repository_coding_session(
+        repository=source,
+        output=output,
+        base_sha=sha,
+        goal=goal,
+        max_steps=7,
+        max_model_calls=9,
+        pause_after_turns=1,
+        model_factory=lambda _: SelectActions([read]),
+    )
+    assert paused.status == "PAUSED_RESUMABLE"
+    checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
+    assert len(checkpoint.observed_query_fingerprints) == 1
+
+    model = SelectActions(
+        [
+            read,
+            {
+                "tool": "repo_replace_snippet",
+                "path": "src/kernel.cu",
+                "old_text": "1.0f",
+                "new_text": "2.0f",
+            },
+            read,
+            {"tool": "finish", "summary": "Code changes staged for public operator review"},
+        ]
+    )
+    report = run_repository_coding_session(
+        repository=source,
+        output=output,
+        base_sha=sha,
+        goal=goal,
+        max_steps=7,
+        max_model_calls=9,
+        resume=True,
+        model_factory=lambda _: model,
+    )
+    assert report.status == "DIFF_STAGED_UNVERIFIED"
+    assert report.turns == report.tool_calls == 5
+    assert model.seen[0].history[-1]["status"] == "OK"
+    assert model.seen[1].history[-1]["status"] == "REJECTED"
+    metrics = summarize_repository_trajectory(output)
+    assert metrics.turns == 5
+    assert metrics.model_physical_calls == 0
+    assert metrics.inspected_actions == 3
+    assert metrics.first_accepted_edit_turn == 3
+    assert metrics.first_accepted_finish_turn == 5
+    assert metrics.first_public_check_request_turn is None
+    assert metrics.redundant_inspection_rejections == 1
+    assert metrics.rejected_actions == 1
+    assert metrics.independently_verified is False
+    assert metrics.public_checks_passed_final is False
+    assert [step.status for step in metrics.tool_trajectory] == [
+        "OK", "REJECTED", "OK", "OK", "OK"
+    ]
+    assert len(read_repository_checkpoint(output / "session-checkpoint.json").observed_query_fingerprints) == 2
+    assert (source / "src/kernel.cu").read_text() == "float x = 1.0f;\n"
+
+
+def test_repo_metric_reader_refuses_unfinished_or_removed_public_evidence(
+    tmp_path: Path,
+) -> None:
+    source, sha = _repo(tmp_path)
+    output = tmp_path / "metric-paused"
+    run_repository_coding_session(
+        repository=source,
+        output=output,
+        base_sha=sha,
+        goal="Inspect a bounded CUDA source then stop at the safe boundary",
+        max_steps=6,
+        max_model_calls=8,
+        pause_after_turns=1,
+        model_factory=lambda _: SelectActions([{"tool": "repo_read_file", "path": "src/kernel.cu"}]),
+    )
+    with pytest.raises((ValueError, OSError)):
+        summarize_repository_trajectory(output)
