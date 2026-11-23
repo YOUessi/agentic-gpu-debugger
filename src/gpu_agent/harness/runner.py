@@ -27,6 +27,8 @@ from gpu_agent.harness.journal import EventKind, SessionJournal
 from gpu_agent.harness.models import (
     FinishTask,
     HarnessDecision,
+    TaskPlan,
+    TaskReflection,
     HarnessOutcome,
     SessionSnapshot,
     ToolObservation,
@@ -56,6 +58,9 @@ class AgentLoopState(TypedDict, total=False):
     turns: int
     stop: bool
     reason: str
+    task_plan: dict[str, Any]
+    task_progress: dict[str, Any]
+    task_reflection: dict[str, Any] | None
 
 
 def run_tool_agent(
@@ -68,6 +73,7 @@ def run_tool_agent(
     on_checkpoint: Callable[[AgentLoopState], None] | None = None,
     initial_state: AgentLoopState | None = None,
     pause_after_turns: int | None = None,
+    hierarchical_mode: bool = False,
 ) -> AgentLoopState:
     """Model chooses all actions; policy gates tool execution and completion."""
     if type(max_steps) is not int or not 1 <= max_steps <= 40:
@@ -95,10 +101,77 @@ def run_tool_agent(
         if previous == max_steps:
             raise ValueError("cannot exceed the persisted total step budget")
 
+    def planner(state: AgentLoopState) -> dict[str, Any]:
+        if not hierarchical_mode or state.get("task_plan") is not None:
+            return {}
+        from gpu_agent.harness.planning import progress_from_tools
+
+        callback = getattr(model, "choose_repository_plan", None)
+        if not callable(callback):
+            raise ValueError("hierarchical model must implement global task planning")
+        snapshot = host.snapshot(goal, state.get("history", []), max_steps)
+        plan = callback(snapshot)
+        if not isinstance(plan, TaskPlan):
+            raise ValueError("global Planner returned an invalid task plan")
+        progress = progress_from_tools(
+            state.get("history", []),
+            current_source_visible=snapshot.context_mode == "evidence_first",
+        )
+        return {
+            "task_plan": plan.model_dump(mode="json"),
+            "task_progress": progress.model_dump(mode="json"),
+            "task_reflection": None,
+        }
+
+    def reflect(state: AgentLoopState) -> dict[str, Any]:
+        from gpu_agent.harness.models import TaskProgress
+
+        callback = getattr(model, "reflect_repository_task", None)
+        if not callable(callback):
+            raise ValueError("hierarchical model must support concise reflection")
+        used = state.get("turns", 0)
+        snapshot = host.snapshot(goal, state.get("history", []), max_steps - used)
+        snapshot = snapshot.model_copy(
+            update={
+                "task_plan": TaskPlan.model_validate(state["task_plan"]),
+                "task_progress": TaskProgress.model_validate(state["task_progress"]),
+            }
+        )
+        result = callback(snapshot)
+        if not isinstance(result, TaskReflection):
+            raise ValueError("Reflect node returned an invalid correction")
+        return {"task_reflection": result.model_dump(mode="json")}
+
     def observe(state: AgentLoopState) -> dict[str, Any]:
         n = state.get("turns", 0)
         remaining = max_steps - n
         snapshot = host.snapshot(goal, state.get("history", []), remaining)
+        if hierarchical_mode:
+            from gpu_agent.harness.models import TaskProgress
+            from gpu_agent.harness.planning import reflection_context, progress_from_tools
+
+            reflection = (
+                TaskReflection.model_validate(state["task_reflection"])
+                if state.get("task_reflection") is not None
+                else None
+            )
+            progress = progress_from_tools(
+                state.get("history", []),
+                current_source_visible=snapshot.context_mode == "evidence_first",
+            )
+            recent = (
+                reflection_context(snapshot.history, reflection=reflection)
+                if reflection is not None
+                else snapshot.history
+            )
+            snapshot = snapshot.model_copy(
+                update={
+                    "task_plan": TaskPlan.model_validate(state["task_plan"]),
+                    "task_progress": TaskProgress.model_validate(progress),
+                    "task_reflection": reflection,
+                    "history": recent,
+                }
+            )
         if on_event:
             on_event({"stage": "model_started", "turn": n + 1})
         try:
@@ -195,19 +268,46 @@ def run_tool_agent(
                 else "CONTINUE"
             ),
         }
+        if hierarchical_mode:
+            from gpu_agent.harness.planning import progress_from_tools
+
+            progress = progress_from_tools(
+                update["history"],
+                current_source_visible=getattr(host, "_context_mode", "") == "evidence_first",
+            )
+            update["task_progress"] = progress.model_dump(mode="json")
         if on_checkpoint is not None:
             on_checkpoint({**state, **update})
         return update
 
+    def needs_reflection(state: AgentLoopState) -> bool:
+        return (
+            hierarchical_mode
+            and state.get("task_plan") is not None
+            and state.get("task_reflection") is None
+            and state.get("turns", 0) >= max(2, max_steps // 2)
+            and not state.get("stop", False)
+        )
+
     graph = StateGraph(AgentLoopState)
+    graph.add_node("planner", planner)
+    graph.add_node("reflect", reflect)
     graph.add_node("model", observe)
     graph.add_node("tool", tool)
-    graph.add_edge(START, "model")
+    graph.add_edge(START, "planner")
+    graph.add_conditional_edges(
+        "planner",
+        lambda state: "reflect" if needs_reflection(state) else "model",
+        {"reflect": "reflect", "model": "model"},
+    )
+    graph.add_edge("reflect", "model")
     graph.add_edge("model", "tool")
     graph.add_conditional_edges(
         "tool",
-        lambda state: "stop" if state.get("stop") else "again",
-        {"stop": END, "again": "model"},
+        lambda state: (
+            "stop" if state.get("stop") else "reflect" if needs_reflection(state) else "again"
+        ),
+        {"stop": END, "reflect": "reflect", "again": "model"},
     )
     return cast(
         AgentLoopState,
