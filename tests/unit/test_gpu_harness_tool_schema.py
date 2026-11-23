@@ -64,3 +64,39 @@ def test_terminal_schema_can_only_finish() -> None:
 def test_invalid_capability_sets_fail_closed(tools: tuple[str, ...]) -> None:
     with pytest.raises(ValueError, match="invalid controller capability"):
         repository_decision_schema(tools)
+
+
+def test_registered_kernel_path_is_literal_in_model_output_grammar() -> None:
+    name = "benchmarks/hardset_v2/h001/mutant/kernel.cu"
+    model = repository_decision_schema(
+        ("repo_inspect_syntax", "repo_replace_syntax", "repo_read_file"),
+        registered_kernel_path=name,
+    )
+    schema_text = str(model.model_json_schema())
+    assert name in schema_text
+    valid = model.model_validate(
+        {
+            "action": {"tool": "repo_inspect_syntax", "path": name, "symbol": "softmax32"},
+            "reason": "Inspect registered CUDA kernel syntax",
+        }
+    )
+    assert valid.action.path == name
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "action": {"tool": "repo_inspect_syntax", "path": "kernel.cu"},
+                "reason": "Hallucinated a shorter kernel path",
+            }
+        )
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {
+                "action": {
+                    "tool": "repo_replace_syntax",
+                    "path": "benchmarks/hardset_v2/h002/mutant/kernel.cu",
+                    "expected_source_sha256": "a" * 64,
+                    "edits": [{"node_id": "b" * 24, "replacement_code": "return;"}],
+                },
+                "reason": "Tried to edit a different registered CUDA task",
+            }
+        )
