@@ -671,7 +671,6 @@ def test_context_ablation_mode_is_bound_into_resume_identity(tmp_path: Path) -> 
     )
 
 
-
 class FactorialDecisionFixture:
     """A deterministic A/B test policy, NOT evidence of real model quality."""
 
