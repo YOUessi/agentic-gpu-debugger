@@ -156,6 +156,43 @@ class ToolObservation(StrictModel):
     artifact_id: str | None = None
 
 
+class PlanMilestone(StrictModel):
+    gate: Literal["inspect", "edit", "public_check", "finish"]
+    objective: str = Field(min_length=8, max_length=220)
+    success_evidence: str = Field(min_length=8, max_length=180)
+
+
+class TaskPlan(StrictModel):
+    """A public, concise goal plan; never private chain-of-thought."""
+
+    milestones: list[PlanMilestone] = Field(min_length=4, max_length=4)
+    failure_risk: str = Field(min_length=8, max_length=230)
+
+    @model_validator(mode="after")
+    def stage_contract(self) -> "TaskPlan":
+        gates = tuple(item.gate for item in self.milestones)
+        if gates != ("inspect", "edit", "public_check", "finish"):
+            raise ValueError("planner must cover evidence, patch, public check and finish")
+        return self
+
+
+class TaskReflection(StrictModel):
+    """Concise decision correction, NOT model private reasoning traces."""
+
+    observed_failure: str = Field(min_length=6, max_length=280)
+    avoid_next: str = Field(min_length=6, max_length=280)
+    next_priority: str = Field(min_length=6, max_length=280)
+
+
+class TaskProgress(StrictModel):
+    inspected: bool = False
+    edited: bool = False
+    public_checked: bool = False
+    finished: bool = False
+    active_gate: Literal["inspect", "edit", "public_check", "finish", "done"] = "inspect"
+    last_failure_code: str | None = Field(default=None, max_length=160)
+
+
 class SessionSnapshot(StrictModel):
     goal: str = Field(min_length=3, max_length=1500)
     case_id: str = Field(min_length=1, max_length=80)
@@ -164,6 +201,9 @@ class SessionSnapshot(StrictModel):
     base_git_commit: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
     registered_public_case: str | None = Field(default=None, pattern=r"^h00[1-3]$")
     context_mode: Literal["legacy", "evidence_first"] = "legacy"
+    task_plan: TaskPlan | None = None
+    task_progress: TaskProgress | None = None
+    task_reflection: TaskReflection | None = None
     current_candidate_sha256: str | None = None
     public_checks_passed: bool = False
     allowed_tools: tuple[str, ...]
