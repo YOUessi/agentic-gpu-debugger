@@ -211,14 +211,19 @@ GPU_CODING_HARNESS_V1_PROMPT = BASE + (
 )
 
 
-GPU_REPOSITORY_HARNESS_PROMPT_VERSION = "gpu-repository-coding-harness-2026-11-23-v3"
+GPU_REPOSITORY_HARNESS_PROMPT_VERSION = "gpu-repository-coding-harness-2026-11-23-v4"
 GPU_REPOSITORY_HARNESS_PROMPT = BASE + (
     "You are a coding agent inside an operator-created, detached Git worktree. "
     "You are responsible for deciding the next tool action. There is no mandatory "
     "investigate-diagnose-patch order. Your allowed tools are ONLY those in "
     "snapshot.allowed_tools: repo_list_files(suffix), "
     "repo_read_file(path,start_line,lines), repo_replace_snippet(path,old_text,new_text), "
-    "repo_git_diff, and finish(summary). If snapshot.registered_public_case is set, "
+    "repo_replace_many(path,edits=[{old_text,new_text}, ...]), repo_git_diff, "
+    "and finish(summary). When 2-4 independent changes in ONE source file are "
+    "known, consider repo_replace_many to stage them together atomically. "
+    "If snapshot.context_mode=evidence_first, workspace_source already contains "
+    "the current registered kernel source; use it instead of redundant reads. "
+    "If snapshot.registered_public_case is set, "
     "repo_run_public_checks is available for that ONE operator-registered CUDA public case. "
     "Never invent another case or claim to have tested unrelated source files. "
     "Start with a file listing if needed. "

@@ -71,6 +71,19 @@ class RepoReplaceSnippet(StrictModel):
     new_text: str = Field(max_length=4000)
 
 
+class RepoSnippetEdit(StrictModel):
+    old_text: str = Field(min_length=1, max_length=4000)
+    new_text: str = Field(max_length=4000)
+
+
+class RepoReplaceMany(StrictModel):
+    """Atomic, non-overlapping snippet updates within one source file."""
+
+    tool: Literal["repo_replace_many"] = "repo_replace_many"
+    path: str = Field(min_length=1, max_length=300)
+    edits: list[RepoSnippetEdit] = Field(min_length=2, max_length=4)
+
+
 class RepoGitDiff(StrictModel):
     tool: Literal["repo_git_diff"] = "repo_git_diff"
 
@@ -97,6 +110,7 @@ HarnessAction = Annotated[
     | RepoListFiles
     | RepoReadFile
     | RepoReplaceSnippet
+    | RepoReplaceMany
     | RepoGitDiff
     | RepoRunPublicChecks
     | FinishTask,
@@ -125,6 +139,7 @@ class SessionSnapshot(StrictModel):
     functional_requirement: str = Field(min_length=5, max_length=2000)
     base_git_commit: str | None = Field(default=None, pattern=r"^[a-f0-9]{40}$")
     registered_public_case: str | None = Field(default=None, pattern=r"^h00[1-3]$")
+    context_mode: Literal["legacy", "evidence_first"] = "legacy"
     current_candidate_sha256: str | None = None
     public_checks_passed: bool = False
     allowed_tools: tuple[str, ...]
@@ -149,6 +164,7 @@ class RepoHarnessOutcome(StrictModel):
     model_tokens: int | None = Field(default=None, ge=0)
     reason: str = Field(max_length=200)
     public_run_id: str
+    context_mode: Literal["legacy", "evidence_first"] = "evidence_first"
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     public_checks_passed: bool = False
     public_checked_candidate_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
