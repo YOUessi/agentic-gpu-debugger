@@ -26,6 +26,7 @@ on:
       - "tests/unit/test_gpu_harness_runtime.py"
       - "tests/unit/test_gpu_harness_worktree.py"
       - "tests/unit/test_gpu_harness_repo_agent.py"
+      - "tests/unit/test_gpu_harness_ablation.py"
       - "tests/unit/test_gpu_harness_repo_public.py"
       - "benchmarks/hardset_v2/**"
       - "docs/research/HARDSET_V2_NATIVE_CN.md"
@@ -63,6 +64,6 @@ jobs:
           python -m ruff format --check scripts/run_repository_hardset_evidence_first_gpu_smoke.py scripts/run_repository_hardset_public_gpu_smoke.py scripts/generate_hardset_v2.py src/gpu_agent/benchmark/hardset_v2.py src/gpu_agent/benchmark/hardset_v2_probe.py src/gpu_agent/benchmark/hardset_v2_graph.py src/gpu_agent/benchmark/hardset_v2_verifier.py src/gpu_agent/cli.py tests/unit/test_hardset_v2.py tests/unit/test_hardset_v2_probe.py
           python scripts/run_repository_hardset_public_gpu_smoke.py --help
           python scripts/run_repository_hardset_evidence_first_gpu_smoke.py --help
-          python -m pytest -q tests/unit/test_hardset_v2.py tests/unit/test_hardset_v2_probe.py tests/unit/test_hardset_v2_llm.py tests/unit/test_hardset_v2_autonomous.py tests/unit/test_hardset_v2_autonomous_wire.py tests/unit/test_gpu_coding_harness.py tests/unit/test_gpu_harness_runtime.py tests/unit/test_gpu_harness_worktree.py tests/unit/test_gpu_harness_repo_agent.py tests/unit/test_gpu_harness_repo_public.py
+          python -m pytest -q tests/unit/test_hardset_v2.py tests/unit/test_hardset_v2_probe.py tests/unit/test_hardset_v2_llm.py tests/unit/test_hardset_v2_autonomous.py tests/unit/test_hardset_v2_autonomous_wire.py tests/unit/test_gpu_coding_harness.py tests/unit/test_gpu_harness_runtime.py tests/unit/test_gpu_harness_worktree.py tests/unit/test_gpu_harness_repo_agent.py tests/unit/test_gpu_harness_repo_public.py tests/unit/test_gpu_harness_ablation.py
       - name: Declare test scope
         run: echo 'Offline CPU contract only. Not real GPU, Agent repair, hidden evaluation, or release evidence.'
