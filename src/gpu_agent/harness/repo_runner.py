@@ -10,7 +10,7 @@ import hashlib
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 from gpu_agent.agent.models import AgentBudget
 from gpu_agent.agent.policy import LLMCallGate
@@ -49,6 +49,7 @@ def run_repository_coding_session(
     max_edited_files: int = 8,
     public_case_id: str | None = None,
     max_public_checks: int = 2,
+    context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
     allow_paid_calls: bool = False,
     resume: bool = False,
     pause_after_turns: int | None = None,
@@ -80,6 +81,7 @@ def run_repository_coding_session(
             max_edited_files=max_edited_files,
             public_case_id=public_case_id,
             max_public_checks=max_public_checks,
+            context_mode=context_mode,
         )
         host = RepositoryWorkspaceTools.reopen(
             origin=repository,
@@ -98,6 +100,7 @@ def run_repository_coding_session(
             last_checked_candidate_sha=checkpoint.last_checked_candidate_sha,
             last_public_passed=checkpoint.last_public_passed,
             observed_query_fingerprints=checkpoint.observed_query_fingerprints,
+            context_mode=checkpoint.context_mode,
         )
         if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
             raise ValueError("resumed workspace diff disagrees with checkpoint")
@@ -111,6 +114,7 @@ def run_repository_coding_session(
             max_edited_files=max_edited_files,
             public_case_id=public_case_id,
             max_public_checks=max_public_checks,
+            context_mode=context_mode,
         )
 
     with host as tools:
@@ -155,6 +159,7 @@ def run_repository_coding_session(
                         "goal_sha256": hashlib.sha256(goal.encode()).hexdigest(),
                         "public_case_id": public_case_id,
                         "max_public_checks": max_public_checks,
+                        "context_mode": context_mode,
                     },
                 )
                 events = 0
@@ -215,6 +220,7 @@ def run_repository_coding_session(
                         max_edited_files=max_edited_files,
                         public_case_id=public_case_id,
                         max_public_checks=max_public_checks,
+                        context_mode=context_mode,
                         public_checks_attempted=tools.public_checks_attempted,
                         attempted_candidate_hashes=tools.attempted_candidate_hashes,
                         last_public_run_id=tools.last_public_run_id,
@@ -271,6 +277,7 @@ def run_repository_coding_session(
                 model_tokens=tokens,
                 reason=state.get("reason", "UNKNOWN"),
                 public_run_id=tools.run_id,
+                context_mode=context_mode,
                 public_checks_attempted=tools.public_checks_attempted,
                 public_checks_passed=tools.public_checks_passed,
                 public_checked_candidate_sha256=tools.last_checked_candidate_sha,

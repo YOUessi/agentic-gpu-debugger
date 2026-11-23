@@ -125,6 +125,9 @@ def harness_repo_run(
     max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=4, max=40)] = 24,
     allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
     public_case: Annotated[str | None, typer.Option("--public-case")] = None,
+    context_mode: Annotated[
+        Literal["legacy", "evidence_first"], typer.Option("--context-mode")
+    ] = "evidence_first",
     max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     resume: Annotated[bool, typer.Option("--resume")] = False,
     pause_after_turns: Annotated[
@@ -152,6 +155,7 @@ def harness_repo_run(
             allow_paid_calls=True,
             public_case_id=public_case,
             max_public_checks=max_public_checks,
+            context_mode=context_mode,
             resume=resume,
             pause_after_turns=pause_after_turns,
         )

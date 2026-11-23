@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Literal
 
 from gpu_agent.benchmark.hardset_v2 import (
     HARDSET_CASES,
@@ -26,6 +27,7 @@ from gpu_agent.harness.models import (
     RepoGitDiff,
     RepoListFiles,
     RepoReadFile,
+    RepoReplaceMany,
     RepoReplaceSnippet,
     RepoRunPublicChecks,
     SessionSnapshot,
@@ -43,6 +45,7 @@ class RepositoryWorkspaceTools:
         "repo_list_files",
         "repo_read_file",
         "repo_replace_snippet",
+        "repo_replace_many",
         "repo_git_diff",
         "repo_run_public_checks",
         "finish",
@@ -59,6 +62,7 @@ class RepositoryWorkspaceTools:
         permissions: ToolPermissionPolicy | None = None,
         public_case_id: str | None = None,
         max_public_checks: int = 2,
+        context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
     ) -> None:
         if output.exists() or output.is_symlink():
             raise ValueError("repository agent output already exists")
@@ -71,6 +75,9 @@ class RepositoryWorkspaceTools:
             max_edited_files=max_edited_files,
         )
         self._policy = permissions or ToolPermissionPolicy()
+        if context_mode not in {"legacy", "evidence_first"}:
+            raise ValueError("unsupported repository context mode")
+        self._context_mode = context_mode
         self._configure_public_case(public_case_id, max_public_checks)
         self._store = RunStore(output / "public")
         self._run = self._store.create_run("gpu_repository_agent")
@@ -180,6 +187,7 @@ class RepositoryWorkspaceTools:
         last_checked_candidate_sha: str | None = None,
         last_public_passed: bool = False,
         observed_query_fingerprints: tuple[str, ...] = (),
+        context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -199,6 +207,9 @@ class RepositoryWorkspaceTools:
         host._run = host._store.load(run_id)
         if host._run.kind != "gpu_repository_agent" or host._run.status != "RUNNING":
             raise ValueError("resumed public RunStore must be an active repository run")
+        if context_mode not in {"legacy", "evidence_first"}:
+            raise ValueError("unsupported resumed context mode")
+        host._context_mode = context_mode
         host._policy = permissions or ToolPermissionPolicy()
         host._configure_public_case(public_case_id, max_public_checks, resuming=True)
         if (
@@ -301,11 +312,23 @@ class RepositoryWorkspaceTools:
                 raise
 
     def snapshot(self, goal: str, history: list[dict[str, str]], steps: int) -> SessionSnapshot:
-        source = (
-            f"Current inspected file: {self._last_file}\n{self._last_file_read}"
-            if self._last_file is not None
-            else "No source file opened yet. Call repo_list_files then repo_read_file."
-        )
+        if self._public_kernel_path is not None and self._context_mode == "evidence_first":
+            # Only the operator-pinned MUTANT source is sent as upfront evidence.
+            # A candidate edit is reflected immediately on the next model turn.
+            raw = read_regular(
+                self.workspace._checked(self._public_kernel_path, editable=False),
+                1024 * 1024,
+            )
+            source = (
+                f"Registered editable CUDA kernel: {self._public_kernel_path}\n"
+                + raw.decode("utf-8")[:10_700]
+            )
+        else:
+            source = (
+                f"Current inspected file: {self._last_file}\n{self._last_file_read}"
+                if self._last_file is not None
+                else "No source file opened yet. Call repo_list_files then repo_read_file."
+            )
         context = compact_public_context(history, source)
         delta = self.workspace.diff()
         gpu_allowed = (
@@ -352,6 +375,7 @@ class RepositoryWorkspaceTools:
             source_hash=hashlib.sha256(self.workspace.base_sha.encode()).hexdigest(),
             functional_requirement=requirement,
             registered_public_case=self._public_case_id,
+            context_mode=self._context_mode,
             current_candidate_sha256=hashlib.sha256(delta.encode()).hexdigest() if delta else None,
             public_checks_passed=self.public_checks_passed,
             allowed_tools=allowed_tools,
@@ -440,6 +464,19 @@ class RepositoryWorkspaceTools:
                 tool=action.tool,
                 status="OK",
                 content=text[:4000],
+            )
+        if isinstance(action, RepoReplaceMany):
+            candidate_sha = self.workspace.replace_batch(
+                action.path,
+                [(item.old_text, item.new_text) for item in action.edits],
+            )
+            self._last_file = action.path
+            self._last_file_read = self.workspace.read(action.path)
+            return ToolObservation(
+                tool=action.tool,
+                status="OK",
+                content=f"Atomic batch accepted. source_sha256={candidate_sha}. "
+                "Inspect changed diff or run the registered public GPU check.",
             )
         if isinstance(action, RepoReplaceSnippet):
             candidate_sha = self.workspace.replace_exact(

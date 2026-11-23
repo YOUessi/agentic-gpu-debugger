@@ -38,6 +38,7 @@ class RepositoryTrajectoryMetrics(BaseModel):
     )
     base_sha: str = Field(pattern=r"^[a-f0-9]{40}$")
     public_case_id: str | None = Field(default=None, pattern=r"^h00[1-3]$")
+    context_mode: Literal["legacy", "evidence_first"] = "evidence_first"
     public_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     status: Literal["DIFF_STAGED_UNVERIFIED", "INCONCLUSIVE"]
     turns: int = Field(ge=1, le=40)
@@ -80,6 +81,11 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
     ):
         raise ValueError("trajectory session identity mismatch")
     public_case = payload.get("public_case_id")
+    context_mode = payload.get("context_mode", "evidence_first")
+    if context_mode not in {"legacy", "evidence_first"}:
+        raise ValueError("unsupported public context mode")
+    if result.context_mode != context_mode:
+        raise ValueError("session context mode changed between start and finish")
     if public_case is not None and public_case not in {"h001", "h002", "h003"}:
         raise ValueError("unexpected public CUDA case in session")
     if journal[-1]["payload"].get("status") != result.status:
@@ -129,7 +135,8 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         (
             step.turn
             for step in sequence
-            if step.tool == "repo_replace_snippet" and step.status == "OK"
+            if step.tool in {"repo_replace_snippet", "repo_replace_many"}
+            and step.status == "OK"
         ),
         None,
     )
@@ -163,6 +170,7 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
     return RepositoryTrajectoryMetrics(
         base_sha=result.base_sha,
         public_case_id=public_case,
+        context_mode=context_mode,
         public_run_id=result.public_run_id,
         status=result.status,
         turns=result.turns,
