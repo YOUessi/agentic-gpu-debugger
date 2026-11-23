@@ -598,13 +598,32 @@ class RepositoryWorkspaceTools:
             mapping = self.workspace.inspect_syntax(action.path, symbol=action.symbol)
             self._observed_query_fingerprints.add(key)
             nodes = mapping["nodes"]
-            if isinstance(nodes, list) and len(nodes) > 12:
-                mapping["nodes"] = nodes[:12]
-                mapping["more_nodes_available"] = True
+            if isinstance(nodes, list):
+                # Prioritize executable statements: presenting just the first
+                # declarations hid the Softmax bug from the model entirely.
+                ordered = sorted(
+                    nodes,
+                    key=lambda item: (
+                        0 if item["kind"] == "expression_statement" else 1,
+                        item["start_line"],
+                    ),
+                )
+                mapping["nodes"] = ordered[:12]
+                if len(ordered) > 12:
+                    mapping["more_nodes_available"] = True
+                serialized = json.dumps(mapping, ensure_ascii=False)
+                while len(serialized) > 3900 and mapping["nodes"]:
+                    mapping["nodes"].pop()
+                    mapping["more_nodes_available"] = True
+                    serialized = json.dumps(mapping, ensure_ascii=False)
+                if not mapping["nodes"]:
+                    raise ValueError("CUDA_SYNTAX_RESPONSE_BUDGET_EXHAUSTED")
+            else:
+                raise ValueError("invalid controller syntax node map")
             return ToolObservation(
                 tool=action.tool,
                 status="OK",
-                content=json.dumps(mapping, ensure_ascii=False)[:3900],
+                content=serialized,
             )
         if isinstance(action, RepoReplaceSyntax):
             if self._public_kernel_path is not None and action.path != self._public_kernel_path:
