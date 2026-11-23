@@ -14,6 +14,7 @@ from dataclasses import dataclass
 MAX_SOURCE_CHARS = 12_000
 MAX_SUMMARY_CHARS = 2_600
 MAX_RECENT_OUTPUT_CHARS = 900
+MAX_SYNTAX_MAP_CHARS = 3600
 MAX_RECENT_ACTIONS = 5
 
 
@@ -75,7 +76,12 @@ def compact_public_context(
             {
                 "tool": _shorten(entry.get("tool", "unknown"), 50),
                 "status": _shorten(entry.get("status", "UNKNOWN"), 20),
-                "content": _shorten(entry.get("content", ""), recent_output_chars),
+                "content": _shorten(
+                    entry.get("content", ""),
+                    MAX_SYNTAX_MAP_CHARS
+                    if entry.get("tool") == "repo_inspect_syntax"
+                    else recent_output_chars,
+                ),
             }
         )
 

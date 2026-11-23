@@ -87,7 +87,8 @@ def reflection_context(
                 if code in redundant_seen:
                     continue
                 redundant_seen.add(code)
-        selected.append({"tool": tool[:50], "status": status[:20], "content": content[:900]})
+        limit = 3500 if tool == "repo_inspect_syntax" and status == "OK" else 900
+        selected.append({"tool": tool[:50], "status": status[:20], "content": content[:limit]})
         if len(selected) >= max_recent:
             break
     # Model-visible reflection is structured separately in SessionSnapshot.
