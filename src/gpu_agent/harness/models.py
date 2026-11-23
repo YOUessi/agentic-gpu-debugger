@@ -230,6 +230,8 @@ class RepoHarnessOutcome(StrictModel):
     public_run_id: str
     context_mode: Literal["legacy", "evidence_first"] = "evidence_first"
     allow_batch_edits: bool = True
+    hierarchical_mode: bool = False
+    syntax_mode: bool = False
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     public_checks_passed: bool = False
     public_checked_candidate_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")

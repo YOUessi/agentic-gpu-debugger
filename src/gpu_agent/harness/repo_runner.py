@@ -51,6 +51,8 @@ def run_repository_coding_session(
     max_public_checks: int = 2,
     context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
     allow_batch_edits: bool = True,
+    hierarchical_mode: bool = False,
+    syntax_mode: bool = False,
     allow_paid_calls: bool = False,
     resume: bool = False,
     pause_after_turns: int | None = None,
@@ -67,6 +69,8 @@ def run_repository_coding_session(
         raise ValueError("real model use requires explicit allow_paid_calls")
     if not 1 <= max_steps <= 38 or not max_steps + 2 <= max_model_calls <= 40:
         raise ValueError("model calls must exceed step budget, within operator cap")
+    if (hierarchical_mode or syntax_mode) and public_case_id is None:
+        raise ValueError("hierarchical and AST modes require registered public CUDA case")
     if not goal.strip() or len(goal) > 1500:
         raise ValueError("invalid task goal")
     checkpoint = None
@@ -84,6 +88,8 @@ def run_repository_coding_session(
             max_public_checks=max_public_checks,
             context_mode=context_mode,
             allow_batch_edits=allow_batch_edits,
+            hierarchical_mode=hierarchical_mode,
+            syntax_mode=syntax_mode,
         )
         host = RepositoryWorkspaceTools.reopen(
             origin=repository,
@@ -104,6 +110,7 @@ def run_repository_coding_session(
             observed_query_fingerprints=checkpoint.observed_query_fingerprints,
             context_mode=checkpoint.context_mode,
             allow_batch_edits=checkpoint.allow_batch_edits,
+            syntax_mode=checkpoint.syntax_mode,
         )
         if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
             raise ValueError("resumed workspace diff disagrees with checkpoint")
@@ -119,6 +126,7 @@ def run_repository_coding_session(
             max_public_checks=max_public_checks,
             context_mode=context_mode,
             allow_batch_edits=allow_batch_edits,
+            syntax_mode=syntax_mode,
         )
 
     with host as tools:
@@ -165,6 +173,8 @@ def run_repository_coding_session(
                         "max_public_checks": max_public_checks,
                         "context_mode": context_mode,
                         "allow_batch_edits": allow_batch_edits,
+                        "hierarchical_mode": hierarchical_mode,
+                        "syntax_mode": syntax_mode,
                     },
                 )
                 events = 0
@@ -227,6 +237,8 @@ def run_repository_coding_session(
                         max_public_checks=max_public_checks,
                         context_mode=context_mode,
                         allow_batch_edits=allow_batch_edits,
+                        hierarchical_mode=hierarchical_mode,
+                        syntax_mode=syntax_mode,
                         public_checks_attempted=tools.public_checks_attempted,
                         attempted_candidate_hashes=tools.attempted_candidate_hashes,
                         last_public_run_id=tools.last_public_run_id,
@@ -250,6 +262,7 @@ def run_repository_coding_session(
                 if checkpoint is not None
                 else None,
                 pause_after_turns=pause_after_turns,
+                hierarchical_mode=hierarchical_mode,
             )
             inv = getattr(model, "invocations", None)
             records = inv() if callable(inv) else []
@@ -285,6 +298,8 @@ def run_repository_coding_session(
                 public_run_id=tools.run_id,
                 context_mode=context_mode,
                 allow_batch_edits=allow_batch_edits,
+                hierarchical_mode=hierarchical_mode,
+                syntax_mode=syntax_mode,
                 public_checks_attempted=tools.public_checks_attempted,
                 public_checks_passed=tools.public_checks_passed,
                 public_checked_candidate_sha256=tools.last_checked_candidate_sha,

@@ -18,7 +18,13 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.harness.journal import read_verified_journal, recovery_disposition
-from gpu_agent.harness.models import HarnessDecision, ToolObservation
+from gpu_agent.harness.models import (
+    HarnessDecision,
+    TaskPlan,
+    TaskProgress,
+    TaskReflection,
+    ToolObservation,
+)
 from gpu_agent.store import read_regular, reject_symlinks, sync_directory
 
 MAX_CHECKPOINT_BYTES = 256 * 1024
@@ -40,6 +46,8 @@ class RepositoryCheckpoint(BaseModel):
     public_case_id: str | None = Field(default=None, pattern=r"^h00[1-3]$")
     context_mode: Literal["legacy", "evidence_first"] = "evidence_first"
     allow_batch_edits: bool = True
+    hierarchical_mode: bool = False
+    syntax_mode: bool = False
     max_public_checks: int = Field(default=2, ge=1, le=3)
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     attempted_candidate_hashes: tuple[str, ...] = ()
@@ -55,8 +63,14 @@ class RepositoryCheckpoint(BaseModel):
 def _validated_state(value: dict[str, Any], max_steps: int) -> dict[str, Any]:
     """Check exact LangGraph tool boundary, not just JSON well-formedness."""
     expected = {"history", "decision", "observation", "turns", "stop", "reason"}
-    if set(value) != expected:
+    extras = {"task_plan", "task_progress", "task_reflection"}
+    if set(value) not in (expected, expected | extras):
         raise ValueError("checkpoint state has unexpected or missing fields")
+    if set(value) == expected | extras:
+        TaskPlan.model_validate(value["task_plan"])
+        TaskProgress.model_validate(value["task_progress"])
+        if value["task_reflection"] is not None:
+            TaskReflection.model_validate(value["task_reflection"])
     turns = value["turns"]
     if type(turns) is not int or not 1 <= turns <= max_steps:
         raise ValueError("invalid checkpoint turn count")
@@ -189,6 +203,8 @@ def validated_quiescent_repository_checkpoint(
     max_public_checks: int = 2,
     context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
     allow_batch_edits: bool = True,
+    hierarchical_mode: bool = False,
+    syntax_mode: bool = False,
 ) -> RepositoryCheckpoint:
     """Reject uncertain side effects, terminal sessions or mismatched settings."""
     records = read_verified_journal(output / "session-events.jsonl")
@@ -209,6 +225,8 @@ def validated_quiescent_repository_checkpoint(
         or checkpoint.max_public_checks != max_public_checks
         or checkpoint.context_mode != context_mode
         or checkpoint.allow_batch_edits != allow_batch_edits
+        or checkpoint.hierarchical_mode != hierarchical_mode
+        or checkpoint.syntax_mode != syntax_mode
     ):
         raise ValueError("checkpoint identity, journal head or budgets differ")
     first = records[0]
@@ -221,6 +239,8 @@ def validated_quiescent_repository_checkpoint(
         or first["payload"].get("max_public_checks", 2) != checkpoint.max_public_checks
         or first["payload"].get("context_mode", "evidence_first") != checkpoint.context_mode
         or first["payload"].get("allow_batch_edits", True) != checkpoint.allow_batch_edits
+        or first["payload"].get("hierarchical_mode", False) != checkpoint.hierarchical_mode
+        or first["payload"].get("syntax_mode", False) != checkpoint.syntax_mode
     ):
         raise ValueError("checkpoint does not match session creation evidence")
     completed = sum(event["kind"] == "tool_completed" for event in records)
