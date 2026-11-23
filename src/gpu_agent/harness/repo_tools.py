@@ -347,6 +347,8 @@ class RepositoryWorkspaceTools:
             fresh_candidate = hashlib.sha256(source).hexdigest() not in (
                 self._attempted_candidate_hashes
             )
+        if passed:
+            return ("finish",) if self._policy.check("finish") == "ALLOW" else ()
         can_check = (
             dirty
             and target_only
@@ -355,7 +357,10 @@ class RepositoryWorkspaceTools:
             and not passed
         )
         diff_key = self._query_fingerprint(
-            {"tool": "repo_git_diff", "source_diff_sha256": str(self.workspace.integrity()["diff_sha256"])}
+            {
+                "tool": "repo_git_diff",
+                "source_diff_sha256": str(self.workspace.integrity()["diff_sha256"]),
+            }
         )
         available: list[str] = []
         for name in self.ALLOWED_TOOLS:
