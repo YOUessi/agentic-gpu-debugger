@@ -8,6 +8,7 @@ hidden evaluator input, evaluator secret, or shell command to model tools.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
@@ -20,13 +21,15 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.agent.models import ProviderError
+from gpu_agent.agent.provider import provider_invocations
 from gpu_agent.agent.provider import OpenAIProviderSettings
 from gpu_agent.benchmark.hardset_v2 import HARDSET_CASES, load_registry
 from gpu_agent.benchmark.hardset_v2_agent import run_autonomous_hardset
+from gpu_agent.harness.journal import read_verified_journal
 from gpu_agent.harness.metrics import summarize_repository_trajectory
 from gpu_agent.harness.repo_runner import run_repository_coding_session
 from gpu_agent.harness.repo_verification import verify_repository_hardset_candidate
-from gpu_agent.store import read_regular, reject_symlinks, sync_directory
+from gpu_agent.store import RunStore, read_regular, reject_symlinks, sync_directory
 
 Arm = Literal["legacy_single", "legacy_batch", "evidence_single", "evidence_batch", "workflow_D"]
 Disposition = Literal[
@@ -288,6 +291,66 @@ def _arm_configuration(arm: Arm) -> tuple[Literal["legacy", "evidence_first"], b
     return configs[arm]
 
 
+def _failed_repository_public_audit(unit_directory: Path) -> dict[str, int | str | None]:
+    """Recover verified *partial* model/tool counts after a failed trial.
+
+    A terminal result.json does not exist after most model exceptions, but the
+    provider still holds immutable STARTED/COMPLETED invocation artifacts.
+    Never silently turn a failure into zero-cost/no-model evidence.
+    """
+    source = unit_directory / "agent"
+    try:
+        journal = read_verified_journal(source / "session-events.jsonl")
+        first = journal[0]
+        if first["kind"] != "session_started":
+            raise ValueError("invalid incomplete session creation")
+        run_id = first["payload"]["public_run_id"]
+        store = RunStore(source / "public")
+        parent = store.load(run_id)
+        if parent.kind != "gpu_repository_agent":
+            raise ValueError("partial evidence is not a repository run")
+        invoked = provider_invocations(store, run_id)
+        calls = len(invoked)
+        complete_usage = [
+            item.usage.total_tokens
+            for item in invoked
+            if item.usage is not None and item.usage.total_tokens is not None
+        ]
+        tokens = sum(complete_usage) if len(complete_usage) == calls else None
+        tool_events: list[tuple[int, str, str]] = []
+        for ref in parent.artifact_refs:
+            if not (ref.name.startswith("repo-harness/v1/tool-") and ref.name.endswith(".json")):
+                continue
+            index = int(ref.name.rsplit("-", 1)[1].removesuffix(".json"))
+            row = json.loads(store.read(ref))
+            if row.get("tool") and row.get("status"):
+                tool_events.append((index, row["tool"], row["status"]))
+        tool_events.sort()
+        first_edit = next(
+            (
+                index
+                for index, tool, status in tool_events
+                if tool in {"repo_replace_snippet", "repo_replace_many"} and status == "OK"
+            ),
+            None,
+        )
+        first_gpu = next(
+            (index for index, tool, _ in tool_events if tool == "repo_run_public_checks"),
+            None,
+        )
+        return {
+            "run_id": run_id,
+            "model_calls": calls,
+            "model_tokens": tokens,
+            "tool_turns": sum(row["kind"] == "tool_completed" for row in journal),
+            "first_edit_turn": first_edit,
+            "first_public_check_turn": first_gpu,
+        }
+    except (OSError, ValueError, TypeError, KeyError, IndexError):
+        # Missing or corrupt partial audit is a real evidence gap, not zero cost.
+        return {}
+
+
 def _run_one(
     repository: Path,
     root: Path,
@@ -366,6 +429,11 @@ def _run_one(
         # Do not publish raw exception messages: SDK errors may contain request
         # contents, tokens, endpoint query strings or private evaluation details.
         failure = type(exc).__name__
+    recovered = (
+        _failed_repository_public_audit(folder)
+        if failure is not None and mode != "workflow_D"
+        else {}
+    )
     status: Disposition = (
         "MODEL_OR_RUNTIME_ERROR"
         if failure is not None
@@ -383,12 +451,18 @@ def _run_one(
         public_accepted=bool(result and result.public_checks_passed),
         strict_verdict=projection.verdict if projection else None,
         source_candidate_sha256=result.public_checked_candidate_sha256 if result else None,
-        public_run_id=result.public_run_id if result else None,
-        model_calls=result.model_calls if result else None,
-        model_tokens=result.model_tokens if result else None,
-        tool_turns=result.tool_calls if result else None,
-        first_edit_turn=metrics.first_accepted_edit_turn if metrics else None,
-        first_public_check_turn=metrics.first_public_check_request_turn if metrics else None,
+        public_run_id=result.public_run_id if result else recovered.get("run_id"),
+        model_calls=result.model_calls if result else recovered.get("model_calls"),
+        model_tokens=result.model_tokens if result else recovered.get("model_tokens"),
+        tool_turns=result.tool_calls if result else recovered.get("tool_turns"),
+        first_edit_turn=(
+            metrics.first_accepted_edit_turn if metrics else recovered.get("first_edit_turn")
+        ),
+        first_public_check_turn=(
+            metrics.first_public_check_request_turn
+            if metrics
+            else recovered.get("first_public_check_turn")
+        ),
         redundant_reads=metrics.redundant_inspection_rejections if metrics else None,
         public_gpu_checks=result.public_checks_attempted if result else None,
         failure_type=failure,
