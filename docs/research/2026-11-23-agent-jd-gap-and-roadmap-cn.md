@@ -81,3 +81,20 @@
 ## 六、项目交付的证明标准
 
 每个功能必须有：冻结代码 SHA、输入/模型/预算版本、源数据与工具调用来源、关键失败轨迹、对照组、自动化测试、真实验收结果、成本与局限。**若无真实模型评测，不在简历写“成功率提升 X%”或“利用 Agentic RL 提升模型能力”。**
+
+
+## 七、2026-11-23 实现结果与下一道真实模型门禁
+
+针对 P0 已在同一 PR 的实验性分支落地：
+
+- `context_mode=legacy|evidence_first`：注册 h001/h002/h003 案例时，新模式模型首轮直接获取当前公开 mutant 的源码；不引入 clean/oracle。
+- `repo_replace_many`：2–4 个相同文件内相互独立、不重叠的 exact snippets 必须全部校验后原子提交；不允许修改测试/控制器/私有路径。
+- `allow_batch_edits=True|False`（CLI `--disable-batch-edits`）：作为第二个独立消融变量；连同 context mode 固定在 Journal、Checkpoint 和最终公开指标中，Resume 不得改变。
+- **2×2 同一模拟决策器对照**：Legacy+逐段=5 次动作；Legacy+Batch=4；Evidence-first+逐段=4；Evidence-first+Batch=3。四组都在 Fake GPU Checker 上获得同一个候选哈希；**不是真实 DeepSeek 的成功率提升**。
+- **实际 Tang RTX 4090 Docker GPU**：固定源码 `06a8923542f78ee47a4c367ffd0a40c083ee66d2`，新版脚本化决策 3 工具动作、1 次 public GPU 检查、四个 Compute Sanitizer 全 CLEAN，0 物理模型调用。完整审计见 [报告](../repair-log/2026-11-23-evidence-first-atomic-gpu-validation.md)。
+
+接下来真实 DeepSeek/其他公开模型实验采用四组 2×2 配对加规则 D 基线，比较独立 Strict Fix 与费用/质量曲线；所有组冻结相同 case/硬件/model/请求数与 GPU 预算，记录每一次失败的 RunStore，不挑选成功轨迹再比较。受审计模型环境缺失时保持 `MODEL_NOT_CONFIGURED`，不能用脚本化模拟数据替代。
+
+### 什么还不应立即做
+
+**不**因为 JD 写了 MCP/Skills/Multi-Agent/GRPO 就一次性加入所有框架。Skills/MCP 先按真实可调用的 CUDA 调试工具设计；Memory/RAG 必须能证明更新/召回正确性；Agentic RL 必须有真实轨迹、独立 Reward 与训练前后优势。当前最优先的仍然是对比 **规则 D vs 真实自由决策 Agent**，解决“Agent 尚未优于规则系统”的核心事实。
