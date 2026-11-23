@@ -31,8 +31,13 @@ from gpu_agent.harness.repo_verification import verify_repository_hardset_candid
 from gpu_agent.store import RunStore, read_regular, reject_symlinks, sync_directory
 
 Arm = Literal[
-    "legacy_single", "legacy_batch", "evidence_single", "evidence_batch",
-    "react_syntax", "hierarchical_syntax", "workflow_D",
+    "legacy_single",
+    "legacy_batch",
+    "evidence_single",
+    "evidence_batch",
+    "react_syntax",
+    "hierarchical_syntax",
+    "workflow_D",
 ]
 Disposition = Literal[
     "EXPERIMENTAL_STRICT_FIXED",

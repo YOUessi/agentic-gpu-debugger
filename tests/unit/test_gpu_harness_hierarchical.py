@@ -67,8 +67,7 @@ def test_cuda_ast_nodes_match_exact_stable_function_statements() -> None:
     selected = {
         item["code"]: item
         for item in nodes
-        if "denominator += expf(x)" in item["code"]
-        or "out[i] = expf(own)" in item["code"]
+        if "denominator += expf(x)" in item["code"] or "out[i] = expf(own)" in item["code"]
     }
     assert len(selected) == 2
     before = source
@@ -91,9 +90,7 @@ def test_cuda_ast_nodes_match_exact_stable_function_statements() -> None:
     assert b"denominator += expf(x - maximum);" in candidate
     assert b"out[i] = expf(own - maximum) / denominator;" in candidate
     assert b"denominator += expf(x);" in before
-    assert syntax_nodes(candidate, symbol="softmax32")["source_sha256"] != indexed[
-        "source_sha256"
-    ]
+    assert syntax_nodes(candidate, symbol="softmax32")["source_sha256"] != indexed["source_sha256"]
     with pytest.raises(ValueError, match="CUDA_SOURCE_SHA_STALE"):
         rewrite_syntax_nodes(
             candidate, expected_source_sha256=indexed["source_sha256"], edits=updates
@@ -108,7 +105,7 @@ def test_cuda_ast_nodes_match_exact_stable_function_statements() -> None:
         rewrite_syntax_nodes(
             source,
             expected_source_sha256=indexed["source_sha256"],
-            edits=[(updates[0][0], "denominator += (" )],
+            edits=[(updates[0][0], "denominator += (")],
         )
 
 
