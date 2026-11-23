@@ -809,11 +809,10 @@ def test_registered_gpu_tool_capabilities_follow_real_candidate_state(
         forbidden = host.invoke(RepoRunPublicChecks())
         assert forbidden.status == "REJECTED"
         assert "CURRENT_STATE" in forbidden.content
-        assert host.invoke(
-            HarnessDecision.model_validate(
-                {"action": _edit_numerator(), "reason": "First source change"}
-            ).action
-        ).status == "OK"
+        first_edit = HarnessDecision.model_validate(
+            {"action": _edit_numerator(), "reason": "First source change"}
+        ).action
+        assert host.invoke(first_edit).status == "OK"
         edited = host.snapshot(GOAL, [], 6)
         assert "repo_run_public_checks" in edited.allowed_tools
         assert "finish" not in edited.allowed_tools
@@ -821,11 +820,10 @@ def test_registered_gpu_tool_capabilities_follow_real_candidate_state(
         after_failed = host.snapshot(GOAL, [], 5)
         assert "repo_run_public_checks" not in after_failed.allowed_tools
         assert host.invoke(RepoRunPublicChecks()).status == "REJECTED"
-        assert host.invoke(
-            HarnessDecision.model_validate(
-                {"action": _edit_denominator(), "reason": "Complete the repair"}
-            ).action
-        ).status == "OK"
+        second_edit = HarnessDecision.model_validate(
+            {"action": _edit_denominator(), "reason": "Complete the repair"}
+        ).action
+        assert host.invoke(second_edit).status == "OK"
         assert "repo_run_public_checks" in host.snapshot(GOAL, [], 4).allowed_tools
         assert host.invoke(RepoRunPublicChecks()).status == "OK"
         assert host.snapshot(GOAL, [], 3).allowed_tools == ("finish",)
