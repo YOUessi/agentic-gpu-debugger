@@ -113,7 +113,12 @@ class FakePublicChecker:
             failure_code="PUBLIC_CHECKS_PASSED" if passed else "NUMERIC_MISMATCH",
             public_run_id=child.id,
         )
-        store.put(child.id, "hardset/public-selfcheck.json", result.model_dump_json().encode(), "public")
+        store.put(
+            child.id,
+            "hardset/public-selfcheck.json",
+            result.model_dump_json().encode(),
+            "public",
+        )
         store.transition(child.id, "COMPLETED" if passed else "FAILED", None)
         return result
 
@@ -173,7 +178,10 @@ def test_registered_case_can_finish_only_after_current_public_gpu_check(
     assert model.snapshots[-1].public_checks_passed is True
     assert report.edited_files == (KERNEL,)
     assert _git(repository, "status", "--porcelain") == ""
-    assert recovery_disposition(read_verified_journal(output / "session-events.jsonl")) == "FINISHED"
+    assert (
+        recovery_disposition(read_verified_journal(output / "session-events.jsonl"))
+        == "FINISHED"
+    )
 
 
 def test_failed_gpu_feedback_revised_candidate_and_duplicate_guard(
@@ -325,7 +333,9 @@ def test_public_resume_rejects_changed_gpu_contract_or_missing_evidence(
 
     checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
     child = public.load(checkpoint.last_public_run_id)
-    result_ref = next(ref for ref in child.artifact_refs if ref.name == "hardset/public-selfcheck.json")
+    result_ref = next(
+        ref for ref in child.artifact_refs if ref.name == "hardset/public-selfcheck.json"
+    )
     artifact = output / "public" / result_ref.relative_path
     artifact.write_bytes(b'{"passed":true,"candidate_sha256":"tampered"}')
     with pytest.raises(ValueError):
