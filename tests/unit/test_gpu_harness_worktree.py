@@ -192,3 +192,50 @@ def test_integrity_detects_external_rewrite_of_approved_source(tmp_path: Path) -
         project.read("src/kernel.cu")
     with pytest.raises(ValueError, match="outside controller"):
         project.replace_exact("src/other.cuh", "return v;", "return 3 * v;")
+
+
+
+def test_atomic_batch_replacement_preserves_checkout_on_invalid_edits(tmp_path: Path) -> None:
+    source, sha = _repository(tmp_path)
+    workspace = PinnedGitWorkspace(
+        origin=source, root=tmp_path / "atomic-batch", sha=sha, max_edited_files=1
+    )
+    initial = (workspace.root / "src/kernel.cu").read_bytes()
+    with pytest.raises(ValueError, match="overlapping"):
+        workspace.replace_batch(
+            "src/kernel.cu",
+            [("float x = 1.0f", "float x = 2.0f"), ("1.0f", "3.0f")],
+        )
+    assert (workspace.root / "src/kernel.cu").read_bytes() == initial
+    assert workspace.edited_files == ()
+    with pytest.raises(ValueError, match="exactly once"):
+        workspace.replace_batch(
+            "src/kernel.cu",
+            [("1.0f", "2.0f"), ("missing();", "new();")],
+        )
+    assert (workspace.root / "src/kernel.cu").read_bytes() == initial
+    with pytest.raises(ValueError, match="2-4"):
+        workspace.replace_batch("src/kernel.cu", [("1.0f", "2.0f")])
+    digest = workspace.replace_batch(
+        "src/kernel.cu",
+        [
+            ("float x = 1.0f;", "float x = 2.0f;"),
+            ("__global__ void kernel()", "__global__ void repaired()"),
+        ],
+    )
+    assert digest == hashlib.sha256((workspace.root / "src/kernel.cu").read_bytes()).hexdigest()
+    assert workspace.edited_files == ("src/kernel.cu",)
+    assert "repaired" in workspace.diff()
+    assert "1.0f" in (source / "src/kernel.cu").read_text()
+    assert _git(source, "status", "--porcelain") == ""
+    assert not tuple((workspace.root / "src").glob(".gpu-agent-stage-*"))
+
+
+def test_atomic_batch_rejects_protected_paths_before_any_write(tmp_path: Path) -> None:
+    source, sha = _repository(tmp_path)
+    workspace = PinnedGitWorkspace(origin=source, root=tmp_path / "blocked-batch", sha=sha)
+    for name in ("tests/test_kernel.py", "README.md", "../outside.cu"):
+        with pytest.raises(ValueError):
+            workspace.replace_batch(name, [("foo", "bar"), ("bar", "baz")])
+    assert workspace.edited_files == ()
+    assert workspace.diff() == ""
