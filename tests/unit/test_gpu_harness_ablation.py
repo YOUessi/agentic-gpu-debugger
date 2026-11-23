@@ -343,3 +343,32 @@ def test_loopback_local_vllm_accepted_only_with_explicit_authority(
     monkeypatch.delenv("GPU_AGENT_ALLOW_LOOPBACK_HTTP")
     with pytest.raises(ValueError, match="opt-in"):
         preflight_paired_experiment(repo, evaluator_secret_file=secret)
+
+
+
+def test_three_arm_architecture_plan_preserves_causal_separation(tmp_path: Path) -> None:
+    from gpu_agent.harness.ablation import _arm_configuration
+
+    repo = _repo(tmp_path)
+    plan = create_benchmark_plan(
+        repo, cases=("h001", "h002"), repetitions=1, architecture_study=True
+    )
+    assert plan.architecture_study
+    assert len(plan.units) == 6
+    assert [u.arm for u in plan.units[:3]] == [
+        "evidence_single",
+        "react_syntax",
+        "hierarchical_syntax",
+    ]
+    assert [u.arm for u in plan.units[3:]] == [
+        "react_syntax",
+        "hierarchical_syntax",
+        "evidence_single",
+    ]
+    assert _arm_configuration("evidence_single") == ("evidence_first", False, False, False)
+    assert _arm_configuration("react_syntax") == ("evidence_first", False, False, True)
+    assert _arm_configuration("hierarchical_syntax") == ("evidence_first", False, True, True)
+    report = summarize_sweep(plan, ())
+    assert report.expected_units == 6
+    assert report.completed_units == 0
+    assert not report.all_units_accounted_for

@@ -117,6 +117,8 @@ def write_repository_checkpoint(path: Path, checkpoint: RepositoryCheckpoint) ->
     """Atomic 0600 replacement and directory fsync, never public RunStore data."""
     reject_symlinks(path)
     _validated_state(checkpoint.state, checkpoint.max_steps)
+    if checkpoint.hierarchical_mode != ("task_plan" in checkpoint.state):
+        raise ValueError("checkpoint planning mode and state shape disagree")
     if checkpoint.event_counter != 4 * checkpoint.state["turns"]:
         raise ValueError("checkpoint trace count disagrees with completed turns")
     if len(checkpoint.accepted_hashes) > checkpoint.max_edited_files:
@@ -166,6 +168,8 @@ def read_repository_checkpoint(path: Path) -> RepositoryCheckpoint:
         raise ValueError("checkpoint must be a private regular file")
     checkpoint = RepositoryCheckpoint.model_validate_json(read_regular(path, MAX_CHECKPOINT_BYTES))
     _validated_state(checkpoint.state, checkpoint.max_steps)
+    if checkpoint.hierarchical_mode != ("task_plan" in checkpoint.state):
+        raise ValueError("checkpoint planning mode and state shape disagree")
     if checkpoint.event_counter != 4 * checkpoint.state["turns"]:
         raise ValueError("checkpoint action trace is inconsistent")
     if len(checkpoint.accepted_hashes) > checkpoint.max_edited_files:
