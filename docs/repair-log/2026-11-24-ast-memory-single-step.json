@@ -1,0 +1,45 @@
+{
+  "schema_version": "gpu-ast-single-step-experiment-summary-v1",
+  "source_sha": "1d41cfb22bd50a37d4c524a121ba6c292ef23c40",
+  "prior_baseline": "bf7f872a10bf9dddf56cfe00b858875b660e403c",
+  "cpu": {
+    "focused_tests_passed": 87,
+    "ruff_check": "PASS",
+    "ruff_format": "PASS"
+  },
+  "real_model": {
+    "model": "qwen3-8b-awq",
+    "case": "h001",
+    "planner": false,
+    "decision_attempts": 1,
+    "model_physical_calls": 1,
+    "prefilled_pages": 4,
+    "observed_nodes": 25,
+    "legal_non_noop": true,
+    "checker_reached": true,
+    "public_check_passed": true,
+    "independent_hidden_verification": false,
+    "public_run_id": "e21c561c9f684c68af5a9e88ed5036bf",
+    "checker_run_id": "7fb5e1d7a6bf4219985683921e77fe8f",
+    "source_sha256": "47e69f940ca6c8b9ab287b5ee5c9aed7973f4d1eeb7ac41b7e855a01609c9bce",
+    "candidate_sha256": "4d7d5fd3d3384cb610bda8128f3b580ed5202e269336b4d325e94b6f2e5d190c",
+    "edits": [
+      {
+        "node_id": "n12",
+        "replacement_code": "const float x = a[start + j] + b[start + j] - maximum;"
+      },
+      {
+        "node_id": "n14",
+        "replacement_code": "const float own = a[i] + b[i] - maximum;"
+      }
+    ],
+    "usage": {
+      "input_tokens": 4197,
+      "output_tokens": 3512,
+      "total_tokens": 7709,
+      "reasoning_tokens": 3283
+    },
+    "result_sha256": "ab57e2ef6e221081c754cdc4cee110049fea57bcf7745902f4046ccc4a35c4b3",
+    "snapshot_sha256": "ab96145f6281444f47fed932130a1de4619f9ec5476d8ba0833f62e7b00c2bad"
+  }
+}

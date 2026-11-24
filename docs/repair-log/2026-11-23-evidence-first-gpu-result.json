@@ -1,0 +1,68 @@
+{
+  "schema_version": "gpu-repository-evidence-first-smoke-v1",
+  "date": "2026-11-23",
+  "repo": "YOUessi/agentic-gpu-debugger",
+  "branch": "feat/gpu-native-coding-harness-20261123",
+  "frozen_source": {
+    "github_commit": "06a8923542f78ee47a4c367ffd0a40c083ee66d2",
+    "tarball_sha256": "4696b2176644710da1602a008cf7cca5c2b534e36ab0b8bb3836b787bb59512a",
+    "local_git_commit": "84e345343c9139ca3e545cbbff654fbdafdddbb3"
+  },
+  "environment": {
+    "device": "Tang",
+    "gpu": "NVIDIA GeForce RTX 4090 Laptop GPU",
+    "runtime": "IsolatedGPUBackend Docker",
+    "python": "3.11",
+    "frozen_deps": "existing separately pinned validated venv",
+    "model": "deterministic scripted test double, no paid model"
+  },
+  "run": {
+    "public_case": "h001",
+    "context_mode": "evidence_first",
+    "model_physical_calls": 0,
+    "steps": 3,
+    "public_checks": 1,
+    "passed_public_checks": true,
+    "first_edit_turn": 1,
+    "first_public_pass_turn": 2,
+    "first_finish_turn": 3,
+    "selected_edit_tool": "repo_replace_many",
+    "source_candidate_sha256": "88dd297b8a0bc53dc3b93b7d1a4678551346b4855d7139b4edaddecef0070ba4",
+    "status": "DIFF_STAGED_UNVERIFIED",
+    "public_run_id": "e41cea126f74417aa3945183cc4d2e19",
+    "public_child_run_id": "2c145613d90449a481ff260c458be2a0",
+    "public_child_status": "COMPLETED",
+    "public_failure_code": "PUBLIC_CHECKS_PASSED",
+    "compute_sanitizer": [
+      "CLEAN",
+      "CLEAN",
+      "CLEAN",
+      "CLEAN"
+    ],
+    "public_artifact_count": 57,
+    "artifact_visibility_all_public": true,
+    "independent_hidden_verification_executed": false,
+    "journal_events": 14,
+    "journal_recovery": "FINISHED"
+  },
+  "hashes": {
+    "stdout_sha256": "adf9ecb3eda52eefa3c2cc0f5560901b86b4ef057b27683e86b54f8c55fcd652",
+    "result_sha256": "602b8c2f28586102264c25fd57d8c865c98edb8d8e983a623a0719846aea218c",
+    "journal_sha256": "dd86ee87b01017b15148a43fefd0e22d3669e32d812e658d57978e252c9ed7ec",
+    "checkpoint_sha256": "adf85624260f4a0314117e47c793811c8f344f2a80be469909e8a3dcbe230e56"
+  },
+  "offline_tests": {
+    "tag": "frozen Github source 06a8923",
+    "focused_Tang": 31,
+    "focused_Tang_result": "passed",
+    "hardset_GitHub_test_count": 186
+  },
+  "comparison_caveat": {
+    "legacy_public_scripted_tools": 6,
+    "legacy_public_scripted_gpu_checks": 2,
+    "evidence_first_public_scripted_tools": 3,
+    "evidence_first_public_scripted_gpu_checks": 1,
+    "model_comparison_valid": false,
+    "reason": "different deterministic scripted action policies, not paired real model trials; only proof of engineering capability"
+  }
+}

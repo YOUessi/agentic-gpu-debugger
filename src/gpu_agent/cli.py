@@ -29,8 +29,295 @@ benchmark_app = typer.Typer(no_args_is_help=True)
 release_app = typer.Typer(no_args_is_help=True)
 app.add_typer(benchmark_app, name="benchmark")
 app.add_typer(release_app, name="release")
+harness_app = typer.Typer(no_args_is_help=True, help="Model-directed GPU coding-agent harness.")
+app.add_typer(harness_app, name="harness")
 knowledge_app = typer.Typer(no_args_is_help=True, help="Offline knowledge inspection.")
 app.add_typer(knowledge_app, name="knowledge")
+
+
+@harness_app.command("sweep-repo")
+def harness_sweep_repo(
+    repository: Annotated[Path, typer.Option("--repository")],
+    output: Annotated[Path, typer.Option("--output")],
+    cases: Annotated[str, typer.Option("--cases")] = "h001",
+    repetitions: Annotated[int, typer.Option("--repetitions", min=1, max=3)] = 1,
+    max_steps: Annotated[int, typer.Option("--max-steps", min=4, max=24)] = 12,
+    max_model_calls: Annotated[
+        int,
+        typer.Option(
+            "--max-model-calls",
+            min=6,
+            max=32,
+            help="Shared executor ceiling; hierarchical arms reserve four auxiliary calls.",
+        ),
+    ] = 14,
+    max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
+    include_workflow_d: Annotated[bool, typer.Option("--include-workflow-d")] = False,
+    architecture_study: Annotated[bool, typer.Option("--architecture-study")] = False,
+    planner_only_study: Annotated[bool, typer.Option("--planner-only-study")] = False,
+    evaluator_secret_file: Annotated[Path | None, typer.Option("--evaluator-secret-file")] = None,
+    execute: Annotated[bool, typer.Option("--execute")] = False,
+    allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    allow_real_gpu: Annotated[bool, typer.Option("--allow-real-gpu")] = False,
+) -> None:
+    """Freeze and optionally execute a 2x2 or three-arm coding Agent study.
+
+    The default preflight makes ZERO GPU or paid model calls and creates no
+    experiment output. --execute requires explicit paid/API, GPU and private
+    evaluator authorization; failed/blocked units are never re-sampled.
+    """
+    from gpu_agent.harness.ablation import (
+        preflight_paired_experiment,
+        run_paired_experiment,
+    )
+
+    selected = tuple(part.strip() for part in cases.split(","))
+    if len(set(selected)) != len(selected):
+        raise typer.BadParameter("duplicate HardSet case in --cases")
+    try:
+        if not execute:
+            report = preflight_paired_experiment(
+                repository,
+                evaluator_secret_file=evaluator_secret_file,
+                output=output,
+                cases=selected,
+                repetitions=repetitions,
+                max_steps=max_steps,
+                max_model_calls=max_model_calls,
+                max_public_checks=max_public_checks,
+                include_workflow_D=include_workflow_d,
+                architecture_study=architecture_study,
+                planner_only_study=planner_only_study,
+            )
+            typer.echo(report.model_dump_json(indent=2))
+            return
+        if evaluator_secret_file is None:
+            raise typer.BadParameter("--evaluator-secret-file required to execute")
+        result = run_paired_experiment(
+            repository,
+            output,
+            evaluator_secret_file=evaluator_secret_file,
+            cases=selected,
+            repetitions=repetitions,
+            max_steps=max_steps,
+            max_model_calls=max_model_calls,
+            max_public_checks=max_public_checks,
+            include_workflow_D=include_workflow_d,
+            architecture_study=architecture_study,
+            planner_only_study=planner_only_study,
+            allow_paid_calls=allow_paid_calls,
+            allow_real_gpu=allow_real_gpu,
+        )
+        typer.echo(result.model_dump_json(indent=2))
+        if not getattr(result, "ready", True):
+            raise typer.Exit(3)
+    except (OSError, ValueError) as error:
+        typer.echo(f"PAIRED_BENCHMARK_REJECTED: {type(error).__name__}", err=True)
+        raise typer.Exit(2) from None
+
+
+@harness_app.command("verify-repo")
+def harness_verify_repo(
+    repository: Annotated[Path, typer.Option("--repository")],
+    session: Annotated[Path, typer.Option("--session")],
+    output: Annotated[Path, typer.Option("--output")],
+    evaluator_secret_file: Annotated[Path, typer.Option("--evaluator-secret-file")],
+) -> None:
+    """Operator-only strict HardSet check; hidden data never becomes an Agent tool."""
+    import stat
+
+    from gpu_agent.harness.repo_verification import verify_repository_hardset_candidate
+    from gpu_agent.store import read_regular
+
+    secret = evaluator_secret_file.absolute()
+    if secret.is_relative_to(repository.resolve()) or secret.is_relative_to(session.resolve()):
+        raise typer.BadParameter("evaluator secret must be outside code and Agent session")
+    try:
+        info = secret.lstat()
+        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError("private evaluator secret must be a regular 0600 file")
+        projection = verify_repository_hardset_candidate(
+            repository=repository,
+            session_output=session,
+            output=output,
+            evaluator_secret=read_regular(secret, 4096),
+        )
+        typer.echo(projection.model_dump_json(indent=2))
+        if projection.verdict != "VERIFIED_FIXED":
+            raise typer.Exit(1)
+    except (OSError, ValueError):
+        typer.echo("OPERATOR_REPOSITORY_VERIFICATION_REJECTED", err=True)
+        raise typer.Exit(2) from None
+
+
+@harness_app.command("summarize-repo")
+def harness_summarize_repo(
+    output: Annotated[Path, typer.Option("--output")],
+) -> None:
+    """Summarize trusted PUBLIC tool events; never invoke models or CUDA."""
+    from gpu_agent.harness.metrics import summarize_repository_trajectory
+
+    try:
+        summary = summarize_repository_trajectory(output)
+        typer.echo(summary.model_dump_json(indent=2))
+    except (OSError, ValueError):
+        typer.echo("INVALID_OR_UNTRUSTED_REPOSITORY_TRAJECTORY", err=True)
+        raise typer.Exit(2) from None
+
+
+@harness_app.command("inspect-session")
+def harness_inspect_session(
+    journal: Annotated[Path, typer.Option("--journal")],
+) -> None:
+    """Validate the durable event chain; never replay uncertain GPU/model calls."""
+    import json
+
+    from gpu_agent.harness.journal import (
+        read_verified_journal,
+        recovery_disposition,
+    )
+
+    try:
+        events = read_verified_journal(journal)
+        typer.echo(
+            json.dumps(
+                {
+                    "events": len(events),
+                    "recovery_disposition": recovery_disposition(events),
+                    "last_event": events[-1]["kind"],
+                    "journal_sha256": hashlib.sha256(journal.read_bytes()).hexdigest(),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+    except (OSError, ValueError):
+        typer.echo("INVALID_OR_UNTRUSTED_SESSION_JOURNAL", err=True)
+        raise typer.Exit(2) from None
+
+
+@harness_app.command("repo-run")
+def harness_repo_run(
+    output: Annotated[Path, typer.Option()],
+    goal: Annotated[str, typer.Option("--goal")],
+    base_sha: Annotated[str, typer.Option("--base-sha")],
+    repository: Annotated[Path, typer.Option()] = Path("."),
+    max_steps: Annotated[int, typer.Option("--max-steps", min=1, max=38)] = 18,
+    max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=4, max=40)] = 24,
+    allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    public_case: Annotated[str | None, typer.Option("--public-case")] = None,
+    context_mode: Annotated[
+        Literal["legacy", "evidence_first"], typer.Option("--context-mode")
+    ] = "evidence_first",
+    disable_batch_edits: Annotated[bool, typer.Option("--disable-batch-edits")] = False,
+    hierarchical: Annotated[bool, typer.Option("--hierarchical")] = False,
+    syntax_editing: Annotated[bool, typer.Option("--syntax-editing")] = False,
+    compile_gate: Annotated[bool, typer.Option("--compile-gate")] = False,
+    allow_revert: Annotated[bool, typer.Option("--allow-revert")] = False,
+    max_compiles: Annotated[int, typer.Option("--max-compiles", min=1, max=8)] = 6,
+    public_diagnostics: Annotated[bool, typer.Option("--public-diagnostics")] = False,
+    ast_target_binding: Annotated[bool, typer.Option("--ast-target-binding")] = False,
+    state_scoped_actions: Annotated[bool, typer.Option("--state-scoped-actions")] = False,
+    max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
+    resume: Annotated[bool, typer.Option("--resume")] = False,
+    pause_after_turns: Annotated[
+        int | None, typer.Option("--pause-after-turns", min=1, max=37)
+    ] = None,
+) -> None:
+    """Model-directed, multi-file editing in an isolated Git worktree.
+
+    Only --public-case h001/h002/h003 enables registered Docker GPU public checks.
+    Output remains UNVERIFIED without the separate independent evaluator.
+    """
+    from gpu_agent.agent.models import ProviderError
+    from gpu_agent.harness.repo_runner import run_repository_coding_session
+
+    if not allow_paid_calls:
+        raise typer.BadParameter("real LLM use requires --allow-paid-calls")
+    try:
+        result = run_repository_coding_session(
+            repository=repository,
+            output=output,
+            base_sha=base_sha,
+            goal=goal,
+            max_steps=max_steps,
+            max_model_calls=max_model_calls,
+            allow_paid_calls=True,
+            public_case_id=public_case,
+            max_public_checks=max_public_checks,
+            context_mode=context_mode,
+            allow_batch_edits=not disable_batch_edits,
+            hierarchical_mode=hierarchical,
+            syntax_mode=syntax_editing,
+            compile_gate=compile_gate,
+            allow_revert=allow_revert,
+            max_compiles=max_compiles,
+            public_diagnostics=public_diagnostics,
+            ast_target_binding=ast_target_binding,
+            state_scoped_actions=state_scoped_actions,
+            resume=resume,
+            pause_after_turns=pause_after_turns,
+        )
+        typer.echo(result.model_dump_json())
+        if result.status not in {"DIFF_STAGED_UNVERIFIED", "PAUSED_RESUMABLE"}:
+            raise typer.Exit(1)
+    except ProviderError as exc:
+        typer.echo(f"REPOSITORY_AGENT_MODEL_FAILED: {exc.code}", err=True)
+        raise typer.Exit(1) from None
+    except (OSError, ValueError) as exc:
+        typer.echo(
+            f"REPOSITORY_AGENT_REJECTED: {type(exc).__name__}",
+            err=True,
+        )
+        raise typer.Exit(2) from None
+
+
+@harness_app.command("run")
+def harness_run(
+    output: Annotated[Path, typer.Option()],
+    case: Annotated[str, typer.Option("--case")],
+    goal: Annotated[str, typer.Option("--goal")],
+    evaluator_secret_file: Annotated[Path, typer.Option("--evaluator-secret-file")],
+    max_steps: Annotated[int, typer.Option("--max-steps", min=1, max=40)] = 24,
+    max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=4, max=40)] = 32,
+    allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
+    repository: Annotated[Path, typer.Option()] = Path("."),
+) -> None:
+    """Real model-driven tool loop on a pinned CUDA workspace."""
+    import stat
+
+    from gpu_agent.agent.models import ProviderError
+    from gpu_agent.harness.runner import run_gpu_coding_harness
+    from gpu_agent.store import read_regular
+
+    if not allow_paid_calls:
+        raise typer.BadParameter("real model requires explicit --allow-paid-calls")
+    secret = evaluator_secret_file.absolute()
+    if secret.is_relative_to(repository.resolve()):
+        raise typer.BadParameter("private evaluator key must be outside the source")
+    try:
+        mode = secret.lstat().st_mode
+        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) & 0o077:
+            raise ValueError("evaluator key must be a regular 0600 file")
+        outcome = run_gpu_coding_harness(
+            repository,
+            output,
+            case_id=case,
+            goal=goal,
+            evaluator_secret=read_regular(secret, 4096),
+            max_steps=max_steps,
+            max_model_calls=max_model_calls,
+            allow_paid_calls=True,
+        )
+        typer.echo(outcome.model_dump_json())
+        if outcome.status != "VERIFIED_FIXED":
+            raise typer.Exit(1)
+    except ProviderError as exc:
+        typer.echo(f"HARNESS_MODEL_FAILURE: {exc.code}", err=True)
+        raise typer.Exit(1) from None
+    except (OSError, ValueError) as exc:
+        typer.echo(f"HARNESS_REJECTED: {type(exc).__name__}", err=True)
+        raise typer.Exit(2) from None
 
 
 @benchmark_app.command("validate-diversity")

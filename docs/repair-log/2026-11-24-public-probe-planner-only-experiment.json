@@ -1,0 +1,125 @@
+{
+  "schema_version": "cuda-agent-public-probe-planner-only-v1",
+  "date": "2026-11-24",
+  "frozen_github_sha": "473bbc21c09d689b9860b48d19cf08ac259ece00",
+  "repo": "YOUessi/agentic-gpu-debugger",
+  "branch": "feat/gpu-native-coding-harness-20261123",
+  "machine": "Tang RTX 4090 Laptop GPU",
+  "model": "Qwen3-8B-AWQ local vLLM, OpenAI-compatible loopback /v1",
+  "code_gates": {
+    "ast_cursor_pagination": true,
+    "cursor_full_json": true,
+    "no_oracle_source_read": true,
+    "only_registered_mutant_read": true,
+    "public_before_after_probe": true,
+    "probe_size_allowlist": [
+      32,
+      33,
+      65,
+      129,
+      257
+    ],
+    "hierarchical_syntax_same_except_planner": true,
+    "primary_metrics": [
+      "effective_patch_rate",
+      "first_effective_edit_turn",
+      "public_check_reached_rate"
+    ]
+  },
+  "offline_54_passed_frozen_sha": "145a6e79328d62e0c5e316ffc31cd339a824c756",
+  "latest_ruff_frozen_sha": "473bbc21c09d689b9860b48d19cf08ac259ece00",
+  "github_hardset_219_passed_sha": "473bbc21c09d689b9860b48d19cf08ac259ece00",
+  "public_gpu_real_toolhost_scripted": {
+    "frozen_sha": "473bbc21c09d689b9860b48d19cf08ac259ece00",
+    "h001_input_size": 33,
+    "before": {
+      "outcome": "PROGRAM_FAILED",
+      "source_sha256": "47e69f940ca6c8b9ab287b5ee5c9aed7973f4d1eeb7ac41b7e855a01609c9bce"
+    },
+    "after": {
+      "outcome": "PASS",
+      "source_sha256": "88dd297b8a0bc53dc3b93b7d1a4678551346b4855d7139b4edaddecef0070ba4"
+    },
+    "final_full_public_gpu_check": "PASSED",
+    "tool_turns": 6,
+    "first_effective_edit_turn": 3,
+    "first_public_check_turn": 5,
+    "model_physical_calls": 0,
+    "model": "DETERMINISTIC SCRIPTED TEST DOUBLE",
+    "process_exit_code": 0,
+    "public_stdout_sha256": "783bf249e066f417a3db0f542bc8c8d67c2521c53ce8fdd2b5dda5117306f506",
+    "operator_hidden_strict_in_this_run": false
+  },
+  "qwen3_planner_only_paired": {
+    "frozen_sha": "473bbc21c09d689b9860b48d19cf08ac259ece00",
+    "model": "qwen3-8b-awq",
+    "registered_case": "h001",
+    "context_mode": "evidence_first",
+    "syntax_mode": true,
+    "allow_batch_edits": false,
+    "tool_steps_cap_per_trial": 12,
+    "physical_model_calls_cap_per_trial": 16,
+    "public_probes_cap_per_trial": 4,
+    "public_gpu_final_checks_cap_per_trial": 2,
+    "expected_trials": 2,
+    "completed_trials": 2,
+    "failed_trials": 2,
+    "no_retries": true,
+    "raw_paired_report_sha256": "4d7f06755011a504fff3a9bae51b7b9ebc750a6d1cf44b7d68934f2d3fb7fb49",
+    "raw_plan_sha256": "c64119abe91f4650aa4e74d2b8c6ab59375468cd66c6eb23838f39e2ab116274",
+    "trials": [
+      {
+        "arm": "react_syntax",
+        "planner": false,
+        "effective_patch": false,
+        "first_effective_edit_turn": null,
+        "public_full_check_reached": false,
+        "public_probes": 1,
+        "model_physical_calls": 12,
+        "tool_steps": 12,
+        "model_tokens": 36957,
+        "strict_verdict": null,
+        "terminal": "PUBLIC_NOT_ACCEPTED",
+        "trace": "multiple AST inspection retries and one pre-mutation public probe; last AST edit used an invalid/stale node ID"
+      },
+      {
+        "arm": "hierarchical_syntax",
+        "planner": true,
+        "effective_patch": false,
+        "first_effective_edit_turn": null,
+        "public_full_check_reached": false,
+        "public_probes": 0,
+        "model_physical_calls": 14,
+        "tool_steps": 12,
+        "model_tokens": 45513,
+        "strict_verdict": null,
+        "terminal": "PUBLIC_NOT_ACCEPTED",
+        "trace": "Planner and Reflect both executed; three CUDA_SYNTAX_NOOP rejections plus repeated inspections and node-not-found errors"
+      }
+    ],
+    "primary_result": {
+      "without_planner": {
+        "effective_patch_rate": 0,
+        "first_effective_edit_turn": null,
+        "full_public_check_reached_rate": 0
+      },
+      "with_planner": {
+        "effective_patch_rate": 0,
+        "first_effective_edit_turn": null,
+        "full_public_check_reached_rate": 0
+      }
+    }
+  },
+  "honesty": [
+    "The scripted h001 GPU pass does not count toward model-autonomous successes.",
+    "The pre-edit functional probe is not the final full public GPU acceptance.",
+    "One case per arm cannot support statistically significant Planner superiority.",
+    "There were zero accepted edits in the real Qwen3 study; no strict verifier run for either real trial.",
+    "The 2-arm study matches model, code, tools, context and caps; planner-only mode adds two model calls for planning/reflection by design."
+  ],
+  "tang_paths": {
+    "source": "/home/you/gpu-native-harness-validation-20261124/public-probe-verified-473bbc/source",
+    "public_gpu_test": "/home/you/gpu-native-harness-validation-20261124/public-probe-verified-473bbc/real-gpu-h001-before-after",
+    "qwen3_run": "/home/you/gpu-native-harness-validation-20261124/public-probe-verified-473bbc/real-qwen-planner-only-h001"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "schema_version": "gpu-repository-hardset-scripted-real-gpu-smoke-v1",
+  "experiment_date": "2026-11-23",
+  "github": {
+    "repo": "YOUessi/agentic-gpu-debugger",
+    "branch": "feat/gpu-native-coding-harness-20261123",
+    "frozen_commit": "786bc35725edbfd4cd1a3dcaa94589cef9d72c21",
+    "downloaded_tar_sha256": "79c22d213f5be72257541ca5ffd463aad1b45e16c6dfdf014f506588004261e9",
+    "local_reinitialized_git_sha": "09b756df102eabb737f580d5f1cd2465be5f527b",
+    "tracked_files": 523
+  },
+  "environment": {
+    "device": "Tang",
+    "gpu": "NVIDIA GeForce RTX 4090 Laptop GPU",
+    "python": "3.11",
+    "runtime": "pinned requirements.lock in independent venv, docker isolated backend",
+    "dependency_conflicts": "none reported by pip check"
+  },
+  "execution": {
+    "runner": "scripts/run_repository_hardset_public_gpu_smoke.py",
+    "case_id": "h001",
+    "model": "deterministic scripted test double",
+    "physical_llm_calls": 0,
+    "tool_calls": 6,
+    "public_gpu_checks_attempted": 2,
+    "public_gpu_checks_passed_final": true,
+    "hidden_verification_ran": false,
+    "final_status": "DIFF_STAGED_UNVERIFIED",
+    "parent_public_run_id": "dd4b207acc4b4f27a2d9c16fa6a6ac29",
+    "checks": [
+      {
+        "ordinal": 1,
+        "public_run_id": "2ec09dd15087467bb935a892161102d5",
+        "candidate_sha256": "992264e8d9c65ba504357399a1d8229fe03a6396f215f0e226da5618ea9c9f73",
+        "public_failure_code": "NUMERIC_MISMATCH",
+        "public_passed": false,
+        "artifact_count": 16,
+        "sanitizer_runs": 0
+      },
+      {
+        "ordinal": 2,
+        "public_run_id": "622daacdeb03468c9d4b855c4dd5bbe0",
+        "candidate_sha256": "88dd297b8a0bc53dc3b93b7d1a4678551346b4855d7139b4edaddecef0070ba4",
+        "public_failure_code": "PUBLIC_CHECKS_PASSED",
+        "public_passed": true,
+        "artifact_count": 57,
+        "sanitizer_runs": 4,
+        "sanitizer_results": [
+          "CLEAN",
+          "CLEAN",
+          "CLEAN",
+          "CLEAN"
+        ]
+      }
+    ],
+    "all_runstore_artifacts_public": true,
+    "journal_events": 26,
+    "recovery_disposition": "FINISHED",
+    "stdout_sha256": "24b7715f5727edafaa0d0515ff063c19ff8527559c88eeebd4bb34c5415a20c5",
+    "result_json_sha256": "a0abbba9e414457eadd62f09afdb4c88bb245f7a442dd1650e8495dd9afb7a09",
+    "journal_sha256": "6d8566e58ae7a5118437236f8f18c4cdba787351bc42af10923c4e2d60cc25b2",
+    "checkpoint_sha256": "3a9a026ad094470973876dc473f097dc45dbec35c64c30eab28126c1171284fa"
+  },
+  "github_cpu_contract": {
+    "snapshot": "786bc35725edbfd4cd1a3dcaa94589cef9d72c21",
+    "workflow": "HardSet V2 native-contract validation",
+    "run_id": 45091132164,
+    "passed": 174,
+    "failed": 0,
+    "note": "No CUDA, paid model, or private oracle in GitHub CI."
+  },
+  "limitations": [
+    "Not a real LLM-driven autonomous success",
+    "No independent hidden verification",
+    "Only operator-bound registered single-file HardSet h001 case tested",
+    "Source tarball locally committed with new SHA; exact archived upstream content identified by tar digest"
+  ]
+}

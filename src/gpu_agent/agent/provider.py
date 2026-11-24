@@ -27,7 +27,13 @@ from gpu_agent.agent.models import (
     PublicEvidence,
     PublicSource,
 )
-from gpu_agent.agent.policy import CallKind, LLMCallGate, validate_diagnosis
+from gpu_agent.agent.policy import (
+    CallKind,
+    LLMCallGate,
+    RepositoryCallBudget,
+    RepositoryCallRole,
+    validate_diagnosis,
+)
 from gpu_agent.agent.prompts import PROMPT_VERSION, select_prompt
 from gpu_agent.agent.transport import TransportError, classify_transport_error
 from gpu_agent.contracts import new_id, now
@@ -55,8 +61,17 @@ if TYPE_CHECKING:
         HardsetPublicCheck,
     )
     from gpu_agent.benchmark.hardset_v2_graph import PlannerSnapshot, ProbeChoice
+    from gpu_agent.harness.models import (
+        HarnessDecision,
+        SessionSnapshot,
+        TaskPlan,
+        TaskReflection,
+    )
 
 Output = TypeVar("Output", bound=BaseModel)
+
+
+MAX_OUTPUT_TOKENS = 4096
 
 
 class OpenAIProviderSettings(ExecutionModel):
@@ -65,6 +80,8 @@ class OpenAIProviderSettings(ExecutionModel):
     api_key: SecretStr | None = Field(default=None, repr=False, exclude=True)
     timeout_seconds: float = Field(default=60, gt=0, le=600, allow_inf_nan=False)
     supports_store_false: bool = False
+    allow_loopback_http: bool = False
+    max_output_tokens: int = Field(default=MAX_OUTPUT_TOKENS, ge=256, le=16384, strict=True)
 
     @field_validator("endpoint")
     @classmethod
@@ -72,16 +89,32 @@ class OpenAIProviderSettings(ExecutionModel):
         if value is None:
             return None
         url = urlsplit(value)
+        # A local inference engine may be used without weakening the security
+        # boundary for public HTTP endpoints. Require a *literal* loopback IP,
+        # an explicit port, and the OpenAI-compatible /v1 API root.
+        local = (
+            url.scheme == "http"
+            and url.hostname in {"127.0.0.1", "::1"}
+            and url.port is not None
+            and url.path.rstrip("/") == "/v1"
+        )
         if (
-            url.scheme != "https"
+            (url.scheme != "https" and not local)
             or not url.hostname
             or url.username is not None
             or url.password is not None
             or url.query
             or url.fragment
         ):
-            raise ValueError("endpoint must be an explicit HTTPS API root without credentials")
+            raise ValueError("endpoint must be HTTPS or a literal loopback /v1 root")
         return value.rstrip("/")
+
+    @model_validator(mode="after")
+    def explicit_local_authority(self) -> "OpenAIProviderSettings":
+        if self.endpoint and urlsplit(self.endpoint).scheme == "http":
+            if not self.allow_loopback_http:
+                raise ValueError("local HTTP inference requires explicit operator opt-in")
+        return self
 
     @classmethod
     def from_environment(cls) -> "OpenAIProviderSettings":
@@ -91,7 +124,9 @@ class OpenAIProviderSettings(ExecutionModel):
             model=os.environ.get("OPENAI_MODEL") or None,
             api_key=SecretStr(key) if key else None,
             supports_store_false=os.environ.get("GPU_AGENT_STORE_FALSE_SUPPORTED") == "1",
+            allow_loopback_http=os.environ.get("GPU_AGENT_ALLOW_LOOPBACK_HTTP") == "1",
             timeout_seconds=float(os.environ.get("GPU_AGENT_LLM_TIMEOUT_SECONDS", "60")),
+            max_output_tokens=int(os.environ.get("GPU_AGENT_MAX_OUTPUT_TOKENS", "4096")),
         )
 
 
@@ -301,11 +336,28 @@ def normalize_wire_value(kind: "CallKind", value: object) -> object:
 WIRE_MODELS: "dict[CallKind, type[BaseModel]]" = {}
 
 
+class ResponseTermination(ExecutionModel):
+    """Allowlisted wire metadata, never raw generated text or reasoning."""
+
+    response_status: (
+        Literal["completed", "incomplete", "failed", "cancelled", "queued", "in_progress", "other"]
+        | None
+    ) = None
+    incomplete_reason: Literal["max_output_tokens", "content_filter", "other"] | None = None
+    finish_reasons: tuple[str, ...] = Field(default=(), max_length=16)
+    output_item_statuses: tuple[str, ...] = Field(default=(), max_length=16)
+    partial_output_chars: int = Field(default=0, ge=0)
+    partial_output_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # Shape-only suffix: preserve JSON delimiters; mask all generated values.
+    partial_output_tail_shape: str = Field(default="", max_length=96)
+
+
 class Invocation(ExecutionModel):
     transport_error: TransportError | None = None
     invocation_id: str
     run_id: str
     kind: CallKind
+    repository_role: RepositoryCallRole | None = None
     attempt: int
     state: Literal["STARTED", "COMPLETED", "FAILED", "UNCERTAIN"]
     started_at: datetime
@@ -313,6 +365,9 @@ class Invocation(ExecutionModel):
     elapsed_ms: float | None = None
     # None denotes older records where the configured deadline was not persisted.
     request_timeout_seconds: float | None = Field(default=None, gt=0, le=600)
+    configured_max_output_tokens: int | None = Field(default=None, ge=256, le=16384)
+    request_payload_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    response_termination: ResponseTermination | None = None
     configured_model: str
     response_model: str | None = None
     endpoint_host: str
@@ -339,6 +394,7 @@ class WorkerRequest(ExecutionModel):
     client_request_id: str
     timeout_seconds: float = Field(gt=0, le=600, allow_inf_nan=False)
     attempt: int = Field(ge=0, le=1)
+    max_output_tokens: int = Field(default=MAX_OUTPUT_TOKENS, ge=256, le=16384, strict=True)
     correction_hints: list[str] = Field(default_factory=list, max_length=10)
 
 
@@ -349,6 +405,7 @@ class ResponseMetadata(ExecutionModel):
     response_model: str | None = Field(default=None, max_length=1024)
     usage: Usage | None = None
     http_status: int | None = None
+    response_termination: ResponseTermination | None = None
 
 
 class SDKResult(ExecutionModel):
@@ -367,6 +424,9 @@ class SDKResult(ExecutionModel):
             "LLM_INVALID_OUTPUT",
             "LLM_REFUSED",
             "LLM_INCOMPLETE",
+            "LLM_INCOMPLETE_MAX_OUTPUT_TOKENS",
+            "LLM_INCOMPLETE_CONTENT_FILTER",
+            "LLM_INCOMPLETE_OTHER",
             "LLM_WORKER_ERROR",
         ]
         | None
@@ -498,6 +558,66 @@ def parse_wire_text(
     return value.model_dump(mode="json"), base
 
 
+def response_termination(envelope: dict[str, Any]) -> ResponseTermination:
+    """Parse only trusted-shape metadata; output_text excludes reasoning items."""
+    statuses = {"completed", "incomplete", "failed", "cancelled", "queued", "in_progress"}
+    finishes = {"stop", "length", "content_filter", "tool_calls", "max_output_tokens"}
+    raw_status = envelope.get("status")
+    raw_reason = envelope.get("incomplete_details")
+    reason = raw_reason.get("reason") if isinstance(raw_reason, dict) else None
+    status = (
+        raw_status
+        if isinstance(raw_status, str) and raw_status in statuses
+        else ("other" if raw_status is not None else None)
+    )
+    safe_reason = (
+        reason
+        if reason in ("max_output_tokens", "content_filter")
+        else ("other" if raw_reason is not None or raw_status == "incomplete" else None)
+    )
+    finish_reasons: list[str] = []
+    item_statuses: list[str] = []
+    parts: list[str] = []
+    items = envelope.get("output")
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for name, allowed, dest in (
+                ("finish_reason", finishes, finish_reasons),
+                ("status", statuses, item_statuses),
+            ):
+                val = item.get(name)
+                if val is not None and len(dest) < 16:
+                    dest.append(val if isinstance(val, str) and val in allowed else "other")
+            if item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if (
+                        isinstance(part, dict)
+                        and part.get("type") == "output_text"
+                        and isinstance(part.get("text"), str)
+                    ):
+                        parts.append(part["text"])
+    output = "".join(parts)
+    tail = "".join(
+        char if char in '{}[]":,' else " " if char.isspace() else "x" for char in output[-96:]
+    )
+    return ResponseTermination.model_validate(
+        {
+            "response_status": status,
+            "incomplete_reason": safe_reason,
+            "finish_reasons": tuple(finish_reasons),
+            "output_item_statuses": tuple(item_statuses),
+            "partial_output_chars": len(output),
+            "partial_output_sha256": hashlib.sha256(output.encode()).hexdigest() if parts else None,
+            "partial_output_tail_shape": tail,
+        }
+    )
+
+
 def invoke_sdk(
     request: WorkerRequest, client_factory: Callable[..., Any] = openai.OpenAI
 ) -> SDKResult:
@@ -510,7 +630,83 @@ def invoke_sdk(
             logging.getLogger(name).disabled = True
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
     output_model: type[BaseModel]
-    if request.kind == "plan" and request.payload.get("hardset_probe_contract") == "hardset-v2":
+    if request.kind == "plan" and request.payload.get("gpu_repo_task_plan") == "v1":
+        from gpu_agent.harness.models import TaskPlan
+
+        output_model = TaskPlan
+    elif request.kind == "plan" and request.payload.get("gpu_repo_reflection") == "v1":
+        from gpu_agent.harness.models import TaskReflection
+
+        output_model = TaskReflection
+    elif request.kind == "plan" and request.payload.get("gpu_repo_harness") == "v1":
+        from gpu_agent.harness.models import CandidateRecoveryView, SyntaxState
+        from gpu_agent.harness.tool_schema import repository_decision_schema
+
+        snapshot = request.payload.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        names = snapshot.get("allowed_tools")
+        if not isinstance(names, list) or any(not isinstance(x, str) for x in names):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        kernel_path = snapshot.get("registered_kernel_path")
+        case_id = snapshot.get("registered_public_case")
+        if case_id is not None:
+            expected = f"benchmarks/hardset_v2/{case_id}/mutant/kernel.cu"
+            if case_id not in {"h001", "h002", "h003"} or kernel_path != expected:
+                raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        elif kernel_path is not None:
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        probe_phase = snapshot.get("public_probe_phase")
+        if probe_phase not in (None, "before", "after"):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        syntax_data = snapshot.get("syntax_state")
+        syntax_state = (
+            SyntaxState.model_validate_json(json.dumps(syntax_data))
+            if syntax_data is not None
+            else None
+        )
+        if syntax_state is not None and syntax_state.path != kernel_path:
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        recovery_data = snapshot.get("candidate_recovery")
+        recovery = (
+            CandidateRecoveryView.model_validate(recovery_data)
+            if recovery_data is not None
+            else None
+        )
+        target_binding = snapshot.get("ast_target_binding", False)
+        if type(target_binding) is not bool or (
+            target_binding and (kernel_path is None or snapshot.get("syntax_mode") is not True)
+        ):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        remaining_sizes = snapshot.get("public_probe_remaining_sizes")
+        if remaining_sizes is not None and (
+            not isinstance(remaining_sizes, list)
+            or len(remaining_sizes) > 5
+            or any(
+                type(size) is not int or size not in (32, 33, 65, 129, 257)
+                for size in remaining_sizes
+            )
+            or len(set(remaining_sizes)) != len(remaining_sizes)
+            or (("repo_probe_public" in names) != bool(remaining_sizes))
+        ):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        output_model = repository_decision_schema(
+            tuple(names),
+            registered_kernel_path=kernel_path,
+            public_probe_phase=probe_phase,
+            syntax_state=syntax_state,
+            bind_syntax_cursor=kernel_path is not None,
+            recovery_source_sha256=recovery.source_sha256 if recovery is not None else None,
+            ast_target_binding=target_binding,
+            public_probe_remaining_sizes=tuple(remaining_sizes)
+            if remaining_sizes is not None
+            else None,
+        )
+    elif request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
+        from gpu_agent.harness.models import HarnessDecision
+
+        output_model = HarnessDecision
+    elif request.kind == "plan" and request.payload.get("hardset_probe_contract") == "hardset-v2":
         from gpu_agent.benchmark.hardset_v2_graph import HardsetProbePlanOutput
 
         output_model = HardsetProbePlanOutput
@@ -544,7 +740,7 @@ def invoke_sdk(
             "model": request.model,
             "input": json.dumps({"untrusted_data": request.payload}, ensure_ascii=False),
             "store": False,
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "max_output_tokens": request.max_output_tokens,
             "timeout": request.timeout_seconds,
             "extra_headers": {"X-Client-Request-Id": request.client_request_id},
         }
@@ -584,7 +780,12 @@ def invoke_sdk(
             or envelope.get("error")
             or envelope.get("incomplete_details")
         ):
-            raise ProviderError("LLM_INCOMPLETE", state="FAILED")
+            reason = response_termination(envelope).incomplete_reason
+            code = {
+                "max_output_tokens": "LLM_INCOMPLETE_MAX_OUTPUT_TOKENS",
+                "content_filter": "LLM_INCOMPLETE_CONTENT_FILTER",
+            }.get(reason or "", "LLM_INCOMPLETE_OTHER")
+            raise ProviderError(code, state="FAILED")
         if deepseek:
             value, diagnostics = parse_wire_text(
                 request.kind, _deepseek_output_text(envelope), output_model
@@ -680,9 +881,6 @@ class LLMProvider(Protocol):
     ) -> str: ...
 
 
-MAX_OUTPUT_TOKENS = 4096
-
-
 class DevelopmentCallPolicy(ExecutionModel):
     """Explicit development opt-in; bound physical calls, record token usage."""
 
@@ -721,9 +919,15 @@ class OpenAIResponsesProvider:
         diff_validator: Callable[[str], object] | None = None,
         idempotency_key: str | None = None,
         call_policy: DevelopmentCallPolicy | None = None,
+        repository_budget: RepositoryCallBudget | None = None,
     ) -> None:
         self.settings, self.gate, self.store, self.run_id = settings, gate, store, run_id
         self._call_policy = call_policy
+        self._repository_budget = repository_budget
+        if repository_budget is not None and (
+            call_policy is None or repository_budget.total != call_policy.max_llm_calls
+        ):
+            raise ValueError("repository role limits must match the physical call ceiling")
         self.model_name = settings.model
         if settings.endpoint and _is_deepseek_endpoint(settings.endpoint):
             self.provider_name = "deepseek-responses"
@@ -760,6 +964,19 @@ class OpenAIResponsesProvider:
         ):
             raise ProviderError("AGENT_BUDGET_EXHAUSTED")
 
+    def _check_repository_role(self, role: RepositoryCallRole | None, attempt: int) -> None:
+        budget = self._repository_budget
+        if budget is None:
+            return
+        if role is None:
+            raise ProviderError("LLM_REPOSITORY_ROLE_REQUIRED")
+        records = self.invocations()
+        if any(item.repository_role is None for item in records):
+            raise ProviderError("LLM_LEGACY_REPOSITORY_BUDGET_UNRESUMABLE")
+        used = sum(item.repository_role == role and item.attempt == attempt for item in records)
+        if used >= budget.limit(role, attempt):
+            raise ProviderError("LLM_REPOSITORY_ROLE_BUDGET_EXHAUSTED")
+
     @staticmethod
     def _metadata(response: dict[str, Any]) -> dict[str, object]:
         usage = response.get("usage")
@@ -779,6 +996,7 @@ class OpenAIResponsesProvider:
             response_id=response.get("id"),
             response_model=response.get("model"),
             usage=parsed_usage,
+            response_termination=response_termination(response),
         )
 
     def _call(
@@ -790,6 +1008,7 @@ class OpenAIResponsesProvider:
         *,
         wire_model: type[BaseModel] | None = None,
         convert: Callable[[Any], Output] | None = None,
+        repository_role: RepositoryCallRole | None = None,
     ) -> Output:
         self.ensure_available()
         if self._cancel is not None and self._cancel.is_set():
@@ -817,14 +1036,25 @@ class OpenAIResponsesProvider:
         self._call_sequence += 1
         for attempt in range(2):
             self._check_call_limit()
-            timeout = min(self.settings.timeout_seconds, self.gate.reserve(kind, attempt=attempt))
+            self._check_repository_role(repository_role, attempt)
+            timeout = min(
+                self.settings.timeout_seconds,
+                self.gate.reserve(
+                    kind, attempt=attempt, role_scoped_retry=self._repository_budget is not None
+                ),
+            )
             invocation = Invocation(
                 invocation_id=new_id(),
                 run_id=self.run_id,
                 kind=kind,
+                repository_role=repository_role,
                 attempt=attempt,
                 state="STARTED",
                 request_timeout_seconds=timeout,
+                configured_max_output_tokens=self.settings.max_output_tokens,
+                request_payload_sha256=hashlib.sha256(
+                    json.dumps(payload, ensure_ascii=False).encode()
+                ).hexdigest(),
                 started_at=now(),
                 configured_model=self.settings.model or "",
                 client_request_id=(
@@ -855,6 +1085,7 @@ class OpenAIResponsesProvider:
                         payload=payload,
                         client_request_id=invocation.client_request_id,
                         timeout_seconds=self.gate.timeout(timeout),
+                        max_output_tokens=self.settings.max_output_tokens,
                         attempt=attempt,
                         correction_hints=hints if attempt else [],
                     )
@@ -862,6 +1093,7 @@ class OpenAIResponsesProvider:
                 diagnostics = result.diagnostics
                 metadata = result.metadata.model_dump()
                 metadata["usage"] = result.metadata.usage
+                metadata["response_termination"] = result.metadata.response_termination
                 if result.error_code is not None:
                     raise ProviderError(
                         result.error_code, state=result.state, retryable=result.retryable
@@ -962,6 +1194,62 @@ class OpenAIResponsesProvider:
             wire_model=PlannerOutput,
             convert=lambda wire: wire.to_action_output(new_id()),
         ).action
+
+    def choose_repository_plan(self, snapshot: "SessionSnapshot") -> "TaskPlan":
+        """One model-generated global task plan, persisted at tool checkpoints."""
+        from gpu_agent.harness.models import TaskPlan
+
+        return self._call(
+            "plan",
+            {
+                "gpu_repo_task_plan": "v1",
+                "snapshot": snapshot.model_dump(
+                    mode="json",
+                    exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None,
+                ),
+            },
+            TaskPlan,
+            repository_role="planner",
+        )
+
+    def reflect_repository_task(self, snapshot: "SessionSnapshot") -> "TaskReflection":
+        """One concise failure analysis at half budget, never private CoT."""
+        from gpu_agent.harness.models import TaskReflection
+
+        return self._call(
+            "plan",
+            {
+                "gpu_repo_reflection": "v1",
+                "snapshot": snapshot.model_dump(
+                    mode="json",
+                    exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None,
+                ),
+            },
+            TaskReflection,
+            repository_role="reflect",
+        )
+
+    def choose_harness_v1(self, snapshot: "SessionSnapshot") -> "HarnessDecision":
+        """Audited model decision, one tool per turn, without a fixed stage order."""
+        from gpu_agent.harness.models import HarnessDecision
+
+        marker = (
+            {"gpu_repo_harness": "v1"}
+            if snapshot.case_id == "repository"
+            else {"gpu_coding_harness": "v1"}
+        )
+        return self._call(
+            "plan",
+            {
+                **marker,
+                "snapshot": snapshot.model_dump(
+                    mode="json",
+                    exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None,
+                ),
+            },
+            HarnessDecision,
+            repository_role="executor" if snapshot.case_id == "repository" else None,
+        )
 
     def plan_hardset_v2(self, snapshot: "PlannerSnapshot") -> "ProbeChoice":
         """Use the existing budgeted killable worker for a *typed* HardSet action."""

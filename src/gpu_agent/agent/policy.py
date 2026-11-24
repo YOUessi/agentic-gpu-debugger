@@ -21,6 +21,59 @@ from gpu_agent.contracts import CurrentPhase
 from gpu_agent.execution.models import SanitizerTool
 
 CallKind = Literal["plan", "diagnose", "patch"]
+RepositoryCallRole = Literal["executor", "planner", "reflect"]
+
+
+@dataclass(frozen=True)
+class RepositoryCallBudget:
+    """Separate logical decisions from bounded physical format retries."""
+
+    executor_decisions: int
+    executor_format_retries: int
+    planner_decisions: int = 0
+    reflect_decisions: int = 0
+    planner_format_retries: int = 0
+    reflect_format_retries: int = 0
+
+    @classmethod
+    def from_session(
+        cls, *, max_steps: int, max_model_calls: int, hierarchical: bool
+    ) -> "RepositoryCallBudget":
+        auxiliary = 4 if hierarchical else 0
+        retries = max_model_calls - max_steps - auxiliary
+        if max_steps < 1 or retries < 2 or max_model_calls > 40:
+            raise ValueError(
+                "repository budget must reserve two executor retries and auxiliary calls"
+            )
+        return cls(
+            executor_decisions=max_steps,
+            executor_format_retries=retries,
+            planner_decisions=int(hierarchical),
+            reflect_decisions=int(hierarchical),
+            planner_format_retries=int(hierarchical),
+            reflect_format_retries=int(hierarchical),
+        )
+
+    def limit(self, role: RepositoryCallRole, attempt: int) -> int:
+        if attempt not in (0, 1):
+            raise ValueError("invalid repository call attempt")
+        counts = {
+            "executor": (self.executor_decisions, self.executor_format_retries),
+            "planner": (self.planner_decisions, self.planner_format_retries),
+            "reflect": (self.reflect_decisions, self.reflect_format_retries),
+        }
+        return counts[role][attempt]
+
+    @property
+    def total(self) -> int:
+        return (
+            self.executor_decisions
+            + self.executor_format_retries
+            + self.planner_decisions
+            + self.planner_format_retries
+            + self.reflect_decisions
+            + self.reflect_format_retries
+        )
 
 
 class BudgetExceeded(Exception):
@@ -118,8 +171,15 @@ class BudgetLedger:
 
 class LLMCallGate:
     def __init__(
-        self, budget: AgentBudget | None = None, clock: Callable[[], float] = time.monotonic
+        self,
+        budget: AgentBudget | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        *,
+        reserve_repair_stages: bool = True,
     ) -> None:
+        if type(reserve_repair_stages) is not bool:
+            raise ValueError("invalid model-call reservation policy")
+        self._reserve_repair_stages = reserve_repair_stages
         self._budget = budget or AgentBudget()
         self._clock, self._start = clock, clock()
         self._lock = threading.Lock()
@@ -147,15 +207,27 @@ class LLMCallGate:
             raise ProviderError("AGENT_BUDGET_EXHAUSTED")
         return min(limit, remaining)
 
-    def reserve(self, kind: CallKind, *, attempt: int = 0) -> float:
+    def reserve(
+        self, kind: CallKind, *, attempt: int = 0, role_scoped_retry: bool = False
+    ) -> float:
         with self._lock:
-            if attempt not in {0, 1} or (attempt == 1 and kind in self._format_retried):
+            # Repository calls are separately bounded by the provider's durable
+            # role ledger. Legacy diagnosis/patch quotas remain unchanged.
+            if role_scoped_retry and (self._reserve_repair_stages or kind != "plan"):
+                raise ValueError("role-scoped retry requires repository call policy")
+            if attempt not in {0, 1} or (
+                attempt == 1 and not role_scoped_retry and kind in self._format_retried
+            ):
                 raise ProviderError("LLM_INVALID_OUTPUT")
             remaining = self.remaining()
             reserve = (
-                (int(not self._diagnosed) + int(not self._patched))
-                if kind == "plan"
-                else (int(not self._patched) if kind == "diagnose" else 0)
+                (
+                    (int(not self._diagnosed) + int(not self._patched))
+                    if kind == "plan"
+                    else (int(not self._patched) if kind == "diagnose" else 0)
+                )
+                if self._reserve_repair_stages
+                else 0
             )
             if remaining <= 0 or self._calls + reserve >= self._budget.max_llm_calls:
                 raise ProviderError("AGENT_BUDGET_EXHAUSTED")
@@ -163,7 +235,7 @@ class LLMCallGate:
             self._plans += int(kind == "plan")
             self._diagnosed |= kind == "diagnose"
             self._patched |= kind == "patch"
-            if attempt == 1:
+            if attempt == 1 and not role_scoped_retry:
                 self._format_retried.add(kind)
             # Provider settings choose the per-request deadline; this gate owns
             # the overall task deadline, not a second hidden 60-second limit.

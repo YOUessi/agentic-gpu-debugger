@@ -382,3 +382,21 @@ export GPU_AGENT_REPAIR_MEMORY_INDEX=/path/frozen-memory.json
 memory-on/off 的因果增益对照。完整来源边界见
 [V3 操作员手册](docs/v2-operator-runbook.md#repair-v3) 与
 [按日期的失败与修复记录](docs/repair-log/README.md)。
+
+
+## Repository Coding Agent — registered public CUDA checks (PR #16)
+
+The experimental `gpu-agent harness repo-run` creates a SHA-pinned detached Git
+worktree and runs a self-hosted LangGraph model→tool loop with bounded source
+edits, durable audit and explicit pause/resume. With the operator opt-in
+`--public-case h001` (or `h002`, `h003`), it can also invoke the already
+isolated HardSet public CUDA compiler, numeric oracle and four sanitizers.
+No shell arguments or hidden verifier controls are exposed to the model.
+A public success is **not** an independently verified repair; other multi-file
+edits remain staged and unverified.
+
+See [operator contract and limitations](docs/repair-log/2026-11-23-repo-registered-gpu-public-checks.md).
+Use `scripts/run_repository_hardset_public_gpu_smoke.py --help` for the
+**scripted**, opt-in real GPU backend connectivity test (zero model calls).
+
+真实 RTX 4090 Docker GPU 双轮公开检查的冻结实测记录（脚本化模型，无隐藏验证）：[2026-11-23 GPU acceptance](docs/repair-log/2026-11-23-repo-registered-gpu-real-acceptance.md)。
