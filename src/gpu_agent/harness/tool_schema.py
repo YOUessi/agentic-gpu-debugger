@@ -60,11 +60,14 @@ def repository_decision_schema(
         or any(name not in _REPO_ACTION_CLASSES for name in allowed_tools)
     ):
         raise ValueError("registered model tool grammar has invalid controller capability set")
+
     def bound_action(name: str) -> type[BaseModel]:
         base = _REPO_ACTION_CLASSES[name]
         fields: dict[str, Any] = {}
         if registered_kernel_path is not None and name in {
-            "repo_inspect_syntax", "repo_replace_syntax", "repo_read_file"
+            "repo_inspect_syntax",
+            "repo_replace_syntax",
+            "repo_read_file",
         }:
             fields["path"] = (Literal[registered_kernel_path], ...)
         if name == "repo_probe_public" and public_probe_phase is not None:
@@ -80,7 +83,9 @@ def repository_decision_schema(
         if name == "repo_replace_syntax" and bind_syntax_cursor:
             if syntax_state is None or not syntax_state.observed_nodes:
                 raise ValueError("AST edit exposed without observed node evidence")
-            aliases = tuple(node.id for node in syntax_state.observed_nodes if not node.code_truncated)
+            aliases = tuple(
+                node.id for node in syntax_state.observed_nodes if not node.code_truncated
+            )
             if not aliases:
                 raise ValueError("AST edit exposed without a complete node")
             if len(set(aliases)) != len(aliases):

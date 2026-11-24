@@ -4,6 +4,7 @@ The operator collects all legal AST pages before asking the model for one edit.
 No oracle, hidden verifier, expected answer, or reference patch enters the prompt.
 A syntactically accepted, changed candidate is NOT evidence of semantic correctness.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -19,7 +20,12 @@ from gpu_agent.agent.provider import (
     OpenAIProviderSettings,
     OpenAIResponsesProvider,
 )
-from gpu_agent.harness.models import FinishTask, RepoInspectSyntax, RepoReplaceSyntax, RepoRunPublicChecks
+from gpu_agent.harness.models import (
+    FinishTask,
+    RepoInspectSyntax,
+    RepoReplaceSyntax,
+    RepoRunPublicChecks,
+)
 from gpu_agent.harness.repo_runner import RepositoryDecisionModel
 from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
 
@@ -40,9 +46,14 @@ def run_ast_single_step(
     kernel = f"benchmarks/hardset_v2/{case_id}/mutant/kernel.cu"
     goal = "Repair the registered public CUDA kernel to satisfy its functional requirement."
     with RepositoryWorkspaceTools(
-        origin=repository, output=output, sha=base_sha, public_case_id=case_id,
-        max_public_checks=1, context_mode="evidence_first",
-        allow_batch_edits=False, syntax_mode=True,
+        origin=repository,
+        output=output,
+        sha=base_sha,
+        public_case_id=case_id,
+        max_public_checks=1,
+        context_mode="evidence_first",
+        allow_batch_edits=False,
+        syntax_mode=True,
     ) as host:
         offset = 0
         while True:
@@ -55,14 +66,17 @@ def run_ast_single_step(
             if state.next_offset is None:
                 break
             offset = state.next_offset
-        snapshot = host.snapshot(goal, [], 1).model_copy(update={
-            "allowed_tools": ("repo_replace_syntax",),
-            "context_summary": (
-                "Single-step diagnostic: select legal short aliases from syntax_state and "
-                "write a changed CUDA replacement in exactly one atomic edit. The operator "
-                "will run any public check after this response. No other model action is allowed."
-            ),
-        })
+        snapshot = host.snapshot(goal, [], 1).model_copy(
+            update={
+                "allowed_tools": ("repo_replace_syntax",),
+                "context_summary": (
+                    "Single-step diagnostic: select legal short aliases from syntax_state and "
+                    "write a changed CUDA replacement in exactly one atomic edit. The operator "
+                    "will run any public check after this response. "
+                    "No other model action is allowed."
+                ),
+            }
+        )
         if model_factory is None:
             settings = OpenAIProviderSettings.from_environment()
             provider = OpenAIResponsesProvider(
@@ -119,7 +133,8 @@ def run_ast_single_step(
                 candidate_sha = hashlib.sha256(candidate).hexdigest()
                 report["candidate_sha256"] = candidate_sha
                 report["legal_non_noop"] = (
-                    result.status == "OK" and candidate_sha != state.source_sha256
+                    result.status == "OK"
+                    and candidate_sha != state.source_sha256
                     and bool(host.workspace.diff())
                 )
                 if report["legal_non_noop"] and allow_real_gpu:
@@ -128,13 +143,18 @@ def run_ast_single_step(
                     report["public_check_passed"] = host.public_checks_passed
                     report["checker_feedback"] = checked.content
                     if host.public_checks_passed:
-                        host.invoke(FinishTask(summary="Operator finalized a publicly checked candidate"))
+                        host.invoke(
+                            FinishTask(summary="Operator finalized a publicly checked candidate")
+                        )
         invocations = getattr(model, "invocations", None)
         records = invocations() if callable(invocations) else []
         report["model_physical_calls"] = len(records)
         report["provider_audit"] = [
-            {"state": item.state, "error_code": item.error_code,
-             "usage": item.usage.model_dump(mode="json") if item.usage else None}
+            {
+                "state": item.state,
+                "error_code": item.error_code,
+                "usage": item.usage.model_dump(mode="json") if item.usage else None,
+            }
             for item in records
         ]
         report["tool_calls_including_operator"] = host.tool_calls

@@ -22,18 +22,28 @@ def main() -> int:
         parser.error("explicit real-model call approval is required")
     repository = args.repository.resolve(strict=True)
     sha = subprocess.run(
-        ["git", "-C", str(repository), "rev-parse", "HEAD"], check=True,
-        capture_output=True, text=True, timeout=20,
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
     ).stdout.strip()
     status = subprocess.run(
-        ["git", "-C", str(repository), "status", "--porcelain"], check=True,
-        capture_output=True, text=True, timeout=20,
+        ["git", "-C", str(repository), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
     ).stdout.strip()
     if status:
         parser.error("single-step experiment requires a clean frozen source checkout")
     result = run_ast_single_step(
-        repository=repository, output=args.output.absolute(), base_sha=sha,
-        case_id=args.case, allow_paid_calls=True, allow_real_gpu=args.allow_real_gpu,
+        repository=repository,
+        output=args.output.absolute(),
+        base_sha=sha,
+        case_id=args.case,
+        allow_paid_calls=True,
+        allow_real_gpu=args.allow_real_gpu,
     )
     print(json.dumps(result, indent=2, sort_keys=True))
     # Failed edits are valid experimental observations, not lost trials.

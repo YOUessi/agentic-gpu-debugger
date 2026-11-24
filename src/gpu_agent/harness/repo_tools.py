@@ -167,9 +167,7 @@ class RepositoryWorkspaceTools:
             }
         )
 
-    def _pin_syntax_page(
-        self, action: RepoInspectSyntax, mapping: dict[str, Any]
-    ) -> None:
+    def _pin_syntax_page(self, action: RepoInspectSyntax, mapping: dict[str, Any]) -> None:
         state = self.syntax_state
         if state is not None and state.path != action.path:
             self._invalidate_syntax_state()
@@ -723,7 +721,9 @@ class RepositoryWorkspaceTools:
                     "rejection_code": (
                         result.content.split(":", 2)[1].strip()
                         if result.status == "REJECTED"
-                        and result.content.startswith(("ValueError: REDUNDANT_", "ValueError: CUDA_"))
+                        and result.content.startswith(
+                            ("ValueError: REDUNDANT_", "ValueError: CUDA_")
+                        )
                         else None
                     ),
                 },

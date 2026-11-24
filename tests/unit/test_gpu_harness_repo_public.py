@@ -992,7 +992,12 @@ def test_hierarchical_syntax_mode_persists_planner_reflection_and_verified_gates
                     ],
                 }
             else:
-                action = {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 20}
+                action = {
+                    "tool": "repo_inspect_syntax",
+                    "path": KERNEL,
+                    "symbol": "softmax32",
+                    "limit": 20,
+                }
             assert action["tool"] in snapshot.allowed_tools
             return HarnessDecision.model_validate(
                 {"action": action, "reason": "Follow evidence-backed CUDA plan milestones"}
@@ -1196,8 +1201,11 @@ def test_pinned_ast_survives_compaction_cursor_binding_and_revision_change(tmp_p
 
     repo, sha = _registered_repository(tmp_path)
     with RepositoryWorkspaceTools(
-        origin=repo, output=tmp_path / "pinned-ast", sha=sha,
-        public_case_id="h001", syntax_mode=True,
+        origin=repo,
+        output=tmp_path / "pinned-ast",
+        sha=sha,
+        public_case_id="h001",
+        syntax_mode=True,
     ) as host:
         first = host.invoke(RepoInspectSyntax(path=KERNEL, symbol="softmax32", limit=3))
         assert first.status == "OK"
@@ -1222,20 +1230,27 @@ def test_pinned_ast_survives_compaction_cursor_binding_and_revision_change(tmp_p
         from pydantic import ValidationError
 
         with pytest.raises(ValidationError):
-            grammar.model_validate({
-                "action": {
-                    "tool": "repo_inspect_syntax", "path": KERNEL,
-                    "symbol": pinned.symbol, "offset": 0, "limit": 8,
-                },
-                "reason": "Repeat an already visited page",
-            })
+            grammar.model_validate(
+                {
+                    "action": {
+                        "tool": "repo_inspect_syntax",
+                        "path": KERNEL,
+                        "symbol": pinned.symbol,
+                        "offset": 0,
+                        "limit": 8,
+                    },
+                    "reason": "Repeat an already visited page",
+                }
+            )
         duplicate = host.invoke(RepoInspectSyntax(path=KERNEL, symbol=pinned.symbol, limit=8))
         assert "REDUNDANT_SYNTAX_INSPECTION" in duplicate.content
         while host.syntax_state.next_offset is not None:
             state = host.syntax_state
-            obs = host.invoke(RepoInspectSyntax(
-                path=KERNEL, symbol=state.symbol, offset=state.next_offset, limit=3
-            ))
+            obs = host.invoke(
+                RepoInspectSyntax(
+                    path=KERNEL, symbol=state.symbol, offset=state.next_offset, limit=3
+                )
+            )
             assert obs.status == "OK"
         state = host.syntax_state
         assert state is not None
@@ -1244,18 +1259,23 @@ def test_pinned_ast_survives_compaction_cursor_binding_and_revision_change(tmp_p
         assert ids == sorted(set(ids))
         node = next(x for x in state.observed_nodes if x.code == "denominator += expf(x);")
         base = {"path": KERNEL, "expected_source_sha256": state.source_sha256}
-        noop = RepoReplaceSyntax(**base, edits=[
-            RepoSyntaxEdit(node_id=node.id, replacement_code=node.code)
-        ])
+        noop = RepoReplaceSyntax(
+            **base, edits=[RepoSyntaxEdit(node_id=node.id, replacement_code=node.code)]
+        )
         assert f"CUDA_SYNTAX_NOOP: {node.id}" in host.invoke(noop).content
         assert "CUDA_SYNTAX_REPEATED_REJECTED_EDIT" in host.invoke(noop).content
-        missing = RepoReplaceSyntax(**base, edits=[
-            RepoSyntaxEdit(node_id="n99", replacement_code="return;")
-        ])
+        missing = RepoReplaceSyntax(
+            **base, edits=[RepoSyntaxEdit(node_id="n99", replacement_code="return;")]
+        )
         assert "CUDA_SYNTAX_NODE_NOT_FOUND" in host.invoke(missing).content
-        fixed = RepoReplaceSyntax(**base, edits=[
-            RepoSyntaxEdit(node_id=node.id, replacement_code="denominator += expf(x - maximum);")
-        ])
+        fixed = RepoReplaceSyntax(
+            **base,
+            edits=[
+                RepoSyntaxEdit(
+                    node_id=node.id, replacement_code="denominator += expf(x - maximum);"
+                )
+            ],
+        )
         assert host.invoke(fixed).status == "OK"
         assert host.syntax_state is None
         assert "CUDA_SOURCE_SHA_STALE" in host.invoke(fixed).content
@@ -1281,14 +1301,21 @@ def test_ast_checkpoint_rehydrates_aliases_without_another_model_inspect(
     checker = FakePublicChecker([True])
     monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
     options = dict(
-        repository=repo, output=output, base_sha=sha, goal=GOAL,
-        public_case_id="h001", syntax_mode=True, max_steps=6, max_model_calls=8,
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        syntax_mode=True,
+        max_steps=6,
+        max_model_calls=8,
     )
     paused = run_repository_coding_session(
-        **options, pause_after_turns=1,
-        model_factory=lambda _: Model([
-            {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 20}
-        ]),
+        **options,
+        pause_after_turns=1,
+        model_factory=lambda _: Model(
+            [{"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 20}]
+        ),
     )
     assert paused.status == "PAUSED_RESUMABLE"
     checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
@@ -1296,18 +1323,24 @@ def test_ast_checkpoint_rehydrates_aliases_without_another_model_inspect(
     assert state is not None
     d = next(x for x in state.observed_nodes if x.code == "denominator += expf(x);")
     n = next(x for x in state.observed_nodes if x.code == "out[i] = expf(own) / denominator;")
-    model = Model([
-        {
-            "tool": "repo_replace_syntax", "path": KERNEL,
-            "expected_source_sha256": state.source_sha256,
-            "edits": [
-                {"node_id": d.id, "replacement_code": "denominator += expf(x - maximum);"},
-                {"node_id": n.id, "replacement_code": "out[i] = expf(own - maximum) / denominator;"},
-            ],
-        },
-        _check(),
-        _finish(),
-    ])
+    model = Model(
+        [
+            {
+                "tool": "repo_replace_syntax",
+                "path": KERNEL,
+                "expected_source_sha256": state.source_sha256,
+                "edits": [
+                    {"node_id": d.id, "replacement_code": "denominator += expf(x - maximum);"},
+                    {
+                        "node_id": n.id,
+                        "replacement_code": "out[i] = expf(own - maximum) / denominator;",
+                    },
+                ],
+            },
+            _check(),
+            _finish(),
+        ]
+    )
     final = run_repository_coding_session(**options, resume=True, model_factory=lambda _: model)
     assert final.public_checks_passed
     assert final.tool_calls == 4
@@ -1338,15 +1371,20 @@ def test_single_step_microbench_calls_model_once_and_gpu_only_after_valid_edit(
             state = snapshot.syntax_state
             assert state is not None and state.next_offset is None
             d = next(n for n in state.observed_nodes if n.code == "denominator += expf(x);")
-            n = next(n for n in state.observed_nodes if n.code == "out[i] = expf(own) / denominator;")
+            n = next(
+                n for n in state.observed_nodes if n.code == "out[i] = expf(own) / denominator;"
+            )
             return HarnessDecision(
                 reason="Single controlled edit decision",
                 action=RepoReplaceSyntax(
-                    path=KERNEL, expected_source_sha256=state.source_sha256,
+                    path=KERNEL,
+                    expected_source_sha256=state.source_sha256,
                     edits=[
                         RepoSyntaxEdit(
                             node_id=d.id,
-                            replacement_code=d.code if self.noop else "denominator += expf(x - maximum);",
+                            replacement_code=d.code
+                            if self.noop
+                            else "denominator += expf(x - maximum);",
                         ),
                         RepoSyntaxEdit(
                             node_id=n.id,
@@ -1359,8 +1397,12 @@ def test_single_step_microbench_calls_model_once_and_gpu_only_after_valid_edit(
     for noop in (True, False):
         model = Once(noop)
         report = run_ast_single_step(
-            repository=repo, output=tmp_path / f"single-step-{noop}", base_sha=sha,
-            case_id="h001", allow_real_gpu=True, model_factory=lambda _: model,
+            repository=repo,
+            output=tmp_path / f"single-step-{noop}",
+            base_sha=sha,
+            case_id="h001",
+            allow_real_gpu=True,
+            model_factory=lambda _, m=model: m,
         )
         assert model.calls == 1
         assert report["model_physical_calls"] == 0
