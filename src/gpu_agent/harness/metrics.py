@@ -7,8 +7,7 @@ becomes VERIFIED_FIXED without an independent evaluator.
 
 from __future__ import annotations
 
-import json
-import re
+
 from pathlib import Path
 from typing import Literal
 
@@ -16,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.harness.journal import read_verified_journal, recovery_disposition
 from gpu_agent.harness.models import RepoHarnessOutcome
+from gpu_agent.harness.repo_audit import read_repository_tool_events
 from gpu_agent.store import RunStore, read_regular
 
 
@@ -62,7 +62,6 @@ class RepositoryTrajectoryMetrics(BaseModel):
     tool_trajectory: tuple[PublicToolStep, ...]
 
 
-_TOOL_NAME = re.compile(r"^repo-harness/v1/tool-([0-9]{3})\.json$")
 _REDUNDANT = {
     "REDUNDANT_READ",
     "REDUNDANT_LIST",
@@ -120,32 +119,16 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
     if parent.status.value != expected_status:
         raise ValueError("public RunStore did not finish in the expected state")
 
-    steps: dict[int, PublicToolStep] = {}
-    for ref in parent.artifact_refs:
-        match = _TOOL_NAME.fullmatch(ref.name)
-        if match is None:
-            continue
-        index = int(match.group(1))
-        if index in steps:
-            raise ValueError("duplicate public tool event")
-        body: object = json.loads(store.read(ref))
-        if not isinstance(body, dict):
-            raise ValueError("tool event is not an object")
-        tool = body.get("tool")
-        status = body.get("status")
-        code = body.get("rejection_code")
-        if (
-            not isinstance(tool, str)
-            or not isinstance(status, str)
-            or status not in {"OK", "FAILED", "REJECTED"}
-            or (code is not None and not isinstance(code, str))
-        ):
-            raise ValueError("invalid public tool event schema")
-        steps[index] = PublicToolStep.model_validate(
-            {"turn": index, "tool": tool, "status": status, "rejection_code": code}
+    records = read_repository_tool_events(
+        store, result.public_run_id, expected_count=result.tool_calls
+    )
+    steps = {
+        index: PublicToolStep.model_validate(
+            {"turn": index, "tool": body["tool"], "status": body["status"],
+             "rejection_code": body.get("rejection_code")}
         )
-    if sorted(steps) != list(range(1, result.tool_calls + 1)):
-        raise ValueError("tool events are missing or not contiguous")
+        for index, body in enumerate(records, 1)
+    }
     if result.tool_calls != result.turns:
         raise ValueError("tool counter differs from completed model turns")
     if sum(event["kind"] == "tool_completed" for event in journal) != result.turns:

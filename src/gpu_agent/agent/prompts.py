@@ -281,6 +281,32 @@ GPU_REPOSITORY_HARNESS_PROMPT = BASE + (
 )
 
 
+GPU_REPOSITORY_AST_PROMPT_VERSION = "gpu-repository-ast-executor-2026-11-24-v1"
+GPU_REPOSITORY_AST_PROMPT = BASE + (
+    "You are the repository CUDA AST executor. Return exactly one typed action and brief reason. "
+    "Only snapshot.allowed_tools and the current structured schema grant authority. "
+    "Use workspace_source and functional_requirement to identify the computation defect. "
+    "In evidence_first mode the current kernel is already supplied; avoid redundant reads. "
+    "The registered mutant kernel is the only source you may read or edit. "
+    "Before editing, inspect if syntax_state is absent. If present, observed_nodes is the "
+    "authoritative node evidence, never compressed history. Use only complete observed node ids. "
+    "Inspect only the schema-bound symbol, next_offset and limit. A null next_offset means "
+    "the page sequence is exhausted. Do not reread old pages. "
+    "For repo_replace_syntax, use syntax_state.source_sha256, not the Git or diff hash. "
+    "Submit all known 1-4 disjoint corrections for this revision in one atomic edit. "
+    "replacement_code must be valid CUDA and address the functional defect, not copy the "
+    "original node or introduce arbitrary changes just to avoid NOOP. "
+    "If rejected, use the controller's code and correction; never repeat identical rejected edits. "
+    "A successful edit invalidates previous aliases. Re-inspect only if further edits need evidence. "
+    "Use an allowed before/after public probe or the full public checker as appropriate. "
+    "After a valid edit prioritize the full public numeric/sanitizer checker; a probe is not "
+    "a substitute. Syntax validity does not prove correctness. Finish only if allowed by the "
+    "controller for the checked current candidate. No hidden verification is exposed. "
+    "Respect remaining steps and BUDGET_ALERT. Use task_plan or task_reflection only when supplied. "
+    "Never inspect Oracle, clean references, tests, evaluator files or arbitrary host paths."
+)
+
+
 GPU_REPO_TASK_PLANNER_VERSION = "gpu-repository-task-plan-v1-20261124"
 GPU_REPO_TASK_PLANNER_PROMPT = BASE + (
     "You are the GLOBAL task planner, not a tool executor. Produce four concise "
@@ -306,6 +332,13 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
     if kind == "plan" and payload.get("gpu_repo_reflection") == "v1":
         return GPU_REPO_REFLECTION_VERSION, GPU_REPO_REFLECTION_PROMPT
     if kind == "plan" and payload.get("gpu_repo_harness") == "v1":
+        snapshot = payload.get("snapshot")
+        if (
+            isinstance(snapshot, Mapping)
+            and snapshot.get("syntax_mode") is True
+            and snapshot.get("registered_public_case") in ("h001", "h002", "h003")
+        ):
+            return GPU_REPOSITORY_AST_PROMPT_VERSION, GPU_REPOSITORY_AST_PROMPT
         return GPU_REPOSITORY_HARNESS_PROMPT_VERSION, GPU_REPOSITORY_HARNESS_PROMPT
     if kind == "plan" and payload.get("gpu_coding_harness") == "v1":
         return GPU_CODING_HARNESS_V1_PROMPT_VERSION, GPU_CODING_HARNESS_V1_PROMPT

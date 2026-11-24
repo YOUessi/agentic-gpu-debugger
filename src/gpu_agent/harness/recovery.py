@@ -26,7 +26,8 @@ from gpu_agent.harness.models import (
     TaskReflection,
     ToolObservation,
 )
-from gpu_agent.store import read_regular, reject_symlinks, sync_directory
+from gpu_agent.harness.repo_audit import read_repository_tool_events
+from gpu_agent.store import RunStore, read_regular, reject_symlinks, sync_directory
 
 MAX_CHECKPOINT_BYTES = 256 * 1024
 
@@ -272,4 +273,33 @@ def validated_quiescent_repository_checkpoint(
         raise ValueError("tool completion ledger does not match checkpoint state")
     if checkpoint.event_counter != 4 * completed:
         raise ValueError("public event counter disagrees with journal")
+    if syntax_mode and public_case_id is not None:
+        events = read_repository_tool_events(
+            RunStore(output / "public"),
+            checkpoint.public_run_id,
+            expected_count=completed,
+            require_action=True,
+        )
+        completed_records = [event for event in records if event["kind"] == "tool_completed"]
+        for entry, event, journal_record in zip(
+            checkpoint.state["history"], events, completed_records, strict=True
+        ):
+            if (
+                entry["tool"] != event["tool"]
+                or entry["status"] != event["status"]
+                or journal_record["payload"]["tool"] != event["tool"]
+                or journal_record["payload"]["status"] != event["status"]
+            ):
+                raise ValueError("checkpoint history differs from public tool ledger")
+            observation = event.get("observation")
+            if observation is not None:
+                if entry["content"] != observation[:3900]:
+                    raise ValueError("checkpoint observation differs from public tool ledger")
+            elif len(entry["content"]) < 3900 and (
+                hashlib.sha256(entry["content"].encode()).hexdigest()
+                != event["observation_sha256"]
+            ):
+                raise ValueError("checkpoint observation hash differs from public tool ledger")
+        if checkpoint.state["decision"]["action"] != events[-1]["action"]:
+            raise ValueError("checkpoint last action differs from public tool ledger")
     return checkpoint

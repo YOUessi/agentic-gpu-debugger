@@ -239,6 +239,7 @@ class SessionSnapshot(StrictModel):
     registered_public_case: str | None = Field(default=None, pattern=r"^h00[1-3]$")
     registered_kernel_path: str | None = Field(default=None, max_length=300)
     context_mode: Literal["legacy", "evidence_first"] = "legacy"
+    syntax_mode: bool = False
     syntax_state: SyntaxState | None = None
     task_plan: TaskPlan | None = None
     task_progress: TaskProgress | None = None

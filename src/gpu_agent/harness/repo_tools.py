@@ -41,6 +41,8 @@ from gpu_agent.harness.models import (
     ToolObservation,
 )
 from gpu_agent.harness.registry import ToolPermissionPolicy
+from gpu_agent.harness.repo_audit import read_repository_tool_events
+from gpu_agent.harness.syntax_feedback import SyntaxRejection
 from gpu_agent.harness.worktree import PinnedGitWorkspace
 from gpu_agent.store import RunStore, read_regular
 
@@ -189,17 +191,35 @@ class RepositoryWorkspaceTools:
             observed_nodes=(*old_nodes, *nodes),
         )
 
-    def _restore_syntax_state(self, state: SyntaxState | None) -> None:
-        """Re-enumerate pinned public AST pages, never trust checkpoint aliases."""
+    def _restore_syntax_state(
+        self, state: SyntaxState | None, *, tool_calls: int
+    ) -> None:
+        """Re-enumerate pinned AST pages and bind them to completed public actions."""
+        active: list[dict[str, Any]] = []
+        if self._syntax_mode and self._public_case_id is not None:
+            records = read_repository_tool_events(
+                self._store, self.run_id, expected_count=tool_calls, require_action=True
+            )
+            for record in records:
+                if record["status"] != "OK":
+                    continue
+                if record["tool"] == "repo_replace_syntax":
+                    active.clear()
+                elif record["tool"] == "repo_inspect_syntax":
+                    active.append(record)
         if state is None:
+            if active:
+                raise ValueError("recovered AST state omitted completed inspection evidence")
             return
+        if self._public_case_id is not None and len(active) != len(state.visited_pages):
+            raise ValueError("recovered AST page count differs from completed inspections")
         if not self._syntax_mode or (
             self._public_kernel_path is not None and state.path != self._public_kernel_path
         ):
             raise ValueError("recovered AST state is outside the authorized source")
         if self._syntax_digest(state.path) != state.source_sha256:
             raise ValueError("recovered AST state has stale source SHA")
-        for page in state.visited_pages:
+        for index, page in enumerate(state.visited_pages):
             previous = self._syntax_state
             if page.offset != (previous.next_offset if previous else 0):
                 raise ValueError("recovered AST cursor is not contiguous")
@@ -214,6 +234,15 @@ class RepositoryWorkspaceTools:
             mapping = self.workspace.inspect_syntax(
                 state.path, symbol=state.symbol, offset=page.offset, limit=page.limit
             )
+            if self._public_case_id is not None:
+                record = active[index]
+                observation = json.dumps(mapping, ensure_ascii=False)
+                if (
+                    record["action"] != action.model_dump(mode="json")
+                    or record["observation_sha256"]
+                    != hashlib.sha256(observation.encode()).hexdigest()
+                ):
+                    raise ValueError("recovered AST page differs from audited public observation")
             self._pin_syntax_page(action, mapping)
         if self._syntax_state != state:
             raise ValueError("recovered AST evidence differs from current parser output")
@@ -380,7 +409,7 @@ class RepositoryWorkspaceTools:
         host._observed_query_fingerprints = set(observed_query_fingerprints)
         host._syntax_state = None
         host._rejected_syntax_edits = set()
-        host._restore_syntax_state(syntax_state)
+        host._restore_syntax_state(syntax_state, tool_calls=tool_calls)
         if (
             len(rejected_syntax_edits) > tool_calls
             or len(set(rejected_syntax_edits)) != len(rejected_syntax_edits)
@@ -652,83 +681,142 @@ class RepositoryWorkspaceTools:
                 else 0
             ),
             history=context.recent,
+            syntax_mode=self._syntax_mode,
             syntax_state=self.syntax_state,
             context_summary=summary,
             workspace_source=context.source,
             total_public_actions=context.total_actions,
         )
 
+    def _stale_syntax_sha(self, action: RepoReplaceSyntax, actual: str) -> SyntaxRejection:
+        return SyntaxRejection(
+            "CUDA_SOURCE_SHA_STALE",
+            expected_source_sha256=action.expected_source_sha256,
+            actual_source_sha256=actual,
+            correction="Use the current syntax_state; inspect again if it is absent.",
+        )
+
+    def _syntax_denial(self, action: HarnessAction) -> SyntaxRejection | None:
+        """Give precise corrections without accessing any unauthorized path."""
+        if not self._syntax_mode or self._public_kernel_path is None:
+            return None
+        if not isinstance(action, (RepoInspectSyntax, RepoReplaceSyntax)):
+            return None
+        if action.path != self._public_kernel_path:
+            return SyntaxRejection(
+                "CUDA_SYNTAX_NOT_REGISTERED_KERNEL",
+                correction="Use the operator-registered kernel path only.",
+            )
+        state = self.syntax_state
+        if isinstance(action, RepoInspectSyntax):
+            if (
+                state is not None
+                and action.symbol == state.symbol
+                and any(page.offset == action.offset for page in state.visited_pages)
+            ):
+                return SyntaxRejection(
+                    "REDUNDANT_SYNTAX_INSPECTION",
+                    requested_offset=action.offset,
+                    next_offset=state.next_offset,
+                    correction="Use pinned observed_nodes; inspect only the next available page.",
+                )
+            return None
+        actual = self._syntax_digest(action.path)
+        if action.expected_source_sha256 != actual:
+            return self._stale_syntax_sha(action, actual)
+        if state is None:
+            return SyntaxRejection(
+                "CUDA_SYNTAX_EVIDENCE_REQUIRED",
+                actual_source_sha256=actual,
+                correction="Inspect the current revision before editing.",
+            )
+        return None
+
     def invoke(self, action: HarnessAction) -> ToolObservation:
         if self._finished:
             raise ValueError("repository workspace already finalized")
         self._tool_calls += 1
         permission = self._policy.check(action.tool)
+        full_public_audit = self._syntax_mode and self._public_case_id is not None
+        detail: dict[str, Any] | None = None
         if (
             permission != "ALLOW"
             or action.tool not in self.ALLOWED_TOOLS
             or action.tool not in self._currently_allowed_tools()
         ):
-            result = ToolObservation(
-                tool=action.tool,
-                status="REJECTED",
-                content=(
-                    "TOOL_DENY: atomic batch editing is disabled for this ablation"
-                    if isinstance(action, RepoReplaceMany) and not self._batch_enabled
-                    else "ValueError: REDUNDANT_SYNTAX_INSPECTION: page already pinned"
-                    if (
-                        permission == "ALLOW"
-                        and isinstance(action, RepoInspectSyntax)
-                        and self.syntax_state is not None
-                        and action.path == self.syntax_state.path
-                        and action.symbol == self.syntax_state.symbol
-                        and any(
-                            page.offset == action.offset for page in self.syntax_state.visited_pages
-                        )
-                    )
-                    else "ValueError: CUDA_SOURCE_SHA_STALE"
-                    if (
-                        permission == "ALLOW"
-                        and isinstance(action, RepoReplaceSyntax)
-                        and self._syntax_mode
-                        and action.path == self._public_kernel_path
-                        and action.expected_source_sha256 != self._syntax_digest(action.path)
-                    )
-                    else "TOOL_NOT_AVAILABLE_AT_CURRENT_STATE: follow the allowed tool list"
-                    if permission == "ALLOW"
-                    else f"TOOL_{permission}: unavailable workspace capability"
-                ),
-            )
+            correction = self._syntax_denial(action) if permission == "ALLOW" else None
+            if correction is not None:
+                detail = correction.detail
+                content = f"ValueError: {correction}"
+            elif isinstance(action, RepoReplaceMany) and not self._batch_enabled:
+                content = "TOOL_DENY: atomic batch editing is disabled for this ablation"
+            elif permission == "ALLOW":
+                content = "TOOL_NOT_AVAILABLE_AT_CURRENT_STATE: follow the allowed tool list"
+            else:
+                content = f"TOOL_{permission}: unavailable workspace capability"
+            result = ToolObservation(tool=action.tool, status="REJECTED", content=content)
         else:
             try:
                 result = self._dispatch(action)
+            except SyntaxRejection as exc:
+                detail = exc.detail
+                result = ToolObservation(
+                    tool=action.tool, status="REJECTED", content=f"ValueError: {exc}"
+                )
             except (ValueError, OSError) as exc:
+                # Do not persist arbitrary exception text (paths, SDK messages,
+                # private diagnostics) in a full public AST observation.
+                message = str(exc)[:500]
+                if full_public_audit:
+                    code = message.split(":", 1)[0]
+                    if (
+                        isinstance(exc, ValueError)
+                        and code.isascii()
+                        and code.replace("_", "").isalnum()
+                        and code.isupper()
+                        and code.startswith(("CUDA_", "REDUNDANT_", "PUBLIC_", "REGISTERED_"))
+                        and len(code) <= 80
+                    ):
+                        message = code
+                    else:
+                        message = "PUBLIC_TOOL_IO_FAILED" if isinstance(exc, OSError) else (
+                            "PUBLIC_TOOL_REJECTED: controller rejected the requested operation"
+                        )
                 result = ToolObservation(
                     tool=action.tool,
                     status="REJECTED",
-                    content=f"{type(exc).__name__}: {str(exc)[:500]}",
+                    content=f"{type(exc).__name__}: {message}",
                 )
+        record: dict[str, Any] = {
+            "tool": action.tool,
+            "action": action.model_dump(mode="json"),
+            "status": result.status,
+            "observation_sha256": hashlib.sha256(result.content.encode()).hexdigest(),
+            "edited_files": self.workspace.edited_files,
+            "diff_sha256": self.workspace.integrity()["diff_sha256"],
+            "rejection_code": (
+                result.content.split(":", 2)[1].strip()
+                if result.status == "REJECTED"
+                and result.content.startswith(
+                    (
+                        "ValueError: REDUNDANT_",
+                        "ValueError: CUDA_",
+                        "ValueError: PUBLIC_",
+                        "ValueError: REGISTERED_",
+                    )
+                )
+                else None
+            ),
+        }
+        if full_public_audit:
+            # Only the bounded model-visible public ToolObservation, never raw
+            # executor artifacts or the private verifier's observations.
+            record["observation"] = result.content
+            record["rejection_detail"] = detail
         self._store.put(
             self.run_id,
             f"repo-harness/v1/tool-{self._tool_calls:03d}.json",
-            json.dumps(
-                {
-                    "tool": action.tool,
-                    "action": action.model_dump(mode="json"),
-                    "status": result.status,
-                    "observation_sha256": hashlib.sha256(result.content.encode()).hexdigest(),
-                    "edited_files": self.workspace.edited_files,
-                    "diff_sha256": self.workspace.integrity()["diff_sha256"],
-                    "rejection_code": (
-                        result.content.split(":", 2)[1].strip()
-                        if result.status == "REJECTED"
-                        and result.content.startswith(
-                            ("ValueError: REDUNDANT_", "ValueError: CUDA_")
-                        )
-                        else None
-                    ),
-                },
-                sort_keys=True,
-            ).encode(),
+            json.dumps(record, sort_keys=True).encode(),
             "public",
         )
         return result
@@ -773,13 +861,31 @@ class RepositoryWorkspaceTools:
             state = self.syntax_state
             if state is not None and state.path == action.path:
                 if action.symbol != state.symbol:
-                    raise ValueError("CUDA_SYNTAX_SYMBOL_CHANGED: use pinned symbol")
+                    raise SyntaxRejection(
+                        "CUDA_SYNTAX_SYMBOL_CHANGED",
+                        symbol=state.symbol,
+                        next_offset=state.next_offset,
+                        correction="Keep the pinned symbol and cursor.",
+                    )
                 if action.offset != state.next_offset:
-                    if any(page.offset == action.offset for page in state.visited_pages):
-                        raise ValueError("REDUNDANT_SYNTAX_INSPECTION: page already pinned")
-                    raise ValueError("CUDA_SYNTAX_CURSOR_MISMATCH: use pinned next_offset")
+                    code = (
+                        "REDUNDANT_SYNTAX_INSPECTION"
+                        if any(page.offset == action.offset for page in state.visited_pages)
+                        else "CUDA_SYNTAX_CURSOR_MISMATCH"
+                    )
+                    raise SyntaxRejection(
+                        code,
+                        requested_offset=action.offset,
+                        next_offset=state.next_offset,
+                        correction="Use pinned observed_nodes and inspect only next_offset.",
+                    )
             elif action.offset != 0:
-                raise ValueError("CUDA_SYNTAX_CURSOR_MISMATCH: start at offset 0")
+                raise SyntaxRejection(
+                    "CUDA_SYNTAX_CURSOR_MISMATCH",
+                    requested_offset=action.offset,
+                    next_offset=0,
+                    correction="Start a fresh source revision at offset 0.",
+                )
             key = self._syntax_fingerprint(
                 action.path, digest, action.symbol, action.offset, action.limit
             )
@@ -804,28 +910,62 @@ class RepositoryWorkspaceTools:
                 raise ValueError("CUDA_SYNTAX_NOT_REGISTERED_KERNEL")
             current = self._syntax_digest(action.path)
             if current != action.expected_source_sha256:
-                raise ValueError("CUDA_SOURCE_SHA_STALE")
+                raise self._stale_syntax_sha(action, current)
             state = self.syntax_state
             if state is None or state.path != action.path:
-                raise ValueError("CUDA_SYNTAX_NODE_NOT_FOUND: no pinned page for this source")
+                raise SyntaxRejection(
+                    "CUDA_SYNTAX_EVIDENCE_REQUIRED",
+                    actual_source_sha256=current,
+                    correction="Inspect the current revision before editing.",
+                )
             fingerprint = hashlib.sha256(
                 json.dumps(
                     action.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
                 ).encode()
             ).hexdigest()
             if fingerprint in self._rejected_syntax_edits:
-                raise ValueError("CUDA_SYNTAX_REPEATED_REJECTED_EDIT")
+                raise SyntaxRejection(
+                    "CUDA_SYNTAX_REPEATED_REJECTED_EDIT",
+                    source_sha256=current,
+                    edit_fingerprint=fingerprint,
+                    correction="Change the rejected edit based on the current public evidence.",
+                )
             try:
-                observed = {node.id for node in state.observed_nodes if not node.code_truncated}
+                observed = {node.id: node for node in state.observed_nodes}
                 for edit in action.edits:
-                    if edit.node_id not in observed:
-                        raise ValueError(f"CUDA_SYNTAX_NODE_NOT_FOUND: {edit.node_id}")
+                    node = observed.get(edit.node_id)
+                    if node is None:
+                        raise SyntaxRejection(
+                            "CUDA_SYNTAX_NODE_NOT_FOUND",
+                            node_id=edit.node_id,
+                            source_sha256=current,
+                            correction="Select an alias from current syntax_state.observed_nodes.",
+                        )
+                    if node.code_truncated:
+                        raise SyntaxRejection(
+                            "CUDA_SYNTAX_NODE_CODE_TRUNCATED",
+                            node_id=edit.node_id,
+                            correction="Only complete observed nodes are editable.",
+                        )
+                    if edit.replacement_code.strip() == node.code.strip():
+                        requirement = PUBLIC_REQUIREMENTS.get(self._public_case_id or "", "")
+                        raise SyntaxRejection(
+                            "CUDA_SYNTAX_NOOP",
+                            node_id=node.id,
+                            source_sha256=current,
+                            original_code=node.code,
+                            functional_requirement=requirement,
+                            correction=(
+                                "replacement_code must differ from the original and address the "
+                                "computation defect; do not fabricate a change."
+                            ),
+                        )
                 digest = self.workspace.replace_syntax(
                     action.path,
                     expected_source_sha256=action.expected_source_sha256,
                     edits=[(e.node_id, e.replacement_code) for e in action.edits],
                 )
-            except (ValueError, OSError):
+            except ValueError:
                 self._rejected_syntax_edits.add(fingerprint)
                 raise
             self._invalidate_syntax_state()
