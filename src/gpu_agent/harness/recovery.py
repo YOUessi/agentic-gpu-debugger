@@ -44,6 +44,7 @@ class RepositoryCheckpoint(BaseModel):
     event_counter: int = Field(ge=4, le=160)
     max_steps: int = Field(ge=1, le=38)
     max_model_calls: int = Field(ge=4, le=40)
+    max_output_tokens: int = Field(default=4096, ge=256, le=16384)
     max_edited_files: int = Field(ge=1, le=20)
     public_case_id: str | None = Field(default=None, pattern=r"^h00[1-3]$")
     context_mode: Literal["legacy", "evidence_first"] = "evidence_first"
@@ -223,6 +224,7 @@ def validated_quiescent_repository_checkpoint(
     base_sha: str,
     max_steps: int,
     max_model_calls: int,
+    max_output_tokens: int = 4096,
     max_edited_files: int,
     public_case_id: str | None = None,
     max_public_checks: int = 2,
@@ -245,6 +247,7 @@ def validated_quiescent_repository_checkpoint(
         or checkpoint.goal_sha256 != hashlib.sha256(goal.encode()).hexdigest()
         or checkpoint.max_steps != max_steps
         or checkpoint.max_model_calls != max_model_calls
+        or checkpoint.max_output_tokens != max_output_tokens
         or checkpoint.max_edited_files != max_edited_files
         or checkpoint.public_case_id != public_case_id
         or checkpoint.max_public_checks != max_public_checks
@@ -266,6 +269,7 @@ def validated_quiescent_repository_checkpoint(
         or first["payload"].get("allow_batch_edits", True) != checkpoint.allow_batch_edits
         or first["payload"].get("hierarchical_mode", False) != checkpoint.hierarchical_mode
         or first["payload"].get("syntax_mode", False) != checkpoint.syntax_mode
+        or first["payload"].get("max_output_tokens", 4096) != checkpoint.max_output_tokens
     ):
         raise ValueError("checkpoint does not match session creation evidence")
     completed = sum(event["kind"] == "tool_completed" for event in records)

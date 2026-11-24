@@ -84,6 +84,7 @@ class BenchmarkPlan(BenchmarkModel):
     repetitions: int = Field(ge=1, le=3)
     model_name: str | None
     endpoint_host: str | None
+    max_output_tokens: int = Field(default=4096, ge=256, le=16384)
     max_steps: int = Field(ge=4, le=24)
     max_model_calls: int = Field(ge=6, le=32)
     # For new plans max_model_calls is the shared executor ceiling; auxiliary
@@ -269,6 +270,7 @@ def create_benchmark_plan(
         repetitions=repetitions,
         model_name=settings.model,
         endpoint_host=host,
+        max_output_tokens=settings.max_output_tokens,
         max_steps=max_steps,
         max_model_calls=max_model_calls,
         model_budget_scheme="equal_executor_v1",
@@ -750,6 +752,7 @@ def run_paired_experiment(
             or snapshot.registry_sha256 != preflight.plan.registry_sha256
             or snapshot.model_name != preflight.plan.model_name
             or snapshot.endpoint_host != preflight.plan.endpoint_host
+            or snapshot.max_output_tokens != preflight.plan.max_output_tokens
             or snapshot.architecture_study != preflight.plan.architecture_study
             or snapshot.planner_only_study != preflight.plan.planner_only_study
         ):

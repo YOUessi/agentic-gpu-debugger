@@ -80,6 +80,8 @@ def run_repository_coding_session(
         raise ValueError("hierarchical and AST modes require registered public CUDA case")
     if not goal.strip() or len(goal) > 1500:
         raise ValueError("invalid task goal")
+    settings = OpenAIProviderSettings.from_environment() if model_factory is None else None
+    output_cap = settings.max_output_tokens if settings is not None else 4096
     checkpoint = None
     if resume:
         if not output.is_dir() or output.is_symlink():
@@ -90,6 +92,7 @@ def run_repository_coding_session(
             base_sha=base_sha,
             max_steps=max_steps,
             max_model_calls=max_model_calls,
+            max_output_tokens=output_cap,
             max_edited_files=max_edited_files,
             public_case_id=public_case_id,
             max_public_checks=max_public_checks,
@@ -144,8 +147,9 @@ def run_repository_coding_session(
 
     with host as tools:
         if model_factory is None:
+            assert settings is not None
             provider = OpenAIResponsesProvider(
-                OpenAIProviderSettings.from_environment(),
+                settings,
                 LLMCallGate(
                     AgentBudget(
                         max_llm_calls=max_model_calls,
@@ -193,6 +197,7 @@ def run_repository_coding_session(
                         "hierarchical_mode": hierarchical_mode,
                         "syntax_mode": syntax_mode,
                         "public_check_audit_version": 1,
+                        "max_output_tokens": output_cap,
                         "repository_call_budget": {
                             "executor_decisions": role_budget.executor_decisions,
                             "executor_format_retries": role_budget.executor_format_retries,
@@ -261,6 +266,7 @@ def run_repository_coding_session(
                         event_counter=events,
                         max_steps=max_steps,
                         max_model_calls=max_model_calls,
+                        max_output_tokens=output_cap,
                         max_edited_files=max_edited_files,
                         public_case_id=public_case_id,
                         max_public_checks=max_public_checks,

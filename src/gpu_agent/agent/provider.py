@@ -71,6 +71,9 @@ if TYPE_CHECKING:
 Output = TypeVar("Output", bound=BaseModel)
 
 
+MAX_OUTPUT_TOKENS = 4096
+
+
 class OpenAIProviderSettings(ExecutionModel):
     endpoint: str | None = None
     model: str | None = Field(default=None, min_length=1)
@@ -78,6 +81,7 @@ class OpenAIProviderSettings(ExecutionModel):
     timeout_seconds: float = Field(default=60, gt=0, le=600, allow_inf_nan=False)
     supports_store_false: bool = False
     allow_loopback_http: bool = False
+    max_output_tokens: int = Field(default=MAX_OUTPUT_TOKENS, ge=256, le=16384, strict=True)
 
     @field_validator("endpoint")
     @classmethod
@@ -122,6 +126,7 @@ class OpenAIProviderSettings(ExecutionModel):
             supports_store_false=os.environ.get("GPU_AGENT_STORE_FALSE_SUPPORTED") == "1",
             allow_loopback_http=os.environ.get("GPU_AGENT_ALLOW_LOOPBACK_HTTP") == "1",
             timeout_seconds=float(os.environ.get("GPU_AGENT_LLM_TIMEOUT_SECONDS", "60")),
+            max_output_tokens=int(os.environ.get("GPU_AGENT_MAX_OUTPUT_TOKENS", "4096")),
         )
 
 
@@ -331,6 +336,21 @@ def normalize_wire_value(kind: "CallKind", value: object) -> object:
 WIRE_MODELS: "dict[CallKind, type[BaseModel]]" = {}
 
 
+class ResponseTermination(ExecutionModel):
+    """Allowlisted wire metadata, never raw generated text or reasoning."""
+
+    response_status: Literal[
+        "completed", "incomplete", "failed", "cancelled", "queued", "in_progress", "other"
+    ] | None = None
+    incomplete_reason: Literal["max_output_tokens", "content_filter", "other"] | None = None
+    finish_reasons: tuple[str, ...] = Field(default=(), max_length=16)
+    output_item_statuses: tuple[str, ...] = Field(default=(), max_length=16)
+    partial_output_chars: int = Field(default=0, ge=0)
+    partial_output_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # Shape-only suffix: preserve JSON delimiters; mask all generated values.
+    partial_output_tail_shape: str = Field(default="", max_length=96)
+
+
 class Invocation(ExecutionModel):
     transport_error: TransportError | None = None
     invocation_id: str
@@ -344,6 +364,9 @@ class Invocation(ExecutionModel):
     elapsed_ms: float | None = None
     # None denotes older records where the configured deadline was not persisted.
     request_timeout_seconds: float | None = Field(default=None, gt=0, le=600)
+    configured_max_output_tokens: int | None = Field(default=None, ge=256, le=16384)
+    request_payload_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    response_termination: ResponseTermination | None = None
     configured_model: str
     response_model: str | None = None
     endpoint_host: str
@@ -370,6 +393,7 @@ class WorkerRequest(ExecutionModel):
     client_request_id: str
     timeout_seconds: float = Field(gt=0, le=600, allow_inf_nan=False)
     attempt: int = Field(ge=0, le=1)
+    max_output_tokens: int = Field(default=MAX_OUTPUT_TOKENS, ge=256, le=16384, strict=True)
     correction_hints: list[str] = Field(default_factory=list, max_length=10)
 
 
@@ -380,6 +404,7 @@ class ResponseMetadata(ExecutionModel):
     response_model: str | None = Field(default=None, max_length=1024)
     usage: Usage | None = None
     http_status: int | None = None
+    response_termination: ResponseTermination | None = None
 
 
 class SDKResult(ExecutionModel):
@@ -398,6 +423,9 @@ class SDKResult(ExecutionModel):
             "LLM_INVALID_OUTPUT",
             "LLM_REFUSED",
             "LLM_INCOMPLETE",
+            "LLM_INCOMPLETE_MAX_OUTPUT_TOKENS",
+            "LLM_INCOMPLETE_CONTENT_FILTER",
+            "LLM_INCOMPLETE_OTHER",
             "LLM_WORKER_ERROR",
         ]
         | None
@@ -529,6 +557,57 @@ def parse_wire_text(
     return value.model_dump(mode="json"), base
 
 
+def response_termination(envelope: dict[str, Any]) -> ResponseTermination:
+    """Parse only trusted-shape metadata; output_text excludes reasoning items."""
+    statuses = {"completed", "incomplete", "failed", "cancelled", "queued", "in_progress"}
+    finishes = {"stop", "length", "content_filter", "tool_calls", "max_output_tokens"}
+    raw_status = envelope.get("status")
+    raw_reason = envelope.get("incomplete_details")
+    reason = raw_reason.get("reason") if isinstance(raw_reason, dict) else None
+    status = raw_status if isinstance(raw_status, str) and raw_status in statuses else (
+        "other" if raw_status is not None else None
+    )
+    safe_reason = reason if reason in ("max_output_tokens", "content_filter") else (
+        "other" if raw_reason is not None or raw_status == "incomplete" else None
+    )
+    finish_reasons: list[str] = []
+    item_statuses: list[str] = []
+    parts: list[str] = []
+    items = envelope.get("output")
+    if isinstance(items, list):
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for name, allowed, dest in (
+                ("finish_reason", finishes, finish_reasons),
+                ("status", statuses, item_statuses),
+            ):
+                val = item.get(name)
+                if val is not None and len(dest) < 16:
+                    dest.append(val if isinstance(val, str) and val in allowed else "other")
+            if item.get("type") != "message":
+                continue
+            content = item.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if (
+                        isinstance(part, dict) and part.get("type") == "output_text"
+                        and isinstance(part.get("text"), str)
+                    ):
+                        parts.append(part["text"])
+    output = "".join(parts)
+    tail = "".join(
+        char if char in '{}[]":, \\n\\t' else "x" for char in output[-96:]
+    )
+    return ResponseTermination.model_validate({
+        "response_status": status, "incomplete_reason": safe_reason,
+        "finish_reasons": tuple(finish_reasons), "output_item_statuses": tuple(item_statuses),
+        "partial_output_chars": len(output),
+        "partial_output_sha256": hashlib.sha256(output.encode()).hexdigest() if parts else None,
+        "partial_output_tail_shape": tail,
+    })
+
+
 def invoke_sdk(
     request: WorkerRequest, client_factory: Callable[..., Any] = openai.OpenAI
 ) -> SDKResult:
@@ -623,7 +702,7 @@ def invoke_sdk(
             "model": request.model,
             "input": json.dumps({"untrusted_data": request.payload}, ensure_ascii=False),
             "store": False,
-            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "max_output_tokens": request.max_output_tokens,
             "timeout": request.timeout_seconds,
             "extra_headers": {"X-Client-Request-Id": request.client_request_id},
         }
@@ -663,7 +742,12 @@ def invoke_sdk(
             or envelope.get("error")
             or envelope.get("incomplete_details")
         ):
-            raise ProviderError("LLM_INCOMPLETE", state="FAILED")
+            reason = response_termination(envelope).incomplete_reason
+            code = {
+                "max_output_tokens": "LLM_INCOMPLETE_MAX_OUTPUT_TOKENS",
+                "content_filter": "LLM_INCOMPLETE_CONTENT_FILTER",
+            }.get(reason or "", "LLM_INCOMPLETE_OTHER")
+            raise ProviderError(code, state="FAILED")
         if deepseek:
             value, diagnostics = parse_wire_text(
                 request.kind, _deepseek_output_text(envelope), output_model
@@ -757,9 +841,6 @@ class LLMProvider(Protocol):
     def revise_patch(
         self, public_source: PublicSource, diagnosis: DiagnosisResult, feedback: dict[str, object]
     ) -> str: ...
-
-
-MAX_OUTPUT_TOKENS = 4096
 
 
 class DevelopmentCallPolicy(ExecutionModel):
@@ -877,6 +958,7 @@ class OpenAIResponsesProvider:
             response_id=response.get("id"),
             response_model=response.get("model"),
             usage=parsed_usage,
+            response_termination=response_termination(response),
         )
 
     def _call(
@@ -931,6 +1013,10 @@ class OpenAIResponsesProvider:
                 attempt=attempt,
                 state="STARTED",
                 request_timeout_seconds=timeout,
+                configured_max_output_tokens=self.settings.max_output_tokens,
+                request_payload_sha256=hashlib.sha256(
+                    json.dumps(payload, ensure_ascii=False).encode()
+                ).hexdigest(),
                 started_at=now(),
                 configured_model=self.settings.model or "",
                 client_request_id=(
@@ -961,6 +1047,7 @@ class OpenAIResponsesProvider:
                         payload=payload,
                         client_request_id=invocation.client_request_id,
                         timeout_seconds=self.gate.timeout(timeout),
+                        max_output_tokens=self.settings.max_output_tokens,
                         attempt=attempt,
                         correction_hints=hints if attempt else [],
                     )
