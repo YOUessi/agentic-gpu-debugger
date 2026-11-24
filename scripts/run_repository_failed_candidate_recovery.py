@@ -115,6 +115,7 @@ class PriorFailureRecovery:
         compile_gate: bool,
         allow_revert: bool,
         public_diagnostics: bool,
+        ast_target_binding: bool = False,
     ) -> None:
         self.host = host
         self.prior = prior
@@ -123,6 +124,7 @@ class PriorFailureRecovery:
         self.compile_gate = compile_gate
         self.allow_revert = allow_revert
         self.public_diagnostics = public_diagnostics
+        self.ast_target_binding = ast_target_binding
         self.prefix_turns = 0
         self.prefix_complete = False
         self.failure_feedback: dict[str, Any] | None = None
@@ -177,7 +179,17 @@ class PriorFailureRecovery:
                 )
             if state.source_sha256 != self.edit.expected_source_sha256:
                 raise ValueError("prior edit refers to a different mutant SHA")
-            return self._prefix_action(snapshot, self.edit)
+            edit = self.edit
+            if self.ast_target_binding:
+                # Historical model actions predate old-code binding. The
+                # operator prefix explicitly attests their actual original
+                # targets, reproducing the same bad bytes, not correcting them.
+                by_id = {node.id: node for node in state.observed_nodes}
+                edit = edit.model_copy(update={"edits": [
+                    item.model_copy(update={"expected_old_code": by_id[item.node_id].code})
+                    for item in edit.edits
+                ]})
+            return self._prefix_action(snapshot, edit)
 
         actual = hashlib.sha256(
             read_regular(self.host.workspace.root / self.edit.path, 1024 * 1024)
@@ -253,6 +265,7 @@ def summarize_trial(
         "compile_gate",
         "allow_revert",
         "public_diagnostics",
+        "ast_target_binding",
         "max_compiles",
         "max_steps",
         "max_model_calls",
@@ -397,6 +410,7 @@ def main() -> int:
     parser.add_argument("--compile-gate", action="store_true")
     parser.add_argument("--allow-revert", action="store_true")
     parser.add_argument("--public-diagnostics", action="store_true")
+    parser.add_argument("--ast-target-binding", action="store_true")
     parser.add_argument("--max-compiles", type=int, default=6)
     parser.add_argument("--allow-paid-calls", action="store_true")
     parser.add_argument("--allow-real-gpu", action="store_true")
@@ -451,6 +465,7 @@ def main() -> int:
         "compile_gate": args.compile_gate,
         "allow_revert": args.allow_revert,
         "public_diagnostics": args.public_diagnostics,
+        "ast_target_binding": args.ast_target_binding,
         "extended_syntax": False,
         "hierarchical_mode": False,
         "max_compiles": args.max_compiles,
@@ -481,6 +496,7 @@ def main() -> int:
             compile_gate=args.compile_gate,
             allow_revert=args.allow_revert,
             public_diagnostics=args.public_diagnostics,
+            ast_target_binding=args.ast_target_binding,
         )
         holder.append(model)
         return model
@@ -504,6 +520,7 @@ def main() -> int:
             allow_revert=args.allow_revert,
             max_compiles=args.max_compiles,
             public_diagnostics=args.public_diagnostics,
+            ast_target_binding=args.ast_target_binding,
             provider_settings=settings,
             allow_paid_calls=True,
             model_factory=factory if prior else None,

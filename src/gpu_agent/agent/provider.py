@@ -673,6 +673,11 @@ def invoke_sdk(
             if recovery_data is not None
             else None
         )
+        target_binding = snapshot.get("ast_target_binding", False)
+        if type(target_binding) is not bool or (
+            target_binding and (kernel_path is None or snapshot.get("syntax_mode") is not True)
+        ):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
         output_model = repository_decision_schema(
             tuple(names),
             registered_kernel_path=kernel_path,
@@ -680,6 +685,7 @@ def invoke_sdk(
             syntax_state=syntax_state,
             bind_syntax_cursor=kernel_path is not None,
             recovery_source_sha256=recovery.source_sha256 if recovery is not None else None,
+            ast_target_binding=target_binding,
         )
     elif request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
         from gpu_agent.harness.models import HarnessDecision

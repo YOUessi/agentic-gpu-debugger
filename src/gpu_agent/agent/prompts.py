@@ -341,6 +341,14 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
             and snapshot.get("registered_public_case") in ("h001", "h002", "h003")
         ):
             recovery = snapshot.get("candidate_recovery")
+            binding = snapshot.get("ast_target_binding") is True
+            binding_extra = (
+                " For each AST edit, copy the EXACT code from the intended observed node "
+                "into expected_old_code, then use its matching node_id and replacement_code. "
+                "Verify the old code is the statement you intend to change, not merely "
+                "a nearby alias. A binding mismatch applies no edits."
+                if binding else ""
+            )
             if isinstance(recovery, Mapping):
                 extra = (
                     " When available, compile the exact edited candidate before numeric checks. "
@@ -349,8 +357,13 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
                     "Compilation is not numerical correctness. "
                     "Do not invent arbitrary source paths."
                 )
-                return "gpu-repository-ast-recovery-v1", GPU_REPOSITORY_AST_PROMPT + extra
-            return GPU_REPOSITORY_AST_PROMPT_VERSION, GPU_REPOSITORY_AST_PROMPT
+                version = "gpu-repository-ast-recovery-v1"
+                return version + ("-bound" if binding else ""), (
+                    GPU_REPOSITORY_AST_PROMPT + extra + binding_extra
+                )
+            return GPU_REPOSITORY_AST_PROMPT_VERSION + ("-bound" if binding else ""), (
+                GPU_REPOSITORY_AST_PROMPT + binding_extra
+            )
         return GPU_REPOSITORY_HARNESS_PROMPT_VERSION, GPU_REPOSITORY_HARNESS_PROMPT
     if kind == "plan" and payload.get("gpu_coding_harness") == "v1":
         return GPU_CODING_HARNESS_V1_PROMPT_VERSION, GPU_CODING_HARNESS_V1_PROMPT

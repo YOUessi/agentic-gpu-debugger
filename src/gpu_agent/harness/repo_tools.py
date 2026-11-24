@@ -88,6 +88,7 @@ class RepositoryWorkspaceTools:
         allow_revert: bool = False,
         max_compiles: int = 6,
         public_diagnostics: bool = False,
+        ast_target_binding: bool = False,
     ) -> None:
         if output.exists() or output.is_symlink():
             raise ValueError("repository agent output already exists")
@@ -132,6 +133,14 @@ class RepositoryWorkspaceTools:
         self._public_probe_run_ids: list[str] = []
         self._configure_recovery(compile_gate, allow_revert, max_compiles)
         self._configure_public_diagnostics(public_diagnostics)
+        self._configure_ast_target_binding(ast_target_binding)
+
+    def _configure_ast_target_binding(self, enabled: bool) -> None:
+        if type(enabled) is not bool or (
+            enabled and (not self._syntax_mode or self._public_kernel_path is None)
+        ):
+            raise ValueError("AST target binding requires registered AST mode")
+        self._ast_target_binding = enabled
 
     def _configure_public_diagnostics(self, enabled: bool) -> None:
         if type(enabled) is not bool or (enabled and self._public_case_id is None):
@@ -596,6 +605,7 @@ class RepositoryWorkspaceTools:
         allow_revert: bool = False,
         max_compiles: int = 6,
         public_diagnostics: bool = False,
+        ast_target_binding: bool = False,
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -723,6 +733,7 @@ class RepositoryWorkspaceTools:
         host._source_version = sha
         host._configure_recovery(compile_gate, allow_revert, max_compiles)
         host._configure_public_diagnostics(public_diagnostics)
+        host._configure_ast_target_binding(ast_target_binding)
         host._restore_candidate_recovery(tool_calls)
         return host
 
@@ -963,6 +974,7 @@ class RepositoryWorkspaceTools:
             history=context.recent,
             syntax_mode=self._syntax_mode,
             syntax_state=self.syntax_state,
+            ast_target_binding=self._ast_target_binding,
             candidate_recovery=self._candidate_recovery_view(),
             context_summary=summary,
             workspace_source=context.source,
@@ -1240,6 +1252,19 @@ class RepositoryWorkspaceTools:
                             "CUDA_SYNTAX_NODE_CODE_TRUNCATED",
                             node_id=edit.node_id,
                             correction="Only complete observed nodes are editable.",
+                        )
+                    if (
+                        self._ast_target_binding or edit.expected_old_code is not None
+                    ) and edit.expected_old_code != node.code:
+                        raise SyntaxRejection(
+                            "CUDA_AST_TARGET_BINDING_MISMATCH",
+                            node_id=node.id, source_sha256=current,
+                            actual_code=node.code, expected_old_code=edit.expected_old_code,
+                            no_source_written=True,
+                            correction=(
+                                "Use the exact current observed node code and its matching ID. "
+                                "No part of this batch was applied."
+                            ),
                         )
                     if edit.replacement_code.strip() == node.code.strip():
                         requirement = PUBLIC_REQUIREMENTS.get(self._public_case_id or "", "")

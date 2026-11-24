@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from gpu_agent.harness.models import (
     FinishTask,
+    LegacyRepoSyntaxEdit,
     RepoCompileCandidate,
     RepoGitDiff,
     RepoInspectSyntax,
@@ -53,6 +54,7 @@ def repository_decision_schema(
     syntax_state: SyntaxState | None = None,
     bind_syntax_cursor: bool = False,
     recovery_source_sha256: str | None = None,
+    ast_target_binding: bool = False,
 ) -> type[BaseModel]:
     """Return a strict Pydantic response schema for EXACTLY approved tools.
 
@@ -100,10 +102,13 @@ def repository_decision_schema(
                 raise ValueError("AST edit exposed without a complete node")
             if len(set(aliases)) != len(aliases):
                 raise ValueError("duplicate AST aliases in model grammar")
+            edit_fields: dict[str, Any] = {"node_id": (Literal[aliases], ...)}
+            if ast_target_binding:
+                edit_fields["expected_old_code"] = (str, Field(min_length=1, max_length=300))
             edit = create_model(
                 "BoundRepoSyntaxEdit",
-                __base__=RepoSyntaxEdit,
-                node_id=(Literal[aliases], ...),
+                __base__=RepoSyntaxEdit if ast_target_binding else LegacyRepoSyntaxEdit,
+                **edit_fields,
             )
             fields["expected_source_sha256"] = (Literal[syntax_state.source_sha256], ...)
             fields["edits"] = (GenericAlias(list, edit), Field(min_length=1, max_length=4))

@@ -55,6 +55,7 @@ class RepositoryCheckpoint(BaseModel):
     allow_revert: bool = False
     max_compiles: int = Field(default=6, ge=1, le=8)
     public_diagnostics: bool = False
+    ast_target_binding: bool = False
     max_public_checks: int = Field(default=2, ge=1, le=3)
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     public_probes_attempted: int = Field(default=0, ge=0, le=4)
@@ -240,6 +241,7 @@ def validated_quiescent_repository_checkpoint(
     allow_revert: bool = False,
     max_compiles: int = 6,
     public_diagnostics: bool = False,
+    ast_target_binding: bool = False,
 ) -> RepositoryCheckpoint:
     """Reject uncertain side effects, terminal sessions or mismatched settings."""
     records = read_verified_journal(output / "session-events.jsonl")
@@ -267,6 +269,7 @@ def validated_quiescent_repository_checkpoint(
         or checkpoint.allow_revert != allow_revert
         or checkpoint.max_compiles != max_compiles
         or checkpoint.public_diagnostics != public_diagnostics
+        or checkpoint.ast_target_binding != ast_target_binding
     ):
         raise ValueError("checkpoint identity, journal head or budgets differ")
     first = records[0]
@@ -285,6 +288,7 @@ def validated_quiescent_repository_checkpoint(
         or first["payload"].get("allow_revert", False) != checkpoint.allow_revert
         or first["payload"].get("max_compiles", 6) != checkpoint.max_compiles
         or first["payload"].get("public_diagnostics", False) != checkpoint.public_diagnostics
+        or first["payload"].get("ast_target_binding", False) != checkpoint.ast_target_binding
         or first["payload"].get("max_steps", max_steps) != max_steps
         or first["payload"].get("max_model_calls", max_model_calls) != max_model_calls
         or first["payload"].get("max_output_tokens", 4096) != checkpoint.max_output_tokens

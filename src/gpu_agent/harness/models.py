@@ -94,9 +94,18 @@ class RepoInspectSyntax(StrictModel):
     limit: int = Field(default=8, ge=1, le=20)
 
 
-class RepoSyntaxEdit(StrictModel):
+class LegacyRepoSyntaxEdit(StrictModel):
+    """Original wire shape, retained for the frozen unbound experiment."""
+
     node_id: str = Field(pattern=r"^n[0-9]{2}$")
     replacement_code: str = Field(min_length=1, max_length=1200)
+
+
+class RepoSyntaxEdit(LegacyRepoSyntaxEdit):
+    # Absence is allowed only for legacy profiles and their historical audits.
+    expected_old_code: str | None = Field(
+        default=None, min_length=1, max_length=300, exclude_if=lambda value: value is None
+    )
 
 
 class RepoReplaceSyntax(StrictModel):
@@ -261,6 +270,7 @@ class SessionSnapshot(StrictModel):
     context_mode: Literal["legacy", "evidence_first"] = "legacy"
     syntax_mode: bool = False
     syntax_state: SyntaxState | None = None
+    ast_target_binding: bool = Field(default=False, exclude_if=lambda value: not value)
     candidate_recovery: CandidateRecoveryView | None = None
     task_plan: TaskPlan | None = None
     task_progress: TaskProgress | None = None
