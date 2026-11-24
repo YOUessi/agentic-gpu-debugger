@@ -556,8 +556,7 @@ def summarize_sweep(plan: BenchmarkPlan, records: tuple[TrialRecord, ...]) -> Sw
             ),
             "public_check_reached_trials": sum(item.public_check_reached for item in group),
             "public_check_reached_rate": (
-                sum(item.public_check_reached for item in group) / len(group)
-                if group else None
+                sum(item.public_check_reached for item in group) / len(group) if group else None
             ),
             "first_effective_edit_turn_mean": sum(edits) / len(edits) if edits else None,
             "planned": sum(item.arm == arm for item in plan.units),

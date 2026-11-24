@@ -23,8 +23,12 @@ from gpu_agent.verification.oracle import parse_output
 
 PUBLIC_PROBE_SIZES = (32, 33, 65, 129, 257)
 ProbeOutcome = Literal[
-    "PASS", "NUMERIC_MISMATCH", "OUTPUT_INVALID", "PROGRAM_FAILED",
-    "BUILD_FAILED", "PROBE_INCONCLUSIVE",
+    "PASS",
+    "NUMERIC_MISMATCH",
+    "OUTPUT_INVALID",
+    "PROGRAM_FAILED",
+    "BUILD_FAILED",
+    "PROBE_INCONCLUSIVE",
 ]
 
 
@@ -103,17 +107,13 @@ def probe_candidate_publicly(
             if not backend.availability().ready:
                 raise ValueError("PUBLIC_PROBE_BACKEND_UNAVAILABLE")
             handle = backend.prepare(
-                WorkspaceRequest(
-                    run_id=child.id, source_manifest=manifest, trust_level="UNTRUSTED"
-                )
+                WorkspaceRequest(run_id=child.id, source_manifest=manifest, trust_level="UNTRUSTED")
             )
             built = backend.build(BuildRequest(workspace_id=handle.id))
             if not built.success:
                 result = result.model_copy(update={"outcome": "BUILD_FAILED"})
             else:
-                input_ref = store.put(
-                    child.id, "probe/public-input.json", payload, "public"
-                )
+                input_ref = store.put(child.id, "probe/public-input.json", payload, "public")
                 execution = backend.run(
                     ExecutionRequest(
                         workspace_id=handle.id,
@@ -138,7 +138,8 @@ def probe_candidate_publicly(
                         outcome: ProbeOutcome = "OUTPUT_INVALID"
                     else:
                         outcome = (
-                            "PASS" if verify_numeric(case_id, payload, observed)
+                            "PASS"
+                            if verify_numeric(case_id, payload, observed)
                             else "NUMERIC_MISMATCH"
                         )
                     result = result.model_copy(update={"outcome": outcome})

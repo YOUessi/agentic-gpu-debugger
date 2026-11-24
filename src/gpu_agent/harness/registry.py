@@ -49,7 +49,8 @@ TOOL_REGISTRY: tuple[ToolDescriptor, ...] = (
         "Atomically rewrite CUDA syntax nodes using source SHA and parser validation",
     ),
     ToolDescriptor(
-        "repo_probe_public", "gpu",
+        "repo_probe_public",
+        "gpu",
         "Public fixed-size functional probe on registered mutant or staged candidate",
     ),
     ToolDescriptor(

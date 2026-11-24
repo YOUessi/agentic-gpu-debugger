@@ -765,8 +765,10 @@ class RepositoryWorkspaceTools:
         digest = hashlib.sha256(source).hexdigest()
         signature = self._query_fingerprint(
             {
-                "tool": action.tool, "phase": action.phase,
-                "size": action.input_size, "source_sha256": digest,
+                "tool": action.tool,
+                "phase": action.phase,
+                "size": action.input_size,
+                "source_sha256": digest,
             }
         )
         if signature in self._public_probe_signatures:
