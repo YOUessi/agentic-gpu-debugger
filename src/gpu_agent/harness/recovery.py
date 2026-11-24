@@ -296,8 +296,7 @@ def validated_quiescent_repository_checkpoint(
                 if entry["content"] != observation[:3900]:
                     raise ValueError("checkpoint observation differs from public tool ledger")
             elif len(entry["content"]) < 3900 and (
-                hashlib.sha256(entry["content"].encode()).hexdigest()
-                != event["observation_sha256"]
+                hashlib.sha256(entry["content"].encode()).hexdigest() != event["observation_sha256"]
             ):
                 raise ValueError("checkpoint observation hash differs from public tool ledger")
         if checkpoint.state["decision"]["action"] != events[-1]["action"]:

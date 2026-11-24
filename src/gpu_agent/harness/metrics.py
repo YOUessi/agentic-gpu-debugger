@@ -7,7 +7,6 @@ becomes VERIFIED_FIXED without an independent evaluator.
 
 from __future__ import annotations
 
-
 from pathlib import Path
 from typing import Literal
 
@@ -124,8 +123,12 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
     )
     steps = {
         index: PublicToolStep.model_validate(
-            {"turn": index, "tool": body["tool"], "status": body["status"],
-             "rejection_code": body.get("rejection_code")}
+            {
+                "turn": index,
+                "tool": body["tool"],
+                "status": body["status"],
+                "rejection_code": body.get("rejection_code"),
+            }
         )
         for index, body in enumerate(records, 1)
     }

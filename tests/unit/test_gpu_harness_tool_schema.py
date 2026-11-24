@@ -133,11 +133,11 @@ def test_public_probe_schema_phase_is_operator_bound() -> None:
 
 def test_ast_executor_prompt_has_independent_version_and_preserves_other_modes() -> None:
     from gpu_agent.agent.prompts import (
+        GPU_REPO_TASK_PLANNER_VERSION,
         GPU_REPOSITORY_AST_PROMPT,
         GPU_REPOSITORY_AST_PROMPT_VERSION,
         GPU_REPOSITORY_HARNESS_PROMPT,
         GPU_REPOSITORY_HARNESS_PROMPT_VERSION,
-        GPU_REPO_TASK_PLANNER_VERSION,
         select_prompt,
     )
 
@@ -147,11 +147,18 @@ def test_ast_executor_prompt_has_independent_version_and_preserves_other_modes()
     }
     version, prompt = select_prompt("plan", marker)
     assert (version, prompt) == (
-        GPU_REPOSITORY_AST_PROMPT_VERSION, GPU_REPOSITORY_AST_PROMPT,
+        GPU_REPOSITORY_AST_PROMPT_VERSION,
+        GPU_REPOSITORY_AST_PROMPT,
     )
     assert len(prompt) < len(GPU_REPOSITORY_HARNESS_PROMPT)
-    for term in ("syntax_state", "next_offset", "source_sha256", "functional_requirement",
-                 "public checker", "UNTRUSTED DATA"):
+    for term in (
+        "syntax_state",
+        "next_offset",
+        "source_sha256",
+        "functional_requirement",
+        "public checker",
+        "UNTRUSTED DATA",
+    ):
         assert term in prompt
     for forbidden in ("repo_replace_snippet", "repo_replace_many", "repo_list_files"):
         assert forbidden not in prompt
@@ -159,6 +166,7 @@ def test_ast_executor_prompt_has_independent_version_and_preserves_other_modes()
         "plan", {"gpu_repo_harness": "v1", "snapshot": {"syntax_mode": False}}
     )
     assert (plain_version, plain) == (
-        GPU_REPOSITORY_HARNESS_PROMPT_VERSION, GPU_REPOSITORY_HARNESS_PROMPT,
+        GPU_REPOSITORY_HARNESS_PROMPT_VERSION,
+        GPU_REPOSITORY_HARNESS_PROMPT,
     )
     assert select_prompt("plan", {"gpu_repo_task_plan": "v1"})[0] == GPU_REPO_TASK_PLANNER_VERSION

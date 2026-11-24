@@ -192,7 +192,10 @@ class RepositoryWorkspaceTools:
         )
 
     def _restore_syntax_state(
-        self, state: SyntaxState | None, *, tool_calls: int,
+        self,
+        state: SyntaxState | None,
+        *,
+        tool_calls: int,
         rejected_syntax_edits: tuple[str, ...],
     ) -> None:
         """Re-enumerate pinned AST pages and bind them to completed public actions."""
@@ -792,8 +795,12 @@ class RepositoryWorkspaceTools:
                     ):
                         message = code
                     else:
-                        message = "PUBLIC_TOOL_IO_FAILED" if isinstance(exc, OSError) else (
-                            "PUBLIC_TOOL_REJECTED: controller rejected the requested operation"
+                        message = (
+                            "PUBLIC_TOOL_IO_FAILED"
+                            if isinstance(exc, OSError)
+                            else (
+                                "PUBLIC_TOOL_REJECTED: controller rejected the requested operation"
+                            )
                         )
                 result = ToolObservation(
                     tool=action.tool,

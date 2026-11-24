@@ -1307,8 +1307,11 @@ def test_pinned_ast_survives_compaction_cursor_binding_and_revision_change(tmp_p
         from gpu_agent.harness.repo_audit import read_repository_tool_events
 
         events = read_repository_tool_events(
-            host.store, host.run_id, expected_count=host.tool_calls,
-            require_action=True, require_observation=True,
+            host.store,
+            host.run_id,
+            expected_count=host.tool_calls,
+            require_action=True,
+            require_observation=True,
         )
         for code, submitted, observed in (
             ("CUDA_SYNTAX_NOOP", noop, noop_result),
@@ -1319,9 +1322,10 @@ def test_pinned_ast_survives_compaction_cursor_binding_and_revision_change(tmp_p
             rejected = next(e for e in events if e["rejection_code"] == code)
             assert rejected["action"] == submitted.model_dump(mode="json")
             assert rejected["observation"] == observed.content
-            assert rejected["observation_sha256"] == hashlib.sha256(
-                observed.content.encode()
-            ).hexdigest()
+            assert (
+                rejected["observation_sha256"]
+                == hashlib.sha256(observed.content.encode()).hexdigest()
+            )
             assert rejected["rejection_detail"]["correction"]
         noop_record = next(e for e in events if e["rejection_code"] == "CUDA_SYNTAX_NOOP")
         assert noop_record["rejection_detail"]["original_code"] == node.code
@@ -1460,14 +1464,21 @@ def test_ast_partial_cursor_resume_and_checkpoint_tampering(tmp_path: Path) -> N
     repo, sha = _registered_repository(tmp_path)
     output = tmp_path / "ast-partial-resume"
     options = dict(
-        repository=repo, output=output, base_sha=sha, goal=GOAL,
-        public_case_id="h001", syntax_mode=True, max_steps=8, max_model_calls=10,
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        syntax_mode=True,
+        max_steps=8,
+        max_model_calls=10,
     )
     initial = run_repository_coding_session(
-        **options, pause_after_turns=1,
-        model_factory=lambda _: Model([
-            {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 3}
-        ]),
+        **options,
+        pause_after_turns=1,
+        model_factory=lambda _: Model(
+            [{"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 3}]
+        ),
     )
     assert initial.status == "PAUSED_RESUMABLE"
     path = output / "session-checkpoint.json"
@@ -1499,33 +1510,48 @@ def test_ast_partial_cursor_resume_and_checkpoint_tampering(tmp_path: Path) -> N
             )
         assert not never_called.snapshots
     path.write_bytes(original)
-    model = Model([
-        {
-            "tool": "repo_inspect_syntax", "path": KERNEL, "symbol": state.symbol,
-            "offset": state.next_offset, "limit": 8,
-        },
-    ])
+    model = Model(
+        [
+            {
+                "tool": "repo_inspect_syntax",
+                "path": KERNEL,
+                "symbol": state.symbol,
+                "offset": state.next_offset,
+                "limit": 8,
+            },
+        ]
+    )
     resumed = run_repository_coding_session(
-        **options, resume=True, pause_after_turns=2, model_factory=lambda _: model,
+        **options,
+        resume=True,
+        pause_after_turns=2,
+        model_factory=lambda _: model,
     )
     assert resumed.status == "PAUSED_RESUMABLE"
     assert model.snapshots[0].syntax_state == state
     assert model.snapshots[0].syntax_mode
     grammar = repository_decision_schema(
-        model.snapshots[0].allowed_tools, registered_kernel_path=KERNEL,
-        syntax_state=state, bind_syntax_cursor=True,
+        model.snapshots[0].allowed_tools,
+        registered_kernel_path=KERNEL,
+        syntax_state=state,
+        bind_syntax_cursor=True,
     )
-    parsed = grammar.model_validate({
-        "action": {
-            "tool": "repo_inspect_syntax", "path": KERNEL, "symbol": state.symbol,
-            "offset": state.next_offset, "limit": 8,
-        },
-        "reason": "Resume next public AST page",
-    })
+    parsed = grammar.model_validate(
+        {
+            "action": {
+                "tool": "repo_inspect_syntax",
+                "path": KERNEL,
+                "symbol": state.symbol,
+                "offset": state.next_offset,
+                "limit": 8,
+            },
+            "reason": "Resume next public AST page",
+        }
+    )
     assert parsed.action.offset == state.next_offset
     after = read_repository_checkpoint(path).syntax_state
     assert after is not None and after.source_sha256 == state.source_sha256
-    assert after.observed_nodes[:len(state.observed_nodes)] == state.observed_nodes
+    assert after.observed_nodes[: len(state.observed_nodes)] == state.observed_nodes
     assert len(after.visited_pages) == 2
 
 
@@ -1536,8 +1562,11 @@ def test_ast_public_audit_never_persists_raw_host_exception(
 
     repo, sha = _registered_repository(tmp_path)
     with RepositoryWorkspaceTools(
-        origin=repo, output=tmp_path / "ast-public-exception", sha=sha,
-        public_case_id="h001", syntax_mode=True,
+        origin=repo,
+        output=tmp_path / "ast-public-exception",
+        sha=sha,
+        public_case_id="h001",
+        syntax_mode=True,
     ) as host:
         forbidden = "private-host-diagnostic-do-not-publish"
 
@@ -1550,8 +1579,11 @@ def test_ast_public_audit_never_persists_raw_host_exception(
         assert "PUBLIC_TOOL_IO_FAILED" in obs.content
         assert forbidden not in obs.content
         events = read_repository_tool_events(
-            host.store, host.run_id, expected_count=1,
-            require_action=True, require_observation=True,
+            host.store,
+            host.run_id,
+            expected_count=1,
+            require_action=True,
+            require_observation=True,
         )
         assert events[0]["observation"] == obs.content
         assert forbidden not in json.dumps(events)
@@ -1566,12 +1598,18 @@ def test_ast_replay_rejects_observation_hash_mismatch(tmp_path: Path) -> None:
     store.transition(run.id, "RUNNING", "DIAGNOSING")
     action = RepoInspectSyntax(path=KERNEL)
     store.put(
-        run.id, "repo-harness/v1/tool-001.json",
-        json.dumps({
-            "tool": action.tool, "action": action.model_dump(mode="json"),
-            "status": "OK", "observation": "changed feedback",
-            "observation_sha256": hashlib.sha256(b"original feedback").hexdigest(),
-        }).encode(), "public",
+        run.id,
+        "repo-harness/v1/tool-001.json",
+        json.dumps(
+            {
+                "tool": action.tool,
+                "action": action.model_dump(mode="json"),
+                "status": "OK",
+                "observation": "changed feedback",
+                "observation_sha256": hashlib.sha256(b"original feedback").hexdigest(),
+            }
+        ).encode(),
+        "public",
     )
     with pytest.raises(ValueError, match="public observation does not match"):
         read_repository_tool_events(store, run.id, expected_count=1, require_observation=True)
@@ -1595,18 +1633,27 @@ def test_ast_rejected_edit_ledger_survives_resume_and_detects_tampering(tmp_path
             state = snapshot.syntax_state
             node = state.observed_nodes[0]
             self.action = RepoReplaceSyntax(
-                path=KERNEL, expected_source_sha256=state.source_sha256,
+                path=KERNEL,
+                expected_source_sha256=state.source_sha256,
                 edits=[RepoSyntaxEdit(node_id=node.id, replacement_code=node.code)],
             )
             return HarnessDecision(action=self.action, reason="Exercise exact NOOP rejection")
 
     model = RejectOnce()
     options = dict(
-        repository=repo, output=output, base_sha=sha, goal=GOAL,
-        public_case_id="h001", syntax_mode=True, max_steps=8, max_model_calls=10,
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        syntax_mode=True,
+        max_steps=8,
+        max_model_calls=10,
     )
     first = run_repository_coding_session(
-        **options, pause_after_turns=2, model_factory=lambda _: model,
+        **options,
+        pause_after_turns=2,
+        model_factory=lambda _: model,
     )
     assert first.status == "PAUSED_RESUMABLE"
     path = output / "session-checkpoint.json"
@@ -1619,14 +1666,19 @@ def test_ast_rejected_edit_ledger_survives_resume_and_detects_tampering(tmp_path
     never_called = Model([])
     with pytest.raises(ValueError, match="recovered AST rejected edits differ"):
         run_repository_coding_session(
-            **options, resume=True, model_factory=lambda _: never_called,
+            **options,
+            resume=True,
+            model_factory=lambda _: never_called,
         )
     assert not never_called.snapshots
     path.write_bytes(original)
     assert model.action is not None
     repeated = Model([model.action.model_dump(mode="json")])
     resumed = run_repository_coding_session(
-        **options, resume=True, pause_after_turns=3, model_factory=lambda _: repeated,
+        **options,
+        resume=True,
+        pause_after_turns=3,
+        model_factory=lambda _: repeated,
     )
     assert resumed.status == "PAUSED_RESUMABLE"
     after = read_repository_checkpoint(path)

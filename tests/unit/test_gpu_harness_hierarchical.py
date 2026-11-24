@@ -336,9 +336,7 @@ def test_ast_aliases_match_full_file_and_symbol_filtered_pages() -> None:
     raw = CUDA_FILE.read_bytes()
     whole = syntax_nodes(raw)
     scoped = syntax_nodes(raw, symbol="softmax32")
-    assert scoped["nodes"] == [
-        node for node in whole["nodes"] if node["function"] == "softmax32"
-    ]
+    assert scoped["nodes"] == [node for node in whole["nodes"] if node["function"] == "softmax32"]
     assert [node["start_line"] for node in whole["nodes"]] == sorted(
         node["start_line"] for node in whole["nodes"]
     )
