@@ -193,3 +193,77 @@ def test_repository_budget_requires_auxiliary_reserve_and_preserves_legacy_retry
     old_gate.reserve("plan", attempt=1)
     with pytest.raises(ProviderError, match="LLM_INVALID_OUTPUT"):
         old_gate.reserve("plan", attempt=1)
+
+
+@pytest.mark.parametrize(
+    "reason,expected",
+    [
+        ("max_output_tokens", "LLM_INCOMPLETE_MAX_OUTPUT_TOKENS"),
+        ("content_filter", "LLM_INCOMPLETE_CONTENT_FILTER"),
+        ("unexpected provider detail", "LLM_INCOMPLETE_OTHER"),
+    ],
+)
+def test_incomplete_wire_metadata_is_bounded_and_classified(reason, expected):
+    from types import SimpleNamespace
+    import json
+
+    from gpu_agent.agent.provider import invoke_sdk, WorkerRequest
+
+    envelope = {
+        "status": "incomplete",
+        "incomplete_details": {"reason": reason},
+        "id": "resp-test",
+        "model": "fixture",
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 4096,
+            "total_tokens": 4196,
+            "output_tokens_details": {"reasoning_tokens": 4095},
+        },
+        "output": [
+            {"type": "reasoning", "status": "incomplete",
+             "content": [{"type": "reasoning_text", "text": "PRIVATE_REASONING"}]},
+            {"type": "message", "status": "incomplete", "finish_reason": "length",
+             "content": [{"type": "output_text", "text": '{"action":"PRIVATE_VALUE"'}]},
+        ],
+    }
+    captured = {}
+
+    def parse(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(request_id="request-test", content=json.dumps(envelope).encode())
+
+    def factory(**kwargs):
+        return SimpleNamespace(
+            responses=SimpleNamespace(with_raw_response=SimpleNamespace(parse=parse)),
+            close=lambda: None,
+        )
+
+    request = WorkerRequest(
+        endpoint="https://api.openai.com/v1", model="fixture", api_key="fixture",
+        kind="plan", payload={}, client_request_id="test", timeout_seconds=60, attempt=0,
+        max_output_tokens=8192,
+    )
+    result = invoke_sdk(request, client_factory=factory)
+    assert captured["max_output_tokens"] == 8192
+    assert result.error_code == expected and result.state == "FAILED"
+    term = result.metadata.response_termination
+    assert term is not None
+    assert term.response_status == "incomplete"
+    assert term.finish_reasons == ("length",)
+    assert term.partial_output_chars == len(envelope["output"][1]["content"][0]["text"])
+    serialized = result.model_dump_json()
+    assert "PRIVATE_REASONING" not in serialized and "PRIVATE_VALUE" not in serialized
+    assert "unexpected provider detail" not in serialized
+    assert result.metadata.usage.reasoning_tokens == 4095
+
+
+def test_output_cap_is_operator_configured_and_bounded(monkeypatch):
+    from gpu_agent.agent.provider import OpenAIProviderSettings
+    from pydantic import ValidationError
+
+    monkeypatch.setenv("GPU_AGENT_MAX_OUTPUT_TOKENS", "8192")
+    assert OpenAIProviderSettings.from_environment().max_output_tokens == 8192
+    monkeypatch.setenv("GPU_AGENT_MAX_OUTPUT_TOKENS", "999999")
+    with pytest.raises(ValidationError):
+        OpenAIProviderSettings.from_environment()

@@ -1055,6 +1055,7 @@ class OpenAIResponsesProvider:
                 diagnostics = result.diagnostics
                 metadata = result.metadata.model_dump()
                 metadata["usage"] = result.metadata.usage
+                metadata["response_termination"] = result.metadata.response_termination
                 if result.error_code is not None:
                     raise ProviderError(
                         result.error_code, state=result.state, retryable=result.retryable
