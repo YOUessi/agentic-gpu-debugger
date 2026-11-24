@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -86,6 +87,7 @@ class RepositoryWorkspaceTools:
         compile_gate: bool = False,
         allow_revert: bool = False,
         max_compiles: int = 6,
+        public_diagnostics: bool = False,
     ) -> None:
         if output.exists() or output.is_symlink():
             raise ValueError("repository agent output already exists")
@@ -129,6 +131,12 @@ class RepositoryWorkspaceTools:
         self._public_probe_signatures: set[str] = set()
         self._public_probe_run_ids: list[str] = []
         self._configure_recovery(compile_gate, allow_revert, max_compiles)
+        self._configure_public_diagnostics(public_diagnostics)
+
+    def _configure_public_diagnostics(self, enabled: bool) -> None:
+        if type(enabled) is not bool or (enabled and self._public_case_id is None):
+            raise ValueError("public diagnostics require a registered case")
+        self._public_diagnostics = enabled
 
     def _configure_recovery(
         self, compile_gate: bool, allow_revert: bool, max_compiles: int
@@ -587,6 +595,7 @@ class RepositoryWorkspaceTools:
         compile_gate: bool = False,
         allow_revert: bool = False,
         max_compiles: int = 6,
+        public_diagnostics: bool = False,
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -713,6 +722,7 @@ class RepositoryWorkspaceTools:
         host._last_file_read = ""
         host._source_version = sha
         host._configure_recovery(compile_gate, allow_revert, max_compiles)
+        host._configure_public_diagnostics(public_diagnostics)
         host._restore_candidate_recovery(tool_calls)
         return host
 
@@ -1405,7 +1415,11 @@ class RepositoryWorkspaceTools:
         if signature in self._public_probe_signatures:
             raise ValueError("REDUNDANT_PUBLIC_PROBE")
         number = self.public_probes_attempted + 1
-        result = probe_candidate_publicly(
+        probe = (
+            partial(probe_candidate_publicly, diagnostic_mode=True)
+            if self._public_diagnostics else probe_candidate_publicly
+        )
+        result = probe(
             store=self._store,
             parent_run_id=self.run_id,
             repository=self.workspace.root,
@@ -1422,7 +1436,9 @@ class RepositoryWorkspaceTools:
         return ToolObservation(
             tool=action.tool,
             status="FAILED" if result.outcome == "PROBE_INCONCLUSIVE" else "OK",
-            content=result.model_dump_json(),
+            content=result.model_dump_json(
+                exclude=None if self._public_diagnostics else {"numeric_diagnostic"}
+            ),
         )
 
     def _run_registered_public_checks(self) -> ToolObservation:
@@ -1459,7 +1475,11 @@ class RepositoryWorkspaceTools:
         )
         self._attempted_candidate_hashes.add(candidate_sha)
         self._public_checks_attempted += 1
-        result = check_candidate_publicly(
+        checker = (
+            partial(check_candidate_publicly, diagnostic_mode=True)
+            if self._public_diagnostics else check_candidate_publicly
+        )
+        result = checker(
             store=self._store,
             parent_run_id=self.run_id,
             repository=self.workspace.root,
@@ -1476,5 +1496,9 @@ class RepositoryWorkspaceTools:
         return ToolObservation(
             tool="repo_run_public_checks",
             status="OK" if result.passed else "FAILED",
-            content=result.model_dump_json(),
+            content=result.model_dump_json(
+                exclude=None if self._public_diagnostics else {
+                    "numeric_diagnostic", "sanitizer_diagnostics"
+                }
+            ),
         )

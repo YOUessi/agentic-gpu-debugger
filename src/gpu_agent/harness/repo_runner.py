@@ -56,6 +56,8 @@ def run_repository_coding_session(
     compile_gate: bool = False,
     allow_revert: bool = False,
     max_compiles: int = 6,
+    public_diagnostics: bool = False,
+    provider_settings: OpenAIProviderSettings | None = None,
     allow_paid_calls: bool = False,
     resume: bool = False,
     pause_after_turns: int | None = None,
@@ -68,7 +70,7 @@ def run_repository_coding_session(
     Physical model calls use the same killable SDK worker and on-disk audit as
     the CUDA single-file Harness.
     """
-    if model_factory is None and not allow_paid_calls:
+    if (model_factory is None or provider_settings is not None) and not allow_paid_calls:
         raise ValueError("real model use requires explicit allow_paid_calls")
     if not 1 <= max_steps <= 38 or not max_steps + 2 <= max_model_calls <= 40:
         raise ValueError("model calls must exceed step budget, within operator cap")
@@ -76,14 +78,16 @@ def run_repository_coding_session(
         RepositoryCallBudget.from_session(
             max_steps=max_steps, max_model_calls=max_model_calls, hierarchical=hierarchical_mode
         )
-        if model_factory is None
+        if model_factory is None or provider_settings is not None
         else None
     )
     if (hierarchical_mode or syntax_mode) and public_case_id is None:
         raise ValueError("hierarchical and AST modes require registered public CUDA case")
     if not goal.strip() or len(goal) > 1500:
         raise ValueError("invalid task goal")
-    settings = OpenAIProviderSettings.from_environment() if model_factory is None else None
+    settings = provider_settings or (
+        OpenAIProviderSettings.from_environment() if model_factory is None else None
+    )
     output_cap = settings.max_output_tokens if settings is not None else 4096
     checkpoint = None
     if resume:
@@ -106,6 +110,7 @@ def run_repository_coding_session(
             compile_gate=compile_gate,
             allow_revert=allow_revert,
             max_compiles=max_compiles,
+            public_diagnostics=public_diagnostics,
         )
         if syntax_mode and "syntax_state" not in checkpoint.model_fields_set:
             raise ValueError("legacy AST checkpoint cannot resume with short aliases")
@@ -136,6 +141,7 @@ def run_repository_coding_session(
             compile_gate=checkpoint.compile_gate,
             allow_revert=checkpoint.allow_revert,
             max_compiles=checkpoint.max_compiles,
+            public_diagnostics=checkpoint.public_diagnostics,
         )
         if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
             raise ValueError("resumed workspace diff disagrees with checkpoint")
@@ -155,6 +161,7 @@ def run_repository_coding_session(
             compile_gate=compile_gate,
             allow_revert=allow_revert,
             max_compiles=max_compiles,
+            public_diagnostics=public_diagnostics,
         )
 
     with host as tools:
@@ -211,6 +218,9 @@ def run_repository_coding_session(
                         "compile_gate": compile_gate,
                         "allow_revert": allow_revert,
                         "max_compiles": max_compiles,
+                        "public_diagnostics": public_diagnostics,
+                        "max_steps": max_steps,
+                        "max_model_calls": max_model_calls,
                         "public_check_audit_version": 1,
                         "max_output_tokens": output_cap,
                         "repository_call_budget": {
@@ -292,6 +302,7 @@ def run_repository_coding_session(
                         compile_gate=compile_gate,
                         allow_revert=allow_revert,
                         max_compiles=max_compiles,
+                        public_diagnostics=public_diagnostics,
                         public_checks_attempted=tools.public_checks_attempted,
                         public_probes_attempted=tools.public_probes_attempted,
                         public_probe_signatures=tools.public_probe_signatures,

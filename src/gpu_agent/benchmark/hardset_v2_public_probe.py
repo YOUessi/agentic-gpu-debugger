@@ -16,6 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.benchmark.hardset_v2 import HARDSET_CASES, sample_input, verify_numeric
 from gpu_agent.benchmark.hardset_v2_selfcheck import HARNESS
+from gpu_agent.benchmark.public_numeric_feedback import (
+    PublicNumericDiagnostic,
+    classify_public_numeric,
+)
 from gpu_agent.execution.isolated import IsolatedGPUBackend
 from gpu_agent.execution.models import BuildRequest, ExecutionRequest, WorkspaceRequest
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
@@ -44,6 +48,7 @@ class PublicProbeResult(BaseModel):
     run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     outcome: ProbeOutcome
     diagnostic_region: Literal["full_warp", "cross_warp_tail", "multi_warp_tail"]
+    numeric_diagnostic: PublicNumericDiagnostic | None = None
 
 
 def _region(n: int) -> Literal["full_warp", "cross_warp_tail", "multi_warp_tail"]:
@@ -60,6 +65,7 @@ def probe_candidate_publicly(
     input_size: int,
     candidate: bytes,
     output: Path,
+    diagnostic_mode: bool = False,
 ) -> PublicProbeResult:
     """Compile and test ONE public input with typed, non-oracle feedback."""
     if (
@@ -143,6 +149,14 @@ def probe_candidate_publicly(
                             else "NUMERIC_MISMATCH"
                         )
                     result = result.model_copy(update={"outcome": outcome})
+                    if diagnostic_mode:
+                        result = result.model_copy(
+                            update={
+                                "numeric_diagnostic": classify_public_numeric(
+                                    case_id, payload, observed
+                                )
+                            }
+                        )
     except (OSError, ValueError):
         result = result.model_copy(update={"outcome": "PROBE_INCONCLUSIVE"})
     finally:
