@@ -1,0 +1,72 @@
+{
+  "schema_version": "deepseek-exact-input-system-comparison-v1",
+  "source_sha": "be3dafd6988972dfdb51cf2faee6984103565973",
+  "input_plan_sha256": "006c70f11739c81441fc38684ea4f4c464eebae08cf82bfb73e31dd852864de3",
+  "model": "deepseek-v4-pro",
+  "returned_model": "deepseek-v4-pro",
+  "provider": "https://api.deepseek.com",
+  "api": "Responses",
+  "sdk": "3.13.0",
+  "precision": "not disclosed",
+  "serving_framework": "not disclosed",
+  "sampling": "provider default; temperature/top_p/seed not explicitly sent",
+  "reasoning_request": {
+    "effort": "none"
+  },
+  "reasoning_returned": {
+    "effort": "none"
+  },
+  "max_output_tokens": 8192,
+  "store": false,
+  "retries": 0,
+  "physical_calls": 3,
+  "gpu_tool_executions": 0,
+  "actual_billed_cost": null,
+  "results": [
+    {
+      "unit": "A-build-h001",
+      "turn": 15,
+      "payload": "04c256c5a188b3abe34dd5e09ceada575b0333a712babdcc897c30a44515a87b",
+      "schema": "0388cb7e995814729e735a24651ccb87971e2de39aee51d5c2e812ceb7da1c46",
+      "prompt": "7d1654fefe76ff8eae3ba20e36e60d2380d929bd66f0e22630cf3cbdab40b3a1",
+      "input": 5662,
+      "output": 91,
+      "cached": 0,
+      "reasoning": 0,
+      "wall": 2.798,
+      "action": "repo_inspect_syntax(offset=8,limit=8)",
+      "adjudication": "Legal new evidence action; necessary target nodes beyond observed first page. No edit proposed or executed; semantic patch correctness untested.",
+      "report": "ae5b85aa3949704cf0d10403ab1cef0695cd160837f18f76dcf3f441821abdda"
+    },
+    {
+      "unit": "C-from-mutant-h002",
+      "turn": 13,
+      "payload": "aa10109ea382a642213dbde101d52249600dcbab5cfc43e693b6cef634d87ed4",
+      "schema": "8ae4f990b70e4dc415a4f878bea380ef6daa44a3d9104a2ab6821d273226b71f",
+      "prompt": "52e6e914ac48d5cd5a8b21c29f8471ec648b7214ddb5604c0311dc271b6ab4b9",
+      "input": 5023,
+      "output": 89,
+      "cached": 0,
+      "reasoning": 0,
+      "wall": 2.385,
+      "action": "repo_inspect_syntax(offset=8,limit=8)",
+      "adjudication": "Legal new AST evidence action; avoids overwriting x and explicitly seeks loop/scale statements. No edit proposed or executed.",
+      "report": "f538da61c14d0efa4f047601a45a988af63e8aef73f67546a57f8ebd79a3a2e8"
+    },
+    {
+      "unit": "B-numeric-h001",
+      "turn": 10,
+      "payload": "e04712bf841e41a0e1e48ab684503d4e416dcd66a47ffa5af0a2d895af8ff200",
+      "schema": "8c9e12d9e87d75ef0730aeaa7db94919e116c2420b3461bff234ae3afb16609e",
+      "prompt": "7d1654fefe76ff8eae3ba20e36e60d2380d929bd66f0e22630cf3cbdab40b3a1",
+      "input": 4315,
+      "output": 93,
+      "cached": 384,
+      "reasoning": 0,
+      "wall": 2.557,
+      "action": "repo_read_file(start_line=10,lines=20)",
+      "adjudication": "Complete allowed bounded source read, no prior identical read. Not a demonstrated repair; source already visible, reason incorrectly claims all-zero output (prior diagnostic all_zero=false). Generation improves; decision-quality caveat.",
+      "report": "ce2f0c3037d9fd4d0ab8684c62299d04e0939a70f18ac81cd78d83def6da2da0"
+    }
+  ]
+}
