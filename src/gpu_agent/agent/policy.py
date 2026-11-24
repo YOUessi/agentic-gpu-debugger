@@ -42,7 +42,9 @@ class RepositoryCallBudget:
         auxiliary = 4 if hierarchical else 0
         retries = max_model_calls - max_steps - auxiliary
         if max_steps < 1 or retries < 2 or max_model_calls > 40:
-            raise ValueError("repository budget must reserve two executor retries and auxiliary calls")
+            raise ValueError(
+                "repository budget must reserve two executor retries and auxiliary calls"
+            )
         return cls(
             executor_decisions=max_steps,
             executor_format_retries=retries,
@@ -65,11 +67,13 @@ class RepositoryCallBudget:
     @property
     def total(self) -> int:
         return (
-            self.executor_decisions + self.executor_format_retries
-            + self.planner_decisions + self.planner_format_retries
-            + self.reflect_decisions + self.reflect_format_retries
+            self.executor_decisions
+            + self.executor_format_retries
+            + self.planner_decisions
+            + self.planner_format_retries
+            + self.reflect_decisions
+            + self.reflect_format_retries
         )
-
 
 
 class BudgetExceeded(Exception):

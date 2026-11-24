@@ -8,7 +8,6 @@ hidden evaluator input, evaluator secret, or shell command to model tools.
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import re
 import stat
@@ -255,7 +254,11 @@ def create_benchmark_plan(
                             None if arm == "workflow_D" else max_model_calls - max_steps
                         ),
                         auxiliary_model_call_limit=(
-                            None if arm == "workflow_D" else 4 if arm == "hierarchical_syntax" else 0
+                            None
+                            if arm == "workflow_D"
+                            else 4
+                            if arm == "hierarchical_syntax"
+                            else 0
                         ),
                     )
                 )
@@ -411,17 +414,20 @@ def _failed_repository_public_audit(unit_directory: Path) -> PartialAudit:
         events = read_repository_tool_events(store, run_id, expected_count=count)
         started = {
             row["payload"]["turn"]: row["payload"]["tool"]
-            for row in journal if row["kind"] == "tool_started"
+            for row in journal
+            if row["kind"] == "tool_started"
         }
         if any(started.get(turn) != row["tool"] for turn, row in enumerate(events, 1)):
             raise ValueError("partial public tools do not match started journal requests")
         first_edit = next(
             (
-                index for index, row in enumerate(events, 1)
-                if row["tool"] in {
-                    "repo_replace_snippet", "repo_replace_many", "repo_replace_syntax"
-                } and row["status"] == "OK"
-            ), None,
+                index
+                for index, row in enumerate(events, 1)
+                if row["tool"]
+                in {"repo_replace_snippet", "repo_replace_many", "repo_replace_syntax"}
+                and row["status"] == "OK"
+            ),
+            None,
         )
         lifecycle = public_check_lifecycle(store, run_id, journal, events)
         return {
@@ -557,35 +563,41 @@ def _run_one(
         ),
         first_public_check_turn=(
             metrics.first_public_check_admitted_turn
-            if metrics else recovered.get("first_public_check_turn")
+            if metrics
+            else recovered.get("first_public_check_turn")
         ),
         first_public_check_request_turn=(
             metrics.first_public_check_request_turn
-            if metrics else recovered.get("first_public_check_request_turn")
+            if metrics
+            else recovered.get("first_public_check_request_turn")
         ),
         first_public_check_admitted_turn=(
             metrics.first_public_check_admitted_turn
-            if metrics else recovered.get("first_public_check_turn")
+            if metrics
+            else recovered.get("first_public_check_turn")
         ),
         first_public_check_executed_turn=(
             metrics.first_public_check_executed_turn
-            if metrics else recovered.get("first_public_check_executed_turn")
+            if metrics
+            else recovered.get("first_public_check_executed_turn")
         ),
         first_public_check_completed_turn=(
             metrics.first_public_check_completed_turn
-            if metrics else recovered.get("first_public_check_completed_turn")
+            if metrics
+            else recovered.get("first_public_check_completed_turn")
         ),
         first_public_check_pass_turn=(
             metrics.first_public_check_pass_turn
-            if metrics else recovered.get("first_public_check_pass_turn")
+            if metrics
+            else recovered.get("first_public_check_pass_turn")
         ),
         public_check_dispatches=(
-            metrics.public_check_dispatches
-            if metrics else recovered.get("public_check_dispatches")
+            metrics.public_check_dispatches if metrics else recovered.get("public_check_dispatches")
         ),
         public_check_completions=(
             metrics.public_check_completions
-            if metrics else recovered.get("public_check_completions")
+            if metrics
+            else recovered.get("public_check_completions")
         ),
         public_audit_available=metrics is not None or bool(recovered),
         redundant_reads=metrics.redundant_inspection_rejections if metrics else None,
@@ -600,12 +612,18 @@ def _run_one(
             result.public_checks_attempted if result else recovered.get("public_checks_attempted")
         ),
         public_check_executed=(
-            bool(metrics.public_check_dispatches) if metrics
-            else bool(recovered["public_check_dispatches"]) if recovered else None
+            bool(metrics.public_check_dispatches)
+            if metrics
+            else bool(recovered["public_check_dispatches"])
+            if recovered
+            else None
         ),
         public_check_completed=(
-            bool(metrics.public_check_completions) if metrics
-            else bool(recovered["public_check_completions"]) if recovered else None
+            bool(metrics.public_check_completions)
+            if metrics
+            else bool(recovered["public_check_completions"])
+            if recovered
+            else None
         ),
         failure_type=failure,
         elapsed_seconds=round(time.monotonic() - begin, 3),
@@ -640,8 +658,12 @@ def summarize_sweep(plan: BenchmarkPlan, records: tuple[TrialRecord, ...]) -> Sw
             "public_check_reached_rate": (
                 sum(item.public_check_reached for item in group) / len(group) if group else None
             ),
-            "public_check_executed_trials": sum(item.public_check_executed is True for item in group),
-            "public_check_completed_trials": sum(item.public_check_completed is True for item in group),
+            "public_check_executed_trials": sum(
+                item.public_check_executed is True for item in group
+            ),
+            "public_check_completed_trials": sum(
+                item.public_check_completed is True for item in group
+            ),
             "missing_public_audits": sum(not item.public_audit_available for item in group),
             "first_effective_edit_turn_mean": sum(edits) / len(edits) if edits else None,
             "planned": sum(item.arm == arm for item in plan.units),

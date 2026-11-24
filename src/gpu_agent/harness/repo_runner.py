@@ -201,7 +201,9 @@ def run_repository_coding_session(
                             "planner_format_retries": role_budget.planner_format_retries,
                             "reflect_format_retries": role_budget.reflect_format_retries,
                             "physical_ceiling": role_budget.total,
-                        } if role_budget is not None else None,
+                        }
+                        if role_budget is not None
+                        else None,
                     },
                 )
                 events = 0

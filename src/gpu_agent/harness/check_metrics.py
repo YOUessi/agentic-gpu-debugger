@@ -43,7 +43,8 @@ def public_check_lifecycle(
     # Older finished journals still have tool requests; tool artifacts are
     # an additional durable source if a process failed before journaling.
     requests.update(
-        turn for turn, event in enumerate(tool_events, 1)
+        turn
+        for turn, event in enumerate(tool_events, 1)
         if event["tool"] == "repo_run_public_checks"
     )
     modern = journal[0]["payload"].get("public_check_audit_version") == 1
@@ -57,10 +58,12 @@ def public_check_lifecycle(
         item = json.loads(store.read(ref))
         candidate = item.get("candidate_sha256")
         if (
-            turn not in requests or item.get("turn") != turn
+            turn not in requests
+            or item.get("turn") != turn
             or not isinstance(candidate, str)
             or re.fullmatch(r"[0-9a-f]{64}", candidate) is None
-            or candidate in admitted or turn in admitted.values()
+            or candidate in admitted
+            or turn in admitted.values()
             or item.get("case_id") != journal[0]["payload"].get("public_case_id")
         ):
             raise ValueError("invalid public checker admission evidence")
@@ -78,11 +81,15 @@ def public_check_lifecycle(
         dispatch_ref = refs.get("hardset/public-numeric-dispatch.json")
         summary = (
             HardsetPublicCheck.model_validate_json(store.read(summary_ref))
-            if summary_ref is not None else None
+            if summary_ref is not None
+            else None
         )
         candidate = (
             json.loads(store.read(candidate_ref)).get("candidate_sha256")
-            if candidate_ref is not None else summary.candidate_sha256 if summary else None
+            if candidate_ref is not None
+            else summary.candidate_sha256
+            if summary
+            else None
         )
         if candidate is None:
             # Unidentified child: cannot attribute it to a tool request.
@@ -97,15 +104,13 @@ def public_check_lifecycle(
         turn = admitted[candidate]
         if dispatch_ref is not None:
             dispatch = json.loads(store.read(dispatch_ref))
-            if (
-                dispatch.get("candidate_sha256") != candidate
-                or dispatch.get("input_size") != 32
-            ):
+            if dispatch.get("candidate_sha256") != candidate or dispatch.get("input_size") != 32:
                 raise ValueError("public numeric dispatch provenance mismatch")
             executed.add(turn)
         if summary is not None:
             if (
-                summary.candidate_sha256 != candidate or summary.public_run_id != child.id
+                summary.candidate_sha256 != candidate
+                or summary.public_run_id != child.id
                 or child.status.value != ("COMPLETED" if summary.passed else "FAILED")
             ):
                 raise ValueError("public checker completion provenance mismatch")
@@ -116,13 +121,14 @@ def public_check_lifecycle(
         # Preserve historical admission/completion estimates for legacy ledgers.
         # Do not invent numeric dispatch markers for them.
         legacy = {
-            turn for turn, event in enumerate(tool_events, 1)
-            if event["tool"] == "repo_run_public_checks"
-            and event["status"] in ("OK", "FAILED")
+            turn
+            for turn, event in enumerate(tool_events, 1)
+            if event["tool"] == "repo_run_public_checks" and event["status"] in ("OK", "FAILED")
         }
         completed |= legacy
         passed |= {
-            turn for turn, event in enumerate(tool_events, 1)
+            turn
+            for turn, event in enumerate(tool_events, 1)
             if event["tool"] == "repo_run_public_checks" and event["status"] == "OK"
         }
     else:

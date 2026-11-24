@@ -845,9 +845,7 @@ class OpenAIResponsesProvider:
         ):
             raise ProviderError("AGENT_BUDGET_EXHAUSTED")
 
-    def _check_repository_role(
-        self, role: RepositoryCallRole | None, attempt: int
-    ) -> None:
+    def _check_repository_role(self, role: RepositoryCallRole | None, attempt: int) -> None:
         budget = self._repository_budget
         if budget is None:
             return
@@ -856,9 +854,7 @@ class OpenAIResponsesProvider:
         records = self.invocations()
         if any(item.repository_role is None for item in records):
             raise ProviderError("LLM_LEGACY_REPOSITORY_BUDGET_UNRESUMABLE")
-        used = sum(
-            item.repository_role == role and item.attempt == attempt for item in records
-        )
+        used = sum(item.repository_role == role and item.attempt == attempt for item in records)
         if used >= budget.limit(role, attempt):
             raise ProviderError("LLM_REPOSITORY_ROLE_BUDGET_EXHAUSTED")
 

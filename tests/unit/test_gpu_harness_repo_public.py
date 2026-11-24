@@ -122,20 +122,27 @@ class FakePublicChecker:
         child = store.create_run("hardset_v2_public_candidate", parent_run_id=parent_run_id)
         store.transition(child.id, "RUNNING", "PREPARING")
         store.put(
-            child.id, "hardset/public-check-candidate.json",
-            json.dumps({"candidate_sha256": digest, "case_id": case_id}).encode(), "public",
+            child.id,
+            "hardset/public-check-candidate.json",
+            json.dumps({"candidate_sha256": digest, "case_id": case_id}).encode(),
+            "public",
         )
         if self.dispatched:
             store.put(
-                child.id, "hardset/public-numeric-dispatch.json",
-                json.dumps({"candidate_sha256": digest, "input_size": 32}).encode(), "public",
+                child.id,
+                "hardset/public-numeric-dispatch.json",
+                json.dumps({"candidate_sha256": digest, "input_size": 32}).encode(),
+                "public",
             )
         result = HardsetPublicCheck(
             candidate_sha256=digest,
             passed=passed,
             failure_code=(
-                "PUBLIC_CHECKS_PASSED" if passed else
-                "NUMERIC_MISMATCH" if self.dispatched else "PUBLIC_EXECUTION_UNAVAILABLE"
+                "PUBLIC_CHECKS_PASSED"
+                if passed
+                else "NUMERIC_MISMATCH"
+                if self.dispatched
+                else "PUBLIC_EXECUTION_UNAVAILABLE"
             ),
             public_run_id=child.id,
         )
@@ -1710,8 +1717,10 @@ _CASE_REPAIRS = {
         ("out[i] = expf(own) / denominator;", "out[i] = expf(own - maximum) / denominator;"),
     ],
     "h002": [
-        ("const float scale = rsqrtf(sum_sq / 32.0f + 1.0e-5f);",
-         "const float scale = rsqrtf(sum_sq / static_cast<float>(valid) + 1.0e-5f);"),
+        (
+            "const float scale = rsqrtf(sum_sq / 32.0f + 1.0e-5f);",
+            "const float scale = rsqrtf(sum_sq / static_cast<float>(valid) + 1.0e-5f);",
+        ),
     ],
     "h003": [
         ("total += a[start + j];", "total += a[start + j] + b[start + j];"),
@@ -1736,8 +1745,11 @@ class CrossCaseASTFixture:
             action = _check()
         elif state is None or state.next_offset is not None:
             action = {
-                "tool": "repo_inspect_syntax", "path": self.kernel, "symbol": "",
-                "offset": state.next_offset if state else 0, "limit": 8,
+                "tool": "repo_inspect_syntax",
+                "path": self.kernel,
+                "symbol": "",
+                "offset": state.next_offset if state else 0,
+                "limit": 8,
             }
         else:
             assert state is not None
@@ -1759,7 +1771,8 @@ class CrossCaseASTFixture:
                     corrections[0] = (previous, corrections[0][1])
                     assert state.source_sha256 != self.edits[0]["expected_source_sha256"]
             action = {
-                "tool": "repo_replace_syntax", "path": self.kernel,
+                "tool": "repo_replace_syntax",
+                "path": self.kernel,
                 "expected_source_sha256": state.source_sha256,
                 "edits": [
                     {"node_id": by_code[old], "replacement_code": replacement}
@@ -1776,7 +1789,10 @@ class CrossCaseASTFixture:
 @pytest.mark.parametrize("case_id", ["h001", "h002", "h003"])
 @pytest.mark.parametrize("fail_first", [False, True])
 def test_cross_case_ast_toolhost_full_loop_and_revision(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case_id: str, fail_first: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case_id: str,
+    fail_first: bool,
 ) -> None:
     repo, sha = _registered_repository(tmp_path)
     checker = FakePublicChecker([False, True] if fail_first else [True], case_id=case_id)
@@ -1784,10 +1800,16 @@ def test_cross_case_ast_toolhost_full_loop_and_revision(
     model = CrossCaseASTFixture(case_id, fail_first=fail_first)
     output = tmp_path / "ast-cross-case"
     result = run_repository_coding_session(
-        repository=repo, output=output, base_sha=sha,
+        repository=repo,
+        output=output,
+        base_sha=sha,
         goal="Repair the registered public CUDA kernel and check the exact candidate.",
-        public_case_id=case_id, syntax_mode=True, allow_batch_edits=False,
-        max_steps=18, max_model_calls=20, model_factory=lambda _: model,
+        public_case_id=case_id,
+        syntax_mode=True,
+        allow_batch_edits=False,
+        max_steps=18,
+        max_model_calls=20,
+        model_factory=lambda _: model,
     )
     assert result.status == "DIFF_STAGED_UNVERIFIED"
     assert result.public_checks_passed
@@ -1808,14 +1830,17 @@ def test_cross_case_ast_toolhost_full_loop_and_revision(
     assert any(s.syntax_state is None and s.current_candidate_sha256 for s in model.snapshots)
     if case_id == "h003":
         assert any(
-            s.syntax_state and {"group_sum", "group_center"}.issubset(
+            s.syntax_state
+            and {"group_sum", "group_center"}.issubset(
                 {n.function for n in s.syntax_state.observed_nodes}
             )
             for s in model.snapshots
         )
 
 
-def test_h003_ast_resume_mid_page_then_finish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_h003_ast_resume_mid_page_then_finish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from gpu_agent.harness.recovery import read_repository_checkpoint
 
     repo, sha = _registered_repository(tmp_path)
@@ -1824,9 +1849,14 @@ def test_h003_ast_resume_mid_page_then_finish(tmp_path: Path, monkeypatch: pytes
     model = CrossCaseASTFixture("h003")
     output = tmp_path / "h003-page-resume"
     options = dict(
-        repository=repo, output=output, base_sha=sha,
+        repository=repo,
+        output=output,
+        base_sha=sha,
         goal="Repair the registered group centering kernel and verify it publicly.",
-        public_case_id="h003", syntax_mode=True, max_steps=12, max_model_calls=14,
+        public_case_id="h003",
+        syntax_mode=True,
+        max_steps=12,
+        max_model_calls=14,
         model_factory=lambda _: model,
     )
     paused = run_repository_coding_session(**options, pause_after_turns=2)
@@ -1843,7 +1873,8 @@ def test_h003_ast_resume_mid_page_then_finish(tmp_path: Path, monkeypatch: pytes
 
 
 def test_ast_lifecycle_rejected_request_and_unavailable_backend_are_distinct(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo, sha = _registered_repository(tmp_path)
     fake = FakePublicChecker([False], case_id="h002", dispatched=False)
@@ -1861,9 +1892,15 @@ def test_ast_lifecycle_rejected_request_and_unavailable_backend_are_distinct(
 
     output = tmp_path / "ast-no-backend"
     outcome = run_repository_coding_session(
-        repository=repo, output=output, base_sha=sha, goal="Repair public RMS kernel",
-        public_case_id="h002", syntax_mode=True,
-        max_steps=6, max_model_calls=8, model_factory=lambda _: WithRejectedRequest(),
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal="Repair public RMS kernel",
+        public_case_id="h002",
+        syntax_mode=True,
+        max_steps=6,
+        max_model_calls=8,
+        model_factory=lambda _: WithRejectedRequest(),
     )
     assert outcome.status == "INCONCLUSIVE"
     metrics = summarize_repository_trajectory(output)
@@ -1875,7 +1912,8 @@ def test_ast_lifecycle_rejected_request_and_unavailable_backend_are_distinct(
 
 
 def test_failed_ast_session_recovers_completed_check_and_edit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from gpu_agent.harness.ablation import _failed_repository_public_audit
 
@@ -1893,8 +1931,14 @@ def test_failed_ast_session_recovers_completed_check_and_edit(
     folder = tmp_path / "failed-trial"
     with pytest.raises(RuntimeError, match="injected model failure"):
         run_repository_coding_session(
-            repository=repo, output=folder / "agent", base_sha=sha, goal="Repair public RMS",
-            public_case_id="h002", syntax_mode=True, max_steps=12, max_model_calls=14,
+            repository=repo,
+            output=folder / "agent",
+            base_sha=sha,
+            goal="Repair public RMS",
+            public_case_id="h002",
+            syntax_mode=True,
+            max_steps=12,
+            max_model_calls=14,
             model_factory=lambda _: FailAfterCheck(),
         )
     assert not (folder / "agent/result.json").exists()

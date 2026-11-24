@@ -96,9 +96,7 @@ def test_repository_roles_have_independent_durable_format_retry_quotas(tmp_path)
     from gpu_agent.harness.models import SessionSnapshot
     from gpu_agent.store import RunStore
 
-    budget = RepositoryCallBudget.from_session(
-        max_steps=3, max_model_calls=9, hierarchical=True
-    )
+    budget = RepositoryCallBudget.from_session(max_steps=3, max_model_calls=9, hierarchical=True)
     assert budget.executor_format_retries == 2
     assert budget.total == 9
 
@@ -107,24 +105,33 @@ def test_repository_roles_have_independent_durable_format_retry_quotas(tmp_path)
             if request.attempt == 0:
                 return SDKResult(error_code="LLM_INVALID_OUTPUT", state="FAILED")
             if request.payload.get("gpu_repo_task_plan"):
-                return SDKResult(value={
-                    "milestones": [
-                        {"gate": gate, "objective": f"Execute {gate} with evidence",
-                         "success_evidence": "Recorded controller evidence"}
-                        for gate in ("inspect", "edit", "public_check", "finish")
-                    ],
-                    "failure_risk": "Avoid unsupported tool arguments",
-                })
+                return SDKResult(
+                    value={
+                        "milestones": [
+                            {
+                                "gate": gate,
+                                "objective": f"Execute {gate} with evidence",
+                                "success_evidence": "Recorded controller evidence",
+                            }
+                            for gate in ("inspect", "edit", "public_check", "finish")
+                        ],
+                        "failure_risk": "Avoid unsupported tool arguments",
+                    }
+                )
             if request.payload.get("gpu_repo_reflection"):
-                return SDKResult(value={
-                    "observed_failure": "No further observed failure",
-                    "avoid_next": "Avoid repeated source reads",
-                    "next_priority": "Proceed to the next allowed action",
-                })
-            return SDKResult(value={
-                "action": {"tool": "repo_read_file", "path": "kernel.cu"},
-                "reason": "Read public source",
-            })
+                return SDKResult(
+                    value={
+                        "observed_failure": "No further observed failure",
+                        "avoid_next": "Avoid repeated source reads",
+                        "next_priority": "Proceed to the next allowed action",
+                    }
+                )
+            return SDKResult(
+                value={
+                    "action": {"tool": "repo_read_file", "path": "kernel.cu"},
+                    "reason": "Read public source",
+                }
+            )
 
     store = RunStore(tmp_path / "public")
     run = store.create_run("gpu_repository_agent")
@@ -133,16 +140,24 @@ def test_repository_roles_have_independent_durable_format_retry_quotas(tmp_path)
         endpoint="https://api.openai.com/v1", model="test-model", api_key="fixture"
     )
     snapshot = SessionSnapshot(
-        goal="Read public source", case_id="repository", source_hash="a" * 64,
+        goal="Read public source",
+        case_id="repository",
+        source_hash="a" * 64,
         functional_requirement="Inspect the authorized public source",
-        allowed_tools=("repo_read_file",), remaining_steps=3, history=(),
+        allowed_tools=("repo_read_file",),
+        remaining_steps=3,
+        history=(),
     )
 
     def provider():
         return OpenAIResponsesProvider(
-            settings, LLMCallGate(AgentBudget(max_llm_calls=9), reserve_repair_stages=False),
-            store, run.id, port=Port(),
-            call_policy=DevelopmentCallPolicy(max_llm_calls=9), repository_budget=budget,
+            settings,
+            LLMCallGate(AgentBudget(max_llm_calls=9), reserve_repair_stages=False),
+            store,
+            run.id,
+            port=Port(),
+            call_policy=DevelopmentCallPolicy(max_llm_calls=9),
+            repository_budget=budget,
         )
 
     original = provider()
