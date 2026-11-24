@@ -344,15 +344,15 @@ def rewrite_syntax_nodes(
         if extended:
             pending = [after.root_node]
             while pending:
-                node = pending.pop()
-                if node.is_error or node.is_missing:
+                error_node = pending.pop()
+                if error_node.is_error or error_node.is_missing:
                     raise SyntaxRejection(
                         "CUDA_SYNTAX_REPLACEMENT_PARSE_ERROR",
-                        candidate_line=node.start_point.row + 1,
-                        candidate_column=node.start_point.column + 1,
-                        parser_issue="MISSING_NODE" if node.is_missing else "ERROR_NODE",
+                        candidate_line=error_node.start_point.row + 1,
+                        candidate_column=error_node.start_point.column + 1,
+                        parser_issue="MISSING_NODE" if error_node.is_missing else "ERROR_NODE",
                         correction="Repair the syntax at the reported candidate location.",
                     )
-                pending.extend(reversed(node.children))
+                pending.extend(reversed(error_node.children))
         raise ValueError("CUDA_SYNTAX_REPLACEMENT_PARSE_ERROR")
     return rewritten
