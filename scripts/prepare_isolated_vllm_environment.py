@@ -20,7 +20,8 @@ import pathlib
 import shutil
 import subprocess
 import sys
-import tempfile
+import re
+from urllib.parse import urlsplit
 
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
@@ -189,8 +190,20 @@ print(json.dumps({'executable':sys.executable,'prefix':str(prefix),
                                      env=env, text=True)
     # The report stays on the operator's machine. Require standard pinned
     # package lines, rather than accidentally storing a credential-bearing URL.
-    if any("://" in line or " @ " in line for line in freeze.splitlines()):
-        raise ValueError("non-version pip freeze entry requires manual review")
+    for line in freeze.splitlines():
+        if " @ " not in line:
+            if "://" in line:
+                raise ValueError("unrecognized pip freeze entry requires manual review")
+            continue
+        name, origin = line.split(" @ ", 1)
+        url = urlsplit(origin)
+        # The existing vLLM installation came from a local wheel. Keep the
+        # actual pip freeze on the authorized host, not in published reports.
+        if not (name.lower() == "vllm" and url.scheme == "file"
+                and url.hostname in (None, "localhost")
+                and not url.username and not url.password and not url.query
+                and (not url.fragment or re.fullmatch(r"sha256=[0-9a-f]{64}", url.fragment))):
+            raise ValueError("unreviewed direct-origin entry in pip freeze")
     subprocess.run([str(python), "-I", "-m", "pip", "check"], env=env, check=True)
     report = {"schema_version":"isolated-serving-relocation-v1",
               "source_python":sys.executable, "target_python":str(python),

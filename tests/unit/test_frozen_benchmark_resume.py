@@ -1,10 +1,10 @@
 """Fault injection of the actual resume reducer and durable hash-chain."""
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -103,3 +103,105 @@ def test_progress_atomic_replace(tmp_path):
     resume.atomic_json(p,{"count":7},replace=True)
     assert json.loads(p.read_text())=={"count":7}
     assert not list(tmp_path.glob(".pending-*"))
+
+
+class InjectedCrash(BaseException):
+    pass
+
+
+@pytest.mark.parametrize("boundary,expected,model_calls,strict_calls", [
+    ("model_call", "OUTCOME_UNKNOWN", 1, 0),
+    ("tool_completed", "OUTCOME_UNKNOWN", 1, 0),
+    ("agent_report", "COMPLETED_SUCCESS", 1, 1),
+    ("strict_started", "OUTCOME_UNKNOWN", 1, 1),
+    ("strict_projection", "COMPLETED_SUCCESS", 1, 1),
+    ("result_written", "COMPLETED_SUCCESS", 1, 1),
+])
+def test_real_orchestration_boundaries(tmp_path, manifest, monkeypatch, boundary,
+                                       expected, model_calls, strict_calls):
+    output=tmp_path/"output"
+    (output/"trials").mkdir(parents=True)
+    args=SimpleNamespace(output=output,repository=tmp_path,evidence_root=tmp_path)
+    tid=manifest["trial_order"][0]["id"]
+    root=output/"scheduler-v2/events"
+    ledger=resume.Ledger(root,manifest)
+    counts={"model":0,"tool":0,"strict":0}
+    sha="d"*64
+    audit={"public_passed_candidate_sha256":sha,"final_candidate_sha256":sha,
+           "live_edits":[{"turn":2,"sha256":sha}]}
+    agent_seal={"verified_fake_agent":True}
+    projection={"candidate_sha256":sha,"verdict":"VERIFIED_FIXED",
+                "case_id":"h001"}
+    strict={"status":"VERIFIED_FIXED","projection":projection,
+            "strict_public_run_id":"a"*32,"projection_sha256":"b"*64,
+            "wall_seconds":1.0,"mode":"fake","exit_code":0,"timed_out":False}
+    folder=output/"trials"/tid
+    crashed=False
+
+    def fake_invoke(*unused):
+        counts["model"]+=1
+        session=folder/"session"
+        session.mkdir()
+        resume.atomic_json(session/"fake-invocation.json",{"admitted":True})
+        if boundary=="model_call":
+            raise InjectedCrash
+        counts["tool"]+=1
+        resume.atomic_json(session/"fake-checkpoint.json",{"tool_completed":True})
+        if boundary=="tool_completed":
+            raise InjectedCrash
+        resume.atomic_json(session/"controlled-recovery.json",{"completed":True})
+        if boundary=="agent_report":
+            raise InjectedCrash
+        return {"exit_code":0,"timed_out":False,"wall_seconds":1.0}
+
+    def fake_verify_agent(*unused):
+        assert resume.read(folder/"session/controlled-recovery.json")["completed"]
+        return audit,agent_seal,"PUBLIC_PASS"
+
+    def fake_strict(*unused):
+        counts["strict"]+=1
+        if boundary=="strict_started" and not crashed:
+            raise InjectedCrash
+        resume.atomic_json(folder/"strict-projection.json",projection)
+        if boundary=="strict_projection" and not crashed:
+            raise InjectedCrash
+        return strict
+
+    def fake_projection(*unused):
+        assert resume.read(folder/"strict-projection.json")==projection
+        return {**strict,"public_inventory":{"inventory_sha256":"f"*64}}
+
+    def fake_record(*unused):
+        r=resume.read(folder/"trial-record.json")
+        assert r["success"] and r["audit"]==audit
+        assert r["strict"]["projection"]==projection
+        return r,{"record_sha256":resume.frozen.file_digest(folder/"trial-record.json")},"COMPLETED_SUCCESS"
+
+    monkeypatch.setattr(resume.frozen,"invoke",fake_invoke)
+    monkeypatch.setattr(resume,"verify_agent",fake_verify_agent)
+    monkeypatch.setattr(resume.frozen,"strict_check",fake_strict)
+    monkeypatch.setattr(resume,"verify_strict_projection",fake_projection)
+    monkeypatch.setattr(resume,"verify_record",fake_record)
+    monkeypatch.setattr(resume.frozen,"session_environment",lambda *_:{})
+    monkeypatch.setattr(resume,"trial_argv",lambda *_:["fake-frozen-cli"])
+    original_phase=ledger.phase
+
+    def crash_phase(tid_arg,phase,details=None):
+        if boundary=="result_written" and phase=="RESULT_WRITTEN":
+            raise InjectedCrash
+        return original_phase(tid_arg,phase,details)
+
+    monkeypatch.setattr(ledger,"phase",crash_phase)
+    with pytest.raises(InjectedCrash):
+        resume.run_new(args,ledger,tid,{})
+    crashed=True
+    # The same scheduler recovery function used in production must reconcile
+    # the durable files. Reopening the ledger simulates a new process.
+    recovered=resume.Ledger(root,manifest)
+    assert resume.recover_running(args,recovered,tid)==expected
+    assert counts["model"]==model_calls and counts["strict"]==strict_calls
+    assert recovered.states[tid]["state"]==expected
+    assert sum(e["kind"]=="RESERVED" for e in recovered.records)==1
+    if expected=="COMPLETED_SUCCESS":
+        assert resume.read(folder/"trial-record.json")["success"]
+    assert all(x["state"]=="PENDING" for key,x in recovered.states.items() if key!=tid)
