@@ -57,10 +57,9 @@ class ScriptedPlanningProbe:
             }
         elif snapshot.current_candidate_sha256 is not None:
             action = {"tool": "repo_run_public_checks"}
-        elif any(item["tool"] == "repo_inspect_syntax" for item in snapshot.history):
-            item = next(x for x in reversed(snapshot.history) if x["tool"] == "repo_inspect_syntax")
-            mapping = json.loads(item["content"])
-            nodes = mapping["nodes"]
+        elif snapshot.syntax_state is not None:
+            mapping = snapshot.syntax_state.model_dump(mode="json")
+            nodes = mapping["observed_nodes"]
             d = next(x for x in nodes if x["code"] == "denominator += expf(x);")
             n = next(x for x in nodes if x["code"] == "out[i] = expf(own) / denominator;")
             action = {

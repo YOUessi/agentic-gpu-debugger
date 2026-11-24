@@ -543,6 +543,7 @@ def invoke_sdk(
 
         output_model = TaskReflection
     elif request.kind == "plan" and request.payload.get("gpu_repo_harness") == "v1":
+        from gpu_agent.harness.models import SyntaxState
         from gpu_agent.harness.tool_schema import repository_decision_schema
 
         snapshot = request.payload.get("snapshot")
@@ -562,12 +563,11 @@ def invoke_sdk(
         probe_phase = snapshot.get("public_probe_phase")
         if probe_phase not in (None, "before", "after"):
             raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
-        from gpu_agent.harness.models import SyntaxState
-
         syntax_data = snapshot.get("syntax_state")
         syntax_state = (
             SyntaxState.model_validate_json(json.dumps(syntax_data))
-            if syntax_data is not None else None
+            if syntax_data is not None
+            else None
         )
         if syntax_state is not None and syntax_state.path != kernel_path:
             raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")

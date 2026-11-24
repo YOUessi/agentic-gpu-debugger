@@ -54,6 +54,7 @@ def compact_public_context(
     recent_count: int = MAX_RECENT_ACTIONS,
     summary_chars: int = MAX_SUMMARY_CHARS,
     recent_output_chars: int = MAX_RECENT_OUTPUT_CHARS,
+    syntax_pinned: bool = False,
 ) -> ContextView:
     """Keep recent detailed results plus terse, evidence-grounded older history.
 
@@ -68,6 +69,18 @@ def compact_public_context(
     if not 100 <= recent_output_chars <= 2_000:
         raise ValueError("invalid recent observation budget")
 
+    if syntax_pinned:
+        # The raw audit remains intact; historical node IDs can refer to an old
+        # source revision, and must not compete with the current pinned map.
+        history = [
+            {
+                **entry,
+                "content": "AST page observed; use current snapshot.syntax_state only.",
+            }
+            if entry.get("tool") == "repo_inspect_syntax" and entry.get("status") == "OK"
+            else entry
+            for entry in history
+        ]
     old = list(history[:-recent_count])
     recent = list(history[-recent_count:])
     result: list[dict[str, str]] = []

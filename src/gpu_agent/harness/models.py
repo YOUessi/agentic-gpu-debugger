@@ -211,6 +211,7 @@ class SyntaxEvidenceNode(StrictModel):
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
     code: str = Field(max_length=300)
+    code_truncated: bool = False
 
 
 class SyntaxPageVisit(StrictModel):

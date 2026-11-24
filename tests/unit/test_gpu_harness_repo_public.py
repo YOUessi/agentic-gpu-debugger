@@ -17,7 +17,14 @@ import pytest
 from gpu_agent.benchmark.hardset_v2_agent_models import HardsetPublicCheck
 from gpu_agent.harness.journal import read_verified_journal, recovery_disposition
 from gpu_agent.harness.metrics import summarize_repository_trajectory
-from gpu_agent.harness.models import HarnessDecision, RepoRunPublicChecks
+from gpu_agent.harness.models import (
+    HarnessDecision,
+    RepoInspectSyntax,
+    RepoReadFile,
+    RepoReplaceSyntax,
+    RepoRunPublicChecks,
+    RepoSyntaxEdit,
+)
 from gpu_agent.harness.repo_runner import run_repository_coding_session
 from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
 from gpu_agent.harness.repo_verification import verify_repository_hardset_candidate
@@ -964,9 +971,9 @@ def test_hierarchical_syntax_mode_persists_planner_reflection_and_verified_gates
                 action = _finish()
             elif snapshot.current_candidate_sha256 is not None:
                 action = _check()
-            elif snapshot.history and snapshot.history[-1]["tool"] == "repo_inspect_syntax":
-                mapping = json.loads(snapshot.history[-1]["content"])
-                nodes = mapping["nodes"]
+            elif snapshot.syntax_state is not None:
+                mapping = snapshot.syntax_state.model_dump(mode="json")
+                nodes = mapping["observed_nodes"]
                 d = next(n for n in nodes if n["code"] == "denominator += expf(x);")
                 n = next(n for n in nodes if n["code"] == "out[i] = expf(own) / denominator;")
                 action = {
@@ -1182,3 +1189,182 @@ def test_public_probe_evidence_survives_checkpoint_resume(
     assert metrics.public_probes_attempted == 2
     assert metrics.public_gpu_checks_attempted == 1
     assert len(fake.calls) == 2
+
+
+def test_pinned_ast_survives_compaction_cursor_binding_and_revision_change(tmp_path: Path) -> None:
+    from gpu_agent.harness.tool_schema import repository_decision_schema
+
+    repo, sha = _registered_repository(tmp_path)
+    with RepositoryWorkspaceTools(
+        origin=repo, output=tmp_path / "pinned-ast", sha=sha,
+        public_case_id="h001", syntax_mode=True,
+    ) as host:
+        first = host.invoke(RepoInspectSyntax(path=KERNEL, symbol="softmax32", limit=3))
+        assert first.status == "OK"
+        pinned = host.syntax_state
+        assert pinned is not None
+        history = [{"tool": first.tool, "status": first.status, "content": first.content}]
+        for line in range(1, 6):
+            read = host.invoke(RepoReadFile(path=KERNEL, start_line=line, lines=1))
+            assert read.status == "OK"
+            history.append({"tool": read.tool, "status": read.status, "content": read.content})
+        snapshot = host.snapshot(GOAL, history, 10)
+        assert snapshot.syntax_state == pinned
+        assert len(snapshot.history) == 5
+        assert "AST page observed" in snapshot.context_summary
+        assert "repo_inspect_syntax" in snapshot.allowed_tools
+        grammar = repository_decision_schema(
+            ("repo_inspect_syntax", "repo_replace_syntax"),
+            registered_kernel_path=KERNEL,
+            syntax_state=pinned,
+            bind_syntax_cursor=True,
+        )
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError):
+            grammar.model_validate({
+                "action": {
+                    "tool": "repo_inspect_syntax", "path": KERNEL,
+                    "symbol": pinned.symbol, "offset": 0, "limit": 8,
+                },
+                "reason": "Repeat an already visited page",
+            })
+        duplicate = host.invoke(RepoInspectSyntax(path=KERNEL, symbol=pinned.symbol, limit=8))
+        assert "REDUNDANT_SYNTAX_INSPECTION" in duplicate.content
+        while host.syntax_state.next_offset is not None:
+            state = host.syntax_state
+            obs = host.invoke(RepoInspectSyntax(
+                path=KERNEL, symbol=state.symbol, offset=state.next_offset, limit=3
+            ))
+            assert obs.status == "OK"
+        state = host.syntax_state
+        assert state is not None
+        assert "repo_inspect_syntax" not in host.snapshot(GOAL, history, 8).allowed_tools
+        ids = [node.id for node in state.observed_nodes]
+        assert ids == sorted(set(ids))
+        node = next(x for x in state.observed_nodes if x.code == "denominator += expf(x);")
+        base = {"path": KERNEL, "expected_source_sha256": state.source_sha256}
+        noop = RepoReplaceSyntax(**base, edits=[
+            RepoSyntaxEdit(node_id=node.id, replacement_code=node.code)
+        ])
+        assert f"CUDA_SYNTAX_NOOP: {node.id}" in host.invoke(noop).content
+        assert "CUDA_SYNTAX_REPEATED_REJECTED_EDIT" in host.invoke(noop).content
+        missing = RepoReplaceSyntax(**base, edits=[
+            RepoSyntaxEdit(node_id="n99", replacement_code="return;")
+        ])
+        assert "CUDA_SYNTAX_NODE_NOT_FOUND" in host.invoke(missing).content
+        fixed = RepoReplaceSyntax(**base, edits=[
+            RepoSyntaxEdit(node_id=node.id, replacement_code="denominator += expf(x - maximum);")
+        ])
+        assert host.invoke(fixed).status == "OK"
+        assert host.syntax_state is None
+        assert "CUDA_SOURCE_SHA_STALE" in host.invoke(fixed).content
+        current = host.snapshot(GOAL, history, 5)
+        assert current.syntax_state is None
+        assert "repo_replace_syntax" not in current.allowed_tools
+        assert "repo_inspect_syntax" in current.allowed_tools
+        assert "repo_run_public_checks" in current.allowed_tools
+        run = host.store.load(host.run_id)
+        event = next(x for x in run.artifact_refs if x.name == "repo-harness/v1/tool-001.json")
+        body = json.loads(host.store.read(event))
+        assert body["action"]["symbol"] == "softmax32"
+        assert body["action"]["limit"] == 3
+
+
+def test_ast_checkpoint_rehydrates_aliases_without_another_model_inspect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+
+    repo, sha = _registered_repository(tmp_path)
+    output = tmp_path / "ast-resume"
+    checker = FakePublicChecker([True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    options = dict(
+        repository=repo, output=output, base_sha=sha, goal=GOAL,
+        public_case_id="h001", syntax_mode=True, max_steps=6, max_model_calls=8,
+    )
+    paused = run_repository_coding_session(
+        **options, pause_after_turns=1,
+        model_factory=lambda _: Model([
+            {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 20}
+        ]),
+    )
+    assert paused.status == "PAUSED_RESUMABLE"
+    checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
+    state = checkpoint.syntax_state
+    assert state is not None
+    d = next(x for x in state.observed_nodes if x.code == "denominator += expf(x);")
+    n = next(x for x in state.observed_nodes if x.code == "out[i] = expf(own) / denominator;")
+    model = Model([
+        {
+            "tool": "repo_replace_syntax", "path": KERNEL,
+            "expected_source_sha256": state.source_sha256,
+            "edits": [
+                {"node_id": d.id, "replacement_code": "denominator += expf(x - maximum);"},
+                {"node_id": n.id, "replacement_code": "out[i] = expf(own - maximum) / denominator;"},
+            ],
+        },
+        _check(),
+        _finish(),
+    ])
+    final = run_repository_coding_session(**options, resume=True, model_factory=lambda _: model)
+    assert final.public_checks_passed
+    assert final.tool_calls == 4
+    assert model.snapshots[0].syntax_state == state
+    assert "repo_inspect_syntax" not in model.snapshots[0].allowed_tools
+    assert len(checker.calls) == 1
+
+
+def test_single_step_microbench_calls_model_once_and_gpu_only_after_valid_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gpu_agent.harness.ast_microbench import run_ast_single_step
+
+    repo, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+
+    class Once:
+        def __init__(self, noop: bool) -> None:
+            self.noop = noop
+            self.calls = 0
+
+        def choose_harness_v1(self, snapshot):
+            self.calls += 1
+            assert self.calls == 1
+            assert snapshot.allowed_tools == ("repo_replace_syntax",)
+            assert snapshot.task_plan is None
+            state = snapshot.syntax_state
+            assert state is not None and state.next_offset is None
+            d = next(n for n in state.observed_nodes if n.code == "denominator += expf(x);")
+            n = next(n for n in state.observed_nodes if n.code == "out[i] = expf(own) / denominator;")
+            return HarnessDecision(
+                reason="Single controlled edit decision",
+                action=RepoReplaceSyntax(
+                    path=KERNEL, expected_source_sha256=state.source_sha256,
+                    edits=[
+                        RepoSyntaxEdit(
+                            node_id=d.id,
+                            replacement_code=d.code if self.noop else "denominator += expf(x - maximum);",
+                        ),
+                        RepoSyntaxEdit(
+                            node_id=n.id,
+                            replacement_code="out[i] = expf(own - maximum) / denominator;",
+                        ),
+                    ],
+                ),
+            )
+
+    for noop in (True, False):
+        model = Once(noop)
+        report = run_ast_single_step(
+            repository=repo, output=tmp_path / f"single-step-{noop}", base_sha=sha,
+            case_id="h001", allow_real_gpu=True, model_factory=lambda _: model,
+        )
+        assert model.calls == 1
+        assert report["model_physical_calls"] == 0
+        assert report["legal_non_noop"] is not noop
+        assert report["checker_reached"] is not noop
+        assert report["public_check_passed"] is not noop
+    assert len(checker.calls) == 1

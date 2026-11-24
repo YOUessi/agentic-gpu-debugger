@@ -128,9 +128,22 @@ class RepositoryWorkspaceTools:
         """Evidence survives prompt compaction; stale source invalidates it."""
         state = self._syntax_state
         if state is not None and self._syntax_digest(state.path) != state.source_sha256:
-            self._syntax_state = None
-            self._rejected_syntax_edits.clear()
+            self._invalidate_syntax_state()
         return self._syntax_state
+
+    def _invalidate_syntax_state(self) -> None:
+        state = self._syntax_state
+        if state is not None:
+            for page in state.visited_pages:
+                self._observed_query_fingerprints.discard(
+                    self._syntax_fingerprint(
+                        state.path, state.source_sha256, state.symbol, page.offset, page.limit
+                    )
+                )
+        # Historical actions remain immutable in RunStore. Dropping the active
+        # fingerprints permits a fresh inspection if a later edit restores a SHA.
+        self._syntax_state = None
+        self._rejected_syntax_edits.clear()
 
     @property
     def rejected_syntax_edits(self) -> tuple[str, ...]:
@@ -159,8 +172,8 @@ class RepositoryWorkspaceTools:
     ) -> None:
         state = self.syntax_state
         if state is not None and state.path != action.path:
+            self._invalidate_syntax_state()
             state = None
-            self._rejected_syntax_edits.clear()
         digest = self._syntax_digest(action.path)
         if mapping["source_sha256"] != digest:
             raise ValueError("CUDA_SOURCE_SHA_STALE")
@@ -545,7 +558,10 @@ class RepositoryWorkspaceTools:
                     )
                     if syntax_key in self._observed_query_fingerprints:
                         continue
-            if name == "repo_replace_syntax" and self.syntax_state is None:
+            if name == "repo_replace_syntax" and (
+                self.syntax_state is None
+                or not any(not node.code_truncated for node in self.syntax_state.observed_nodes)
+            ):
                 continue
             if name in {"repo_replace_many", "repo_replace_snippet"} and passed:
                 continue
@@ -587,7 +603,7 @@ class RepositoryWorkspaceTools:
                     else "No source file opened yet. Call repo_list_files then repo_read_file."
                 )
             )
-        context = compact_public_context(history, source)
+        context = compact_public_context(history, source, syntax_pinned=self._syntax_mode)
         delta = self.workspace.diff()
         allowed_tools = self._currently_allowed_tools()
         requirement = goal
@@ -800,7 +816,7 @@ class RepositoryWorkspaceTools:
             if fingerprint in self._rejected_syntax_edits:
                 raise ValueError("CUDA_SYNTAX_REPEATED_REJECTED_EDIT")
             try:
-                observed = {node.id for node in state.observed_nodes}
+                observed = {node.id for node in state.observed_nodes if not node.code_truncated}
                 for edit in action.edits:
                     if edit.node_id not in observed:
                         raise ValueError(f"CUDA_SYNTAX_NODE_NOT_FOUND: {edit.node_id}")
@@ -812,8 +828,7 @@ class RepositoryWorkspaceTools:
             except (ValueError, OSError):
                 self._rejected_syntax_edits.add(fingerprint)
                 raise
-            self._syntax_state = None
-            self._rejected_syntax_edits.clear()
+            self._invalidate_syntax_state()
             self._last_file = action.path
             self._last_file_read = self.workspace.read(action.path)
             return ToolObservation(

@@ -33,9 +33,9 @@ class PublicProbeFixture:
             action = {"tool": "repo_probe_public", "phase": "before", "input_size": 33}
         elif history[-1]["tool"] == "repo_probe_public" and snapshot.public_probe_phase == "before":
             action = {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 20}
-        elif history[-1]["tool"] == "repo_inspect_syntax":
-            syntax = json.loads(history[-1]["content"])
-            nodes = syntax["nodes"]
+        elif history[-1]["tool"] == "repo_inspect_syntax" and snapshot.syntax_state is not None:
+            syntax = snapshot.syntax_state.model_dump(mode="json")
+            nodes = syntax["observed_nodes"]
             denominator = next(x for x in nodes if x["code"] == "denominator += expf(x);")
             numerator = next(x for x in nodes if x["code"] == "out[i] = expf(own) / denominator;")
             action = {

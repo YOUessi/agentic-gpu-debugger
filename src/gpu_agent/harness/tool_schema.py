@@ -80,7 +80,9 @@ def repository_decision_schema(
         if name == "repo_replace_syntax" and bind_syntax_cursor:
             if syntax_state is None or not syntax_state.observed_nodes:
                 raise ValueError("AST edit exposed without observed node evidence")
-            aliases = tuple(node.id for node in syntax_state.observed_nodes)
+            aliases = tuple(node.id for node in syntax_state.observed_nodes if not node.code_truncated)
+            if not aliases:
+                raise ValueError("AST edit exposed without a complete node")
             if len(set(aliases)) != len(aliases):
                 raise ValueError("duplicate AST aliases in model grammar")
             edit = create_model(

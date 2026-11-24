@@ -128,6 +128,7 @@ def syntax_nodes(raw: bytes, *, symbol: str = "") -> dict[str, Any]:
                 "start_line": item.start_line,
                 "end_line": item.end_line,
                 "code": item.code[:300],
+                "code_truncated": len(item.code) > 300,
             }
             for alias, item in indexed
         ],
@@ -220,7 +221,7 @@ def rewrite_syntax_nodes(
             raise ValueError("CUDA_SYNTAX_REPLACEMENT_INVALID")
         node = by_id[node_id]
         proposed = code.encode("utf-8")
-        if proposed == raw[node.start_byte : node.end_byte]:
+        if proposed.strip() == raw[node.start_byte : node.end_byte].strip():
             raise ValueError(f"CUDA_SYNTAX_NOOP: {node_id} replacement equals current node")
         spans.append((node.start_byte, node.end_byte, proposed))
     spans.sort(key=lambda x: x[0])
