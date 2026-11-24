@@ -20,6 +20,7 @@ from gpu_agent.benchmark.hardset_v2 import (
 )
 from gpu_agent.benchmark.hardset_v2_agent_models import HardsetPublicCheck
 from gpu_agent.benchmark.hardset_v2_selfcheck import check_candidate_publicly
+from gpu_agent.benchmark.hardset_v2_public_probe import probe_candidate_publicly
 from gpu_agent.harness.context import compact_public_context
 from gpu_agent.harness.models import (
     FinishTask,
@@ -28,6 +29,7 @@ from gpu_agent.harness.models import (
     RepoInspectSyntax,
     RepoListFiles,
     RepoReadFile,
+    RepoProbePublic,
     RepoReplaceMany,
     RepoReplaceSnippet,
     RepoReplaceSyntax,
@@ -51,6 +53,7 @@ class RepositoryWorkspaceTools:
         "repo_git_diff",
         "repo_inspect_syntax",
         "repo_replace_syntax",
+        "repo_probe_public",
         "repo_run_public_checks",
         "finish",
     )
@@ -107,11 +110,25 @@ class RepositoryWorkspaceTools:
         self._last_checked_candidate_sha: str | None = None
         self._last_public_passed = False
         self._observed_query_fingerprints: set[str] = set()
+        self._public_probe_signatures: set[str] = set()
+        self._public_probe_run_ids: list[str] = []
 
     @property
     def observed_query_fingerprints(self) -> tuple[str, ...]:
         """Hashed read/list/diff queries; no source code is persisted here."""
         return tuple(sorted(self._observed_query_fingerprints))
+
+    @property
+    def public_probe_signatures(self) -> tuple[str, ...]:
+        return tuple(sorted(self._public_probe_signatures))
+
+    @property
+    def public_probe_run_ids(self) -> tuple[str, ...]:
+        return tuple(self._public_probe_run_ids)
+
+    @property
+    def public_probes_attempted(self) -> int:
+        return len(self._public_probe_run_ids)
 
     def _query_fingerprint(self, payload: dict[str, str | int]) -> str:
         """Bind inspection requests to their exact revision, not LLM claims."""
@@ -199,6 +216,8 @@ class RepositoryWorkspaceTools:
         last_checked_candidate_sha: str | None = None,
         last_public_passed: bool = False,
         observed_query_fingerprints: tuple[str, ...] = (),
+        public_probe_signatures: tuple[str, ...] = (),
+        public_probe_run_ids: tuple[str, ...] = (),
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
         allow_batch_edits: bool = True,
         syntax_mode: bool = False,
@@ -257,6 +276,23 @@ class RepositoryWorkspaceTools:
         ):
             raise ValueError("invalid resumed inspection query fingerprints")
         host._observed_query_fingerprints = set(observed_query_fingerprints)
+        if (
+            len(public_probe_signatures) != len(public_probe_run_ids)
+            or len(public_probe_signatures) > 4
+            or len(set(public_probe_signatures)) != len(public_probe_signatures)
+            or len(set(public_probe_run_ids)) != len(public_probe_run_ids)
+            or any(not isinstance(v, str) or len(v) != 64 for v in public_probe_signatures)
+        ):
+            raise ValueError("recovered public functional probe ledger is invalid")
+        for identifier in public_probe_run_ids:
+            child = host._store.load(identifier)
+            if child.parent_run_id != run_id or child.kind != "hardset_v2_public_functional_probe":
+                raise ValueError("recovered probe does not belong to session")
+            refs = [x for x in child.artifact_refs if x.name == "probe/public-summary.json"]
+            if len(refs) != 1:
+                raise ValueError("missing public probe attestation")
+        host._public_probe_signatures = set(public_probe_signatures)
+        host._public_probe_run_ids = list(public_probe_run_ids)
         if public_checks_attempted:
             if not public_case_id or not last_public_run_id or not last_checked_candidate_sha:
                 raise ValueError("missing recovered public GPU evidence")
@@ -368,6 +404,7 @@ class RepositoryWorkspaceTools:
             )
         if passed:
             return ("finish",) if self._policy.check("finish") == "ALLOW" else ()
+        probe_phase = self._public_probe_phase()
         can_check = (
             dirty
             and target_only
@@ -412,6 +449,10 @@ class RepositoryWorkspaceTools:
                 continue
             if name == "repo_git_diff" and (
                 not dirty or diff_key in self._observed_query_fingerprints
+            ):
+                continue
+            if name == "repo_probe_public" and (
+                self.public_probes_attempted >= 4 or probe_phase is None
             ):
                 continue
             if name == "repo_run_public_checks" and not can_check:
@@ -482,6 +523,8 @@ class RepositoryWorkspaceTools:
             functional_requirement=requirement,
             registered_public_case=self._public_case_id,
             registered_kernel_path=self._public_kernel_path,
+            public_probe_phase=self._public_probe_phase(),
+            remaining_public_probes=4 - self.public_probes_attempted,
             context_mode=self._context_mode,
             current_candidate_sha256=hashlib.sha256(delta.encode()).hexdigest() if delta else None,
             public_checks_passed=self.public_checks_passed,
@@ -563,6 +606,8 @@ class RepositoryWorkspaceTools:
                 content="\n".join(files)[:4000] or "No allowed source files found.",
             )
         if isinstance(action, RepoReadFile):
+            if self._public_kernel_path is not None and action.path != self._public_kernel_path:
+                raise ValueError("REGISTERED_READ_SCOPE_VIOLATION")
             key = self._query_fingerprint(
                 {
                     "tool": action.tool,
@@ -657,6 +702,8 @@ class RepositoryWorkspaceTools:
                 content=f"Edit accepted. source_sha256={candidate_sha}. "
                 "Use repo_git_diff to inspect changes; staged edits are NOT GPU verified.",
             )
+        if isinstance(action, RepoProbePublic):
+            return self._run_registered_public_probe(action)
         if isinstance(action, RepoRunPublicChecks):
             return self._run_registered_public_checks()
         if isinstance(action, RepoGitDiff):
@@ -692,6 +739,58 @@ class RepositoryWorkspaceTools:
                 ),
             )
         raise ValueError("unsupported repository action")
+
+    def _public_probe_phase(self) -> Literal["before", "after"] | None:
+        if self._public_case_id is None or self._public_kernel_path is None:
+            return None
+        if self.public_checks_passed or self.public_probes_attempted >= 4:
+            return None
+        diff = self.workspace.diff()
+        if not diff and not self.workspace.edited_files:
+            return "before"
+        if diff and self.workspace.edited_files == (self._public_kernel_path,):
+            return "after"
+        return None
+
+    def _run_registered_public_probe(self, action: RepoProbePublic) -> ToolObservation:
+        if self._public_case_id is None or self._public_kernel_path is None:
+            raise ValueError("PUBLIC_PROBE_UNREGISTERED_CASE")
+        actual_phase = self._public_probe_phase()
+        if actual_phase is None or action.phase != actual_phase:
+            raise ValueError("PUBLIC_PROBE_PHASE_MISMATCH")
+        source = read_regular(
+            self.workspace._checked(self._public_kernel_path, editable=True),
+            1024 * 1024,
+        )
+        digest = hashlib.sha256(source).hexdigest()
+        signature = self._query_fingerprint(
+            {
+                "tool": action.tool, "phase": action.phase,
+                "size": action.input_size, "source_sha256": digest,
+            }
+        )
+        if signature in self._public_probe_signatures:
+            raise ValueError("REDUNDANT_PUBLIC_PROBE")
+        number = self.public_probes_attempted + 1
+        result = probe_candidate_publicly(
+            store=self._store,
+            parent_run_id=self.run_id,
+            repository=self.workspace.root,
+            case_id=self._public_case_id,
+            phase=action.phase,
+            input_size=action.input_size,
+            candidate=source,
+            output=self.output / f"public-probe-{number:02d}",
+        )
+        if result.candidate_sha256 != digest or result.phase != action.phase:
+            raise ValueError("PUBLIC_PROBE_SOURCE_PROVENANCE_MISMATCH")
+        self._public_probe_signatures.add(signature)
+        self._public_probe_run_ids.append(result.run_id)
+        return ToolObservation(
+            tool=action.tool,
+            status="FAILED" if result.outcome == "PROBE_INCONCLUSIVE" else "OK",
+            content=result.model_dump_json(),
+        )
 
     def _run_registered_public_checks(self) -> ToolObservation:
         if self._public_case_id is None or self._public_kernel_path is None:
