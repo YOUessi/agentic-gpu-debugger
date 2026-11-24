@@ -17,23 +17,31 @@ import importlib.metadata as md
 import json
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
-import re
 from urllib.parse import urlsplit
 
 from packaging.markers import default_environment
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-
 ROOTS = [
-    "vllm", "pip", "setuptools", "wheel", "typing_extensions", "torch",
-    "torchvision", "torchaudio", "triton", "transformers", "numpy", "pydantic",
+    "vllm",
+    "pip",
+    "setuptools",
+    "wheel",
+    "typing_extensions",
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "triton",
+    "transformers",
+    "numpy",
+    "pydantic",
 ]
-APT = {"markupsafe": "python3-markupsafe", "wheel": "python3-wheel",
-       "psutil": "python3-psutil"}
+APT = {"markupsafe": "python3-markupsafe", "wheel": "python3-wheel", "psutil": "python3-psutil"}
 
 
 def sha(path: pathlib.Path) -> str:
@@ -102,8 +110,10 @@ def main():
         assert not target.is_symlink() and "include-system-site-packages = false" in cfg
         assert (target / "bin/python").is_file()
     else:
-        subprocess.run([sys.executable, "-I", "-m", "venv", "--copies", "--without-pip",
-                        str(target)], check=True)
+        subprocess.run(
+            [sys.executable, "-I", "-m", "venv", "--copies", "--without-pip", str(target)],
+            check=True,
+        )
     dest = target / "lib/python3.10/site-packages"
     expected = {}
     records = []
@@ -118,9 +128,13 @@ def main():
         assert root in roots, root
         installed = []
         if dist.files:
-            files = [(root / str(f), pathlib.Path(str(f)), f.hash) for f in dist.files
-                     if ".." not in f.parts and "__pycache__" not in f.parts
-                     and not str(f).endswith(".pyc")]
+            files = [
+                (root / str(f), pathlib.Path(str(f)), f.hash)
+                for f in dist.files
+                if ".." not in f.parts
+                and "__pycache__" not in f.parts
+                and not str(f).endswith(".pyc")
+            ]
         else:
             # Ubuntu's three distro-owned Python distributions have egg-info,
             # not wheel RECORD. Use the installed package inventory only.
@@ -141,23 +155,36 @@ def main():
                 owner = dists["flashinfer-python"]
                 other = next(f for f in owner.files if str(f) == str(rel))
                 assert pathlib.Path(owner.locate_file(other)).resolve() == src.resolve()
-                assert sha(src) == "d034bb09167e69d48f61ffbddf3a0f2e4f6b4233e76f295eaa11b38ac535b657"
+                assert (
+                    sha(src) == "d034bb09167e69d48f61ffbddf3a0f2e4f6b4233e76f295eaa11b38ac535b657"
+                )
                 assert h is not None and other.hash is not None
-                record_collisions.append({
-                    "path": str(rel), "overwritten_record_owner": name,
-                    "matching_record_owner": "flashinfer-python",
-                    "effective_sha256": sha(src), "original_expected_hash": h.value,
-                    "matching_record_hash": other.hash.value,
-                })
+                record_collisions.append(
+                    {
+                        "path": str(rel),
+                        "overwritten_record_owner": name,
+                        "matching_record_owner": "flashinfer-python",
+                        "effective_sha256": sha(src),
+                        "original_expected_hash": h.value,
+                        "matching_record_hash": other.hash.value,
+                    }
+                )
                 h = other.hash
             value = install_file(src, dest / rel, h)
             installed.append([str(rel), value])
         assert installed
         expected[name] = dist.version
-        records.append({"name": name, "version": dist.version,
-                        "source_package_root": str(root), "installed_file_count": len(installed),
-                        "file_inventory_sha256": hashlib.sha256(
-                            json.dumps(installed, separators=(",", ":")).encode()).hexdigest()})
+        records.append(
+            {
+                "name": name,
+                "version": dist.version,
+                "source_package_root": str(root),
+                "installed_file_count": len(installed),
+                "file_inventory_sha256": hashlib.sha256(
+                    json.dumps(installed, separators=(",", ":")).encode()
+                ).hexdigest(),
+            }
+        )
         print("RELOCATED", name, dist.version, len(installed), flush=True)
     # Only the new environment is used from here onward.
     env = dict(os.environ)
@@ -184,10 +211,11 @@ print(json.dumps({'executable':sys.executable,'prefix':str(prefix),
 """
     out = subprocess.check_output([str(python), "-I", "-c", check], env=env, text=True)
     identity = json.loads(out.splitlines()[-1])
-    actual = {canonicalize_name(k):v for k,v in identity["installed"].items()}
-    assert expected == actual, (set(expected)-set(actual),set(actual)-set(expected))
-    freeze = subprocess.check_output([str(python), "-I", "-m", "pip", "freeze", "--all"],
-                                     env=env, text=True)
+    actual = {canonicalize_name(k): v for k, v in identity["installed"].items()}
+    assert expected == actual, (set(expected) - set(actual), set(actual) - set(expected))
+    freeze = subprocess.check_output(
+        [str(python), "-I", "-m", "pip", "freeze", "--all"], env=env, text=True
+    )
     # The report stays on the operator's machine. Require standard pinned
     # package lines, rather than accidentally storing a credential-bearing URL.
     for line in freeze.splitlines():
@@ -199,29 +227,52 @@ print(json.dumps({'executable':sys.executable,'prefix':str(prefix),
         url = urlsplit(origin)
         # The existing vLLM installation came from a local wheel. Keep the
         # actual pip freeze on the authorized host, not in published reports.
-        if not (name.lower() == "vllm" and url.scheme == "file"
-                and url.hostname in (None, "localhost")
-                and not url.username and not url.password and not url.query
-                and (not url.fragment or re.fullmatch(r"sha256=[0-9a-f]{64}", url.fragment))):
+        if not (
+            name.lower() == "vllm"
+            and url.scheme == "file"
+            and url.hostname in (None, "localhost")
+            and not url.username
+            and not url.password
+            and not url.query
+            and (not url.fragment or re.fullmatch(r"sha256=[0-9a-f]{64}", url.fragment))
+        ):
             raise ValueError("unreviewed direct-origin entry in pip freeze")
     subprocess.run([str(python), "-I", "-m", "pip", "check"], env=env, check=True)
-    report = {"schema_version":"isolated-serving-relocation-v1",
-              "source_python":sys.executable, "target_python":str(python),
-              "relocation_method":"copy exact installed package files into separate no-system-site venv; verify wheel RECORD and copied bytes",
-              "package_records":records,"shared_path_record_collisions":record_collisions,
-              "module_identity":identity,"pip_freeze":freeze,
-              "pip_freeze_sha256":hashlib.sha256(freeze.encode()).hexdigest()}
+    report = {
+        "schema_version": "isolated-serving-relocation-v1",
+        "source_python": sys.executable,
+        "target_python": str(python),
+        "relocation_method": (
+            "copy exact installed package files into separate no-system-site venv; "
+            "verify wheel RECORD and copied bytes"
+        ),
+        "package_records": records,
+        "shared_path_record_collisions": record_collisions,
+        "module_identity": identity,
+        "pip_freeze": freeze,
+        "pip_freeze_sha256": hashlib.sha256(freeze.encode()).hexdigest(),
+    }
     args.report.parent.mkdir(parents=True, exist_ok=True)
     with args.report.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, indent=2)
         stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
-    print("ISOLATED_ENVIRONMENT_READY", json.dumps({
-        "python":str(python), "packages":len(records), "torch":identity["torch"],
-        "vllm":identity["vllm"], "typing_extensions":identity["typing_extensions"],
-        "pip_freeze_sha256":report["pip_freeze_sha256"], "report_sha256":sha(args.report)
-    }), flush=True)
+    print(
+        "ISOLATED_ENVIRONMENT_READY",
+        json.dumps(
+            {
+                "python": str(python),
+                "packages": len(records),
+                "torch": identity["torch"],
+                "vllm": identity["vllm"],
+                "typing_extensions": identity["typing_extensions"],
+                "pip_freeze_sha256": report["pip_freeze_sha256"],
+                "report_sha256": sha(args.report),
+            }
+        ),
+        flush=True,
+    )
 
 
 if __name__ == "__main__":
