@@ -92,6 +92,10 @@ def check_candidate_publicly(
                     update={"failure_code": "BUILD_FAILED", "public_error_excerpt": stderr}
                 )
             else:
+                store.put(
+                    run.id, "hardset/public-build-passed.json",
+                    json.dumps({"candidate_sha256": candidate_hash}).encode(), "public",
+                )
                 failure = None
                 for size in PUBLIC_CHECK_SIZES:
                     payload = sample_input(case_id, size)

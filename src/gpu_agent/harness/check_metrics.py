@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from gpu_agent.benchmark.hardset_v2_agent_models import HardsetPublicCheck
+from gpu_agent.benchmark.public_compile import PublicCompileResult
 from gpu_agent.store import RunStore
 
 _ADMITTED = re.compile(r"^repo-harness/v1/check-([0-9]{3})-admitted\.json$")
@@ -26,6 +27,7 @@ class PublicCheckLifecycle:
     executed: tuple[int, ...]
     completed: tuple[int, ...]
     passed: tuple[int, ...]
+    build_passed_candidates: tuple[str, ...]
 
 
 def public_check_lifecycle(
@@ -72,13 +74,41 @@ def public_check_lifecycle(
     passed: set[int] = set()
     executed: set[int] = set()
     seen_children: set[str] = set()
+    built: set[str] = set()
+    compile_events = {
+        json.loads(event["observation"])["run_id"]: event
+        for event in tool_events
+        if event["tool"] == "repo_compile_candidate" and event["status"] in ("OK", "FAILED")
+    }
     for child in store.children(run_id):
+        if child.kind == "hardset_v2_public_compile":
+            event = compile_events.get(child.id)
+            if event is None:
+                # Incomplete compile-only run is not evidence of a successful build.
+                continue
+            refs = [ref for ref in child.artifact_refs if ref.name == "compile/public-summary.json"]
+            if len(refs) != 1:
+                raise ValueError("compile summary missing")
+            compile_result = PublicCompileResult.model_validate_json(store.read(refs[0]))
+            if (
+                compile_result != PublicCompileResult.model_validate_json(event["observation"])
+                or compile_result.run_id != child.id
+                or compile_result.candidate_sha256 != event["action"]["expected_source_sha256"]
+                or child.status.value != (
+                    "COMPLETED" if compile_result.status == "BUILD_PASSED" else "FAILED"
+                )
+            ):
+                raise ValueError("compile candidate evidence mismatch")
+            if compile_result.status == "BUILD_PASSED":
+                built.add(compile_result.candidate_sha256)
+            continue
         if child.kind != "hardset_v2_public_candidate":
             continue
         refs = {ref.name: ref for ref in child.artifact_refs}
         summary_ref = refs.get("hardset/public-selfcheck.json")
         candidate_ref = refs.get("hardset/public-check-candidate.json")
         dispatch_ref = refs.get("hardset/public-numeric-dispatch.json")
+        build_ref = refs.get("hardset/public-build-passed.json")
         summary = (
             HardsetPublicCheck.model_validate_json(store.read(summary_ref))
             if summary_ref is not None
@@ -102,11 +132,17 @@ def public_check_lifecycle(
             raise ValueError("duplicate public checker candidate child")
         seen_children.add(candidate)
         turn = admitted[candidate]
+        if build_ref is not None:
+            if json.loads(store.read(build_ref)).get("candidate_sha256") != candidate:
+                raise ValueError("public build provenance mismatch")
+            built.add(candidate)
         if dispatch_ref is not None:
             dispatch = json.loads(store.read(dispatch_ref))
             if dispatch.get("candidate_sha256") != candidate or dispatch.get("input_size") != 32:
                 raise ValueError("public numeric dispatch provenance mismatch")
             executed.add(turn)
+            # Numeric dispatch only occurs after successful NVCC build.
+            built.add(candidate)
         if summary is not None:
             if (
                 summary.candidate_sha256 != candidate
@@ -143,4 +179,5 @@ def public_check_lifecycle(
         executed=tuple(sorted(executed)),
         completed=tuple(sorted(completed)),
         passed=tuple(sorted(passed)),
+        build_passed_candidates=tuple(sorted(built)),
     )

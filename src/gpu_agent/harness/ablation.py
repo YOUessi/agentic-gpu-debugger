@@ -116,6 +116,11 @@ class TrialRecord(BenchmarkModel):
     model_tokens: int | None = Field(default=None, ge=0)
     tool_turns: int | None = Field(default=None, ge=0)
     first_edit_turn: int | None = Field(default=None, ge=1)
+    first_ast_edit_accepted_turn: int | None = Field(default=None, ge=1)
+    ast_edit_accepted_count: int | None = Field(default=None, ge=0)
+    build_passed_candidate_count: int | None = Field(default=None, ge=0)
+    numeric_dispatched_candidate_count: int | None = Field(default=None, ge=0)
+    public_check_passed_candidate_count: int | None = Field(default=None, ge=0)
     # Legacy name is retained as an admitted request, not proof of GPU execution.
     first_public_check_turn: int | None = Field(default=None, ge=1)
     first_public_check_request_turn: int | None = Field(default=None, ge=1)
@@ -373,6 +378,11 @@ class PartialAudit(TypedDict, total=False):
     model_tokens: int | None
     tool_turns: int
     first_edit_turn: int | None
+    first_ast_edit_accepted_turn: int | None
+    ast_edit_accepted_count: int
+    build_passed_candidate_count: int
+    numeric_dispatched_candidate_count: int
+    public_check_passed_candidate_count: int
     first_public_check_turn: int | None
     first_public_check_request_turn: int | None
     first_public_check_executed_turn: int | None
@@ -432,12 +442,21 @@ def _failed_repository_public_audit(unit_directory: Path) -> PartialAudit:
             None,
         )
         lifecycle = public_check_lifecycle(store, run_id, journal, events)
+        ast_edits = [
+            turn for turn, event in enumerate(events, 1)
+            if event["tool"] == "repo_replace_syntax" and event["status"] == "OK"
+        ]
         return {
             "run_id": run_id,
             "model_calls": calls,
             "model_tokens": tokens,
             "tool_turns": count,
             "first_edit_turn": first_edit,
+            "first_ast_edit_accepted_turn": min(ast_edits, default=None),
+            "ast_edit_accepted_count": len(ast_edits),
+            "build_passed_candidate_count": len(lifecycle.build_passed_candidates),
+            "numeric_dispatched_candidate_count": len(lifecycle.executed),
+            "public_check_passed_candidate_count": len(lifecycle.passed),
             "first_public_check_turn": min(lifecycle.admitted, default=None),
             "first_public_check_request_turn": min(lifecycle.requested, default=None),
             "first_public_check_executed_turn": min(lifecycle.executed, default=None),
@@ -563,6 +582,25 @@ def _run_one(
         first_edit_turn=(
             metrics.first_accepted_edit_turn if metrics else recovered.get("first_edit_turn")
         ),
+        first_ast_edit_accepted_turn=(
+            metrics.first_ast_edit_accepted_turn if metrics
+            else recovered.get("first_ast_edit_accepted_turn")
+        ),
+        ast_edit_accepted_count=(
+            metrics.ast_edit_accepted_count if metrics else recovered.get("ast_edit_accepted_count")
+        ),
+        build_passed_candidate_count=(
+            metrics.build_passed_candidate_count if metrics
+            else recovered.get("build_passed_candidate_count")
+        ),
+        numeric_dispatched_candidate_count=(
+            metrics.numeric_dispatched_candidate_count if metrics
+            else recovered.get("numeric_dispatched_candidate_count")
+        ),
+        public_check_passed_candidate_count=(
+            metrics.public_check_passed_candidate_count if metrics
+            else recovered.get("public_check_passed_candidate_count")
+        ),
         first_public_check_turn=(
             metrics.first_public_check_admitted_turn
             if metrics
@@ -607,8 +645,10 @@ def _run_one(
             result.public_checks_attempted if result else recovered.get("public_checks_attempted")
         ),
         public_probes=result.public_probes_attempted if result else None,
+        # "Effective" here means buildable; never equate accepted AST text with NVCC success.
         effective_patch=bool(
-            metrics.first_accepted_edit_turn if metrics else recovered.get("first_edit_turn")
+            metrics.build_passed_candidate_count if metrics
+            else recovered.get("build_passed_candidate_count")
         ),
         public_check_reached=bool(
             result.public_checks_attempted if result else recovered.get("public_checks_attempted")
@@ -652,6 +692,16 @@ def summarize_sweep(plan: BenchmarkPlan, records: tuple[TrialRecord, ...]) -> Sw
         reported = [item.model_tokens for item in group]
         edits = [item.first_edit_turn for item in group if item.first_edit_turn is not None]
         by_arm[arm] = {
+            "ast_edit_accepted_trials": sum(
+                bool(item.ast_edit_accepted_count) for item in group
+            ),
+            "build_passed_trials": sum(bool(item.build_passed_candidate_count) for item in group),
+            "numeric_dispatched_trials": sum(
+                bool(item.numeric_dispatched_candidate_count) for item in group
+            ),
+            "public_check_passed_trials": sum(
+                bool(item.public_check_passed_candidate_count) for item in group
+            ),
             "effective_patch_trials": sum(item.effective_patch for item in group),
             "effective_patch_rate": (
                 sum(item.effective_patch for item in group) / len(group) if group else None

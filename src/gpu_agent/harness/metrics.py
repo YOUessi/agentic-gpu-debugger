@@ -49,6 +49,11 @@ class RepositoryTrajectoryMetrics(BaseModel):
     model_tokens: int | None = Field(default=None, ge=0)
     inspected_actions: int = Field(ge=0)
     first_accepted_edit_turn: int | None = Field(default=None, ge=1)
+    first_ast_edit_accepted_turn: int | None = Field(default=None, ge=1)
+    ast_edit_accepted_count: int = Field(default=0, ge=0)
+    build_passed_candidate_count: int = Field(default=0, ge=0)
+    numeric_dispatched_candidate_count: int = Field(default=0, ge=0)
+    public_check_passed_candidate_count: int = Field(default=0, ge=0)
     first_public_check_request_turn: int | None = Field(default=None, ge=1)
     first_public_check_admitted_turn: int | None = Field(default=None, ge=1)
     first_public_check_executed_turn: int | None = Field(default=None, ge=1)
@@ -154,6 +159,9 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         ),
         None,
     )
+    ast_edits = [
+        step.turn for step in sequence if step.tool == "repo_replace_syntax" and step.status == "OK"
+    ]
     lifecycle = public_check_lifecycle(store, result.public_run_id, journal, records)
     first_public_pass = min(lifecycle.passed, default=None)
     first_finish = next(
@@ -185,6 +193,11 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         model_tokens=result.model_tokens,
         inspected_actions=sum(step.tool in _READ_TOOLS for step in sequence),
         first_accepted_edit_turn=first_edit,
+        first_ast_edit_accepted_turn=min(ast_edits, default=None),
+        ast_edit_accepted_count=len(ast_edits),
+        build_passed_candidate_count=len(lifecycle.build_passed_candidates),
+        numeric_dispatched_candidate_count=len(lifecycle.executed),
+        public_check_passed_candidate_count=len(lifecycle.passed),
         first_public_check_request_turn=min(lifecycle.requested, default=None),
         first_public_check_admitted_turn=min(lifecycle.admitted, default=None),
         first_public_check_executed_turn=min(lifecycle.executed, default=None),

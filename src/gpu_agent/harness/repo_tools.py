@@ -145,6 +145,7 @@ class RepositoryWorkspaceTools:
         self._allow_revert = allow_revert
         self._max_compiles = max_compiles
         self._compile_results: dict[str, PublicCompileResult] = {}
+        self._compile_attempts: set[str] = set()
         self._last_edit_turn: int | None = None
         self._revert_used = False
 
@@ -176,6 +177,7 @@ class RepositoryWorkspaceTools:
                 if result.candidate_sha256 in self._compile_results:
                     raise ValueError("recovered duplicate candidate compilation")
                 self._compile_results[result.candidate_sha256] = result
+                self._compile_attempts.add(result.candidate_sha256)
             if event["status"] != "OK":
                 continue
             if event["tool"] == "repo_replace_syntax" and self._allow_revert and not self._revert_used:
@@ -191,8 +193,25 @@ class RepositoryWorkspaceTools:
                     raise ValueError("recovered invalid rollback ledger")
                 self._revert_used = True
                 self._last_edit_turn = None
-        if len(self._compile_results) > self._max_compiles:
-            raise ValueError("recovered compilation budget exceeded")
+        admissions = {}
+        for ref in self._store.load(self.run_id).artifact_refs:
+            if ref.name.startswith("repo-harness/v1/compile-") and ref.name.endswith("-admitted.json"):
+                item = json.loads(self._store.read(ref))
+                turn = item["turn"]
+                if not 1 <= turn <= len(events):
+                    raise ValueError("recovered compilation admission outside tool ledger")
+                event = events[turn - 1]
+                digest = item["candidate_sha256"]
+                if (
+                    event["tool"] != "repo_compile_candidate"
+                    or event["status"] not in ("OK", "FAILED")
+                    or digest != event["action"]["expected_source_sha256"]
+                    or digest in admissions
+                ):
+                    raise ValueError("recovered compilation admission differs from tool ledger")
+                admissions[digest] = turn
+        if set(admissions) != self._compile_attempts or len(admissions) > self._max_compiles:
+            raise ValueError("recovered compilation budget or admission evidence differs")
         if self._last_edit_turn is not None:
             image = self._before_image(self._last_edit_turn)
             assert self._public_kernel_path is not None
@@ -218,7 +237,7 @@ class RepositoryWorkspaceTools:
         return CandidateRecoveryView(
             source_sha256=digest,
             compile_gate=self._compile_gate,
-            remaining_compiles=self._max_compiles - len(self._compile_results),
+            remaining_compiles=self._max_compiles - len(self._compile_attempts),
             compile_status=result.status if result else "NOT_CHECKED",
             revert_available=bool(
                 self._allow_revert and not self._revert_used and self._last_edit_turn is not None
@@ -240,13 +259,22 @@ class RepositoryWorkspaceTools:
         )
         if hashlib.sha256(candidate).hexdigest() != view.source_sha256:
             raise ValueError("CUDA_SOURCE_SHA_STALE")
-        result = compile_public_candidate(
-            store=self._store, parent_run_id=self.run_id, repository=self.workspace.root,
-            candidate=candidate, output=self.output / f"compile-{self._tool_calls:03d}",
+        self._store.put(
+            self.run_id, f"repo-harness/v1/compile-{self._tool_calls:03d}-admitted.json",
+            json.dumps({"turn": self._tool_calls, "candidate_sha256": view.source_sha256}).encode(),
+            "public",
         )
-        self._validate_compile_result(result)
-        if result.candidate_sha256 != view.source_sha256:
-            raise ValueError("PUBLIC_COMPILE_PROVENANCE_MISMATCH")
+        self._compile_attempts.add(view.source_sha256)
+        try:
+            result = compile_public_candidate(
+                store=self._store, parent_run_id=self.run_id, repository=self.workspace.root,
+                candidate=candidate, output=self.output / f"compile-{self._tool_calls:03d}",
+            )
+            self._validate_compile_result(result)
+            if result.candidate_sha256 != view.source_sha256:
+                raise ValueError("PUBLIC_COMPILE_PROVENANCE_MISMATCH")
+        except (ValueError, OSError) as exc:
+            raise RuntimeError("PUBLIC_COMPILE_AUDIT_UNCERTAIN") from exc
         self._compile_results[result.candidate_sha256] = result
         return ToolObservation(
             tool=action.tool, status="OK" if result.status == "BUILD_PASSED" else "FAILED",
@@ -1205,14 +1233,17 @@ class RepositoryWorkspaceTools:
                 # The image is limited to the registered public kernel. If
                 # persistence fails after staging, abort rather than permit an
                 # unlogged rollback or silently continue a mutated session.
-                self._store.put(
-                    self.run_id, f"repo-harness/v1/edit-{self._tool_calls:03d}-before.json",
-                    json.dumps({
-                        "turn": self._tool_calls, "path": action.path,
-                        "before_sha256": current, "after_sha256": digest,
-                        "source": before_image.decode("utf-8"),
-                    }, ensure_ascii=False).encode(), "public",
-                )
+                try:
+                    self._store.put(
+                        self.run_id, f"repo-harness/v1/edit-{self._tool_calls:03d}-before.json",
+                        json.dumps({
+                            "turn": self._tool_calls, "path": action.path,
+                            "before_sha256": current, "after_sha256": digest,
+                            "source": before_image.decode("utf-8"),
+                        }, ensure_ascii=False).encode(), "public",
+                    )
+                except (ValueError, OSError) as exc:
+                    raise RuntimeError("CUDA_BEFORE_IMAGE_AUDIT_UNCERTAIN") from exc
                 self._last_edit_turn = self._tool_calls
             self._invalidate_syntax_state()
             self._last_file = action.path
