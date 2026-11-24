@@ -1,0 +1,202 @@
+{
+  "schema_version": "gpu-ast-audit-closure-v1",
+  "frozen_source": "dc7f5aabd0bcef0cb7aad28cadfcf040f687c130",
+  "previous_baseline": "bd0d20cfffedce8a1ab0d71a27f5271f57a25252",
+  "model": "qwen3-8b-awq",
+  "gpu": "Tang RTX 4090 Laptop GPU",
+  "server_seed_values": [
+    41,
+    43
+  ],
+  "cases": [
+    "h001",
+    "h002",
+    "h003"
+  ],
+  "physical_model_calls_per_trial": 1,
+  "planner": false,
+  "reflection": false,
+  "hidden_verifier": false,
+  "prompt_version": "gpu-repository-ast-executor-2026-11-24-v1",
+  "cpu": {
+    "focused_tests_passed": 93,
+    "mypy_strict_files": 120,
+    "ruff_lint": "PASS",
+    "ruff_format": "PASS",
+    "cpu_log_sha256": "fdb12b403241c33b2434444200da22b28a1e290deb66cd81edceb76998b2a284",
+    "typecheck_log_sha256": "a1051ec290fd198fdc01a84ce45195d00fd6617246598e305eb28ab300452773"
+  },
+  "aggregate": {
+    "trials": 6,
+    "physical_calls": 6,
+    "legal_non_noop": 4,
+    "checker_reached": 4,
+    "public_pass": 3,
+    "public_numeric_mismatch": 1,
+    "mixed_noop": 1,
+    "parse_error": 1,
+    "node_not_found": 0,
+    "provider_errors": 0,
+    "verified_replays": 6
+  },
+  "raw_artifact_root": "/home/you/gpu-native-harness-validation-20261124/ast-audit-closure/",
+  "gpu_lock_released": true,
+  "trials": [
+    {
+      "server_seed": 41,
+      "case_id": "h001",
+      "legal_non_noop": false,
+      "checker_reached": false,
+      "public_check_passed": false,
+      "outcome": "CUDA_SYNTAX_NOOP",
+      "model_tokens": 5789,
+      "public_run_id": "4c3c516e5b914845afb058dee2979bf4",
+      "checker_run_id": null,
+      "candidate_sha256": "47e69f940ca6c8b9ab287b5ee5c9aed7973f4d1eeb7ac41b7e855a01609c9bce",
+      "edits": [
+        {
+          "node_id": "n14",
+          "original": "const float own = a[i] + b[i];",
+          "replacement": "const float own = a[i] + b[i] - maximum;",
+          "text_changed": true
+        },
+        {
+          "node_id": "n15",
+          "original": "out[i] = expf(own) / denominator;",
+          "replacement": "out[i] = expf(own) / denominator;",
+          "text_changed": false
+        },
+        {
+          "node_id": "n12",
+          "original": "const float x = a[start + j] + b[start + j];",
+          "replacement": "const float x = a[start + j] + b[start + j] - maximum;",
+          "text_changed": true
+        },
+        {
+          "node_id": "n13",
+          "original": "denominator += expf(x);",
+          "replacement": "denominator += expf(x);",
+          "text_changed": false
+        }
+      ],
+      "result_sha256": "9cb351b81f6dcc9381665f96c83dc6daaa67cd7456f0aa84d11c3767795b8b9b",
+      "replay_sha256": "0bfd3acc38068a2e6b272214e1b72844d2f43f77992b2ada63a30b3cc17afd78"
+    },
+    {
+      "server_seed": 41,
+      "case_id": "h002",
+      "legal_non_noop": true,
+      "checker_reached": true,
+      "public_check_passed": true,
+      "outcome": "PUBLIC_CHECKS_PASSED",
+      "model_tokens": 4267,
+      "public_run_id": "d2cee456f94e4c5cb7ea9533c648fd78",
+      "checker_run_id": "1457d69e8a0743ba8757ba1077fef953",
+      "candidate_sha256": "2a6b46543d50286749e7eb310fa1ed630db93c6d32dd25693c38ca2dc607b567",
+      "edits": [
+        {
+          "node_id": "n10",
+          "original": "const float scale = rsqrtf(sum_sq / 32.0f + 1.0e-5f);",
+          "replacement": "const float scale = rsqrtf(sum_sq / static_cast<float>(valid) + 1.0e-5f);",
+          "text_changed": true
+        }
+      ],
+      "result_sha256": "0ea0044b83aef3114daf4c90f5728484ba786b2e8f332ae538b6e8bbfc954649",
+      "replay_sha256": "d2f59d74eac6c587703523cee4a5d0749da09d25a568697cc01fe33f57077d1f"
+    },
+    {
+      "server_seed": 41,
+      "case_id": "h003",
+      "legal_non_noop": false,
+      "checker_reached": false,
+      "public_check_passed": false,
+      "outcome": "CUDA_SYNTAX_REPLACEMENT_PARSE_ERROR",
+      "model_tokens": 4297,
+      "public_run_id": "05041d2f90934c0a969c0d0d21e88689",
+      "checker_run_id": null,
+      "candidate_sha256": "e8c6b2386175d3e77689311b9fc2dd54a7014365b45e2017a454a79fa5958bde",
+      "edits": [
+        {
+          "node_id": "n01",
+          "original": "return;",
+          "replacement": "/* Removed premature return to allow sum calculation */",
+          "text_changed": true
+        }
+      ],
+      "result_sha256": "e4fd397ba593777959b6c3af1cce79f4ce38f3f912c6570b880363e6eb3fa172",
+      "replay_sha256": "8b2ea36be2d7339381218797c455f9db1993e0c5e307828151ab9e17de709956"
+    },
+    {
+      "server_seed": 43,
+      "case_id": "h001",
+      "legal_non_noop": true,
+      "checker_reached": true,
+      "public_check_passed": false,
+      "outcome": "NUMERIC_MISMATCH",
+      "model_tokens": 5706,
+      "public_run_id": "8bc29e691d6e464db23dabab5d1a9f02",
+      "checker_run_id": "b8deaf07b74742a6a708b674b3bfb565",
+      "candidate_sha256": "992264e8d9c65ba504357399a1d8229fe03a6396f215f0e226da5618ea9c9f73",
+      "edits": [
+        {
+          "node_id": "n15",
+          "original": "out[i] = expf(own) / denominator;",
+          "replacement": "out[i] = expf(own - maximum) / denominator;",
+          "text_changed": true
+        }
+      ],
+      "result_sha256": "f62ba346378f6a42f1ceb4699a12bc484fb7abdf80ec75ed72eec32f6361bc4d",
+      "replay_sha256": "25d61be4d5198daa8aa4eb8fc5b30cfff196124ec515538063080a94671c6e56"
+    },
+    {
+      "server_seed": 43,
+      "case_id": "h002",
+      "legal_non_noop": true,
+      "checker_reached": true,
+      "public_check_passed": true,
+      "outcome": "PUBLIC_CHECKS_PASSED",
+      "model_tokens": 4069,
+      "public_run_id": "8bc12d60fa63476e8d50917f93747457",
+      "checker_run_id": "b63990b79c0d42f2af2efdebbd7b00cc",
+      "candidate_sha256": "2a6b46543d50286749e7eb310fa1ed630db93c6d32dd25693c38ca2dc607b567",
+      "edits": [
+        {
+          "node_id": "n10",
+          "original": "const float scale = rsqrtf(sum_sq / 32.0f + 1.0e-5f);",
+          "replacement": "const float scale = rsqrtf(sum_sq / static_cast<float>(valid) + 1.0e-5f);",
+          "text_changed": true
+        }
+      ],
+      "result_sha256": "0112251c19dbce553264b185593099fa6f2d1a9347d04b1bccd0027d243e5615",
+      "replay_sha256": "fffe3721780407d2e4ae5e72db4a1fabec9aa3312064e78fcf3c4a39c8119cfc"
+    },
+    {
+      "server_seed": 43,
+      "case_id": "h003",
+      "legal_non_noop": true,
+      "checker_reached": true,
+      "public_check_passed": true,
+      "outcome": "PUBLIC_CHECKS_PASSED",
+      "model_tokens": 4773,
+      "public_run_id": "e9d7f095f3e341fc8ef8ba6a1d1ff7e0",
+      "checker_run_id": "0941f0b38444498299483b8ccd66013a",
+      "candidate_sha256": "dd2f7ba2889c6870416f3aabca6bcdf18b16a00fea0cbe1fd1124ea3b17519e4",
+      "edits": [
+        {
+          "node_id": "n06",
+          "original": "total += a[start + j];",
+          "replacement": "total += a[start + j] + b[start + j];",
+          "text_changed": true
+        }
+      ],
+      "result_sha256": "202f81ba161b82eb38b23cb854db157226cd32adf6a69640d5109ff2dbc15c1e",
+      "replay_sha256": "872c277bb5f5dca7309ca32fc2b2f94404f2b3802e690440c939e3bcb2dcc911"
+    }
+  ],
+  "limitations": [
+    "Server initialization seeds, not per-request seed control; six trials are descriptive only.",
+    "Earlier successful h001 trials had a different executor prompt and seed configuration; no causal prompt regression claim.",
+    "Single-step uses operator-prefilled AST pages; no autonomous full-loop or Planner effect is measured.",
+    "No stronger-model comparison or hidden independent verification was run."
+  ]
+}
