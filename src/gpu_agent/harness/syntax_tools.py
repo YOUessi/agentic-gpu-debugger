@@ -131,7 +131,6 @@ def syntax_nodes(raw: bytes, *, symbol: str = "") -> dict[str, Any]:
     }
 
 
-
 def syntax_page(
     raw: bytes,
     *,

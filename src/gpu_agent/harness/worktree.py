@@ -59,23 +59,43 @@ _NAME = re.compile(r"^[a-zA-Z0-9_.-]+$")
 # Model-facing source is strictly less privileged than controller/Oracle code.
 # The operator may read these internally for validation; model tools cannot.
 _PUBLIC_DENIED_PREFIXES = (
-    "tests/", "test/", "evaluation/", "docs/", "scripts/", ".github/",
-    "benchmarks/harness/", "benchmarks/development_truth/",
-    "src/gpu_agent/benchmark/", "src/gpu_agent/verification/",
-    "src/gpu_agent/execution/", "src/gpu_agent/harness/",
+    "tests/",
+    "test/",
+    "evaluation/",
+    "docs/",
+    "scripts/",
+    ".github/",
+    "benchmarks/harness/",
+    "benchmarks/development_truth/",
+    "src/gpu_agent/benchmark/",
+    "src/gpu_agent/verification/",
+    "src/gpu_agent/execution/",
+    "src/gpu_agent/harness/",
     "src/gpu_agent/agent/",
 )
-_PUBLIC_DENIED_COMPONENTS = frozenset({
-    "oracle", "oracles", "reference", "references", "gold",
-    "ground_truth", "holdout", "hidden", "evaluation", "eval",
-})
+_PUBLIC_DENIED_COMPONENTS = frozenset(
+    {
+        "oracle",
+        "oracles",
+        "reference",
+        "references",
+        "gold",
+        "ground_truth",
+        "holdout",
+        "hidden",
+        "evaluation",
+        "eval",
+    }
+)
 
 
 def _model_read_allowed(name: str) -> bool:
     parts = PurePosixPath(name).parts
-    return not any(name.startswith(p) for p in _PUBLIC_DENIED_PREFIXES) and not any(
-        p.lower() in _PUBLIC_DENIED_COMPONENTS for p in parts
-    ) and not (name.endswith(".test.cu") or name.endswith("_test.py"))
+    return (
+        not any(name.startswith(p) for p in _PUBLIC_DENIED_PREFIXES)
+        and not any(p.lower() in _PUBLIC_DENIED_COMPONENTS for p in parts)
+        and not (name.endswith(".test.cu") or name.endswith("_test.py"))
+    )
 
 
 def _run_git(repo: Path, *argv: str) -> str:

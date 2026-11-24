@@ -380,8 +380,13 @@ def test_planner_only_frozen_arm_pair_holds_tools_context_and_budget_equal(
 
     root = _repo(tmp_path)
     plan = create_benchmark_plan(
-        root, cases=("h001", "h002"), repetitions=2, planner_only_study=True,
-        max_steps=8, max_model_calls=10, max_public_checks=2,
+        root,
+        cases=("h001", "h002"),
+        repetitions=2,
+        planner_only_study=True,
+        max_steps=8,
+        max_model_calls=10,
+        max_public_checks=2,
     )
     assert plan.planner_only_study
     assert not plan.architecture_study
@@ -397,7 +402,8 @@ def test_planner_only_frozen_arm_pair_holds_tools_context_and_budget_equal(
     for case in ("h001", "h002"):
         for rep in (1, 2):
             assert {u.arm for u in plan.units if u.case_id == case and u.repetition == rep} == {
-                "react_syntax", "hierarchical_syntax"
+                "react_syntax",
+                "hierarchical_syntax",
             }
     assert plan.max_steps == 8 and plan.max_model_calls == 10
     with pytest.raises(ValueError, match="invalid registered"):
@@ -411,16 +417,27 @@ def test_planner_only_primary_metrics_do_not_count_rejected_edits_as_valid(
 ) -> None:
     plan = create_benchmark_plan(_repo(tmp_path), planner_only_study=True)
     first = TrialRecord(
-        spec=plan.units[0], disposition="PUBLIC_NOT_ACCEPTED",
-        public_accepted=False, strict_verdict=None, source_candidate_sha256=None,
-        public_run_id=None, elapsed_seconds=0.1, first_edit_turn=2,
-        effective_patch=True, public_check_reached=False,
+        spec=plan.units[0],
+        disposition="PUBLIC_NOT_ACCEPTED",
+        public_accepted=False,
+        strict_verdict=None,
+        source_candidate_sha256=None,
+        public_run_id=None,
+        elapsed_seconds=0.1,
+        first_edit_turn=2,
+        effective_patch=True,
+        public_check_reached=False,
     )
     second = TrialRecord(
-        spec=plan.units[1], disposition="PUBLIC_NOT_ACCEPTED",
-        public_accepted=False, strict_verdict=None, source_candidate_sha256=None,
-        public_run_id=None, elapsed_seconds=0.1,
-        effective_patch=False, public_check_reached=False,
+        spec=plan.units[1],
+        disposition="PUBLIC_NOT_ACCEPTED",
+        public_accepted=False,
+        strict_verdict=None,
+        source_candidate_sha256=None,
+        public_run_id=None,
+        elapsed_seconds=0.1,
+        effective_patch=False,
+        public_check_reached=False,
     )
     report = summarize_sweep(plan, (first, second))
     assert report.by_arm[first.spec.arm]["effective_patch_rate"] == 1.0

@@ -1034,8 +1034,16 @@ class FakeBoundedPublicProbe:
         self.calls: list[tuple[str, int, str]] = []
 
     def __call__(
-        self, *, store, parent_run_id, repository, case_id, phase, input_size,
-        candidate, output,
+        self,
+        *,
+        store,
+        parent_run_id,
+        repository,
+        case_id,
+        phase,
+        input_size,
+        candidate,
+        output,
     ):
         from gpu_agent.benchmark.hardset_v2_public_probe import PublicProbeResult
 
@@ -1043,9 +1051,7 @@ class FakeBoundedPublicProbe:
         assert input_size in {32, 33, 65, 129, 257}
         assert repository.is_dir()
         output.mkdir(mode=0o700)
-        child = store.create_run(
-            "hardset_v2_public_functional_probe", parent_run_id=parent_run_id
-        )
+        child = store.create_run("hardset_v2_public_functional_probe", parent_run_id=parent_run_id)
         store.transition(child.id, "RUNNING", "PREPARING")
         digest = hashlib.sha256(candidate).hexdigest()
         outcome = "NUMERIC_MISMATCH" if phase == "before" else "PASS"
@@ -1103,11 +1109,14 @@ def test_registered_toolhost_before_after_probes_and_read_scope(
             assert denied.status == "REJECTED", (name, denied)
             assert "oracle" in denied.content.lower() or "scope" in denied.content.lower()
         assert "benchmarks/hardset_v2/h001/clean/kernel.cu" not in host.workspace.list_files()
-        assert host.invoke(
-            HarnessDecision.model_validate(
-                {"action": _edit_denominator(), "reason": "Apply first verified source edit"}
-            ).action
-        ).status == "OK"
+        assert (
+            host.invoke(
+                HarnessDecision.model_validate(
+                    {"action": _edit_denominator(), "reason": "Apply first verified source edit"}
+                ).action
+            ).status
+            == "OK"
+        )
         assert host.snapshot(GOAL, [], 5).public_probe_phase == "after"
         assert host.invoke(RepoProbePublic(phase="before", input_size=65)).status == "REJECTED"
         after = host.invoke(RepoProbePublic(phase="after", input_size=33))
@@ -1128,13 +1137,16 @@ def test_public_probe_evidence_survives_checkpoint_resume(
     fake = FakeBoundedPublicProbe()
     checker = FakePublicChecker([True])
     monkeypatch.setattr("gpu_agent.harness.repo_tools.probe_candidate_publicly", fake)
-    monkeypatch.setattr(
-        "gpu_agent.harness.repo_tools.check_candidate_publicly", checker
-    )
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
     output = tmp_path / "probe-resume"
     paused = run_repository_coding_session(
-        repository=repo, output=output, base_sha=sha, goal=GOAL,
-        public_case_id="h001", max_steps=8, max_model_calls=10,
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        max_steps=8,
+        max_model_calls=10,
         pause_after_turns=1,
         model_factory=lambda _: Model(
             [{"tool": "repo_probe_public", "phase": "before", "input_size": 33}]
@@ -1145,14 +1157,23 @@ def test_public_probe_evidence_survives_checkpoint_resume(
     assert checkpoint.public_probes_attempted == 1
     assert len(checkpoint.public_probe_run_ids) == 1
     resumed = run_repository_coding_session(
-        repository=repo, output=output, base_sha=sha, goal=GOAL,
-        public_case_id="h001", max_steps=8, max_model_calls=10,
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        max_steps=8,
+        max_model_calls=10,
         resume=True,
-        model_factory=lambda _: Model([
-            _edit_denominator(),
-            {"tool": "repo_probe_public", "phase": "after", "input_size": 33},
-            _edit_numerator(), _check(), _finish(),
-        ]),
+        model_factory=lambda _: Model(
+            [
+                _edit_denominator(),
+                {"tool": "repo_probe_public", "phase": "after", "input_size": 33},
+                _edit_numerator(),
+                _check(),
+                _finish(),
+            ]
+        ),
     )
     assert resumed.status == "DIFF_STAGED_UNVERIFIED"
     assert resumed.public_probes_attempted == 2
