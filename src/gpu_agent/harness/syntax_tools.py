@@ -8,6 +8,7 @@ and independent verifier can do that. Refuse unparseable or stale sources.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -127,6 +128,71 @@ def syntax_nodes(raw: bytes, *, symbol: str = "") -> dict[str, Any]:
             }
             for item in entries
         ],
+    }
+
+
+
+def syntax_page(
+    raw: bytes,
+    *,
+    symbol: str = "",
+    offset: int = 0,
+    limit: int = 8,
+    max_chars: int = 3900,
+) -> dict[str, Any]:
+    """Return a COMPLETE, cursor-addressable JSON syntax map.
+
+    No silent truncation: if a node cannot fit within the output budget,
+    return a bounded page and an explicit next_offset. Node IDs are anchored
+    to the same SHA for all pages. Executable statements are shown first.
+    """
+    if (
+        type(offset) is not int
+        or type(limit) is not int
+        or not 0 <= offset <= _MAX_NODES
+        or not 1 <= limit <= 20
+        or not 500 <= max_chars <= 4000
+    ):
+        raise ValueError("CUDA_SYNTAX_PAGE_BOUNDS_INVALID")
+    full = syntax_nodes(raw, symbol=symbol)
+    candidates = sorted(
+        full["nodes"],
+        key=lambda node: (
+            0 if node["kind"] == "expression_statement" else 1,
+            node["start_line"],
+            node["id"],
+        ),
+    )
+    if offset >= len(candidates):
+        raise ValueError("CUDA_SYNTAX_CURSOR_EXHAUSTED")
+    selected: list[dict[str, Any]] = []
+    for node in candidates[offset : offset + limit]:
+        trial = [*selected, node]
+        page = {
+            "schema_version": "gpu-cuda-syntax-page-v2",
+            "source_sha256": full["source_sha256"],
+            "symbol_filter": symbol,
+            "total_nodes": len(candidates),
+            "offset": offset,
+            "next_offset": offset + len(trial) if offset + len(trial) < len(candidates) else None,
+            "has_more": offset + len(trial) < len(candidates),
+            "nodes": trial,
+        }
+        if len(json.dumps(page, ensure_ascii=False)) > max_chars:
+            break
+        selected = trial
+    if not selected:
+        raise ValueError("CUDA_SYNTAX_NODE_EXCEEDS_RESPONSE_BUDGET")
+    consumed = offset + len(selected)
+    return {
+        "schema_version": "gpu-cuda-syntax-page-v2",
+        "source_sha256": full["source_sha256"],
+        "symbol_filter": symbol,
+        "total_nodes": len(candidates),
+        "offset": offset,
+        "next_offset": consumed if consumed < len(candidates) else None,
+        "has_more": consumed < len(candidates),
+        "nodes": selected,
     }
 
 
