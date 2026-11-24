@@ -36,3 +36,14 @@ Raw public logs live on Tang in `/home/you/gpu-native-harness-validation-2026112
 ## Separate P1 branch
 
 `experiment/ast-editor-diagnostics-v2-20261124` implements opt-in extended AST and bounded diagnostics; validated implementation `b9f3eb789f52c3c4530d614b9fd7128ba5afc202`. See its `docs/repair-log/2026-11-24-extended-ast-public-diagnostics.md`. Do not combine this with the P0 frozen trials. Neither a new Planner-only comparison nor a strict-fix statistic is justified yet.
+
+## Controlled recovery from an actual prior model candidate
+
+Runner: `scripts/run_repository_failed_candidate_recovery.py`, frozen implementation/runner SHA `752416e1e4b5388d257cd7d3fa5ab160ce437da8`. This is **conditional recovery**, not another autonomous from-mutant trial. Prior Qwen single-step h001 seed43 result SHA256 `f62ba346378f6a42f1ceb4699a12bc484fb7abdf80ec75ed72eec32f6361bc4d`. The operator replayed that recorded model action (not a reference fix); candidate SHA256 `992264e8d9c65ba504357399a1d8229fe03a6396f215f0e226da5618ea9c9f73`.
+
+- Operator prefix: 4 tool turns, inspect page 1, inspect page 2, replay AST edit, actual public checker. Reproduced NUMERIC_MISMATCH at input size 32.
+- Real Qwen3-8B-AWQ, server seed43: 2 physical calls, 12,797 tokens. Live decision 1 selected repo_git_diff (OK); live decision 2 terminated with LLM_INCOMPLETE. No new candidate or second checker. Recovery did not pass.
+- Run ID `989ec168844d41ea8a64cd321911f786`; checker child `111eab3aaf8d4bd7b65d845c8d1bcb27`. Request/admission/numeric dispatch/completion all at turn 4; no pass. Prefix edits are not credited to live model.
+- Verified partial audit file `/home/you/gpu-native-harness-validation-20261124/p0-fair-budget-closure/controlled-recovery-partial-audit.json`, SHA256 `d1a6bbdf9982200c6dd5d05463d946eae8882c0d12b2de1931abbd20c23483c4`. Full raw journal and public artifacts under `controlled-recovery-h001-seed43/`. GPU released; 204 MiB observed and shared lock free.
+
+Next experiment gate: diagnose incomplete model responses (preserve cap, response status and usage; do not confuse this with invalid structured JSON), evaluate precise AST target selection and mixed NOOP rejection with fixed baseline and separately enabled P1 flags, then repeat autonomous/conditional recovery. No Planner benefit or hidden strict-fix claim from these data.
