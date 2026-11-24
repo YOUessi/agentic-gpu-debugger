@@ -58,6 +58,7 @@ def run_repository_coding_session(
     max_compiles: int = 6,
     public_diagnostics: bool = False,
     ast_target_binding: bool = False,
+    state_scoped_actions: bool = False,
     provider_settings: OpenAIProviderSettings | None = None,
     allow_paid_calls: bool = False,
     resume: bool = False,
@@ -113,6 +114,7 @@ def run_repository_coding_session(
             max_compiles=max_compiles,
             public_diagnostics=public_diagnostics,
             ast_target_binding=ast_target_binding,
+            state_scoped_actions=state_scoped_actions,
         )
         if syntax_mode and "syntax_state" not in checkpoint.model_fields_set:
             raise ValueError("legacy AST checkpoint cannot resume with short aliases")
@@ -145,6 +147,7 @@ def run_repository_coding_session(
             max_compiles=checkpoint.max_compiles,
             public_diagnostics=checkpoint.public_diagnostics,
             ast_target_binding=checkpoint.ast_target_binding,
+            state_scoped_actions=checkpoint.state_scoped_actions,
         )
         if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
             raise ValueError("resumed workspace diff disagrees with checkpoint")
@@ -166,6 +169,7 @@ def run_repository_coding_session(
             max_compiles=max_compiles,
             public_diagnostics=public_diagnostics,
             ast_target_binding=ast_target_binding,
+            state_scoped_actions=state_scoped_actions,
         )
 
     with host as tools:
@@ -224,6 +228,7 @@ def run_repository_coding_session(
                         "max_compiles": max_compiles,
                         "public_diagnostics": public_diagnostics,
                         "ast_target_binding": ast_target_binding,
+                        "state_scoped_actions": state_scoped_actions,
                         "max_steps": max_steps,
                         "max_model_calls": max_model_calls,
                         "public_check_audit_version": 1,
@@ -309,6 +314,7 @@ def run_repository_coding_session(
                         max_compiles=max_compiles,
                         public_diagnostics=public_diagnostics,
                         ast_target_binding=ast_target_binding,
+                        state_scoped_actions=state_scoped_actions,
                         public_checks_attempted=tools.public_checks_attempted,
                         public_probes_attempted=tools.public_probes_attempted,
                         public_probe_signatures=tools.public_probe_signatures,

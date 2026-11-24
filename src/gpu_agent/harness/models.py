@@ -259,6 +259,13 @@ class CandidateRecoveryView(StrictModel):
     revert_available: bool
 
 
+class RejectedActionSummary(StrictModel):
+    tool: Literal["repo_replace_syntax"] = "repo_replace_syntax"
+    node_ids: tuple[str, ...] = Field(min_length=1, max_length=4)
+    code: str = Field(min_length=1, max_length=80)
+    count: int = Field(ge=1, le=40)
+
+
 class SessionSnapshot(StrictModel):
     goal: str = Field(min_length=3, max_length=1500)
     case_id: str = Field(min_length=1, max_length=80)
@@ -287,6 +294,12 @@ class SessionSnapshot(StrictModel):
     remaining_public_checks: int = Field(default=3, ge=0)
     public_probe_phase: Literal["before", "after"] | None = None
     remaining_public_probes: int = Field(default=0, ge=0, le=4)
+    public_probe_remaining_sizes: tuple[Literal[32, 33, 65, 129, 257], ...] | None = Field(
+        default=None, max_length=5, exclude_if=lambda value: value is None
+    )
+    rejected_action_state: tuple[RejectedActionSummary, ...] | None = Field(
+        default=None, max_length=40, exclude_if=lambda value: value is None
+    )
 
 
 class RepoHarnessOutcome(StrictModel):

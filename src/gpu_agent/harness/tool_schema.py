@@ -55,6 +55,7 @@ def repository_decision_schema(
     bind_syntax_cursor: bool = False,
     recovery_source_sha256: str | None = None,
     ast_target_binding: bool = False,
+    public_probe_remaining_sizes: tuple[int, ...] | None = None,
 ) -> type[BaseModel]:
     """Return a strict Pydantic response schema for EXACTLY approved tools.
 
@@ -84,6 +85,14 @@ def repository_decision_schema(
             fields["expected_source_sha256"] = (Literal[recovery_source_sha256], ...)
         if name == "repo_probe_public" and public_probe_phase is not None:
             fields["phase"] = (Literal[public_probe_phase], ...)
+        if name == "repo_probe_public" and public_probe_remaining_sizes is not None:
+            sizes = public_probe_remaining_sizes
+            if (
+                public_probe_phase is None or not sizes or len(set(sizes)) != len(sizes)
+                or any(type(size) is not int or size not in (32, 33, 65, 129, 257) for size in sizes)
+            ):
+                raise ValueError("invalid remaining public probe capability")
+            fields["input_size"] = (Literal[sizes], ...)
         if name == "repo_inspect_syntax" and bind_syntax_cursor:
             if syntax_state is not None and syntax_state.next_offset is None:
                 raise ValueError("exhausted AST cursor exposed in model grammar")

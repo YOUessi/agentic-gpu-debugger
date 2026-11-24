@@ -266,6 +266,7 @@ def summarize_trial(
         "allow_revert",
         "public_diagnostics",
         "ast_target_binding",
+        "state_scoped_actions",
         "max_compiles",
         "max_steps",
         "max_model_calls",
@@ -411,6 +412,7 @@ def main() -> int:
     parser.add_argument("--allow-revert", action="store_true")
     parser.add_argument("--public-diagnostics", action="store_true")
     parser.add_argument("--ast-target-binding", action="store_true")
+    parser.add_argument("--state-scoped-actions", action="store_true")
     parser.add_argument("--max-compiles", type=int, default=6)
     parser.add_argument("--allow-paid-calls", action="store_true")
     parser.add_argument("--allow-real-gpu", action="store_true")
@@ -466,6 +468,7 @@ def main() -> int:
         "allow_revert": args.allow_revert,
         "public_diagnostics": args.public_diagnostics,
         "ast_target_binding": args.ast_target_binding,
+        "state_scoped_actions": args.state_scoped_actions,
         "extended_syntax": False,
         "hierarchical_mode": False,
         "max_compiles": args.max_compiles,
@@ -521,6 +524,7 @@ def main() -> int:
             max_compiles=args.max_compiles,
             public_diagnostics=args.public_diagnostics,
             ast_target_binding=args.ast_target_binding,
+            state_scoped_actions=args.state_scoped_actions,
             provider_settings=settings,
             allow_paid_calls=True,
             model_factory=factory if prior else None,

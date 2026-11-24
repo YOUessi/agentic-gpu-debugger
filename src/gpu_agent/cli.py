@@ -217,6 +217,7 @@ def harness_repo_run(
     max_compiles: Annotated[int, typer.Option("--max-compiles", min=1, max=8)] = 6,
     public_diagnostics: Annotated[bool, typer.Option("--public-diagnostics")] = False,
     ast_target_binding: Annotated[bool, typer.Option("--ast-target-binding")] = False,
+    state_scoped_actions: Annotated[bool, typer.Option("--state-scoped-actions")] = False,
     max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     resume: Annotated[bool, typer.Option("--resume")] = False,
     pause_after_turns: Annotated[
@@ -253,6 +254,7 @@ def harness_repo_run(
             max_compiles=max_compiles,
             public_diagnostics=public_diagnostics,
             ast_target_binding=ast_target_binding,
+            state_scoped_actions=state_scoped_actions,
             resume=resume,
             pause_after_turns=pause_after_turns,
         )

@@ -349,6 +349,14 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
                 "a nearby alias. A binding mismatch applies no edits."
                 if binding else ""
             )
+            scoped = snapshot.get("public_probe_remaining_sizes") is not None
+            if scoped:
+                binding_extra += (
+                    " Choose only an untested probe size from public_probe_remaining_sizes. "
+                    "Read rejected_action_state before editing; change the failed edit, "
+                    "do not avoid a needed node solely because an earlier action was rejected."
+                )
+            suffix = ("-bound" if binding else "") + ("-scoped" if scoped else "")
             if isinstance(recovery, Mapping):
                 extra = (
                     " When available, compile the exact edited candidate before numeric checks. "
@@ -358,10 +366,10 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
                     "Do not invent arbitrary source paths."
                 )
                 version = "gpu-repository-ast-recovery-v1"
-                return version + ("-bound" if binding else ""), (
+                return version + suffix, (
                     GPU_REPOSITORY_AST_PROMPT + extra + binding_extra
                 )
-            return GPU_REPOSITORY_AST_PROMPT_VERSION + ("-bound" if binding else ""), (
+            return GPU_REPOSITORY_AST_PROMPT_VERSION + suffix, (
                 GPU_REPOSITORY_AST_PROMPT + binding_extra
             )
         return GPU_REPOSITORY_HARNESS_PROMPT_VERSION, GPU_REPOSITORY_HARNESS_PROMPT

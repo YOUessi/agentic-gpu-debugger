@@ -20,7 +20,9 @@ from gpu_agent.benchmark.hardset_v2 import (
     manifest_for,
 )
 from gpu_agent.benchmark.hardset_v2_agent_models import HardsetPublicCheck
-from gpu_agent.benchmark.hardset_v2_public_probe import probe_candidate_publicly
+from gpu_agent.benchmark.hardset_v2_public_probe import (
+    PUBLIC_PROBE_SIZES, PublicProbeResult, probe_candidate_publicly,
+)
 from gpu_agent.benchmark.hardset_v2_selfcheck import check_candidate_publicly
 from gpu_agent.benchmark.public_compile import PublicCompileResult, compile_public_candidate
 from gpu_agent.harness.context import compact_public_context
@@ -39,6 +41,7 @@ from gpu_agent.harness.models import (
     RepoReplaceSyntax,
     RepoRevertLastEdit,
     RepoRunPublicChecks,
+    RejectedActionSummary,
     SessionSnapshot,
     SyntaxEvidenceNode,
     SyntaxPageVisit,
@@ -89,6 +92,7 @@ class RepositoryWorkspaceTools:
         max_compiles: int = 6,
         public_diagnostics: bool = False,
         ast_target_binding: bool = False,
+        state_scoped_actions: bool = False,
     ) -> None:
         if output.exists() or output.is_symlink():
             raise ValueError("repository agent output already exists")
@@ -134,6 +138,97 @@ class RepositoryWorkspaceTools:
         self._configure_recovery(compile_gate, allow_revert, max_compiles)
         self._configure_public_diagnostics(public_diagnostics)
         self._configure_ast_target_binding(ast_target_binding)
+        self._configure_state_scoped_actions(state_scoped_actions)
+
+    def _configure_state_scoped_actions(self, enabled: bool) -> None:
+        if type(enabled) is not bool or (enabled and self._public_kernel_path is None):
+            raise ValueError("state-scoped actions require a registered public kernel")
+        self._state_scoped_actions = enabled
+
+    def _remaining_probe_sizes(self) -> tuple[int, ...]:
+        phase = self._public_probe_phase()
+        if phase is None or self._public_kernel_path is None:
+            return ()
+        digest = self._syntax_digest(self._public_kernel_path)
+        return tuple(
+            size for size in PUBLIC_PROBE_SIZES
+            if self._probe_signature(phase, size, digest) not in self._public_probe_signatures
+        )
+
+    def _probe_signature(self, phase: str, size: int, digest: str) -> str:
+        return self._query_fingerprint({
+            "tool": "repo_probe_public", "phase": phase,
+            "size": size, "source_sha256": digest,
+        })
+
+    def _current_rejected_action_state(self) -> tuple[RejectedActionSummary, ...]:
+        """Derive persistent summaries from immutable public evidence, not prompt history.
+
+        The same source revision can reappear after a rollback. Retain its previous
+        rejected patterns, but do not blacklist the node or prevent a corrected edit.
+        """
+        if self._public_kernel_path is None:
+            return ()
+        digest = self._syntax_digest(self._public_kernel_path)
+        counts: dict[tuple[tuple[str, ...], str], int] = {}
+        for event in read_repository_tool_events(
+            self._store, self.run_id, expected_count=self._tool_calls, require_action=True
+        ):
+            action = event["action"]
+            code = event.get("rejection_code")
+            if (
+                event["tool"] != "repo_replace_syntax" or event["status"] != "REJECTED"
+                or action.get("path") != self._public_kernel_path
+                or action.get("expected_source_sha256") != digest
+                or not isinstance(code, str) or not code.startswith("CUDA_") or len(code) > 80
+            ):
+                continue
+            nodes = tuple(sorted({edit["node_id"] for edit in action["edits"]}))
+            key = (nodes, code)
+            counts[key] = counts.get(key, 0) + 1
+        return tuple(
+            RejectedActionSummary(node_ids=nodes, code=code, count=count)
+            for (nodes, code), count in counts.items()
+        )
+
+    def _validate_scoped_probe_ledger(self, tool_calls: int) -> None:
+        if not self._state_scoped_actions:
+            return
+        events = read_repository_tool_events(
+            self._store, self.run_id, expected_count=tool_calls, require_action=True
+        )
+        # Match every completed Probe child and typed action to its original
+        # signature. A tampered checkpoint cannot restore used sizes.
+        completed = [
+            event for event in events if event["tool"] == "repo_probe_public"
+            and event["status"] in ("OK", "FAILED")
+        ]
+        if len(completed) != len(self._public_probe_run_ids):
+            raise ValueError("recovered scoped probe ledger differs from audit")
+        signatures = set()
+        for event, child_id in zip(completed, self._public_probe_run_ids, strict=True):
+            child = self._store.load(child_id)
+            refs = [ref for ref in child.artifact_refs if ref.name == "probe/public-summary.json"]
+            if len(refs) != 1:
+                raise ValueError("missing scoped probe result")
+            result = PublicProbeResult.model_validate_json(self._store.read(refs[0]))
+            if (
+                result.run_id != child_id or result.case_id != self._public_case_id
+                or result.phase != event["action"]["phase"]
+                or result.input_size != event["action"]["input_size"]
+                or event["status"] != ("FAILED" if result.outcome == "PROBE_INCONCLUSIVE" else "OK")
+            ):
+                raise ValueError("recovered scoped probe identity differs")
+            visible = result.model_dump_json(
+                exclude=None if self._public_diagnostics else {"numeric_diagnostic"}
+            )
+            if hashlib.sha256(visible.encode()).hexdigest() != event["observation_sha256"]:
+                raise ValueError("recovered scoped probe observation differs")
+            signatures.add(self._probe_signature(
+                result.phase, result.input_size, result.candidate_sha256
+            ))
+        if signatures != self._public_probe_signatures or len(signatures) != len(completed):
+            raise ValueError("recovered scoped probe signatures differ from audit")
 
     def _configure_ast_target_binding(self, enabled: bool) -> None:
         if type(enabled) is not bool or (
@@ -606,6 +701,7 @@ class RepositoryWorkspaceTools:
         max_compiles: int = 6,
         public_diagnostics: bool = False,
         ast_target_binding: bool = False,
+        state_scoped_actions: bool = False,
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -734,6 +830,8 @@ class RepositoryWorkspaceTools:
         host._configure_recovery(compile_gate, allow_revert, max_compiles)
         host._configure_public_diagnostics(public_diagnostics)
         host._configure_ast_target_binding(ast_target_binding)
+        host._configure_state_scoped_actions(state_scoped_actions)
+        host._validate_scoped_probe_ledger(tool_calls)
         host._restore_candidate_recovery(tool_calls)
         return host
 
@@ -889,6 +987,7 @@ class RepositoryWorkspaceTools:
                 self.public_probes_attempted >= 4
                 or probe_phase is None
                 or (probe_phase == "after" and needs_compile)
+                or (self._state_scoped_actions and not self._remaining_probe_sizes())
             ):
                 continue
             if name == "repo_run_public_checks" and not can_check:
@@ -961,6 +1060,16 @@ class RepositoryWorkspaceTools:
             registered_kernel_path=self._public_kernel_path,
             public_probe_phase=self._public_probe_phase(),
             remaining_public_probes=4 - self.public_probes_attempted,
+            public_probe_remaining_sizes=(
+                tuple(
+                    size for size in (32, 33, 65, 129, 257)
+                    if size in self._remaining_probe_sizes()
+                ) if self._state_scoped_actions and "repo_probe_public" in allowed_tools
+                else () if self._state_scoped_actions else None
+            ),
+            rejected_action_state=(
+                self._current_rejected_action_state() if self._state_scoped_actions else None
+            ),
             context_mode=self._context_mode,
             current_candidate_sha256=hashlib.sha256(delta.encode()).hexdigest() if delta else None,
             public_checks_passed=self.public_checks_passed,
@@ -1429,14 +1538,7 @@ class RepositoryWorkspaceTools:
             1024 * 1024,
         )
         digest = hashlib.sha256(source).hexdigest()
-        signature = self._query_fingerprint(
-            {
-                "tool": action.tool,
-                "phase": action.phase,
-                "size": action.input_size,
-                "source_sha256": digest,
-            }
-        )
+        signature = self._probe_signature(action.phase, action.input_size, digest)
         if signature in self._public_probe_signatures:
             raise ValueError("REDUNDANT_PUBLIC_PROBE")
         number = self.public_probes_attempted + 1

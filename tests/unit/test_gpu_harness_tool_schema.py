@@ -206,3 +206,24 @@ def test_ast_binding_requires_old_code_but_does_not_hide_mismatch_from_host() ->
     # Host, not a giant per-node grammar, reports the actual binding mismatch.
     parsed = bound.model_validate(payload)
     assert parsed.action.edits[0].expected_old_code == "int y = 0;"
+
+
+def test_remaining_probe_sizes_are_literal_and_empty_set_fails_closed() -> None:
+    model=repository_decision_schema(
+        ("repo_probe_public","repo_read_file"),
+        registered_kernel_path="benchmarks/hardset_v2/h001/mutant/kernel.cu",
+        public_probe_phase="before",public_probe_remaining_sizes=(33,65,257),
+    )
+    assert model.model_validate({
+        "action":{"tool":"repo_probe_public","phase":"before","input_size":65},
+        "reason":"Inspect an untested public shape",
+    }).action.input_size==65
+    with pytest.raises(ValidationError):
+        model.model_validate({
+            "action":{"tool":"repo_probe_public","phase":"before","input_size":129},
+            "reason":"Already executed public shape",
+        })
+    with pytest.raises(ValueError,match="invalid remaining"):
+        repository_decision_schema(
+            ("repo_probe_public",),public_probe_phase="before",public_probe_remaining_sizes=(),
+        )

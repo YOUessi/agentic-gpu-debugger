@@ -678,6 +678,15 @@ def invoke_sdk(
             target_binding and (kernel_path is None or snapshot.get("syntax_mode") is not True)
         ):
             raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        remaining_sizes = snapshot.get("public_probe_remaining_sizes")
+        if remaining_sizes is not None and (
+            not isinstance(remaining_sizes, list)
+            or len(remaining_sizes) > 5
+            or any(type(size) is not int or size not in (32, 33, 65, 129, 257) for size in remaining_sizes)
+            or len(set(remaining_sizes)) != len(remaining_sizes)
+            or (("repo_probe_public" in names) != bool(remaining_sizes))
+        ):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
         output_model = repository_decision_schema(
             tuple(names),
             registered_kernel_path=kernel_path,
@@ -686,6 +695,7 @@ def invoke_sdk(
             bind_syntax_cursor=kernel_path is not None,
             recovery_source_sha256=recovery.source_sha256 if recovery is not None else None,
             ast_target_binding=target_binding,
+            public_probe_remaining_sizes=tuple(remaining_sizes) if remaining_sizes is not None else None,
         )
     elif request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
         from gpu_agent.harness.models import HarnessDecision
