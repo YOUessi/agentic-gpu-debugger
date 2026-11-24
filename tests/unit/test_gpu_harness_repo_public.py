@@ -1059,7 +1059,9 @@ class FakeBoundedPublicProbe:
             outcome=outcome,
             diagnostic_region="cross_warp_tail",
         )
-        store.put(child.id, "probe/public-summary.json", result.model_dump_json().encode(), "public")
+        store.put(
+            child.id, "probe/public-summary.json", result.model_dump_json().encode(), "public"
+        )
         store.transition(child.id, "COMPLETED", None)
         self.calls.append((phase, input_size, digest))
         return result
@@ -1121,7 +1123,6 @@ def test_public_probe_evidence_survives_checkpoint_resume(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from gpu_agent.harness.recovery import read_repository_checkpoint
-    from gpu_agent.harness.models import RepoProbePublic
 
     repo, sha = _registered_repository(tmp_path)
     fake = FakeBoundedPublicProbe()
@@ -1135,7 +1136,9 @@ def test_public_probe_evidence_survives_checkpoint_resume(
         repository=repo, output=output, base_sha=sha, goal=GOAL,
         public_case_id="h001", max_steps=8, max_model_calls=10,
         pause_after_turns=1,
-        model_factory=lambda _: Model([{"tool": "repo_probe_public", "phase": "before", "input_size": 33}]),
+        model_factory=lambda _: Model(
+            [{"tool": "repo_probe_public", "phase": "before", "input_size": 33}]
+        ),
     )
     assert paused.status == "PAUSED_RESUMABLE"
     checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
