@@ -339,9 +339,10 @@ WIRE_MODELS: "dict[CallKind, type[BaseModel]]" = {}
 class ResponseTermination(ExecutionModel):
     """Allowlisted wire metadata, never raw generated text or reasoning."""
 
-    response_status: Literal[
-        "completed", "incomplete", "failed", "cancelled", "queued", "in_progress", "other"
-    ] | None = None
+    response_status: (
+        Literal["completed", "incomplete", "failed", "cancelled", "queued", "in_progress", "other"]
+        | None
+    ) = None
     incomplete_reason: Literal["max_output_tokens", "content_filter", "other"] | None = None
     finish_reasons: tuple[str, ...] = Field(default=(), max_length=16)
     output_item_statuses: tuple[str, ...] = Field(default=(), max_length=16)
@@ -564,11 +565,15 @@ def response_termination(envelope: dict[str, Any]) -> ResponseTermination:
     raw_status = envelope.get("status")
     raw_reason = envelope.get("incomplete_details")
     reason = raw_reason.get("reason") if isinstance(raw_reason, dict) else None
-    status = raw_status if isinstance(raw_status, str) and raw_status in statuses else (
-        "other" if raw_status is not None else None
+    status = (
+        raw_status
+        if isinstance(raw_status, str) and raw_status in statuses
+        else ("other" if raw_status is not None else None)
     )
-    safe_reason = reason if reason in ("max_output_tokens", "content_filter") else (
-        "other" if raw_reason is not None or raw_status == "incomplete" else None
+    safe_reason = (
+        reason
+        if reason in ("max_output_tokens", "content_filter")
+        else ("other" if raw_reason is not None or raw_status == "incomplete" else None)
     )
     finish_reasons: list[str] = []
     item_statuses: list[str] = []
@@ -591,21 +596,24 @@ def response_termination(envelope: dict[str, Any]) -> ResponseTermination:
             if isinstance(content, list):
                 for part in content:
                     if (
-                        isinstance(part, dict) and part.get("type") == "output_text"
+                        isinstance(part, dict)
+                        and part.get("type") == "output_text"
                         and isinstance(part.get("text"), str)
                     ):
                         parts.append(part["text"])
     output = "".join(parts)
-    tail = "".join(
-        char if char in '{}[]":, \\n\\t' else "x" for char in output[-96:]
+    tail = "".join(char if char in '{}[]":, \\n\\t' else "x" for char in output[-96:])
+    return ResponseTermination.model_validate(
+        {
+            "response_status": status,
+            "incomplete_reason": safe_reason,
+            "finish_reasons": tuple(finish_reasons),
+            "output_item_statuses": tuple(item_statuses),
+            "partial_output_chars": len(output),
+            "partial_output_sha256": hashlib.sha256(output.encode()).hexdigest() if parts else None,
+            "partial_output_tail_shape": tail,
+        }
     )
-    return ResponseTermination.model_validate({
-        "response_status": status, "incomplete_reason": safe_reason,
-        "finish_reasons": tuple(finish_reasons), "output_item_statuses": tuple(item_statuses),
-        "partial_output_chars": len(output),
-        "partial_output_sha256": hashlib.sha256(output.encode()).hexdigest() if parts else None,
-        "partial_output_tail_shape": tail,
-    })
 
 
 def invoke_sdk(

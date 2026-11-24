@@ -204,10 +204,10 @@ def test_repository_budget_requires_auxiliary_reserve_and_preserves_legacy_retry
     ],
 )
 def test_incomplete_wire_metadata_is_bounded_and_classified(reason, expected):
-    from types import SimpleNamespace
     import json
+    from types import SimpleNamespace
 
-    from gpu_agent.agent.provider import invoke_sdk, WorkerRequest
+    from gpu_agent.agent.provider import WorkerRequest, invoke_sdk
 
     envelope = {
         "status": "incomplete",
@@ -221,10 +221,17 @@ def test_incomplete_wire_metadata_is_bounded_and_classified(reason, expected):
             "output_tokens_details": {"reasoning_tokens": 4095},
         },
         "output": [
-            {"type": "reasoning", "status": "incomplete",
-             "content": [{"type": "reasoning_text", "text": "PRIVATE_REASONING"}]},
-            {"type": "message", "status": "incomplete", "finish_reason": "length",
-             "content": [{"type": "output_text", "text": '{"action":"PRIVATE_VALUE"'}]},
+            {
+                "type": "reasoning",
+                "status": "incomplete",
+                "content": [{"type": "reasoning_text", "text": "PRIVATE_REASONING"}],
+            },
+            {
+                "type": "message",
+                "status": "incomplete",
+                "finish_reason": "length",
+                "content": [{"type": "output_text", "text": '{"action":"PRIVATE_VALUE"'}],
+            },
         ],
     }
     captured = {}
@@ -240,8 +247,14 @@ def test_incomplete_wire_metadata_is_bounded_and_classified(reason, expected):
         )
 
     request = WorkerRequest(
-        endpoint="https://api.openai.com/v1", model="fixture", api_key="fixture",
-        kind="plan", payload={}, client_request_id="test", timeout_seconds=60, attempt=0,
+        endpoint="https://api.openai.com/v1",
+        model="fixture",
+        api_key="fixture",
+        kind="plan",
+        payload={},
+        client_request_id="test",
+        timeout_seconds=60,
+        attempt=0,
         max_output_tokens=8192,
     )
     result = invoke_sdk(request, client_factory=factory)
@@ -259,8 +272,9 @@ def test_incomplete_wire_metadata_is_bounded_and_classified(reason, expected):
 
 
 def test_output_cap_is_operator_configured_and_bounded(monkeypatch):
-    from gpu_agent.agent.provider import OpenAIProviderSettings
     from pydantic import ValidationError
+
+    from gpu_agent.agent.provider import OpenAIProviderSettings
 
     monkeypatch.setenv("GPU_AGENT_MAX_OUTPUT_TOKENS", "8192")
     assert OpenAIProviderSettings.from_environment().max_output_tokens == 8192
