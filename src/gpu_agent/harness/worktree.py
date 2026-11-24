@@ -56,6 +56,27 @@ _FORBIDDEN_NAME_PARTS = {
 }
 _NAME = re.compile(r"^[a-zA-Z0-9_.-]+$")
 
+# Model-facing source is strictly less privileged than controller/Oracle code.
+# The operator may read these internally for validation; model tools cannot.
+_PUBLIC_DENIED_PREFIXES = (
+    "tests/", "test/", "evaluation/", "docs/", "scripts/", ".github/",
+    "benchmarks/harness/", "benchmarks/development_truth/",
+    "src/gpu_agent/benchmark/", "src/gpu_agent/verification/",
+    "src/gpu_agent/execution/", "src/gpu_agent/harness/",
+    "src/gpu_agent/agent/",
+)
+_PUBLIC_DENIED_COMPONENTS = frozenset({
+    "oracle", "oracles", "reference", "references", "gold",
+    "ground_truth", "holdout", "hidden", "evaluation", "eval",
+})
+
+
+def _model_read_allowed(name: str) -> bool:
+    parts = PurePosixPath(name).parts
+    return not any(name.startswith(p) for p in _PUBLIC_DENIED_PREFIXES) and not any(
+        p.lower() in _PUBLIC_DENIED_COMPONENTS for p in parts
+    ) and not (name.endswith(".test.cu") or name.endswith("_test.py"))
+
 
 def _run_git(repo: Path, *argv: str) -> str:
     cmd = ["git", "-C", str(repo), "-c", "core.hooksPath=/dev/null", *argv]
@@ -288,6 +309,8 @@ class PinnedGitWorkspace:
             raise ValueError("only existing source-code files are editable")
         if not editable and PurePosixPath(norm).suffix not in PUBLIC_READ_EXTENSIONS:
             raise ValueError("file extension is not public-readable")
+        if not editable and not _model_read_allowed(norm):
+            raise ValueError("model read of evaluator, Oracle or test source is forbidden")
         candidate = self.root
         for part in parts:
             candidate /= part
@@ -307,6 +330,7 @@ class PinnedGitWorkspace:
             if (not suffix or name.endswith(suffix))
             and PurePosixPath(name).suffix in PUBLIC_READ_EXTENSIONS
             and not any(p.lower() in _FORBIDDEN_NAME_PARTS for p in PurePosixPath(name).parts)
+            and _model_read_allowed(name)
         )[:max_files]
 
     def read(self, name: str, *, start: int = 1, lines: int = 120) -> str:

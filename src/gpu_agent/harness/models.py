@@ -90,6 +90,8 @@ class RepoInspectSyntax(StrictModel):
     tool: Literal["repo_inspect_syntax"] = "repo_inspect_syntax"
     path: str = Field(min_length=1, max_length=300)
     symbol: str = Field(default="", max_length=80)
+    offset: int = Field(default=0, ge=0, le=90)
+    limit: int = Field(default=8, ge=1, le=20)
 
 
 class RepoSyntaxEdit(StrictModel):
