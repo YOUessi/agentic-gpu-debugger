@@ -37,9 +37,7 @@ class PublicProbeFixture:
             syntax = json.loads(history[-1]["content"])
             nodes = syntax["nodes"]
             denominator = next(x for x in nodes if x["code"] == "denominator += expf(x);")
-            numerator = next(
-                x for x in nodes if x["code"] == "out[i] = expf(own) / denominator;"
-            )
+            numerator = next(x for x in nodes if x["code"] == "out[i] = expf(own) / denominator;")
             action = {
                 "tool": "repo_replace_syntax",
                 "path": KERNEL,
@@ -82,7 +80,10 @@ def main() -> int:
         parser.error("existing output cannot be overwritten")
     sha = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        capture_output=True, check=True, text=True, timeout=20,
+        capture_output=True,
+        check=True,
+        text=True,
+        timeout=20,
     ).stdout.strip()
     result = run_repository_coding_session(
         repository=repo,
@@ -100,17 +101,17 @@ def main() -> int:
     metrics = summarize_repository_trajectory(output)
     checkpoint = json.loads((output / "session-checkpoint.json").read_text())
     observations = checkpoint["state"]["history"]
-    probes = [
-        json.loads(x["content"]) for x in observations if x["tool"] == "repo_probe_public"
-    ]
+    probes = [json.loads(x["content"]) for x in observations if x["tool"] == "repo_probe_public"]
     summary = {
         "frozen_sha": sha,
         "physical_model_calls": result.model_calls,
         "public_probe_count": metrics.public_probes_attempted,
         "public_probe_results": [
             {
-                "phase": x["phase"], "input_size": x["input_size"],
-                "outcome": x["outcome"], "diagnostic_region": x["diagnostic_region"],
+                "phase": x["phase"],
+                "input_size": x["input_size"],
+                "outcome": x["outcome"],
+                "diagnostic_region": x["diagnostic_region"],
                 "candidate_sha256": x["candidate_sha256"],
             }
             for x in probes
