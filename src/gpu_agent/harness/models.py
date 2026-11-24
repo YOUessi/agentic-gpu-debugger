@@ -263,6 +263,7 @@ class SessionSnapshot(StrictModel):
     context_mode: Literal["legacy", "evidence_first"] = "legacy"
     syntax_mode: bool = False
     extended_syntax: bool = False
+    public_diagnostics: bool = False
     syntax_state: SyntaxState | None = None
     task_plan: TaskPlan | None = None
     task_progress: TaskProgress | None = None
@@ -298,6 +299,7 @@ class RepoHarnessOutcome(StrictModel):
     hierarchical_mode: bool = False
     syntax_mode: bool = False
     extended_syntax: bool = False
+    public_diagnostics: bool = False
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     public_probes_attempted: int = Field(default=0, ge=0, le=4)
     public_checks_passed: bool = False

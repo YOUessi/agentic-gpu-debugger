@@ -51,6 +51,7 @@ class RepositoryCheckpoint(BaseModel):
     hierarchical_mode: bool = False
     syntax_mode: bool = False
     extended_syntax: bool = False
+    public_diagnostics: bool = False
     max_public_checks: int = Field(default=2, ge=1, le=3)
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     public_probes_attempted: int = Field(default=0, ge=0, le=4)
@@ -232,6 +233,7 @@ def validated_quiescent_repository_checkpoint(
     hierarchical_mode: bool = False,
     syntax_mode: bool = False,
     extended_syntax: bool = False,
+    public_diagnostics: bool = False,
 ) -> RepositoryCheckpoint:
     """Reject uncertain side effects, terminal sessions or mismatched settings."""
     records = read_verified_journal(output / "session-events.jsonl")
@@ -255,6 +257,7 @@ def validated_quiescent_repository_checkpoint(
         or checkpoint.hierarchical_mode != hierarchical_mode
         or checkpoint.syntax_mode != syntax_mode
         or checkpoint.extended_syntax != extended_syntax
+        or checkpoint.public_diagnostics != public_diagnostics
     ):
         raise ValueError("checkpoint identity, journal head or budgets differ")
     first = records[0]
@@ -270,6 +273,7 @@ def validated_quiescent_repository_checkpoint(
         or first["payload"].get("hierarchical_mode", False) != checkpoint.hierarchical_mode
         or first["payload"].get("syntax_mode", False) != checkpoint.syntax_mode
         or first["payload"].get("extended_syntax", False) != checkpoint.extended_syntax
+        or first["payload"].get("public_diagnostics", False) != checkpoint.public_diagnostics
     ):
         raise ValueError("checkpoint does not match session creation evidence")
     completed = sum(event["kind"] == "tool_completed" for event in records)

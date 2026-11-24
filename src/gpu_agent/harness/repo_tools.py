@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
@@ -80,6 +81,7 @@ class RepositoryWorkspaceTools:
         allow_batch_edits: bool = True,
         syntax_mode: bool = False,
         extended_syntax: bool = False,
+        public_diagnostics: bool = False,
     ) -> None:
         if output.exists() or output.is_symlink():
             raise ValueError("repository agent output already exists")
@@ -104,6 +106,7 @@ class RepositoryWorkspaceTools:
         if extended_syntax and (not syntax_mode or public_case_id is None):
             raise ValueError("extended AST requires a registered syntax session")
         self._extended_syntax = extended_syntax
+        self._public_diagnostics = public_diagnostics
         self._configure_public_case(public_case_id, max_public_checks)
         self._store = RunStore(output / "public")
         self._run = self._store.create_run("gpu_repository_agent")
@@ -390,6 +393,7 @@ class RepositoryWorkspaceTools:
         allow_batch_edits: bool = True,
         syntax_mode: bool = False,
         extended_syntax: bool = False,
+        public_diagnostics: bool = False,
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -421,6 +425,7 @@ class RepositoryWorkspaceTools:
         if extended_syntax and (not syntax_mode or public_case_id is None):
             raise ValueError("extended AST requires a registered syntax session")
         host._extended_syntax = extended_syntax
+        host._public_diagnostics = public_diagnostics
         host._policy = permissions or ToolPermissionPolicy()
         host._configure_public_case(public_case_id, max_public_checks, resuming=True)
         if (
@@ -731,6 +736,7 @@ class RepositoryWorkspaceTools:
             history=context.recent,
             syntax_mode=self._syntax_mode,
             extended_syntax=self._extended_syntax,
+            public_diagnostics=self._public_diagnostics,
             syntax_state=self.syntax_state,
             context_summary=summary,
             workspace_source=context.source,
@@ -1190,7 +1196,11 @@ class RepositoryWorkspaceTools:
         if signature in self._public_probe_signatures:
             raise ValueError("REDUNDANT_PUBLIC_PROBE")
         number = self.public_probes_attempted + 1
-        result = probe_candidate_publicly(
+        probe = (
+            partial(probe_candidate_publicly, diagnostic_mode=True)
+            if self._public_diagnostics else probe_candidate_publicly
+        )
+        result = probe(
             store=self._store,
             parent_run_id=self.run_id,
             repository=self.workspace.root,
@@ -1244,7 +1254,11 @@ class RepositoryWorkspaceTools:
         )
         self._attempted_candidate_hashes.add(candidate_sha)
         self._public_checks_attempted += 1
-        result = check_candidate_publicly(
+        checker = (
+            partial(check_candidate_publicly, diagnostic_mode=True)
+            if self._public_diagnostics else check_candidate_publicly
+        )
+        result = checker(
             store=self._store,
             parent_run_id=self.run_id,
             repository=self.workspace.root,

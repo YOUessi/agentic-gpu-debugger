@@ -13,7 +13,10 @@ import tempfile
 from pathlib import Path
 
 from gpu_agent.benchmark.hardset_v2 import sample_input, verify_numeric
-from gpu_agent.benchmark.hardset_v2_agent_models import HardsetPublicCheck
+from gpu_agent.benchmark.hardset_v2_agent_models import (
+    HardsetPublicCheck, PublicSanitizerDiagnostic,
+)
+from gpu_agent.benchmark.public_numeric_feedback import classify_public_numeric
 from gpu_agent.execution.isolated import IsolatedGPUBackend
 from gpu_agent.execution.models import (
     BuildRequest,
@@ -40,6 +43,7 @@ def check_candidate_publicly(
     case_id: str,
     candidate: bytes,
     output: Path,
+    diagnostic_mode: bool = False,
 ) -> HardsetPublicCheck:
     """Build/run and numerically check the *candidate*, not its original mutant."""
     if store.visibility != "public":
@@ -121,8 +125,15 @@ def check_candidate_publicly(
                     if execution.runtime_status != "SUCCESS":
                         failure = ("PROGRAM_FAILED", size)
                         break
-                    if not verify_numeric(case_id, payload, store.read(execution.output_ref)):
+                    observed = store.read(execution.output_ref)
+                    if not verify_numeric(case_id, payload, observed):
                         failure = ("NUMERIC_MISMATCH", size)
+                        if diagnostic_mode:
+                            feedback = feedback.model_copy(update={
+                                "numeric_diagnostic": classify_public_numeric(
+                                    case_id, payload, observed
+                                ),
+                            })
                         break
                 if failure is not None:
                     feedback = feedback.model_copy(
@@ -135,6 +146,10 @@ def check_candidate_publicly(
                     feedback = feedback.model_copy(
                         update={"passed": True, "failure_code": "PUBLIC_CHECKS_PASSED"}
                     )
+                # In diagnostic mode, still run the bounded sanitizer stage
+                # after a numeric mismatch. An infrastructure failure does not
+                # grant permission to start extra workloads.
+                if failure is None or (diagnostic_mode and failure[0] == "NUMERIC_MISMATCH"):
                     input_data = sample_input(case_id, 65)
                     ref = store.put(
                         run.id, "hardset/public-sanitizer-input.json", input_data, "public"
@@ -149,20 +164,33 @@ def check_candidate_publicly(
                             )
                         )
                         output_ref = result.program_output_ref
-                        if (
-                            not result.completed
-                            or result.check_outcome != "CLEAN"
-                            or output_ref is None
-                            or not verify_numeric(case_id, input_data, store.read(output_ref))
-                        ):
-                            feedback = feedback.model_copy(
-                                update={
+                        numeric_match = (
+                            verify_numeric(case_id, input_data, store.read(output_ref))
+                            if result.completed and output_ref is not None else None
+                        )
+                        clean = result.completed and result.check_outcome == "CLEAN"
+                        if diagnostic_mode:
+                            detail = PublicSanitizerDiagnostic(
+                                tool=tool.value,
+                                status=(
+                                    "CLEAN" if clean else "FINDINGS"
+                                    if result.completed and result.check_outcome == "FINDINGS"
+                                    else "INCONCLUSIVE"
+                                ),
+                                numeric_output_matches=numeric_match,
+                            )
+                            feedback = feedback.model_copy(update={
+                                "sanitizer_diagnostics": (*feedback.sanitizer_diagnostics, detail)
+                            })
+                        if not clean or numeric_match is not True:
+                            if failure is None and feedback.passed:
+                                feedback = feedback.model_copy(update={
                                     "passed": False,
                                     "failure_code": "SANITIZER_FAILED",
                                     "public_error_excerpt": tool.value,
-                                }
-                            )
-                            break
+                                })
+                            if not diagnostic_mode:
+                                break
         except (OSError, ValueError) as error:
             if feedback.failure_code == "PUBLIC_EXECUTION_UNAVAILABLE":
                 feedback = feedback.model_copy(

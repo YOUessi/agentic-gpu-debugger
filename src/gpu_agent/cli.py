@@ -213,6 +213,7 @@ def harness_repo_run(
     hierarchical: Annotated[bool, typer.Option("--hierarchical")] = False,
     syntax_editing: Annotated[bool, typer.Option("--syntax-editing")] = False,
     extended_syntax: Annotated[bool, typer.Option("--extended-syntax")] = False,
+    public_diagnostics: Annotated[bool, typer.Option("--public-diagnostics")] = False,
     max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     resume: Annotated[bool, typer.Option("--resume")] = False,
     pause_after_turns: Annotated[
@@ -245,6 +246,7 @@ def harness_repo_run(
             hierarchical_mode=hierarchical,
             syntax_mode=syntax_editing,
             extended_syntax=extended_syntax,
+            public_diagnostics=public_diagnostics,
             resume=resume,
             pause_after_turns=pause_after_turns,
         )

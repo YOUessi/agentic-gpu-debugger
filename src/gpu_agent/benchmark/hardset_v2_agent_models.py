@@ -11,6 +11,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.benchmark.hardset_v2_probe import FunctionalProbeObservation
+from gpu_agent.benchmark.public_numeric_feedback import PublicNumericDiagnostic
 
 
 class HardsetDiagnosis(BaseModel):
@@ -34,6 +35,13 @@ class HardsetAgentContext(BaseModel):
     observations: tuple[FunctionalProbeObservation, ...] = Field(min_length=1, max_length=15)
 
 
+class PublicSanitizerDiagnostic(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+    tool: Literal["memcheck", "racecheck", "initcheck", "synccheck"]
+    status: Literal["CLEAN", "FINDINGS", "INCONCLUSIVE"]
+    numeric_output_matches: bool | None = None
+
+
 class HardsetPublicCheck(BaseModel):
     """Untrusted feedback from an actual public candidate GPU execution."""
 
@@ -51,6 +59,8 @@ class HardsetPublicCheck(BaseModel):
     ]
     first_failing_size: int | None = Field(default=None, ge=1, le=65536)
     public_error_excerpt: str = Field(default="", max_length=1000)
+    numeric_diagnostic: PublicNumericDiagnostic | None = None
+    sanitizer_diagnostics: tuple[PublicSanitizerDiagnostic, ...] = Field(default=(), max_length=4)
     public_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
 
 
