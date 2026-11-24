@@ -63,7 +63,7 @@ class RepositoryTrajectoryMetrics(BaseModel):
 
 
 _TOOL_NAME = re.compile(r"^repo-harness/v1/tool-([0-9]{3})\.json$")
-_REDUNDANT = {"REDUNDANT_READ", "REDUNDANT_LIST", "REDUNDANT_DIFF"}
+_REDUNDANT = {"REDUNDANT_READ", "REDUNDANT_LIST", "REDUNDANT_DIFF", "REDUNDANT_SYNTAX_INSPECTION"}
 _READ_TOOLS = {"repo_list_files", "repo_read_file", "repo_git_diff", "repo_inspect_syntax"}
 
 

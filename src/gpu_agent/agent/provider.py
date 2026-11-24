@@ -562,8 +562,21 @@ def invoke_sdk(
         probe_phase = snapshot.get("public_probe_phase")
         if probe_phase not in (None, "before", "after"):
             raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        from gpu_agent.harness.models import SyntaxState
+
+        syntax_data = snapshot.get("syntax_state")
+        syntax_state = (
+            SyntaxState.model_validate_json(json.dumps(syntax_data))
+            if syntax_data is not None else None
+        )
+        if syntax_state is not None and syntax_state.path != kernel_path:
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
         output_model = repository_decision_schema(
-            tuple(names), registered_kernel_path=kernel_path, public_probe_phase=probe_phase
+            tuple(names),
+            registered_kernel_path=kernel_path,
+            public_probe_phase=probe_phase,
+            syntax_state=syntax_state,
+            bind_syntax_cursor=kernel_path is not None,
         )
     elif request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
         from gpu_agent.harness.models import HarnessDecision

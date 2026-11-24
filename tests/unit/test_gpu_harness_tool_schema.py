@@ -95,7 +95,7 @@ def test_registered_kernel_path_is_literal_in_model_output_grammar() -> None:
                     "tool": "repo_replace_syntax",
                     "path": "benchmarks/hardset_v2/h002/mutant/kernel.cu",
                     "expected_source_sha256": "a" * 64,
-                    "edits": [{"node_id": "b" * 24, "replacement_code": "return;"}],
+                    "edits": [{"node_id": "n01", "replacement_code": "return;"}],
                 },
                 "reason": "Tried to edit a different registered CUDA task",
             }

@@ -79,7 +79,7 @@ class ScriptedPlanningProbe:
                 ],
             }
         else:
-            action = {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32"}
+            action = {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 20}
         if action["tool"] not in snapshot.allowed_tools:
             raise ValueError("scripted probe tried a forbidden repository tool")
         return HarnessDecision.model_validate(

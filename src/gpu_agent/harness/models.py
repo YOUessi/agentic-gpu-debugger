@@ -95,7 +95,7 @@ class RepoInspectSyntax(StrictModel):
 
 
 class RepoSyntaxEdit(StrictModel):
-    node_id: str = Field(min_length=24, max_length=24, pattern=r"^[a-f0-9]{24}$")
+    node_id: str = Field(pattern=r"^n[0-9]{2}$")
     replacement_code: str = Field(min_length=1, max_length=1200)
 
 
@@ -204,6 +204,31 @@ class TaskProgress(StrictModel):
     last_failure_code: str | None = Field(default=None, max_length=160)
 
 
+class SyntaxEvidenceNode(StrictModel):
+    id: str = Field(pattern=r"^n[0-9]{2}$")
+    function: str
+    kind: str
+    start_line: int = Field(ge=1)
+    end_line: int = Field(ge=1)
+    code: str = Field(max_length=300)
+
+
+class SyntaxPageVisit(StrictModel):
+    offset: int = Field(ge=0, le=90)
+    limit: int = Field(ge=1, le=20)
+
+
+class SyntaxState(StrictModel):
+    """Public, controller-pinned evidence for one exact source revision."""
+
+    path: str
+    source_sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    symbol: str = Field(max_length=80)
+    next_offset: int | None = Field(ge=0, le=90)
+    visited_pages: tuple[SyntaxPageVisit, ...] = Field(max_length=90)
+    observed_nodes: tuple[SyntaxEvidenceNode, ...] = Field(max_length=90)
+
+
 class SessionSnapshot(StrictModel):
     goal: str = Field(min_length=3, max_length=1500)
     case_id: str = Field(min_length=1, max_length=80)
@@ -213,6 +238,7 @@ class SessionSnapshot(StrictModel):
     registered_public_case: str | None = Field(default=None, pattern=r"^h00[1-3]$")
     registered_kernel_path: str | None = Field(default=None, max_length=300)
     context_mode: Literal["legacy", "evidence_first"] = "legacy"
+    syntax_state: SyntaxState | None = None
     task_plan: TaskPlan | None = None
     task_progress: TaskProgress | None = None
     task_reflection: TaskReflection | None = None

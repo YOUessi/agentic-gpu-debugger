@@ -846,7 +846,7 @@ def test_syntax_mode_uses_controller_ast_ids_and_never_model_quoted_old_text(
     ) as host:
         first = host.snapshot(GOAL, [], 8)
         assert "repo_inspect_syntax" in first.allowed_tools
-        assert "repo_replace_syntax" in first.allowed_tools
+        assert "repo_replace_syntax" not in first.allowed_tools
         assert "repo_replace_snippet" not in first.allowed_tools
         inspected = HarnessDecision.model_validate(
             {
@@ -854,6 +854,7 @@ def test_syntax_mode_uses_controller_ast_ids_and_never_model_quoted_old_text(
                     "tool": "repo_inspect_syntax",
                     "path": KERNEL,
                     "symbol": "softmax32",
+                    "limit": 20,
                 },
                 "reason": "Inspect syntax nodes in the exact mutable CUDA kernel",
             }
@@ -984,7 +985,7 @@ def test_hierarchical_syntax_mode_persists_planner_reflection_and_verified_gates
                     ],
                 }
             else:
-                action = {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32"}
+                action = {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 20}
             assert action["tool"] in snapshot.allowed_tools
             return HarnessDecision.model_validate(
                 {"action": action, "reason": "Follow evidence-backed CUDA plan milestones"}

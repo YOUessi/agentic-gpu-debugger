@@ -188,7 +188,7 @@ class FakeTwoLevelModel:
                 "tool": "repo_replace_syntax",
                 "path": "kernel.cu",
                 "expected_source_sha256": "a" * 64,
-                "edits": [{"node_id": "a" * 24, "replacement_code": "x = 2;"}],
+                "edits": [{"node_id": "n01", "replacement_code": "x = 2;"}],
             }
         elif n == 3:
             action = {"tool": "repo_run_public_checks"}

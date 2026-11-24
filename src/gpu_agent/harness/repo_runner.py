@@ -91,6 +91,8 @@ def run_repository_coding_session(
             hierarchical_mode=hierarchical_mode,
             syntax_mode=syntax_mode,
         )
+        if syntax_mode and "syntax_state" not in checkpoint.model_fields_set:
+            raise ValueError("legacy AST checkpoint cannot resume with short aliases")
         host = RepositoryWorkspaceTools.reopen(
             origin=repository,
             output=output,
@@ -108,6 +110,8 @@ def run_repository_coding_session(
             last_checked_candidate_sha=checkpoint.last_checked_candidate_sha,
             last_public_passed=checkpoint.last_public_passed,
             observed_query_fingerprints=checkpoint.observed_query_fingerprints,
+            syntax_state=checkpoint.syntax_state,
+            rejected_syntax_edits=checkpoint.rejected_syntax_edits,
             public_probe_signatures=checkpoint.public_probe_signatures,
             public_probe_run_ids=checkpoint.public_probe_run_ids,
             context_mode=checkpoint.context_mode,
@@ -254,6 +258,8 @@ def run_repository_coding_session(
                         last_checked_candidate_sha=tools.last_checked_candidate_sha,
                         last_public_passed=tools._last_public_passed,
                         observed_query_fingerprints=tools.observed_query_fingerprints,
+                        syntax_state=tools.syntax_state,
+                        rejected_syntax_edits=tools.rejected_syntax_edits,
                         accepted_hashes=tools.workspace.accepted_hashes,
                         state=dict(state),
                     ),

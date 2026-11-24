@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from gpu_agent.harness.journal import read_verified_journal, recovery_disposition
 from gpu_agent.harness.models import (
     HarnessDecision,
+    SyntaxState,
     TaskPlan,
     TaskProgress,
     TaskReflection,
@@ -55,6 +56,8 @@ class RepositoryCheckpoint(BaseModel):
     public_probe_run_ids: tuple[str, ...] = ()
     attempted_candidate_hashes: tuple[str, ...] = ()
     observed_query_fingerprints: tuple[str, ...] = ()
+    syntax_state: SyntaxState | None = None
+    rejected_syntax_edits: tuple[str, ...] = ()
     last_public_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
     last_checked_diff_sha: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
     last_checked_candidate_sha: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")

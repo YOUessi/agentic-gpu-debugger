@@ -22,6 +22,8 @@ from gpu_agent.harness.models import (
     RepoReplaceSnippet,
     RepoReplaceSyntax,
     RepoRunPublicChecks,
+    RepoSyntaxEdit,
+    SyntaxState,
 )
 
 _REPO_ACTION_CLASSES: dict[str, type[BaseModel]] = {
@@ -43,6 +45,8 @@ def repository_decision_schema(
     *,
     registered_kernel_path: str | None = None,
     public_probe_phase: Literal["before", "after"] | None = None,
+    syntax_state: SyntaxState | None = None,
+    bind_syntax_cursor: bool = False,
 ) -> type[BaseModel]:
     """Return a strict Pydantic response schema for EXACTLY approved tools.
 
@@ -56,23 +60,41 @@ def repository_decision_schema(
         or any(name not in _REPO_ACTION_CLASSES for name in allowed_tools)
     ):
         raise ValueError("registered model tool grammar has invalid controller capability set")
-    options: tuple[type[BaseModel], ...] = tuple(
-        create_model(
-            f"Bound{name.title().replace('_', '')}",
-            __base__=_REPO_ACTION_CLASSES[name],
-            path=(Literal[registered_kernel_path], ...),
-        )
-        if registered_kernel_path is not None
-        and name in {"repo_inspect_syntax", "repo_replace_syntax", "repo_read_file"}
-        else create_model(
-            "BoundRepoProbePublic",
-            __base__=RepoProbePublic,
-            phase=(Literal[public_probe_phase], ...),
-        )
-        if name == "repo_probe_public" and public_probe_phase is not None
-        else _REPO_ACTION_CLASSES[name]
-        for name in allowed_tools
-    )
+    def bound_action(name: str) -> type[BaseModel]:
+        base = _REPO_ACTION_CLASSES[name]
+        fields: dict[str, Any] = {}
+        if registered_kernel_path is not None and name in {
+            "repo_inspect_syntax", "repo_replace_syntax", "repo_read_file"
+        }:
+            fields["path"] = (Literal[registered_kernel_path], ...)
+        if name == "repo_probe_public" and public_probe_phase is not None:
+            fields["phase"] = (Literal[public_probe_phase], ...)
+        if name == "repo_inspect_syntax" and bind_syntax_cursor:
+            if syntax_state is not None and syntax_state.next_offset is None:
+                raise ValueError("exhausted AST cursor exposed in model grammar")
+            offset = syntax_state.next_offset if syntax_state else 0
+            symbol = syntax_state.symbol if syntax_state else ""
+            fields["offset"] = (Literal[offset], ...)
+            fields["symbol"] = (Literal[symbol], ...)
+            fields["limit"] = (Literal[8], ...)
+        if name == "repo_replace_syntax" and bind_syntax_cursor:
+            if syntax_state is None or not syntax_state.observed_nodes:
+                raise ValueError("AST edit exposed without observed node evidence")
+            aliases = tuple(node.id for node in syntax_state.observed_nodes)
+            if len(set(aliases)) != len(aliases):
+                raise ValueError("duplicate AST aliases in model grammar")
+            edit = create_model(
+                "BoundRepoSyntaxEdit",
+                __base__=RepoSyntaxEdit,
+                node_id=(Literal[aliases], ...),
+            )
+            fields["expected_source_sha256"] = (Literal[syntax_state.source_sha256], ...)
+            fields["edits"] = (list[edit], Field(min_length=1, max_length=4))
+        if fields:
+            return create_model(f"Bound{name.title().replace('_', '')}", __base__=base, **fields)
+        return base
+
+    options = tuple(bound_action(name) for name in allowed_tools)
     action: Any
     if len(options) == 1:
         action = options[0]

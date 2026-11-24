@@ -32,7 +32,7 @@ class PublicProbeFixture:
         elif not history:
             action = {"tool": "repo_probe_public", "phase": "before", "input_size": 33}
         elif history[-1]["tool"] == "repo_probe_public" and snapshot.public_probe_phase == "before":
-            action = {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32"}
+            action = {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 20}
         elif history[-1]["tool"] == "repo_inspect_syntax":
             syntax = json.loads(history[-1]["content"])
             nodes = syntax["nodes"]

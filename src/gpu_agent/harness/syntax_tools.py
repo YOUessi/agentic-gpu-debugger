@@ -101,6 +101,8 @@ def _entries(raw: bytes) -> tuple[str, list[SyntaxNode]]:
         visit(function_node)
     if len(entries) > _MAX_NODES:
         raise ValueError("CUDA syntax node listing exceeds controller bound")
+    # Stable aliases are globally unique within a source revision.
+    entries.sort(key=lambda item: (item.start_byte, item.end_byte))
     return source_sha256, entries
 
 
@@ -109,9 +111,10 @@ def syntax_nodes(raw: bytes, *, symbol: str = "") -> dict[str, Any]:
     if symbol and not re.fullmatch(r"[A-Za-z_]\w{0,79}", symbol):
         raise ValueError("invalid CUDA function symbol")
     digest, entries = _entries(raw)
+    indexed = [(f"n{index:02d}", item) for index, item in enumerate(entries, 1)]
     if symbol:
-        entries = [item for item in entries if item.function == symbol]
-    if not entries:
+        indexed = [(alias, item) for alias, item in indexed if item.function == symbol]
+    if not indexed:
         raise ValueError("CUDA_SYNTAX_SYMBOL_NOT_FOUND")
     return {
         "schema_version": "gpu-cuda-syntax-map-v1",
@@ -119,14 +122,14 @@ def syntax_nodes(raw: bytes, *, symbol: str = "") -> dict[str, Any]:
         "symbol_filter": symbol,
         "nodes": [
             {
-                "id": item.node_id,
+                "id": alias,
                 "function": item.function,
                 "kind": item.kind,
                 "start_line": item.start_line,
                 "end_line": item.end_line,
                 "code": item.code[:300],
             }
-            for item in entries
+            for alias, item in indexed
         ],
     }
 
@@ -143,7 +146,7 @@ def syntax_page(
 
     No silent truncation: if a node cannot fit within the output budget,
     return a bounded page and an explicit next_offset. Node IDs are anchored
-    to the same SHA for all pages. Executable statements are shown first.
+    to the same SHA for all pages. Nodes appear in source-byte order.
     """
     if (
         type(offset) is not int
@@ -154,14 +157,7 @@ def syntax_page(
     ):
         raise ValueError("CUDA_SYNTAX_PAGE_BOUNDS_INVALID")
     full = syntax_nodes(raw, symbol=symbol)
-    candidates = sorted(
-        full["nodes"],
-        key=lambda node: (
-            0 if node["kind"] == "expression_statement" else 1,
-            node["start_line"],
-            node["id"],
-        ),
-    )
+    candidates = full["nodes"]
     if offset >= len(candidates):
         raise ValueError("CUDA_SYNTAX_CURSOR_EXHAUSTED")
     selected: list[dict[str, Any]] = []
@@ -211,7 +207,7 @@ def rewrite_syntax_nodes(
         raise ValueError("CUDA_SOURCE_SHA_STALE")
     if not 1 <= len(edits) <= 4:
         raise ValueError("CUDA_SYNTAX_EDIT_COUNT_OUT_OF_BOUNDS")
-    by_id = {item.node_id: item for item in entries}
+    by_id = {f"n{index:02d}": item for index, item in enumerate(entries, 1)}
     spans: list[tuple[int, int, bytes]] = []
     chosen: set[str] = set()
     for node_id, code in edits:
@@ -219,13 +215,13 @@ def rewrite_syntax_nodes(
             raise ValueError("CUDA_SYNTAX_DUPLICATE_NODE")
         chosen.add(node_id)
         if node_id not in by_id:
-            raise ValueError("CUDA_SYNTAX_NODE_NOT_FOUND_OR_STALE")
+            raise ValueError(f"CUDA_SYNTAX_NODE_NOT_FOUND: {node_id}")
         if not code or len(code.encode("utf-8")) > 1200 or "\x00" in code:
             raise ValueError("CUDA_SYNTAX_REPLACEMENT_INVALID")
         node = by_id[node_id]
         proposed = code.encode("utf-8")
         if proposed == raw[node.start_byte : node.end_byte]:
-            raise ValueError("CUDA_SYNTAX_NOOP")
+            raise ValueError(f"CUDA_SYNTAX_NOOP: {node_id} replacement equals current node")
         spans.append((node.start_byte, node.end_byte, proposed))
     spans.sort(key=lambda x: x[0])
     cursor = 0

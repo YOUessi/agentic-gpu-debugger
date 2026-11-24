@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from gpu_agent.benchmark.hardset_v2 import (
     HARDSET_CASES,
@@ -35,6 +35,9 @@ from gpu_agent.harness.models import (
     RepoReplaceSyntax,
     RepoRunPublicChecks,
     SessionSnapshot,
+    SyntaxEvidenceNode,
+    SyntaxPageVisit,
+    SyntaxState,
     ToolObservation,
 )
 from gpu_agent.harness.registry import ToolPermissionPolicy
@@ -110,6 +113,8 @@ class RepositoryWorkspaceTools:
         self._last_checked_candidate_sha: str | None = None
         self._last_public_passed = False
         self._observed_query_fingerprints: set[str] = set()
+        self._syntax_state: SyntaxState | None = None
+        self._rejected_syntax_edits: set[str] = set()
         self._public_probe_signatures: set[str] = set()
         self._public_probe_run_ids: list[str] = []
 
@@ -117,6 +122,90 @@ class RepositoryWorkspaceTools:
     def observed_query_fingerprints(self) -> tuple[str, ...]:
         """Hashed read/list/diff queries; no source code is persisted here."""
         return tuple(sorted(self._observed_query_fingerprints))
+
+    @property
+    def syntax_state(self) -> SyntaxState | None:
+        """Evidence survives prompt compaction; stale source invalidates it."""
+        state = self._syntax_state
+        if state is not None and self._syntax_digest(state.path) != state.source_sha256:
+            self._syntax_state = None
+            self._rejected_syntax_edits.clear()
+        return self._syntax_state
+
+    @property
+    def rejected_syntax_edits(self) -> tuple[str, ...]:
+        return tuple(sorted(self._rejected_syntax_edits))
+
+    def _syntax_digest(self, path: str) -> str:
+        target = self.workspace._checked(path, editable=False)
+        return hashlib.sha256(read_regular(target, 1024 * 1024)).hexdigest()
+
+    def _syntax_fingerprint(
+        self, path: str, digest: str, symbol: str, offset: int, limit: int
+    ) -> str:
+        return self._query_fingerprint(
+            {
+                "tool": "repo_inspect_syntax",
+                "path": path,
+                "source_sha256": digest,
+                "symbol": symbol,
+                "offset": offset,
+                "limit": limit,
+            }
+        )
+
+    def _pin_syntax_page(
+        self, action: RepoInspectSyntax, mapping: dict[str, Any]
+    ) -> None:
+        state = self.syntax_state
+        if state is not None and state.path != action.path:
+            state = None
+            self._rejected_syntax_edits.clear()
+        digest = self._syntax_digest(action.path)
+        if mapping["source_sha256"] != digest:
+            raise ValueError("CUDA_SOURCE_SHA_STALE")
+        nodes = tuple(SyntaxEvidenceNode.model_validate(node) for node in mapping["nodes"])
+        old_nodes = state.observed_nodes if state else ()
+        old_pages = state.visited_pages if state else ()
+        if set(node.id for node in old_nodes) & set(node.id for node in nodes):
+            raise ValueError("REDUNDANT_SYNTAX_INSPECTION: page overlaps pinned nodes")
+        self._syntax_state = SyntaxState(
+            path=action.path,
+            source_sha256=digest,
+            symbol=action.symbol,
+            next_offset=mapping["next_offset"],
+            visited_pages=(*old_pages, SyntaxPageVisit(offset=action.offset, limit=action.limit)),
+            observed_nodes=(*old_nodes, *nodes),
+        )
+
+    def _restore_syntax_state(self, state: SyntaxState | None) -> None:
+        """Re-enumerate pinned public AST pages, never trust checkpoint aliases."""
+        if state is None:
+            return
+        if not self._syntax_mode or (
+            self._public_kernel_path is not None and state.path != self._public_kernel_path
+        ):
+            raise ValueError("recovered AST state is outside the authorized source")
+        if self._syntax_digest(state.path) != state.source_sha256:
+            raise ValueError("recovered AST state has stale source SHA")
+        for page in state.visited_pages:
+            previous = self._syntax_state
+            if page.offset != (previous.next_offset if previous else 0):
+                raise ValueError("recovered AST cursor is not contiguous")
+            fingerprint = self._syntax_fingerprint(
+                state.path, state.source_sha256, state.symbol, page.offset, page.limit
+            )
+            if fingerprint not in self._observed_query_fingerprints:
+                raise ValueError("recovered AST page has no completed inspection")
+            action = RepoInspectSyntax(
+                path=state.path, symbol=state.symbol, offset=page.offset, limit=page.limit
+            )
+            mapping = self.workspace.inspect_syntax(
+                state.path, symbol=state.symbol, offset=page.offset, limit=page.limit
+            )
+            self._pin_syntax_page(action, mapping)
+        if self._syntax_state != state:
+            raise ValueError("recovered AST evidence differs from current parser output")
 
     @property
     def public_probe_signatures(self) -> tuple[str, ...]:
@@ -216,6 +305,8 @@ class RepositoryWorkspaceTools:
         last_checked_candidate_sha: str | None = None,
         last_public_passed: bool = False,
         observed_query_fingerprints: tuple[str, ...] = (),
+        syntax_state: SyntaxState | None = None,
+        rejected_syntax_edits: tuple[str, ...] = (),
         public_probe_signatures: tuple[str, ...] = (),
         public_probe_run_ids: tuple[str, ...] = (),
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
@@ -276,6 +367,20 @@ class RepositoryWorkspaceTools:
         ):
             raise ValueError("invalid resumed inspection query fingerprints")
         host._observed_query_fingerprints = set(observed_query_fingerprints)
+        host._syntax_state = None
+        host._rejected_syntax_edits = set()
+        host._restore_syntax_state(syntax_state)
+        if (
+            len(rejected_syntax_edits) > tool_calls
+            or len(set(rejected_syntax_edits)) != len(rejected_syntax_edits)
+            or any(
+                len(v) != 64 or any(ch not in "0123456789abcdef" for ch in v)
+                for v in rejected_syntax_edits
+            )
+            or (rejected_syntax_edits and syntax_state is None)
+        ):
+            raise ValueError("invalid recovered AST rejection ledger")
+        host._rejected_syntax_edits = set(rejected_syntax_edits)
         if (
             len(public_probe_signatures) != len(public_probe_run_ids)
             or len(public_probe_signatures) > 4
@@ -431,20 +536,17 @@ class RepositoryWorkspaceTools:
             if name in {"repo_replace_many", "repo_replace_snippet"} and self._syntax_mode:
                 continue
             if name == "repo_inspect_syntax" and self._public_kernel_path is not None:
-                original = read_regular(
-                    self.workspace._checked(self._public_kernel_path, editable=False),
-                    1024 * 1024,
-                )
-                syntax_key = self._query_fingerprint(
-                    {
-                        "tool": "repo_inspect_syntax",
-                        "path": self._public_kernel_path,
-                        "source_sha256": hashlib.sha256(original).hexdigest(),
-                        "symbol": "",
-                    }
-                )
-                if syntax_key in self._observed_query_fingerprints:
-                    continue
+                state = self.syntax_state
+                if state is not None:
+                    if state.next_offset is None:
+                        continue
+                    syntax_key = self._syntax_fingerprint(
+                        state.path, state.source_sha256, state.symbol, state.next_offset, 8
+                    )
+                    if syntax_key in self._observed_query_fingerprints:
+                        continue
+            if name == "repo_replace_syntax" and self.syntax_state is None:
+                continue
             if name in {"repo_replace_many", "repo_replace_snippet"} and passed:
                 continue
             if name == "repo_git_diff" and (
@@ -536,6 +638,7 @@ class RepositoryWorkspaceTools:
                 else 0
             ),
             history=context.recent,
+            syntax_state=self.syntax_state,
             context_summary=summary,
             workspace_source=context.source,
             total_public_actions=context.total_actions,
@@ -557,6 +660,25 @@ class RepositoryWorkspaceTools:
                 content=(
                     "TOOL_DENY: atomic batch editing is disabled for this ablation"
                     if isinstance(action, RepoReplaceMany) and not self._batch_enabled
+                    else "ValueError: REDUNDANT_SYNTAX_INSPECTION: page already pinned"
+                    if (
+                        permission == "ALLOW"
+                        and isinstance(action, RepoInspectSyntax)
+                        and self.syntax_state is not None
+                        and action.path == self.syntax_state.path
+                        and action.symbol == self.syntax_state.symbol
+                        and any(
+                            page.offset == action.offset for page in self.syntax_state.visited_pages
+                        )
+                    )
+                    else "ValueError: CUDA_SOURCE_SHA_STALE"
+                    if (
+                        permission == "ALLOW"
+                        and isinstance(action, RepoReplaceSyntax)
+                        and self._syntax_mode
+                        and action.path == self._public_kernel_path
+                        and action.expected_source_sha256 != self._syntax_digest(action.path)
+                    )
                     else "TOOL_NOT_AVAILABLE_AT_CURRENT_STATE: follow the allowed tool list"
                     if permission == "ALLOW"
                     else f"TOOL_{permission}: unavailable workspace capability"
@@ -577,6 +699,7 @@ class RepositoryWorkspaceTools:
             json.dumps(
                 {
                     "tool": action.tool,
+                    "action": action.model_dump(mode="json"),
                     "status": result.status,
                     "observation_sha256": hashlib.sha256(result.content.encode()).hexdigest(),
                     "edited_files": self.workspace.edited_files,
@@ -584,7 +707,7 @@ class RepositoryWorkspaceTools:
                     "rejection_code": (
                         result.content.split(":", 2)[1].strip()
                         if result.status == "REJECTED"
-                        and result.content.startswith("ValueError: REDUNDANT_")
+                        and result.content.startswith(("ValueError: REDUNDANT_", "ValueError: CUDA_"))
                         else None
                     ),
                 },
@@ -630,28 +753,31 @@ class RepositoryWorkspaceTools:
         if isinstance(action, RepoInspectSyntax):
             if self._public_kernel_path is not None and action.path != self._public_kernel_path:
                 raise ValueError("CUDA_SYNTAX_NOT_REGISTERED_KERNEL")
-            target = self.workspace._checked(action.path, editable=False)
-            digest = hashlib.sha256(read_regular(target, 1024 * 1024)).hexdigest()
-            key = self._query_fingerprint(
-                {
-                    "tool": action.tool,
-                    "path": action.path,
-                    "source_sha256": digest,
-                    "symbol": action.symbol,
-                    "offset": action.offset,
-                    "limit": action.limit,
-                }
+            digest = self._syntax_digest(action.path)
+            state = self.syntax_state
+            if state is not None and state.path == action.path:
+                if action.symbol != state.symbol:
+                    raise ValueError("CUDA_SYNTAX_SYMBOL_CHANGED: use pinned symbol")
+                if action.offset != state.next_offset:
+                    if any(page.offset == action.offset for page in state.visited_pages):
+                        raise ValueError("REDUNDANT_SYNTAX_INSPECTION: page already pinned")
+                    raise ValueError("CUDA_SYNTAX_CURSOR_MISMATCH: use pinned next_offset")
+            elif action.offset != 0:
+                raise ValueError("CUDA_SYNTAX_CURSOR_MISMATCH: start at offset 0")
+            key = self._syntax_fingerprint(
+                action.path, digest, action.symbol, action.offset, action.limit
             )
             self._require_new_observation(key, "REDUNDANT_SYNTAX_INSPECTION")
             mapping = self.workspace.inspect_syntax(
                 action.path, symbol=action.symbol, offset=action.offset, limit=action.limit
             )
-            self._observed_query_fingerprints.add(key)
             # Parsing and cursor pagination are controller owned. Never trim
             # the serialized JSON: callers can use next_offset for more nodes.
             serialized = json.dumps(mapping, ensure_ascii=False)
             if len(serialized) > 3900 or not mapping["nodes"]:
                 raise ValueError("CUDA_SYNTAX_PAGE_INVALID_OR_OVER_BUDGET")
+            self._pin_syntax_page(action, mapping)
+            self._observed_query_fingerprints.add(key)
             return ToolObservation(
                 tool=action.tool,
                 status="OK",
@@ -660,11 +786,34 @@ class RepositoryWorkspaceTools:
         if isinstance(action, RepoReplaceSyntax):
             if self._public_kernel_path is not None and action.path != self._public_kernel_path:
                 raise ValueError("CUDA_SYNTAX_NOT_REGISTERED_KERNEL")
-            digest = self.workspace.replace_syntax(
-                action.path,
-                expected_source_sha256=action.expected_source_sha256,
-                edits=[(e.node_id, e.replacement_code) for e in action.edits],
-            )
+            current = self._syntax_digest(action.path)
+            if current != action.expected_source_sha256:
+                raise ValueError("CUDA_SOURCE_SHA_STALE")
+            state = self.syntax_state
+            if state is None or state.path != action.path:
+                raise ValueError("CUDA_SYNTAX_NODE_NOT_FOUND: no pinned page for this source")
+            fingerprint = hashlib.sha256(
+                json.dumps(
+                    action.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+            if fingerprint in self._rejected_syntax_edits:
+                raise ValueError("CUDA_SYNTAX_REPEATED_REJECTED_EDIT")
+            try:
+                observed = {node.id for node in state.observed_nodes}
+                for edit in action.edits:
+                    if edit.node_id not in observed:
+                        raise ValueError(f"CUDA_SYNTAX_NODE_NOT_FOUND: {edit.node_id}")
+                digest = self.workspace.replace_syntax(
+                    action.path,
+                    expected_source_sha256=action.expected_source_sha256,
+                    edits=[(e.node_id, e.replacement_code) for e in action.edits],
+                )
+            except (ValueError, OSError):
+                self._rejected_syntax_edits.add(fingerprint)
+                raise
+            self._syntax_state = None
+            self._rejected_syntax_edits.clear()
             self._last_file = action.path
             self._last_file_read = self.workspace.read(action.path)
             return ToolObservation(
