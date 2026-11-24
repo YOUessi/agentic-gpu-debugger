@@ -78,32 +78,42 @@ def main() -> int:
             if args.effort != "default":
                 kwargs["reasoning"] = {"effort": args.effort}
             schema = to_strict_json_schema(kwargs["text_format"])
-            observed.update({
-                "reasoning_parameter_sent": kwargs.get("reasoning"),
-                "wire_schema_sha256": sha(json.dumps(schema, sort_keys=True).encode()),
-                "instructions_sha256": sha(kwargs["instructions"].encode()),
-                "wire_input_sha256": sha(kwargs["input"].encode()),
-                "wire_max_output_tokens": kwargs["max_output_tokens"],
-            })
+            observed.update(
+                {
+                    "reasoning_parameter_sent": kwargs.get("reasoning"),
+                    "wire_schema_sha256": sha(json.dumps(schema, sort_keys=True).encode()),
+                    "instructions_sha256": sha(kwargs["instructions"].encode()),
+                    "wire_input_sha256": sha(kwargs["input"].encode()),
+                    "wire_max_output_tokens": kwargs["max_output_tokens"],
+                }
+            )
             response = self.client.responses.with_raw_response.parse(**kwargs)
             envelope = json.loads(response.content)
             texts = [
-                part["text"] for item in envelope.get("output", [])
+                part["text"]
+                for item in envelope.get("output", [])
                 if item.get("type") == "message"
                 for part in item.get("content", [])
                 if part.get("type") == "output_text" and isinstance(part.get("text"), str)
             ]
             if tokenizer is not None:
-                observed["output_text_tokens_retokenized"] = len(
-                    tokenizer.encode("".join(texts), add_special_tokens=False).ids
-                ) if texts else 0
+                observed["output_text_tokens_retokenized"] = (
+                    len(tokenizer.encode("".join(texts), add_special_tokens=False).ids)
+                    if texts
+                    else 0
+                )
             return response
 
     request = WorkerRequest(
-        endpoint=settings.endpoint, model=settings.model, api_key=settings.api_key,
-        kind="plan", payload=payload,
+        endpoint=settings.endpoint,
+        model=settings.model,
+        api_key=settings.api_key,
+        kind="plan",
+        payload=payload,
         client_request_id=sha(raw + args.effort.encode() + args.server_thinking.encode())[:32],
-        timeout_seconds=settings.timeout_seconds, attempt=0, max_output_tokens=8192,
+        timeout_seconds=settings.timeout_seconds,
+        attempt=0,
+        max_output_tokens=8192,
     )
     result = invoke_sdk(request, client_factory=CaptureClient)
     usage = result.metadata.usage
@@ -116,11 +126,14 @@ def main() -> int:
     report = {
         "payload_sha256": args.payload_sha256,
         "prompt_version": select_prompt("plan", payload)[0],
-        "model": settings.model, "configured_max_output_tokens": 8192,
-        "requested_effort": args.effort, "server_thinking": args.server_thinking,
+        "model": settings.model,
+        "configured_max_output_tokens": 8192,
+        "requested_effort": args.effort,
+        "server_thinking": args.server_thinking,
         "server_template_sha256": args.server_template_sha256,
         **observed,
-        "state": result.state, "error_code": result.error_code,
+        "state": result.state,
+        "error_code": result.error_code,
         "usage": usage.model_dump() if usage else None,
         "nonreasoning_output_tokens": (
             usage.output_tokens - usage.reasoning_tokens
@@ -128,9 +141,13 @@ def main() -> int:
             else None
         ),
         "response_termination": result.metadata.response_termination.model_dump(mode="json")
-        if result.metadata.response_termination else None,
-        "structured_action_legal": legal, "selected_tool": tool,
-        "decision": result.value, "physical_calls": 1, "format_retries": 0,
+        if result.metadata.response_termination
+        else None,
+        "structured_action_legal": legal,
+        "selected_tool": tool,
+        "decision": result.value,
+        "physical_calls": 1,
+        "format_retries": 0,
         "tool_executed": False,
     }
     with args.output.open("x", encoding="utf-8") as f:

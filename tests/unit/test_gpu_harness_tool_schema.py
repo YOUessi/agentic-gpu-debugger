@@ -177,24 +177,41 @@ def test_ast_binding_requires_old_code_but_does_not_hide_mismatch_from_host() ->
 
     path = "benchmarks/hardset_v2/h001/mutant/kernel.cu"
     state = SyntaxState(
-        path=path, source_sha256="a" * 64, symbol="", next_offset=None,
+        path=path,
+        source_sha256="a" * 64,
+        symbol="",
+        next_offset=None,
         visited_pages=(),
         observed_nodes=(
-            SyntaxEvidenceNode(id="n01", function="f", kind="declaration",
-                               start_line=1, end_line=1, code="int x = 0;"),
-            SyntaxEvidenceNode(id="n02", function="f", kind="declaration",
-                               start_line=2, end_line=2, code="int y = 0;"),
+            SyntaxEvidenceNode(
+                id="n01",
+                function="f",
+                kind="declaration",
+                start_line=1,
+                end_line=1,
+                code="int x = 0;",
+            ),
+            SyntaxEvidenceNode(
+                id="n02",
+                function="f",
+                kind="declaration",
+                start_line=2,
+                end_line=2,
+                code="int y = 0;",
+            ),
         ),
     )
     kwargs = dict(
-        registered_kernel_path=path, syntax_state=state, bind_syntax_cursor=True,
+        registered_kernel_path=path,
+        syntax_state=state,
+        bind_syntax_cursor=True,
     )
     legacy = repository_decision_schema(("repo_replace_syntax",), **kwargs)
-    bound = repository_decision_schema(
-        ("repo_replace_syntax",), **kwargs, ast_target_binding=True
-    )
+    bound = repository_decision_schema(("repo_replace_syntax",), **kwargs, ast_target_binding=True)
     action = {
-        "tool": "repo_replace_syntax", "path": path, "expected_source_sha256": "a" * 64,
+        "tool": "repo_replace_syntax",
+        "path": path,
+        "expected_source_sha256": "a" * 64,
         "edits": [{"node_id": "n01", "replacement_code": "int y = 1;"}],
     }
     payload = {"action": action, "reason": "Edit a pinned declaration"}
@@ -209,21 +226,31 @@ def test_ast_binding_requires_old_code_but_does_not_hide_mismatch_from_host() ->
 
 
 def test_remaining_probe_sizes_are_literal_and_empty_set_fails_closed() -> None:
-    model=repository_decision_schema(
-        ("repo_probe_public","repo_read_file"),
+    model = repository_decision_schema(
+        ("repo_probe_public", "repo_read_file"),
         registered_kernel_path="benchmarks/hardset_v2/h001/mutant/kernel.cu",
-        public_probe_phase="before",public_probe_remaining_sizes=(33,65,257),
+        public_probe_phase="before",
+        public_probe_remaining_sizes=(33, 65, 257),
     )
-    assert model.model_validate({
-        "action":{"tool":"repo_probe_public","phase":"before","input_size":65},
-        "reason":"Inspect an untested public shape",
-    }).action.input_size==65
+    assert (
+        model.model_validate(
+            {
+                "action": {"tool": "repo_probe_public", "phase": "before", "input_size": 65},
+                "reason": "Inspect an untested public shape",
+            }
+        ).action.input_size
+        == 65
+    )
     with pytest.raises(ValidationError):
-        model.model_validate({
-            "action":{"tool":"repo_probe_public","phase":"before","input_size":129},
-            "reason":"Already executed public shape",
-        })
-    with pytest.raises(ValueError,match="invalid remaining"):
+        model.model_validate(
+            {
+                "action": {"tool": "repo_probe_public", "phase": "before", "input_size": 129},
+                "reason": "Already executed public shape",
+            }
+        )
+    with pytest.raises(ValueError, match="invalid remaining"):
         repository_decision_schema(
-            ("repo_probe_public",),public_probe_phase="before",public_probe_remaining_sizes=(),
+            ("repo_probe_public",),
+            public_probe_phase="before",
+            public_probe_remaining_sizes=(),
         )

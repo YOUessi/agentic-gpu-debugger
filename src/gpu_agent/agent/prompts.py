@@ -347,7 +347,8 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
                 "into expected_old_code, then use its matching node_id and replacement_code. "
                 "Verify the old code is the statement you intend to change, not merely "
                 "a nearby alias. A binding mismatch applies no edits."
-                if binding else ""
+                if binding
+                else ""
             )
             scoped = snapshot.get("public_probe_remaining_sizes") is not None
             if scoped:
@@ -366,9 +367,7 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
                     "Do not invent arbitrary source paths."
                 )
                 version = "gpu-repository-ast-recovery-v1"
-                return version + suffix, (
-                    GPU_REPOSITORY_AST_PROMPT + extra + binding_extra
-                )
+                return version + suffix, (GPU_REPOSITORY_AST_PROMPT + extra + binding_extra)
             return GPU_REPOSITORY_AST_PROMPT_VERSION + suffix, (
                 GPU_REPOSITORY_AST_PROMPT + binding_extra
             )

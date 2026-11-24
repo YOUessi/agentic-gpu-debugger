@@ -88,8 +88,12 @@ def repository_decision_schema(
         if name == "repo_probe_public" and public_probe_remaining_sizes is not None:
             sizes = public_probe_remaining_sizes
             if (
-                public_probe_phase is None or not sizes or len(set(sizes)) != len(sizes)
-                or any(type(size) is not int or size not in (32, 33, 65, 129, 257) for size in sizes)
+                public_probe_phase is None
+                or not sizes
+                or len(set(sizes)) != len(sizes)
+                or any(
+                    type(size) is not int or size not in (32, 33, 65, 129, 257) for size in sizes
+                )
             ):
                 raise ValueError("invalid remaining public probe capability")
             fields["input_size"] = (Literal[sizes], ...)

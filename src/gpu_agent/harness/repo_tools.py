@@ -21,7 +21,9 @@ from gpu_agent.benchmark.hardset_v2 import (
 )
 from gpu_agent.benchmark.hardset_v2_agent_models import HardsetPublicCheck
 from gpu_agent.benchmark.hardset_v2_public_probe import (
-    PUBLIC_PROBE_SIZES, PublicProbeResult, probe_candidate_publicly,
+    PUBLIC_PROBE_SIZES,
+    PublicProbeResult,
+    probe_candidate_publicly,
 )
 from gpu_agent.benchmark.hardset_v2_selfcheck import check_candidate_publicly
 from gpu_agent.benchmark.public_compile import PublicCompileResult, compile_public_candidate
@@ -30,6 +32,8 @@ from gpu_agent.harness.models import (
     CandidateRecoveryView,
     FinishTask,
     HarnessAction,
+    PublicProbeSize,
+    RejectedActionSummary,
     RepoCompileCandidate,
     RepoGitDiff,
     RepoInspectSyntax,
@@ -41,8 +45,6 @@ from gpu_agent.harness.models import (
     RepoReplaceSyntax,
     RepoRevertLastEdit,
     RepoRunPublicChecks,
-    RejectedActionSummary,
-    PublicProbeSize,
     SessionSnapshot,
     SyntaxEvidenceNode,
     SyntaxPageVisit,
@@ -152,15 +154,20 @@ class RepositoryWorkspaceTools:
             return ()
         digest = self._syntax_digest(self._public_kernel_path)
         return tuple(
-            cast(PublicProbeSize, size) for size in PUBLIC_PROBE_SIZES
+            cast(PublicProbeSize, size)
+            for size in PUBLIC_PROBE_SIZES
             if self._probe_signature(phase, size, digest) not in self._public_probe_signatures
         )
 
     def _probe_signature(self, phase: str, size: int, digest: str) -> str:
-        return self._query_fingerprint({
-            "tool": "repo_probe_public", "phase": phase,
-            "size": size, "source_sha256": digest,
-        })
+        return self._query_fingerprint(
+            {
+                "tool": "repo_probe_public",
+                "phase": phase,
+                "size": size,
+                "source_sha256": digest,
+            }
+        )
 
     def _current_rejected_action_state(self) -> tuple[RejectedActionSummary, ...]:
         """Derive persistent summaries from immutable public evidence, not prompt history.
@@ -178,10 +185,13 @@ class RepositoryWorkspaceTools:
             action = event["action"]
             code = event.get("rejection_code")
             if (
-                event["tool"] != "repo_replace_syntax" or event["status"] != "REJECTED"
+                event["tool"] != "repo_replace_syntax"
+                or event["status"] != "REJECTED"
                 or action.get("path") != self._public_kernel_path
                 or action.get("expected_source_sha256") != digest
-                or not isinstance(code, str) or not code.startswith("CUDA_") or len(code) > 80
+                or not isinstance(code, str)
+                or not code.startswith("CUDA_")
+                or len(code) > 80
             ):
                 continue
             nodes = tuple(sorted({edit["node_id"] for edit in action["edits"]}))
@@ -201,8 +211,9 @@ class RepositoryWorkspaceTools:
         # Match every completed Probe child and typed action to its original
         # signature. A tampered checkpoint cannot restore used sizes.
         completed = [
-            event for event in events if event["tool"] == "repo_probe_public"
-            and event["status"] in ("OK", "FAILED")
+            event
+            for event in events
+            if event["tool"] == "repo_probe_public" and event["status"] in ("OK", "FAILED")
         ]
         if len(completed) != len(self._public_probe_run_ids):
             raise ValueError("recovered scoped probe ledger differs from audit")
@@ -214,7 +225,8 @@ class RepositoryWorkspaceTools:
                 raise ValueError("missing scoped probe result")
             result = PublicProbeResult.model_validate_json(self._store.read(refs[0]))
             if (
-                result.run_id != child_id or result.case_id != self._public_case_id
+                result.run_id != child_id
+                or result.case_id != self._public_case_id
                 or result.phase != event["action"]["phase"]
                 or result.input_size != event["action"]["input_size"]
                 or event["status"] != ("FAILED" if result.outcome == "PROBE_INCONCLUSIVE" else "OK")
@@ -225,9 +237,9 @@ class RepositoryWorkspaceTools:
             )
             if hashlib.sha256(visible.encode()).hexdigest() != event["observation_sha256"]:
                 raise ValueError("recovered scoped probe observation differs")
-            signatures.add(self._probe_signature(
-                result.phase, result.input_size, result.candidate_sha256
-            ))
+            signatures.add(
+                self._probe_signature(result.phase, result.input_size, result.candidate_sha256)
+            )
         if signatures != self._public_probe_signatures or len(signatures) != len(completed):
             raise ValueError("recovered scoped probe signatures differ from audit")
 
@@ -1064,7 +1076,9 @@ class RepositoryWorkspaceTools:
             public_probe_remaining_sizes=(
                 self._remaining_probe_sizes()
                 if self._state_scoped_actions and "repo_probe_public" in allowed_tools
-                else () if self._state_scoped_actions else None
+                else ()
+                if self._state_scoped_actions
+                else None
             ),
             rejected_action_state=(
                 self._current_rejected_action_state() if self._state_scoped_actions else None
@@ -1366,8 +1380,10 @@ class RepositoryWorkspaceTools:
                     ) and edit.expected_old_code != node.code:
                         raise SyntaxRejection(
                             "CUDA_AST_TARGET_BINDING_MISMATCH",
-                            node_id=node.id, source_sha256=current,
-                            actual_code=node.code, expected_old_code=edit.expected_old_code,
+                            node_id=node.id,
+                            source_sha256=current,
+                            actual_code=node.code,
+                            expected_old_code=edit.expected_old_code,
                             no_source_written=True,
                             correction=(
                                 "Use the exact current observed node code and its matching ID. "

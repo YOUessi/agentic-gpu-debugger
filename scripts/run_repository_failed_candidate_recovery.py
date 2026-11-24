@@ -185,10 +185,14 @@ class PriorFailureRecovery:
                 # operator prefix explicitly attests their actual original
                 # targets, reproducing the same bad bytes, not correcting them.
                 by_id = {node.id: node for node in state.observed_nodes}
-                edit = edit.model_copy(update={"edits": [
-                    item.model_copy(update={"expected_old_code": by_id[item.node_id].code})
-                    for item in edit.edits
-                ]})
+                edit = edit.model_copy(
+                    update={
+                        "edits": [
+                            item.model_copy(update={"expected_old_code": by_id[item.node_id].code})
+                            for item in edit.edits
+                        ]
+                    }
+                )
             return self._prefix_action(snapshot, edit)
 
         actual = hashlib.sha256(

@@ -2118,41 +2118,65 @@ def test_compile_gate_is_independent_and_counts_unique_buildable_candidate(
 
 @pytest.mark.parametrize("case_id", ["h001", "h002"])
 def test_double_binding_rejects_wrong_target_before_any_source_write(
-    tmp_path: Path, case_id: str,
+    tmp_path: Path,
+    case_id: str,
 ) -> None:
     repo, sha = _registered_repository(tmp_path)
     path = f"benchmarks/hardset_v2/{case_id}/mutant/kernel.cu"
     with RepositoryWorkspaceTools(
-        origin=repo, output=tmp_path / "bound", sha=sha,
-        public_case_id=case_id, syntax_mode=True, ast_target_binding=True,
-        compile_gate=True, allow_revert=True,
+        origin=repo,
+        output=tmp_path / "bound",
+        sha=sha,
+        public_case_id=case_id,
+        syntax_mode=True,
+        ast_target_binding=True,
+        compile_gate=True,
+        allow_revert=True,
     ) as host:
         while True:
             state = host.syntax_state
             if state is not None and state.next_offset is None:
                 break
-            assert host.invoke(RepoInspectSyntax(
-                path=path, offset=state.next_offset if state else 0, limit=8,
-            )).status == "OK"
+            assert (
+                host.invoke(
+                    RepoInspectSyntax(
+                        path=path,
+                        offset=state.next_offset if state else 0,
+                        limit=8,
+                    )
+                ).status
+                == "OK"
+            )
         assert state is not None
         nodes = {n.id: n for n in state.observed_nodes}
-        wanted = next(n for n in nodes.values() if (
-            n.code == "denominator += expf(x);" if case_id == "h001"
-            else n.code.startswith("const float scale =")
-        ))
+        wanted = next(
+            n
+            for n in nodes.values()
+            if (
+                n.code == "denominator += expf(x);"
+                if case_id == "h001"
+                else n.code.startswith("const float scale =")
+            )
+        )
         wrong = nodes["n07" if case_id == "h001" else "n08"]
         assert wrong.id != wanted.id and wrong.code != wanted.code
         replacement = (
-            "denominator += expf(x - maximum);" if case_id == "h001"
+            "denominator += expf(x - maximum);"
+            if case_id == "h001"
             else "const float scale = rsqrtf(sum_sq / static_cast<float>(valid) + 1.0e-5f);"
         )
         before = (host.workspace.root / path).read_bytes()
         diff = host.workspace.integrity()["diff_sha256"]
         wrong_edit = RepoReplaceSyntax(
-            path=path, expected_source_sha256=state.source_sha256,
-            edits=[RepoSyntaxEdit(
-                node_id=wrong.id, expected_old_code=wanted.code, replacement_code=replacement,
-            )],
+            path=path,
+            expected_source_sha256=state.source_sha256,
+            edits=[
+                RepoSyntaxEdit(
+                    node_id=wrong.id,
+                    expected_old_code=wanted.code,
+                    replacement_code=replacement,
+                )
+            ],
         )
         rejected = host.invoke(wrong_edit)
         assert rejected.status == "REJECTED"
@@ -2166,27 +2190,36 @@ def test_double_binding_rejects_wrong_target_before_any_source_write(
         assert host.snapshot(GOAL, [], 10).candidate_recovery.remaining_compiles == 6
         assert not host.snapshot(GOAL, [], 10).candidate_recovery.revert_available
         from gpu_agent.harness.repo_audit import read_repository_tool_events
+
         events = read_repository_tool_events(
             host.store, host.run_id, expected_count=host.tool_calls, require_observation=True
         )
         detail = events[-1]["rejection_detail"]
         assert detail == {
-            "node_id": wrong.id, "source_sha256": state.source_sha256,
-            "actual_code": wrong.code, "expected_old_code": wanted.code,
+            "node_id": wrong.id,
+            "source_sha256": state.source_sha256,
+            "actual_code": wrong.code,
+            "expected_old_code": wanted.code,
             "no_source_written": True,
             "correction": "Use the exact current observed node code and its matching ID. "
-                          "No part of this batch was applied.",
+            "No part of this batch was applied.",
         }
         missing_old_code = RepoReplaceSyntax(
-            path=path, expected_source_sha256=state.source_sha256,
+            path=path,
+            expected_source_sha256=state.source_sha256,
             edits=[RepoSyntaxEdit(node_id=wanted.id, replacement_code=replacement)],
         )
         assert "CUDA_AST_TARGET_BINDING_MISMATCH" in host.invoke(missing_old_code).content
         correct = RepoReplaceSyntax(
-            path=path, expected_source_sha256=state.source_sha256,
-            edits=[RepoSyntaxEdit(
-                node_id=wanted.id, expected_old_code=wanted.code, replacement_code=replacement,
-            )],
+            path=path,
+            expected_source_sha256=state.source_sha256,
+            edits=[
+                RepoSyntaxEdit(
+                    node_id=wanted.id,
+                    expected_old_code=wanted.code,
+                    replacement_code=replacement,
+                )
+            ],
         )
         assert host.invoke(correct).status == "OK"
         assert host.syntax_state is None
@@ -2198,22 +2231,35 @@ def test_double_binding_rejects_wrong_target_before_any_source_write(
 def test_double_binding_atomic_batch_no_partial_write(tmp_path: Path) -> None:
     repo, sha = _registered_repository(tmp_path)
     with RepositoryWorkspaceTools(
-        origin=repo, output=tmp_path / "bound-batch", sha=sha,
-        public_case_id="h001", syntax_mode=True, ast_target_binding=True,
+        origin=repo,
+        output=tmp_path / "bound-batch",
+        sha=sha,
+        public_case_id="h001",
+        syntax_mode=True,
+        ast_target_binding=True,
     ) as host:
-        assert host.invoke(RepoInspectSyntax(path=KERNEL, symbol="softmax32", limit=20)).status == "OK"
+        assert (
+            host.invoke(RepoInspectSyntax(path=KERNEL, symbol="softmax32", limit=20)).status == "OK"
+        )
         state = host.syntax_state
         assert state is not None
         nodes = {n.code: n for n in state.observed_nodes}
         numerator = nodes["out[i] = expf(own) / denominator;"]
         denominator = nodes["denominator += expf(x);"]
         bad = RepoReplaceSyntax(
-            path=KERNEL, expected_source_sha256=state.source_sha256,
+            path=KERNEL,
+            expected_source_sha256=state.source_sha256,
             edits=[
-                RepoSyntaxEdit(node_id=denominator.id, expected_old_code=denominator.code,
-                               replacement_code="denominator += expf(x - maximum);"),
-                RepoSyntaxEdit(node_id=numerator.id, expected_old_code=denominator.code,
-                               replacement_code="out[i] = expf(own - maximum) / denominator;"),
+                RepoSyntaxEdit(
+                    node_id=denominator.id,
+                    expected_old_code=denominator.code,
+                    replacement_code="denominator += expf(x - maximum);",
+                ),
+                RepoSyntaxEdit(
+                    node_id=numerator.id,
+                    expected_old_code=denominator.code,
+                    replacement_code="out[i] = expf(own - maximum) / denominator;",
+                ),
             ],
         )
         assert "CUDA_AST_TARGET_BINDING_MISMATCH" in host.invoke(bad).content
@@ -2222,12 +2268,14 @@ def test_double_binding_atomic_batch_no_partial_write(tmp_path: Path) -> None:
 
 
 def test_state_scoped_probe_sizes_and_rejection_memory_resume(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from pydantic import ValidationError
+
     from gpu_agent.harness.models import RepoProbePublic
     from gpu_agent.harness.recovery import read_repository_checkpoint
     from gpu_agent.harness.tool_schema import repository_decision_schema
-    from pydantic import ValidationError
 
     repo, sha = _registered_repository(tmp_path)
     fake = FakeBoundedPublicProbe()
@@ -2237,6 +2285,7 @@ def test_state_scoped_probe_sizes_and_rejection_memory_resume(
     class Fixture:
         def __init__(self):
             self.snapshots = []
+
         def choose_harness_v1(self, snapshot):
             self.snapshots.append(snapshot)
             state = snapshot.syntax_state
@@ -2247,62 +2296,88 @@ def test_state_scoped_probe_sizes_and_rejection_memory_resume(
                 assert 129 not in snapshot.public_probe_remaining_sizes
                 action = RepoInspectSyntax(path=KERNEL, offset=state.next_offset if state else 0)
             else:
-                node = next(n for n in state.observed_nodes if n.code=="denominator += expf(x);")
+                node = next(n for n in state.observed_nodes if n.code == "denominator += expf(x);")
                 if snapshot.rejected_action_state:
                     assert snapshot.rejected_action_state[0].code == "CUDA_SYNTAX_NOOP"
                     assert node.id in snapshot.rejected_action_state[0].node_ids
                     action = RepoReplaceSyntax(
-                        path=KERNEL, expected_source_sha256=state.source_sha256,
-                        edits=[RepoSyntaxEdit(node_id=node.id, expected_old_code=node.code,
-                                             replacement_code="denominator += expf(x - maximum);")],
+                        path=KERNEL,
+                        expected_source_sha256=state.source_sha256,
+                        edits=[
+                            RepoSyntaxEdit(
+                                node_id=node.id,
+                                expected_old_code=node.code,
+                                replacement_code="denominator += expf(x - maximum);",
+                            )
+                        ],
                     )
                 else:
                     action = RepoReplaceSyntax(
-                        path=KERNEL, expected_source_sha256=state.source_sha256,
-                        edits=[RepoSyntaxEdit(node_id=node.id, expected_old_code=node.code,
-                                             replacement_code=node.code)],
+                        path=KERNEL,
+                        expected_source_sha256=state.source_sha256,
+                        edits=[
+                            RepoSyntaxEdit(
+                                node_id=node.id,
+                                expected_old_code=node.code,
+                                replacement_code=node.code,
+                            )
+                        ],
                     )
             return HarnessDecision(action=action, reason="Test persisted scoped action state")
 
     fixture = Fixture()
-    opts = dict(repository=repo, output=output, base_sha=sha, goal=GOAL,
-                public_case_id="h001", syntax_mode=True, ast_target_binding=True,
-                state_scoped_actions=True, max_steps=12, max_model_calls=14,
-                model_factory=lambda _:fixture)
-    paused=run_repository_coding_session(**opts, pause_after_turns=1)
-    assert paused.status=="PAUSED_RESUMABLE"
-    checkpoint=read_repository_checkpoint(output/"session-checkpoint.json")
+    opts = dict(
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal=GOAL,
+        public_case_id="h001",
+        syntax_mode=True,
+        ast_target_binding=True,
+        state_scoped_actions=True,
+        max_steps=12,
+        max_model_calls=14,
+        model_factory=lambda _: fixture,
+    )
+    paused = run_repository_coding_session(**opts, pause_after_turns=1)
+    assert paused.status == "PAUSED_RESUMABLE"
+    checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
     assert checkpoint.state_scoped_actions
-    assert len(fake.calls)==1
-    original=(output/"session-checkpoint.json").read_bytes()
-    tampered=json.loads(original)
-    tampered["public_probe_signatures"]=["f"*64]
-    (output/"session-checkpoint.json").write_text(json.dumps(tampered))
-    with pytest.raises(ValueError,match="scoped probe signatures"):
-        run_repository_coding_session(**opts,resume=True,pause_after_turns=2)
-    (output/"session-checkpoint.json").write_bytes(original)
+    assert len(fake.calls) == 1
+    original = (output / "session-checkpoint.json").read_bytes()
+    tampered = json.loads(original)
+    tampered["public_probe_signatures"] = ["f" * 64]
+    (output / "session-checkpoint.json").write_text(json.dumps(tampered))
+    with pytest.raises(ValueError, match="scoped probe signatures"):
+        run_repository_coding_session(**opts, resume=True, pause_after_turns=2)
+    (output / "session-checkpoint.json").write_bytes(original)
     # Three inspect pages of h001 may be required; pause after each until the
     # first rejected edit, then verify resume sees it despite history compaction.
-    for turn in range(2,9):
-        paused=run_repository_coding_session(**opts,resume=True,pause_after_turns=turn)
-        checkpoint=read_repository_checkpoint(output/"session-checkpoint.json")
+    for turn in range(2, 9):
+        paused = run_repository_coding_session(**opts, resume=True, pause_after_turns=turn)
+        checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
         if checkpoint.rejected_syntax_edits:
             break
     assert checkpoint.rejected_syntax_edits
-    snapshot=fixture.snapshots[-1]
-    grammar=repository_decision_schema(
-        snapshot.allowed_tools, registered_kernel_path=KERNEL,
-        public_probe_phase=snapshot.public_probe_phase, syntax_state=snapshot.syntax_state,
-        bind_syntax_cursor=True, ast_target_binding=True,
+    snapshot = fixture.snapshots[-1]
+    grammar = repository_decision_schema(
+        snapshot.allowed_tools,
+        registered_kernel_path=KERNEL,
+        public_probe_phase=snapshot.public_probe_phase,
+        syntax_state=snapshot.syntax_state,
+        bind_syntax_cursor=True,
+        ast_target_binding=True,
         public_probe_remaining_sizes=snapshot.public_probe_remaining_sizes,
     )
     with pytest.raises(ValidationError):
-        grammar.model_validate({
-            "action":{"tool":"repo_probe_public","phase":"before","input_size":129},
-            "reason":"Duplicate probe is no longer expressible",
-        })
-    resumed=run_repository_coding_session(**opts,resume=True,pause_after_turns=turn+1)
-    assert resumed.status=="PAUSED_RESUMABLE"
+        grammar.model_validate(
+            {
+                "action": {"tool": "repo_probe_public", "phase": "before", "input_size": 129},
+                "reason": "Duplicate probe is no longer expressible",
+            }
+        )
+    resumed = run_repository_coding_session(**opts, resume=True, pause_after_turns=turn + 1)
+    assert resumed.status == "PAUSED_RESUMABLE"
     assert fixture.snapshots[-1].rejected_action_state
-    assert read_repository_checkpoint(output/"session-checkpoint.json").syntax_state is None
-    assert len(fake.calls)==1
+    assert read_repository_checkpoint(output / "session-checkpoint.json").syntax_state is None
+    assert len(fake.calls) == 1
