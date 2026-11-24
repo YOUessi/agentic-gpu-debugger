@@ -2114,3 +2114,108 @@ def test_compile_gate_is_independent_and_counts_unique_buildable_candidate(
     assert metrics.build_passed_candidate_count == 1
     assert metrics.numeric_dispatched_candidate_count == 1
     assert metrics.public_check_passed_candidate_count == 1
+
+
+@pytest.mark.parametrize("case_id", ["h001", "h002"])
+def test_double_binding_rejects_wrong_target_before_any_source_write(
+    tmp_path: Path, case_id: str,
+) -> None:
+    repo, sha = _registered_repository(tmp_path)
+    path = f"benchmarks/hardset_v2/{case_id}/mutant/kernel.cu"
+    with RepositoryWorkspaceTools(
+        origin=repo, output=tmp_path / "bound", sha=sha,
+        public_case_id=case_id, syntax_mode=True, ast_target_binding=True,
+        compile_gate=True, allow_revert=True,
+    ) as host:
+        while True:
+            state = host.syntax_state
+            if state is not None and state.next_offset is None:
+                break
+            assert host.invoke(RepoInspectSyntax(
+                path=path, offset=state.next_offset if state else 0, limit=8,
+            )).status == "OK"
+        assert state is not None
+        nodes = {n.id: n for n in state.observed_nodes}
+        wanted = next(n for n in nodes.values() if (
+            n.code == "denominator += expf(x);" if case_id == "h001"
+            else n.code.startswith("const float scale =")
+        ))
+        wrong = nodes["n07" if case_id == "h001" else "n08"]
+        assert wrong.id != wanted.id and wrong.code != wanted.code
+        replacement = (
+            "denominator += expf(x - maximum);" if case_id == "h001"
+            else "const float scale = rsqrtf(sum_sq / static_cast<float>(valid) + 1.0e-5f);"
+        )
+        before = (host.workspace.root / path).read_bytes()
+        diff = host.workspace.integrity()["diff_sha256"]
+        wrong_edit = RepoReplaceSyntax(
+            path=path, expected_source_sha256=state.source_sha256,
+            edits=[RepoSyntaxEdit(
+                node_id=wrong.id, expected_old_code=wanted.code, replacement_code=replacement,
+            )],
+        )
+        rejected = host.invoke(wrong_edit)
+        assert rejected.status == "REJECTED"
+        assert "CUDA_AST_TARGET_BINDING_MISMATCH" in rejected.content
+        assert "No part of this batch was applied." in rejected.content
+        assert (host.workspace.root / path).read_bytes() == before
+        assert host.workspace.integrity()["diff_sha256"] == diff
+        assert host.syntax_state == state
+        assert not host.store.children(host.run_id)
+        assert host.public_checks_attempted == 0
+        assert host.snapshot(GOAL, [], 10).candidate_recovery.remaining_compiles == 6
+        assert not host.snapshot(GOAL, [], 10).candidate_recovery.revert_available
+        from gpu_agent.harness.repo_audit import read_repository_tool_events
+        events = read_repository_tool_events(
+            host.store, host.run_id, expected_count=host.tool_calls, require_observation=True
+        )
+        detail = events[-1]["rejection_detail"]
+        assert detail == {
+            "node_id": wrong.id, "source_sha256": state.source_sha256,
+            "actual_code": wrong.code, "expected_old_code": wanted.code,
+            "no_source_written": True,
+            "correction": "Use the exact current observed node code and its matching ID. "
+                          "No part of this batch was applied.",
+        }
+        missing_old_code = RepoReplaceSyntax(
+            path=path, expected_source_sha256=state.source_sha256,
+            edits=[RepoSyntaxEdit(node_id=wanted.id, replacement_code=replacement)],
+        )
+        assert "CUDA_AST_TARGET_BINDING_MISMATCH" in host.invoke(missing_old_code).content
+        correct = RepoReplaceSyntax(
+            path=path, expected_source_sha256=state.source_sha256,
+            edits=[RepoSyntaxEdit(
+                node_id=wanted.id, expected_old_code=wanted.code, replacement_code=replacement,
+            )],
+        )
+        assert host.invoke(correct).status == "OK"
+        assert host.syntax_state is None
+        assert (host.workspace.root / path).read_bytes() == before.replace(
+            wanted.code.encode(), replacement.encode(), 1
+        )
+
+
+def test_double_binding_atomic_batch_no_partial_write(tmp_path: Path) -> None:
+    repo, sha = _registered_repository(tmp_path)
+    with RepositoryWorkspaceTools(
+        origin=repo, output=tmp_path / "bound-batch", sha=sha,
+        public_case_id="h001", syntax_mode=True, ast_target_binding=True,
+    ) as host:
+        assert host.invoke(RepoInspectSyntax(path=KERNEL, symbol="softmax32", limit=20)).status == "OK"
+        state = host.syntax_state
+        assert state is not None
+        nodes = {n.code: n for n in state.observed_nodes}
+        numerator = nodes["out[i] = expf(own) / denominator;"]
+        denominator = nodes["denominator += expf(x);"]
+        bad = RepoReplaceSyntax(
+            path=KERNEL, expected_source_sha256=state.source_sha256,
+            edits=[
+                RepoSyntaxEdit(node_id=denominator.id, expected_old_code=denominator.code,
+                               replacement_code="denominator += expf(x - maximum);"),
+                RepoSyntaxEdit(node_id=numerator.id, expected_old_code=denominator.code,
+                               replacement_code="out[i] = expf(own - maximum) / denominator;"),
+            ],
+        )
+        assert "CUDA_AST_TARGET_BINDING_MISMATCH" in host.invoke(bad).content
+        assert host.workspace.diff() == ""
+        assert host.syntax_state == state

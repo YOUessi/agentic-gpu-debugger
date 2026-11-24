@@ -170,3 +170,39 @@ def test_ast_executor_prompt_has_independent_version_and_preserves_other_modes()
         GPU_REPOSITORY_HARNESS_PROMPT,
     )
     assert select_prompt("plan", {"gpu_repo_task_plan": "v1"})[0] == GPU_REPO_TASK_PLANNER_VERSION
+
+
+def test_ast_binding_requires_old_code_but_does_not_hide_mismatch_from_host() -> None:
+    from gpu_agent.harness.models import SyntaxEvidenceNode, SyntaxState
+
+    path = "benchmarks/hardset_v2/h001/mutant/kernel.cu"
+    state = SyntaxState(
+        path=path, source_sha256="a" * 64, symbol="", next_offset=None,
+        visited_pages=(),
+        observed_nodes=(
+            SyntaxEvidenceNode(id="n01", function="f", kind="declaration",
+                               start_line=1, end_line=1, code="int x = 0;"),
+            SyntaxEvidenceNode(id="n02", function="f", kind="declaration",
+                               start_line=2, end_line=2, code="int y = 0;"),
+        ),
+    )
+    kwargs = dict(
+        registered_kernel_path=path, syntax_state=state, bind_syntax_cursor=True,
+    )
+    legacy = repository_decision_schema(("repo_replace_syntax",), **kwargs)
+    bound = repository_decision_schema(
+        ("repo_replace_syntax",), **kwargs, ast_target_binding=True
+    )
+    action = {
+        "tool": "repo_replace_syntax", "path": path, "expected_source_sha256": "a" * 64,
+        "edits": [{"node_id": "n01", "replacement_code": "int y = 1;"}],
+    }
+    payload = {"action": action, "reason": "Edit a pinned declaration"}
+    legacy.model_validate(payload)
+    assert "expected_old_code" not in str(legacy.model_json_schema())
+    with pytest.raises(ValidationError):
+        bound.model_validate(payload)
+    action["edits"][0]["expected_old_code"] = "int y = 0;"
+    # Host, not a giant per-node grammar, reports the actual binding mismatch.
+    parsed = bound.model_validate(payload)
+    assert parsed.action.edits[0].expected_old_code == "int y = 0;"
