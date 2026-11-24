@@ -1950,3 +1950,85 @@ def test_failed_ast_session_recovers_completed_check_and_edit(
     assert recovered["first_public_check_pass_turn"] is None
     assert recovered["public_checks_attempted"] == 1
     assert recovered["public_check_dispatches"] == 1
+
+
+def test_extended_toolhost_full_node_upgrade_resume_and_edit(tmp_path: Path) -> None:
+    from gpu_agent.harness.models import RepoInspectSyntaxNode
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+    from gpu_agent.harness.tool_schema import repository_decision_schema
+
+    repo, sha = _registered_repository(tmp_path)
+    kernel = "benchmarks/hardset_v2/h002/mutant/kernel.cu"
+    original = _CASE_REPAIRS["h002"][0][0]
+    long_code = original[:-1] + " /*" + "x" * 420 + "*/;"
+    output = tmp_path / "extended-full-node"
+
+    class ModelWithNode:
+        def choose_harness_v1(self, snapshot):
+            state = snapshot.syntax_state
+            assert snapshot.extended_syntax
+            source = snapshot.workspace_source
+            if state is None or state.next_offset is not None:
+                action = RepoInspectSyntax(
+                    path=kernel, offset=state.next_offset if state else 0, limit=8
+                )
+            elif long_code not in source:
+                node = next(n for n in state.observed_nodes if n.code == original)
+                action = RepoReplaceSyntax(
+                    path=kernel, expected_source_sha256=state.source_sha256,
+                    edits=[RepoSyntaxEdit(node_id=node.id, replacement_code=long_code)],
+                )
+            else:
+                node = next(n for n in state.observed_nodes if n.kind == "declaration"
+                            and n.code.startswith(original[:-1]))
+                if node.code_truncated:
+                    action = RepoInspectSyntaxNode(
+                        path=kernel, expected_source_sha256=state.source_sha256, node_id=node.id
+                    )
+                    grammar = repository_decision_schema(
+                        snapshot.allowed_tools, registered_kernel_path=kernel,
+                        syntax_state=state, bind_syntax_cursor=True,
+                    )
+                    grammar.model_validate({
+                        "action": action.model_dump(mode="json"), "reason": "Read full node",
+                    })
+                else:
+                    action = RepoReplaceSyntax(
+                        path=kernel, expected_source_sha256=state.source_sha256,
+                        edits=[RepoSyntaxEdit(
+                            node_id=node.id, replacement_code=_CASE_REPAIRS["h002"][0][1]
+                        )],
+                    )
+            return HarnessDecision(action=action, reason="Exercise extended public AST tool")
+
+    model = ModelWithNode()
+    opts = dict(
+        repository=repo, output=output, base_sha=sha,
+        goal="Exercise long-node editing with the public RMS kernel.",
+        public_case_id="h002", syntax_mode=True, extended_syntax=True,
+        max_steps=24, max_model_calls=26, model_factory=lambda _: model,
+    )
+    # Pause after each completed action until the full-node tool succeeds.
+    paused = run_repository_coding_session(**opts, pause_after_turns=1)
+    for turn in range(2, 22):
+        checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
+        if checkpoint.syntax_state and checkpoint.syntax_state.full_node_reads:
+            break
+        paused = run_repository_coding_session(**opts, resume=True, pause_after_turns=turn)
+        assert paused.status == "PAUSED_RESUMABLE"
+    checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
+    pinned = checkpoint.syntax_state
+    assert pinned is not None and pinned.full_node_reads
+    alias = pinned.full_node_reads[0]
+    upgraded = next(n for n in pinned.observed_nodes if n.id == alias)
+    assert upgraded.code == long_code and not upgraded.code_truncated
+    assert alias not in pinned.readable_truncated_aliases
+    with pytest.raises(ValueError, match="budgets differ"):
+        run_repository_coding_session(
+            **{**opts, "extended_syntax": False}, resume=True, pause_after_turns=turn + 1,
+        )
+    next_turn = checkpoint.state["turns"] + 1
+    edited = run_repository_coding_session(**opts, resume=True, pause_after_turns=next_turn)
+    assert edited.status == "PAUSED_RESUMABLE"
+    assert read_repository_checkpoint(output / "session-checkpoint.json").syntax_state is None
+    assert _CASE_REPAIRS["h002"][0][1] in (output / "worktree" / kernel).read_text()
