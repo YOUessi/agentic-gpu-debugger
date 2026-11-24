@@ -8,7 +8,6 @@ can access reference source, host expected output, evaluator files or shell.
 from __future__ import annotations
 
 import hashlib
-import json
 import tempfile
 from pathlib import Path
 from typing import Literal
@@ -138,7 +137,10 @@ def probe_candidate_publicly(
                     except ValueError:
                         outcome: ProbeOutcome = "OUTPUT_INVALID"
                     else:
-                        outcome = "PASS" if verify_numeric(case_id, payload, observed) else "NUMERIC_MISMATCH"
+                        outcome = (
+                            "PASS" if verify_numeric(case_id, payload, observed)
+                            else "NUMERIC_MISMATCH"
+                        )
                     result = result.model_copy(update={"outcome": outcome})
     except (OSError, ValueError):
         result = result.model_copy(update={"outcome": "PROBE_INCONCLUSIVE"})

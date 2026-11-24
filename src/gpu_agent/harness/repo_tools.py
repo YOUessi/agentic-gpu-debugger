@@ -19,8 +19,8 @@ from gpu_agent.benchmark.hardset_v2 import (
     manifest_for,
 )
 from gpu_agent.benchmark.hardset_v2_agent_models import HardsetPublicCheck
-from gpu_agent.benchmark.hardset_v2_selfcheck import check_candidate_publicly
 from gpu_agent.benchmark.hardset_v2_public_probe import probe_candidate_publicly
+from gpu_agent.benchmark.hardset_v2_selfcheck import check_candidate_publicly
 from gpu_agent.harness.context import compact_public_context
 from gpu_agent.harness.models import (
     FinishTask,
@@ -28,8 +28,8 @@ from gpu_agent.harness.models import (
     RepoGitDiff,
     RepoInspectSyntax,
     RepoListFiles,
-    RepoReadFile,
     RepoProbePublic,
+    RepoReadFile,
     RepoReplaceMany,
     RepoReplaceSnippet,
     RepoReplaceSyntax,
