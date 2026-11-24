@@ -42,6 +42,7 @@ class RepositoryTrajectoryMetrics(BaseModel):
     allow_batch_edits: bool = True
     hierarchical_mode: bool = False
     syntax_mode: bool = False
+    extended_syntax: bool = False
     public_run_id: str = Field(pattern=r"^[a-f0-9]{32}$")
     status: Literal["DIFF_STAGED_UNVERIFIED", "INCONCLUSIVE"]
     turns: int = Field(ge=1, le=40)
@@ -74,7 +75,10 @@ _REDUNDANT = {
     "REDUNDANT_DIFF",
     "REDUNDANT_SYNTAX_INSPECTION",
 }
-_READ_TOOLS = {"repo_list_files", "repo_read_file", "repo_git_diff", "repo_inspect_syntax"}
+_READ_TOOLS = {
+    "repo_list_files", "repo_read_file", "repo_git_diff", "repo_inspect_syntax",
+    "repo_inspect_syntax_node",
+}
 
 
 def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics:
@@ -105,11 +109,13 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         raise ValueError("session batch-edit policy changed between start and finish")
     hierarchical = payload.get("hierarchical_mode", False)
     syntax = payload.get("syntax_mode", False)
+    extended = payload.get("extended_syntax", False)
     if (
         type(hierarchical) is not bool
         or type(syntax) is not bool
         or result.hierarchical_mode != hierarchical
         or result.syntax_mode != syntax
+        or type(extended) is not bool or result.extended_syntax != extended
     ):
         raise ValueError("hierarchical or syntax experiment identity changed")
     if public_case is not None and public_case not in {"h001", "h002", "h003"}:
@@ -178,6 +184,7 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         allow_batch_edits=allow_batch,
         hierarchical_mode=hierarchical,
         syntax_mode=syntax,
+        extended_syntax=extended,
         public_run_id=result.public_run_id,
         status=result.status,
         turns=result.turns,

@@ -27,6 +27,7 @@ from gpu_agent.harness.models import (
     HarnessAction,
     RepoGitDiff,
     RepoInspectSyntax,
+    RepoInspectSyntaxNode,
     RepoListFiles,
     RepoProbePublic,
     RepoReadFile,
@@ -57,6 +58,7 @@ class RepositoryWorkspaceTools:
         "repo_replace_many",
         "repo_git_diff",
         "repo_inspect_syntax",
+        "repo_inspect_syntax_node",
         "repo_replace_syntax",
         "repo_probe_public",
         "repo_run_public_checks",
@@ -77,6 +79,7 @@ class RepositoryWorkspaceTools:
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
         allow_batch_edits: bool = True,
         syntax_mode: bool = False,
+        extended_syntax: bool = False,
     ) -> None:
         if output.exists() or output.is_symlink():
             raise ValueError("repository agent output already exists")
@@ -98,6 +101,9 @@ class RepositoryWorkspaceTools:
         if type(syntax_mode) is not bool:
             raise ValueError("invalid syntax editing policy")
         self._syntax_mode = syntax_mode
+        if extended_syntax and (not syntax_mode or public_case_id is None):
+            raise ValueError("extended AST requires a registered syntax session")
+        self._extended_syntax = extended_syntax
         self._configure_public_case(public_case_id, max_public_checks)
         self._store = RunStore(output / "public")
         self._run = self._store.create_run("gpu_repository_agent")
@@ -189,6 +195,8 @@ class RepositoryWorkspaceTools:
             next_offset=mapping["next_offset"],
             visited_pages=(*old_pages, SyntaxPageVisit(offset=action.offset, limit=action.limit)),
             observed_nodes=(*old_nodes, *nodes),
+            extended_syntax=self._extended_syntax,
+            full_node_reads=state.full_node_reads if state else (),
         )
 
     def _restore_syntax_state(
@@ -212,7 +220,7 @@ class RepositoryWorkspaceTools:
                         active.clear()
                         recorded_rejections.clear()
                         complete_rejection_ledger = True
-                    elif record["tool"] == "repo_inspect_syntax":
+                    elif record["tool"] in {"repo_inspect_syntax", "repo_inspect_syntax_node"}:
                         active.append(record)
                 if "rejected_edit_fingerprint" not in record:
                     # Old audit records did not persist this optional field.
@@ -225,7 +233,11 @@ class RepositoryWorkspaceTools:
             if active:
                 raise ValueError("recovered AST state omitted completed inspection evidence")
             return
-        if self._public_case_id is not None and len(active) != len(state.visited_pages):
+        if state.extended_syntax != self._extended_syntax:
+            raise ValueError("recovered AST profile differs")
+        if self._public_case_id is not None and len(active) != (
+            len(state.visited_pages) + len(state.full_node_reads)
+        ):
             raise ValueError("recovered AST page count differs from completed inspections")
         if not self._syntax_mode or (
             self._public_kernel_path is not None and state.path != self._public_kernel_path
@@ -233,7 +245,18 @@ class RepositoryWorkspaceTools:
             raise ValueError("recovered AST state is outside the authorized source")
         if self._syntax_digest(state.path) != state.source_sha256:
             raise ValueError("recovered AST state has stale source SHA")
-        for index, page in enumerate(state.visited_pages):
+        pages = iter(state.visited_pages)
+        records_to_replay = active if self._public_case_id is not None else [
+            {"tool": "repo_inspect_syntax"} for _ in state.visited_pages
+        ]
+        for record in records_to_replay:
+            if record["tool"] == "repo_inspect_syntax_node":
+                full = RepoInspectSyntaxNode.model_validate(record["action"])
+                mapping = self._read_full_syntax_node(full)
+                if record["observation_sha256"] != hashlib.sha256(mapping.encode()).hexdigest():
+                    raise ValueError("recovered full AST node differs from audited observation")
+                continue
+            page = next(pages)
             previous = self._syntax_state
             if page.offset != (previous.next_offset if previous else 0):
                 raise ValueError("recovered AST cursor is not contiguous")
@@ -246,10 +269,10 @@ class RepositoryWorkspaceTools:
                 path=state.path, symbol=state.symbol, offset=page.offset, limit=page.limit
             )
             mapping = self.workspace.inspect_syntax(
-                state.path, symbol=state.symbol, offset=page.offset, limit=page.limit
+                state.path, symbol=state.symbol, offset=page.offset, limit=page.limit,
+                extended=self._extended_syntax,
             )
             if self._public_case_id is not None:
-                record = active[index]
                 observation = json.dumps(mapping, ensure_ascii=False)
                 if (
                     record["action"] != action.model_dump(mode="json")
@@ -366,6 +389,7 @@ class RepositoryWorkspaceTools:
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
         allow_batch_edits: bool = True,
         syntax_mode: bool = False,
+        extended_syntax: bool = False,
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -394,6 +418,9 @@ class RepositoryWorkspaceTools:
         if type(syntax_mode) is not bool:
             raise ValueError("invalid resumed syntax editing policy")
         host._syntax_mode = syntax_mode
+        if extended_syntax and (not syntax_mode or public_case_id is None):
+            raise ValueError("extended AST requires a registered syntax session")
+        host._extended_syntax = extended_syntax
         host._policy = permissions or ToolPermissionPolicy()
         host._configure_public_case(public_case_id, max_public_checks, resuming=True)
         if (
@@ -541,7 +568,7 @@ class RepositoryWorkspaceTools:
                 for name in self.ALLOWED_TOOLS
                 if self._policy.check(name) == "ALLOW"
                 and (name != "repo_replace_many" or self._batch_enabled)
-                and name != "repo_run_public_checks"
+                and name not in {"repo_run_public_checks", "repo_inspect_syntax_node"}
                 and (
                     name not in {"repo_inspect_syntax", "repo_replace_syntax"} or self._syntax_mode
                 )
@@ -601,6 +628,11 @@ class RepositoryWorkspaceTools:
                     )
                     if syntax_key in self._observed_query_fingerprints:
                         continue
+            if name == "repo_inspect_syntax_node" and (
+                not self._extended_syntax or self.syntax_state is None
+                or not self.syntax_state.readable_truncated_aliases
+            ):
+                continue
             if name == "repo_replace_syntax" and (
                 self.syntax_state is None
                 or not any(not node.code_truncated for node in self.syntax_state.observed_nodes)
@@ -698,6 +730,7 @@ class RepositoryWorkspaceTools:
             ),
             history=context.recent,
             syntax_mode=self._syntax_mode,
+            extended_syntax=self._extended_syntax,
             syntax_state=self.syntax_state,
             context_summary=summary,
             workspace_source=context.source,
@@ -850,7 +883,47 @@ class RepositoryWorkspaceTools:
         )
         return result
 
+    def _read_full_syntax_node(self, action: RepoInspectSyntaxNode) -> str:
+        if not self._extended_syntax or action.path != self._public_kernel_path:
+            raise ValueError("CUDA_SYNTAX_NOT_REGISTERED_KERNEL")
+        state = self.syntax_state
+        actual = self._syntax_digest(action.path)
+        if actual != action.expected_source_sha256:
+            raise SyntaxRejection(
+                "CUDA_SOURCE_SHA_STALE", expected_source_sha256=action.expected_source_sha256,
+                actual_source_sha256=actual, correction="Inspect the current revision.",
+            )
+        if state is None or action.node_id not in state.readable_truncated_aliases:
+            raise SyntaxRejection(
+                "CUDA_SYNTAX_FULL_NODE_UNAVAILABLE", node_id=action.node_id,
+                correction="Read only a bounded, observed and still truncated node.",
+            )
+        mapping = self.workspace.inspect_syntax_node(
+            action.path, expected_source_sha256=actual, node_id=action.node_id,
+            extended=True,
+        )
+        node = SyntaxEvidenceNode.model_validate(mapping["node"])
+        previous = next(n for n in state.observed_nodes if n.id == action.node_id)
+        if (
+            mapping["source_sha256"] != actual or node.code_truncated
+            or not node.code.startswith(previous.code)
+            or node.kind != previous.kind or node.function != previous.function
+        ):
+            raise ValueError("CUDA_SYNTAX_FULL_NODE_PROVENANCE_MISMATCH")
+        content = json.dumps(mapping, ensure_ascii=False)
+        if len(content) > 3900:
+            raise ValueError("CUDA_SYNTAX_PAGE_INVALID_OR_OVER_BUDGET")
+        self._syntax_state = state.model_copy(update={
+            "observed_nodes": tuple(node if n.id == node.id else n for n in state.observed_nodes),
+            "full_node_reads": (*state.full_node_reads, node.id),
+        })
+        return content
+
     def _dispatch(self, action: HarnessAction) -> ToolObservation:
+        if isinstance(action, RepoInspectSyntaxNode):
+            return ToolObservation(
+                tool=action.tool, status="OK", content=self._read_full_syntax_node(action)
+            )
         if isinstance(action, RepoListFiles):
             key = self._query_fingerprint({"tool": action.tool, "suffix": action.suffix})
             self._require_new_observation(key, "REDUNDANT_LIST")
@@ -920,7 +993,8 @@ class RepositoryWorkspaceTools:
             )
             self._require_new_observation(key, "REDUNDANT_SYNTAX_INSPECTION")
             mapping = self.workspace.inspect_syntax(
-                action.path, symbol=action.symbol, offset=action.offset, limit=action.limit
+                action.path, symbol=action.symbol, offset=action.offset, limit=action.limit,
+                extended=self._extended_syntax,
             )
             # Parsing and cursor pagination are controller owned. Never trim
             # the serialized JSON: callers can use next_offset for more nodes.
@@ -989,6 +1063,7 @@ class RepositoryWorkspaceTools:
                     action.path,
                     expected_source_sha256=action.expected_source_sha256,
                     edits=[(e.node_id, e.replacement_code) for e in action.edits],
+                    extended=self._extended_syntax,
                 )
             except ValueError as exc:
                 self._rejected_syntax_edits.add(fingerprint)
@@ -997,6 +1072,7 @@ class RepositoryWorkspaceTools:
                     "CUDA_SYNTAX_OVERLAPPING_NODES": "Submit disjoint observed AST nodes.",
                     "CUDA_SYNTAX_REPLACEMENT_INVALID": "Use bounded valid UTF-8 CUDA code.",
                     "CUDA_SYNTAX_REPLACEMENT_PARSE_ERROR": "Fix the replacement CUDA syntax.",
+                    "CUDA_SYNTAX_EXPRESSION_SLOT_INVALID": "Replace only one expression.",
                     "CUDA_SYNTAX_RESULT_TOO_LARGE": "Keep the source within the size limit.",
                 }
                 if not isinstance(exc, SyntaxRejection) and str(exc) in corrections:

@@ -53,6 +53,7 @@ def run_repository_coding_session(
     allow_batch_edits: bool = True,
     hierarchical_mode: bool = False,
     syntax_mode: bool = False,
+    extended_syntax: bool = False,
     allow_paid_calls: bool = False,
     resume: bool = False,
     pause_after_turns: int | None = None,
@@ -76,6 +77,8 @@ def run_repository_coding_session(
         if model_factory is None
         else None
     )
+    if extended_syntax and not syntax_mode:
+        raise ValueError("extended AST requires syntax_mode")
     if (hierarchical_mode or syntax_mode) and public_case_id is None:
         raise ValueError("hierarchical and AST modes require registered public CUDA case")
     if not goal.strip() or len(goal) > 1500:
@@ -97,6 +100,7 @@ def run_repository_coding_session(
             allow_batch_edits=allow_batch_edits,
             hierarchical_mode=hierarchical_mode,
             syntax_mode=syntax_mode,
+            extended_syntax=extended_syntax,
         )
         if syntax_mode and "syntax_state" not in checkpoint.model_fields_set:
             raise ValueError("legacy AST checkpoint cannot resume with short aliases")
@@ -124,6 +128,7 @@ def run_repository_coding_session(
             context_mode=checkpoint.context_mode,
             allow_batch_edits=checkpoint.allow_batch_edits,
             syntax_mode=checkpoint.syntax_mode,
+            extended_syntax=checkpoint.extended_syntax,
         )
         if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
             raise ValueError("resumed workspace diff disagrees with checkpoint")
@@ -140,6 +145,7 @@ def run_repository_coding_session(
             context_mode=context_mode,
             allow_batch_edits=allow_batch_edits,
             syntax_mode=syntax_mode,
+            extended_syntax=extended_syntax,
         )
 
     with host as tools:
@@ -192,6 +198,7 @@ def run_repository_coding_session(
                         "allow_batch_edits": allow_batch_edits,
                         "hierarchical_mode": hierarchical_mode,
                         "syntax_mode": syntax_mode,
+                        "extended_syntax": extended_syntax,
                         "public_check_audit_version": 1,
                         "repository_call_budget": {
                             "executor_decisions": role_budget.executor_decisions,
@@ -268,6 +275,7 @@ def run_repository_coding_session(
                         allow_batch_edits=allow_batch_edits,
                         hierarchical_mode=hierarchical_mode,
                         syntax_mode=syntax_mode,
+                        extended_syntax=extended_syntax,
                         public_checks_attempted=tools.public_checks_attempted,
                         public_probes_attempted=tools.public_probes_attempted,
                         public_probe_signatures=tools.public_probe_signatures,
@@ -334,6 +342,7 @@ def run_repository_coding_session(
                 allow_batch_edits=allow_batch_edits,
                 hierarchical_mode=hierarchical_mode,
                 syntax_mode=syntax_mode,
+                extended_syntax=extended_syntax,
                 public_checks_attempted=tools.public_checks_attempted,
                 public_probes_attempted=tools.public_probes_attempted,
                 public_checks_passed=tools.public_checks_passed,

@@ -77,7 +77,8 @@ def compact_public_context(
                 **entry,
                 "content": "AST page observed; use current snapshot.syntax_state only.",
             }
-            if entry.get("tool") == "repo_inspect_syntax" and entry.get("status") == "OK"
+            if entry.get("tool") in {"repo_inspect_syntax", "repo_inspect_syntax_node"}
+            and entry.get("status") == "OK"
             else entry
             for entry in history
         ]

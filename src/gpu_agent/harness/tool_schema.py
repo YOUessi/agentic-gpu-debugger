@@ -16,6 +16,7 @@ from gpu_agent.harness.models import (
     FinishTask,
     RepoGitDiff,
     RepoInspectSyntax,
+    RepoInspectSyntaxNode,
     RepoListFiles,
     RepoProbePublic,
     RepoReadFile,
@@ -35,6 +36,7 @@ _REPO_ACTION_CLASSES: dict[str, type[BaseModel]] = {
     "repo_replace_many": RepoReplaceMany,
     "repo_git_diff": RepoGitDiff,
     "repo_inspect_syntax": RepoInspectSyntax,
+    "repo_inspect_syntax_node": RepoInspectSyntaxNode,
     "repo_replace_syntax": RepoReplaceSyntax,
     "repo_run_public_checks": RepoRunPublicChecks,
     "finish": FinishTask,
@@ -67,6 +69,7 @@ def repository_decision_schema(
         fields: dict[str, Any] = {}
         if registered_kernel_path is not None and name in {
             "repo_inspect_syntax",
+            "repo_inspect_syntax_node",
             "repo_replace_syntax",
             "repo_read_file",
         }:
@@ -81,6 +84,12 @@ def repository_decision_schema(
             fields["offset"] = (Literal[offset], ...)
             fields["symbol"] = (Literal[symbol], ...)
             fields["limit"] = (Literal[8], ...)
+        if name == "repo_inspect_syntax_node":
+            if syntax_state is None or not syntax_state.readable_truncated_aliases:
+                raise ValueError("full node read exposed without a readable observed node")
+            aliases = syntax_state.readable_truncated_aliases
+            fields["node_id"] = (Literal[aliases], ...)
+            fields["expected_source_sha256"] = (Literal[syntax_state.source_sha256], ...)
         if name == "repo_replace_syntax" and bind_syntax_cursor:
             if syntax_state is None or not syntax_state.observed_nodes:
                 raise ValueError("AST edit exposed without observed node evidence")

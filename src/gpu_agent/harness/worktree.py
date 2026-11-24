@@ -445,7 +445,8 @@ class PinnedGitWorkspace:
         return self._stage_source(name, target, original, "".join(pieces).encode("utf-8"))
 
     def inspect_syntax(
-        self, name: str, *, symbol: str = "", offset: int = 0, limit: int = 8
+        self, name: str, *, symbol: str = "", offset: int = 0, limit: int = 8,
+        extended: bool = False,
     ) -> dict[str, object]:
         """Parse only an existing approved CUDA source file, without executing it."""
         from gpu_agent.harness.syntax_tools import syntax_page
@@ -455,7 +456,21 @@ class PinnedGitWorkspace:
         if path.suffix not in {".cu", ".cuh"}:
             raise ValueError("CUDA_SYNTAX_ONLY_CUDA_SOURCE")
         raw = read_regular(path, MAX_SOURCE_BYTES)
-        return syntax_page(raw, symbol=symbol, offset=offset, limit=limit)
+        return syntax_page(raw, symbol=symbol, offset=offset, limit=limit, extended=extended)
+
+    def inspect_syntax_node(
+        self, name: str, *, expected_source_sha256: str, node_id: str, extended: bool = False
+    ) -> dict[str, object]:
+        from gpu_agent.harness.syntax_tools import syntax_node_detail
+
+        self._verify_boundary()
+        path = self._checked(name, editable=False)
+        if path.suffix not in {".cu", ".cuh"}:
+            raise ValueError("CUDA_SYNTAX_ONLY_CUDA_SOURCE")
+        return syntax_node_detail(
+            read_regular(path, MAX_SOURCE_BYTES), expected_source_sha256=expected_source_sha256,
+            node_id=node_id, extended=extended,
+        )
 
     def replace_syntax(
         self,
@@ -463,6 +478,7 @@ class PinnedGitWorkspace:
         *,
         expected_source_sha256: str,
         edits: list[tuple[str, str]],
+        extended: bool = False,
     ) -> str:
         """Replace exact parsed nodes bound to a SHA-pinned current source.
 
@@ -479,7 +495,8 @@ class PinnedGitWorkspace:
             raise ValueError("workspace modified-file budget exhausted")
         original = read_regular(target, MAX_SOURCE_BYTES)
         changed = rewrite_syntax_nodes(
-            original, expected_source_sha256=expected_source_sha256, edits=edits
+            original, expected_source_sha256=expected_source_sha256, edits=edits,
+            extended=extended,
         )
         return self._stage_source(name, target, original, changed)
 

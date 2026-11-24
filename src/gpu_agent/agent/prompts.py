@@ -340,6 +340,14 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
             and snapshot.get("syntax_mode") is True
             and snapshot.get("registered_public_case") in ("h001", "h002", "h003")
         ):
+            if snapshot.get("extended_syntax") is True:
+                return (
+                    "gpu-repository-extended-ast-2026-11-24-v1",
+                    GPU_REPOSITORY_AST_PROMPT
+                    + " For a readable truncated observed node, use repo_inspect_syntax_node "
+                    "to obtain its full code. Expression targets require exactly one expression. "
+                    "Never submit overlapping parent/child node edits in one batch.",
+                )
             return GPU_REPOSITORY_AST_PROMPT_VERSION, GPU_REPOSITORY_AST_PROMPT
         return GPU_REPOSITORY_HARNESS_PROMPT_VERSION, GPU_REPOSITORY_HARNESS_PROMPT
     if kind == "plan" and payload.get("gpu_coding_harness") == "v1":

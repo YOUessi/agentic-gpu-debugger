@@ -94,6 +94,15 @@ class RepoInspectSyntax(StrictModel):
     limit: int = Field(default=8, ge=1, le=20)
 
 
+class RepoInspectSyntaxNode(StrictModel):
+    """Request the complete code of an already observed truncated AST node."""
+
+    tool: Literal["repo_inspect_syntax_node"] = "repo_inspect_syntax_node"
+    path: str = Field(min_length=1, max_length=300)
+    expected_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    node_id: str = Field(pattern=r"^n[0-9]{2}$")
+
+
 class RepoSyntaxEdit(StrictModel):
     node_id: str = Field(pattern=r"^n[0-9]{2}$")
     replacement_code: str = Field(min_length=1, max_length=1200)
@@ -144,6 +153,7 @@ HarnessAction = Annotated[
     | RepoReplaceSnippet
     | RepoReplaceMany
     | RepoInspectSyntax
+    | RepoInspectSyntaxNode
     | RepoReplaceSyntax
     | RepoGitDiff
     | RepoProbePublic
@@ -210,8 +220,9 @@ class SyntaxEvidenceNode(StrictModel):
     kind: str
     start_line: int = Field(ge=1)
     end_line: int = Field(ge=1)
-    code: str = Field(max_length=300)
+    code: str = Field(max_length=1200)
     code_truncated: bool = False
+    code_bytes: int | None = Field(default=None, ge=0)
 
 
 class SyntaxPageVisit(StrictModel):
@@ -228,6 +239,17 @@ class SyntaxState(StrictModel):
     next_offset: int | None = Field(ge=0, le=90)
     visited_pages: tuple[SyntaxPageVisit, ...] = Field(max_length=90)
     observed_nodes: tuple[SyntaxEvidenceNode, ...] = Field(max_length=90)
+    extended_syntax: bool = False
+    full_node_reads: tuple[str, ...] = Field(default=(), max_length=8)
+
+    @property
+    def readable_truncated_aliases(self) -> tuple[str, ...]:
+        if not self.extended_syntax or len(self.full_node_reads) >= 8:
+            return ()
+        return tuple(
+            node.id for node in self.observed_nodes
+            if node.code_truncated and node.code_bytes is not None and node.code_bytes <= 1200
+        )
 
 
 class SessionSnapshot(StrictModel):
@@ -240,6 +262,7 @@ class SessionSnapshot(StrictModel):
     registered_kernel_path: str | None = Field(default=None, max_length=300)
     context_mode: Literal["legacy", "evidence_first"] = "legacy"
     syntax_mode: bool = False
+    extended_syntax: bool = False
     syntax_state: SyntaxState | None = None
     task_plan: TaskPlan | None = None
     task_progress: TaskProgress | None = None
@@ -274,6 +297,7 @@ class RepoHarnessOutcome(StrictModel):
     allow_batch_edits: bool = True
     hierarchical_mode: bool = False
     syntax_mode: bool = False
+    extended_syntax: bool = False
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     public_probes_attempted: int = Field(default=0, ge=0, le=4)
     public_checks_passed: bool = False

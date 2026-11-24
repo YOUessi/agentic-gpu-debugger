@@ -44,6 +44,11 @@ TOOL_REGISTRY: tuple[ToolDescriptor, ...] = (
         "Inspect SHA-pinned CUDA AST statements with immutable node IDs",
     ),
     ToolDescriptor(
+        "repo_inspect_syntax_node",
+        "read",
+        "Read a complete bounded node already observed in extended AST mode",
+    ),
+    ToolDescriptor(
         "repo_replace_syntax",
         "edit",
         "Atomically rewrite CUDA syntax nodes using source SHA and parser validation",

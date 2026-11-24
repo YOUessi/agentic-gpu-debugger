@@ -61,7 +61,7 @@ def _functions(root: Node, raw: bytes) -> list[tuple[str, Node]]:
     return found
 
 
-def _entries(raw: bytes) -> tuple[str, list[SyntaxNode]]:
+def _entries(raw: bytes, *, extended: bool = False) -> tuple[str, list[SyntaxNode]]:
     if not raw or len(raw) > _MAX_SOURCE or b"\x00" in raw:
         raise ValueError("invalid bounded CUDA syntax source")
     try:
@@ -75,30 +75,67 @@ def _entries(raw: bytes) -> tuple[str, list[SyntaxNode]]:
     entries: list[SyntaxNode] = []
     for function, function_node in _functions(tree.root_node, raw):
 
-        def visit(node: Node, function_name: str = function) -> None:
-            if node.type in _NODE_TYPES:
-                chunk = raw[node.start_byte : node.end_byte]
-                node_id = hashlib.sha256(
-                    f"{source_sha256}:{node.type}:{node.start_byte}:{node.end_byte}".encode()
-                    + chunk
-                ).hexdigest()[:24]
-                entries.append(
-                    SyntaxNode(
-                        node_id=node_id,
-                        function=function_name,
-                        kind=node.type,
-                        start_line=node.start_point.row + 1,
-                        end_line=node.end_point.row + 1,
-                        start_byte=node.start_byte,
-                        end_byte=node.end_byte,
-                        code=chunk.decode("utf-8"),
-                    )
+        def append_node(node: Node, kind: str, function_name: str = function) -> None:
+            chunk = raw[node.start_byte : node.end_byte]
+            node_id = hashlib.sha256(
+                f"{source_sha256}:{kind}:{node.start_byte}:{node.end_byte}".encode() + chunk
+            ).hexdigest()[:24]
+            entries.append(
+                SyntaxNode(
+                    node_id=node_id,
+                    function=function_name,
+                    kind=kind,
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_byte=node.start_byte,
+                    end_byte=node.end_byte,
+                    code=chunk.decode("utf-8"),
                 )
+            )
+
+        def visit(node: Node) -> None:
+            if node.type in _NODE_TYPES:
+                append_node(node, node.type)
                 return
             for child in node.named_children:
-                visit(child, function_name)
+                visit(child)
 
         visit(function_node)
+        if extended:
+            def extra(node: Node) -> None:
+                targets: list[tuple[str, str]] = []
+                if node.type in {"if_statement", "while_statement", "do_statement", "switch_statement"}:
+                    targets.append(("condition", "condition_expression"))
+                elif node.type == "for_statement":
+                    targets.extend((
+                        ("condition", "loop_condition_expression"),
+                        ("update", "loop_update_expression"),
+                    ))
+                elif node.type == "assignment_expression":
+                    targets.append(("right", "assignment_rhs"))
+                elif node.type == "init_declarator":
+                    targets.append(("value", "initializer_expression"))
+                for field, kind in targets:
+                    part = node.child_by_field_name(field)
+                    if part is None:
+                        continue
+                    if part.type == "condition_clause":
+                        part = part.child_by_field_name("value")
+                    if part is not None and (
+                        part.type.endswith("_expression")
+                        or part.type in {"identifier", "number_literal", "true", "false"}
+                    ) and part.type not in {"lambda_expression"}:
+                        if not any(
+                            x.start_byte == part.start_byte and x.end_byte == part.end_byte
+                            for x in entries
+                        ):
+                            append_node(part, kind)
+                for child in node.named_children:
+                    extra(child)
+
+            body = function_node.child_by_field_name("body")
+            if body is not None:
+                extra(body)
     if len(entries) > _MAX_NODES:
         raise ValueError("CUDA syntax node listing exceeds controller bound")
     # Stable aliases are globally unique within a source revision.
@@ -106,11 +143,13 @@ def _entries(raw: bytes) -> tuple[str, list[SyntaxNode]]:
     return source_sha256, entries
 
 
-def syntax_nodes(raw: bytes, *, symbol: str = "") -> dict[str, Any]:
+def syntax_nodes(
+    raw: bytes, *, symbol: str = "", extended: bool = False
+) -> dict[str, Any]:
     """Expose only ordinary public source structure; never a clean reference."""
     if symbol and not re.fullmatch(r"[A-Za-z_]\w{0,79}", symbol):
         raise ValueError("invalid CUDA function symbol")
-    digest, entries = _entries(raw)
+    digest, entries = _entries(raw, extended=extended)
     indexed = [(f"n{index:02d}", item) for index, item in enumerate(entries, 1)]
     if symbol:
         indexed = [(alias, item) for alias, item in indexed if item.function == symbol]
@@ -129,6 +168,10 @@ def syntax_nodes(raw: bytes, *, symbol: str = "") -> dict[str, Any]:
                 "end_line": item.end_line,
                 "code": item.code[:300],
                 "code_truncated": len(item.code) > 300,
+                **(
+                    {"code_bytes": len(item.code.encode("utf-8"))}
+                    if extended else {}
+                ),
             }
             for alias, item in indexed
         ],
@@ -142,6 +185,7 @@ def syntax_page(
     offset: int = 0,
     limit: int = 8,
     max_chars: int = 3900,
+    extended: bool = False,
 ) -> dict[str, Any]:
     """Return a COMPLETE, cursor-addressable JSON syntax map.
 
@@ -157,7 +201,7 @@ def syntax_page(
         or not 500 <= max_chars <= 4000
     ):
         raise ValueError("CUDA_SYNTAX_PAGE_BOUNDS_INVALID")
-    full = syntax_nodes(raw, symbol=symbol)
+    full = syntax_nodes(raw, symbol=symbol, extended=extended)
     candidates = full["nodes"]
     if offset >= len(candidates):
         raise ValueError("CUDA_SYNTAX_CURSOR_EXHAUSTED")
@@ -192,18 +236,73 @@ def syntax_page(
     }
 
 
+def syntax_node_detail(
+    raw: bytes, *, expected_source_sha256: str, node_id: str, extended: bool = False
+) -> dict[str, Any]:
+    """Read one complete, SHA-bound observed node within the edit byte bound."""
+    if _source_digest(raw) != expected_source_sha256:
+        raise ValueError("CUDA_SOURCE_SHA_STALE")
+    digest, entries = _entries(raw, extended=extended)
+    by_id = {f"n{index:02d}": item for index, item in enumerate(entries, 1)}
+    if node_id not in by_id:
+        raise ValueError("CUDA_SYNTAX_NODE_NOT_FOUND")
+    item = by_id[node_id]
+    if len(item.code.encode("utf-8")) > 1200:
+        raise ValueError("CUDA_SYNTAX_NODE_EXCEEDS_EDIT_BOUND")
+    return {
+        "source_sha256": digest,
+        "node": {
+            "id": node_id, "function": item.function, "kind": item.kind,
+            "start_line": item.start_line, "end_line": item.end_line,
+            "code": item.code, "code_truncated": False,
+            "code_bytes": len(item.code.encode("utf-8")),
+        },
+    }
+
+
+_EXPRESSION_TARGETS = {
+    "condition_expression", "loop_condition_expression", "loop_update_expression",
+    "assignment_rhs", "initializer_expression",
+}
+
+
+def _validate_expression_replacement(code: bytes) -> None:
+    # Require exactly one expression in an isolated grammar slot. Full-file
+    # parsing still follows; a replacement cannot escape this slot with ';'.
+    prefix = b"void syntax_probe() { auto value = ("
+    suffix = b"); }"
+    root = _parser().parse(prefix + code + suffix).root_node
+    if root.has_error or len(root.named_children) != 1:
+        raise ValueError("CUDA_SYNTAX_EXPRESSION_SLOT_INVALID")
+    function = root.named_children[0]
+    body = function.child_by_field_name("body")
+    if body is None or len(body.named_children) != 1:
+        raise ValueError("CUDA_SYNTAX_EXPRESSION_SLOT_INVALID")
+    declaration = body.named_children[0]
+    declarator = declaration.child_by_field_name("declarator")
+    value = declarator.child_by_field_name("value") if declarator is not None else None
+    if (
+        value is None or value.type != "parenthesized_expression"
+        or value.start_byte != len(prefix) - 1
+        or value.end_byte != len(prefix) + len(code) + 1
+        or len(value.named_children) != 1
+    ):
+        raise ValueError("CUDA_SYNTAX_EXPRESSION_SLOT_INVALID")
+
+
 def rewrite_syntax_nodes(
     raw: bytes,
     *,
     expected_source_sha256: str,
     edits: list[tuple[str, str]],
+    extended: bool = False,
 ) -> bytes:
     """Resolve immutable syntax IDs and atomically assemble a new CUDA source.
 
     All targets bind to ONE input version. No fallbacks to fuzzy line matching,
     no mutation of any source file, and no silent syntactic repair.
     """
-    digest, entries = _entries(raw)
+    digest, entries = _entries(raw, extended=extended)
     if digest != expected_source_sha256:
         raise ValueError("CUDA_SOURCE_SHA_STALE")
     if not 1 <= len(edits) <= 4:
@@ -221,6 +320,8 @@ def rewrite_syntax_nodes(
             raise ValueError("CUDA_SYNTAX_REPLACEMENT_INVALID")
         node = by_id[node_id]
         proposed = code.encode("utf-8")
+        if node.kind in _EXPRESSION_TARGETS:
+            _validate_expression_replacement(proposed)
         if proposed.strip() == raw[node.start_byte : node.end_byte].strip():
             raise ValueError(f"CUDA_SYNTAX_NOOP: {node_id} replacement equals current node")
         spans.append((node.start_byte, node.end_byte, proposed))
