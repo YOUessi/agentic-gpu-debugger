@@ -1846,7 +1846,7 @@ def test_ast_lifecycle_rejected_request_and_unavailable_backend_are_distinct(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo, sha = _registered_repository(tmp_path)
-    fake = FakePublicChecker([False], dispatched=False)
+    fake = FakePublicChecker([False], case_id="h002", dispatched=False)
     monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", fake)
     model = CrossCaseASTFixture("h002")
 
