@@ -854,6 +854,12 @@ def test_syntax_mode_uses_controller_ast_ids_and_never_model_quoted_old_text(
         first = host.snapshot(GOAL, [], 8)
         assert "repo_inspect_syntax" in first.allowed_tools
         assert "repo_replace_syntax" not in first.allowed_tools
+        from gpu_agent.harness.tool_schema import repository_decision_schema
+
+        initial_schema = repository_decision_schema(
+            first.allowed_tools, registered_kernel_path=KERNEL, bind_syntax_cursor=True
+        )
+        assert "repo_replace_syntax" not in str(initial_schema.model_json_schema())
         assert "repo_replace_snippet" not in first.allowed_tools
         inspected = HarnessDecision.model_validate(
             {
@@ -1262,12 +1268,18 @@ def test_pinned_ast_survives_compaction_cursor_binding_and_revision_change(tmp_p
         noop = RepoReplaceSyntax(
             **base, edits=[RepoSyntaxEdit(node_id=node.id, replacement_code=node.code)]
         )
-        assert f"CUDA_SYNTAX_NOOP: {node.id}" in host.invoke(noop).content
-        assert "CUDA_SYNTAX_REPEATED_REJECTED_EDIT" in host.invoke(noop).content
+        noop_result = host.invoke(noop)
+        assert f"CUDA_SYNTAX_NOOP: {node.id}" in noop_result.content
+        assert node.code in noop_result.content
+        assert "functional_requirement" in noop_result.content
+        repeat_result = host.invoke(noop)
+        assert "CUDA_SYNTAX_REPEATED_REJECTED_EDIT" in repeat_result.content
         missing = RepoReplaceSyntax(
             **base, edits=[RepoSyntaxEdit(node_id="n99", replacement_code="return;")]
         )
-        assert "CUDA_SYNTAX_NODE_NOT_FOUND" in host.invoke(missing).content
+        missing_result = host.invoke(missing)
+        assert "CUDA_SYNTAX_NODE_NOT_FOUND" in missing_result.content
+        assert "n99" in missing_result.content
         fixed = RepoReplaceSyntax(
             **base,
             edits=[
@@ -1278,7 +1290,10 @@ def test_pinned_ast_survives_compaction_cursor_binding_and_revision_change(tmp_p
         )
         assert host.invoke(fixed).status == "OK"
         assert host.syntax_state is None
-        assert "CUDA_SOURCE_SHA_STALE" in host.invoke(fixed).content
+        stale_result = host.invoke(fixed)
+        assert "CUDA_SOURCE_SHA_STALE" in stale_result.content
+        assert "expected_source_sha256" in stale_result.content
+        assert "actual_source_sha256" in stale_result.content
         current = host.snapshot(GOAL, history, 5)
         assert current.syntax_state is None
         assert "repo_replace_syntax" not in current.allowed_tools
@@ -1289,6 +1304,32 @@ def test_pinned_ast_survives_compaction_cursor_binding_and_revision_change(tmp_p
         body = json.loads(host.store.read(event))
         assert body["action"]["symbol"] == "softmax32"
         assert body["action"]["limit"] == 3
+        from gpu_agent.harness.repo_audit import read_repository_tool_events
+
+        events = read_repository_tool_events(
+            host.store, host.run_id, expected_count=host.tool_calls,
+            require_action=True, require_observation=True,
+        )
+        for code, submitted, observed in (
+            ("CUDA_SYNTAX_NOOP", noop, noop_result),
+            ("CUDA_SYNTAX_REPEATED_REJECTED_EDIT", noop, repeat_result),
+            ("CUDA_SYNTAX_NODE_NOT_FOUND", missing, missing_result),
+            ("CUDA_SOURCE_SHA_STALE", fixed, stale_result),
+        ):
+            rejected = next(e for e in events if e["rejection_code"] == code)
+            assert rejected["action"] == submitted.model_dump(mode="json")
+            assert rejected["observation"] == observed.content
+            assert rejected["observation_sha256"] == hashlib.sha256(
+                observed.content.encode()
+            ).hexdigest()
+            assert rejected["rejection_detail"]["correction"]
+        noop_record = next(e for e in events if e["rejection_code"] == "CUDA_SYNTAX_NOOP")
+        assert noop_record["rejection_detail"]["original_code"] == node.code
+        assert noop_record["rejection_detail"]["node_id"] == node.id
+        assert noop_record["rejection_detail"]["functional_requirement"]
+        stale_record = next(e for e in events if e["rejection_code"] == "CUDA_SOURCE_SHA_STALE")
+        assert stale_record["rejection_detail"]["expected_source_sha256"] == state.source_sha256
+        assert stale_record["rejection_detail"]["actual_source_sha256"] != state.source_sha256
 
 
 def test_ast_checkpoint_rehydrates_aliases_without_another_model_inspect(
@@ -1410,3 +1451,127 @@ def test_single_step_microbench_calls_model_once_and_gpu_only_after_valid_edit(
         assert report["checker_reached"] is not noop
         assert report["public_check_passed"] is not noop
     assert len(checker.calls) == 1
+
+
+def test_ast_partial_cursor_resume_and_checkpoint_tampering(tmp_path: Path) -> None:
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+    from gpu_agent.harness.tool_schema import repository_decision_schema
+
+    repo, sha = _registered_repository(tmp_path)
+    output = tmp_path / "ast-partial-resume"
+    options = dict(
+        repository=repo, output=output, base_sha=sha, goal=GOAL,
+        public_case_id="h001", syntax_mode=True, max_steps=8, max_model_calls=10,
+    )
+    initial = run_repository_coding_session(
+        **options, pause_after_turns=1,
+        model_factory=lambda _: Model([
+            {"tool": "repo_inspect_syntax", "path": KERNEL, "symbol": "softmax32", "limit": 3}
+        ]),
+    )
+    assert initial.status == "PAUSED_RESUMABLE"
+    path = output / "session-checkpoint.json"
+    original = path.read_bytes()
+    state = read_repository_checkpoint(path).syntax_state
+    assert state is not None and state.next_offset is not None
+    assert len(state.observed_nodes) == 3
+
+    # Tampering with the private checkpoint cannot supply fabricated AST evidence.
+    cases = ("source_sha", "node_code", "next_offset", "missing_state", "history")
+    for case in cases:
+        body = json.loads(original)
+        if case == "source_sha":
+            body["syntax_state"]["source_sha256"] = "f" * 64
+        elif case == "node_code":
+            body["syntax_state"]["observed_nodes"][0]["code"] = "return;"
+        elif case == "next_offset":
+            body["syntax_state"]["next_offset"] += 1
+        elif case == "missing_state":
+            body["syntax_state"] = None
+        else:
+            body["state"]["history"][0]["content"] = "tampered observation"
+            body["state"]["observation"]["content"] = "tampered observation"
+        path.write_text(json.dumps(body))
+        never_called = Model([])
+        with pytest.raises(ValueError, match="recovered AST|checkpoint observation"):
+            run_repository_coding_session(
+                **options, resume=True, model_factory=lambda _, m=never_called: m
+            )
+        assert not never_called.snapshots
+    path.write_bytes(original)
+    model = Model([
+        {
+            "tool": "repo_inspect_syntax", "path": KERNEL, "symbol": state.symbol,
+            "offset": state.next_offset, "limit": 8,
+        },
+    ])
+    resumed = run_repository_coding_session(
+        **options, resume=True, pause_after_turns=2, model_factory=lambda _: model,
+    )
+    assert resumed.status == "PAUSED_RESUMABLE"
+    assert model.snapshots[0].syntax_state == state
+    assert model.snapshots[0].syntax_mode
+    grammar = repository_decision_schema(
+        model.snapshots[0].allowed_tools, registered_kernel_path=KERNEL,
+        syntax_state=state, bind_syntax_cursor=True,
+    )
+    parsed = grammar.model_validate({
+        "action": {
+            "tool": "repo_inspect_syntax", "path": KERNEL, "symbol": state.symbol,
+            "offset": state.next_offset, "limit": 8,
+        },
+        "reason": "Resume next public AST page",
+    })
+    assert parsed.action.offset == state.next_offset
+    after = read_repository_checkpoint(path).syntax_state
+    assert after is not None and after.source_sha256 == state.source_sha256
+    assert after.observed_nodes[:len(state.observed_nodes)] == state.observed_nodes
+    assert len(after.visited_pages) == 2
+
+
+def test_ast_public_audit_never_persists_raw_host_exception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gpu_agent.harness.repo_audit import read_repository_tool_events
+
+    repo, sha = _registered_repository(tmp_path)
+    with RepositoryWorkspaceTools(
+        origin=repo, output=tmp_path / "ast-public-exception", sha=sha,
+        public_case_id="h001", syntax_mode=True,
+    ) as host:
+        forbidden = "private-host-diagnostic-do-not-publish"
+
+        def fail_read(*args, **kwargs):
+            raise OSError(f"/home/private/{forbidden}")
+
+        monkeypatch.setattr(host.workspace, "inspect_syntax", fail_read)
+        obs = host.invoke(RepoInspectSyntax(path=KERNEL))
+        assert obs.status == "REJECTED"
+        assert "PUBLIC_TOOL_IO_FAILED" in obs.content
+        assert forbidden not in obs.content
+        events = read_repository_tool_events(
+            host.store, host.run_id, expected_count=1,
+            require_action=True, require_observation=True,
+        )
+        assert events[0]["observation"] == obs.content
+        assert forbidden not in json.dumps(events)
+        assert host.syntax_state is None
+
+
+def test_ast_replay_rejects_observation_hash_mismatch(tmp_path: Path) -> None:
+    from gpu_agent.harness.repo_audit import read_repository_tool_events
+
+    store = RunStore(tmp_path / "public-audit")
+    run = store.create_run("gpu_repository_agent")
+    store.transition(run.id, "RUNNING", "DIAGNOSING")
+    action = RepoInspectSyntax(path=KERNEL)
+    store.put(
+        run.id, "repo-harness/v1/tool-001.json",
+        json.dumps({
+            "tool": action.tool, "action": action.model_dump(mode="json"),
+            "status": "OK", "observation": "changed feedback",
+            "observation_sha256": hashlib.sha256(b"original feedback").hexdigest(),
+        }).encode(), "public",
+    )
+    with pytest.raises(ValueError, match="public observation does not match"):
+        read_repository_tool_events(store, run.id, expected_count=1, require_observation=True)

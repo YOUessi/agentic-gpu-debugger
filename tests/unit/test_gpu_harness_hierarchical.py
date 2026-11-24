@@ -328,3 +328,26 @@ def test_ast_pagination_has_complete_json_no_lost_nodes_or_hidden_truncation() -
         syntax_page(source, symbol="softmax32", offset=total)
     with pytest.raises(ValueError, match="CUDA_SYNTAX_PAGE_BOUNDS_INVALID"):
         syntax_page(source, symbol="softmax32", offset=-1)
+
+
+def test_ast_aliases_match_full_file_and_symbol_filtered_pages() -> None:
+    from gpu_agent.harness.syntax_tools import syntax_page
+
+    raw = CUDA_FILE.read_bytes()
+    whole = syntax_nodes(raw)
+    scoped = syntax_nodes(raw, symbol="softmax32")
+    assert scoped["nodes"] == [
+        node for node in whole["nodes"] if node["function"] == "softmax32"
+    ]
+    assert [node["start_line"] for node in whole["nodes"]] == sorted(
+        node["start_line"] for node in whole["nodes"]
+    )
+    offset = 0
+    collected = []
+    while True:
+        page = syntax_page(raw, offset=offset, limit=2)
+        collected.extend(page["nodes"])
+        if page["next_offset"] is None:
+            break
+        offset = page["next_offset"]
+    assert collected == whole["nodes"]
