@@ -95,8 +95,7 @@ class RepoInspectSyntax(StrictModel):
 
 
 class LegacyRepoSyntaxEdit(StrictModel):
-    """Original wire shape, retained for the frozen unbound experiment."""
-
+    # Original wire shape, retained for the frozen unbound experiment.
     node_id: str = Field(pattern=r"^n[0-9]{2}$")
     replacement_code: str = Field(min_length=1, max_length=1200)
 
@@ -259,6 +258,9 @@ class CandidateRecoveryView(StrictModel):
     revert_available: bool
 
 
+PublicProbeSize = Literal[32, 33, 65, 129, 257]
+
+
 class RejectedActionSummary(StrictModel):
     tool: Literal["repo_replace_syntax"] = "repo_replace_syntax"
     node_ids: tuple[str, ...] = Field(min_length=1, max_length=4)
@@ -294,7 +296,7 @@ class SessionSnapshot(StrictModel):
     remaining_public_checks: int = Field(default=3, ge=0)
     public_probe_phase: Literal["before", "after"] | None = None
     remaining_public_probes: int = Field(default=0, ge=0, le=4)
-    public_probe_remaining_sizes: tuple[Literal[32, 33, 65, 129, 257], ...] | None = Field(
+    public_probe_remaining_sizes: tuple[PublicProbeSize, ...] | None = Field(
         default=None, max_length=5, exclude_if=lambda value: value is None
     )
     rejected_action_state: tuple[RejectedActionSummary, ...] | None = Field(

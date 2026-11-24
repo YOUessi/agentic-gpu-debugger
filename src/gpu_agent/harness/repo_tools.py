@@ -11,7 +11,7 @@ import hashlib
 import json
 from functools import partial
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from gpu_agent.benchmark.hardset_v2 import (
     HARDSET_CASES,
@@ -42,6 +42,7 @@ from gpu_agent.harness.models import (
     RepoRevertLastEdit,
     RepoRunPublicChecks,
     RejectedActionSummary,
+    PublicProbeSize,
     SessionSnapshot,
     SyntaxEvidenceNode,
     SyntaxPageVisit,
@@ -145,13 +146,13 @@ class RepositoryWorkspaceTools:
             raise ValueError("state-scoped actions require a registered public kernel")
         self._state_scoped_actions = enabled
 
-    def _remaining_probe_sizes(self) -> tuple[int, ...]:
+    def _remaining_probe_sizes(self) -> tuple[PublicProbeSize, ...]:
         phase = self._public_probe_phase()
         if phase is None or self._public_kernel_path is None:
             return ()
         digest = self._syntax_digest(self._public_kernel_path)
         return tuple(
-            size for size in PUBLIC_PROBE_SIZES
+            cast(PublicProbeSize, size) for size in PUBLIC_PROBE_SIZES
             if self._probe_signature(phase, size, digest) not in self._public_probe_signatures
         )
 
@@ -1061,10 +1062,8 @@ class RepositoryWorkspaceTools:
             public_probe_phase=self._public_probe_phase(),
             remaining_public_probes=4 - self.public_probes_attempted,
             public_probe_remaining_sizes=(
-                tuple(
-                    size for size in (32, 33, 65, 129, 257)
-                    if size in self._remaining_probe_sizes()
-                ) if self._state_scoped_actions and "repo_probe_public" in allowed_tools
+                self._remaining_probe_sizes()
+                if self._state_scoped_actions and "repo_probe_public" in allowed_tools
                 else () if self._state_scoped_actions else None
             ),
             rejected_action_state=(
