@@ -51,6 +51,9 @@ class RepositoryCheckpoint(BaseModel):
     allow_batch_edits: bool = True
     hierarchical_mode: bool = False
     syntax_mode: bool = False
+    compile_gate: bool = False
+    allow_revert: bool = False
+    max_compiles: int = Field(default=6, ge=1, le=8)
     max_public_checks: int = Field(default=2, ge=1, le=3)
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
     public_probes_attempted: int = Field(default=0, ge=0, le=4)
@@ -232,6 +235,9 @@ def validated_quiescent_repository_checkpoint(
     allow_batch_edits: bool = True,
     hierarchical_mode: bool = False,
     syntax_mode: bool = False,
+    compile_gate: bool = False,
+    allow_revert: bool = False,
+    max_compiles: int = 6,
 ) -> RepositoryCheckpoint:
     """Reject uncertain side effects, terminal sessions or mismatched settings."""
     records = read_verified_journal(output / "session-events.jsonl")
@@ -255,6 +261,9 @@ def validated_quiescent_repository_checkpoint(
         or checkpoint.allow_batch_edits != allow_batch_edits
         or checkpoint.hierarchical_mode != hierarchical_mode
         or checkpoint.syntax_mode != syntax_mode
+        or checkpoint.compile_gate != compile_gate
+        or checkpoint.allow_revert != allow_revert
+        or checkpoint.max_compiles != max_compiles
     ):
         raise ValueError("checkpoint identity, journal head or budgets differ")
     first = records[0]
@@ -269,6 +278,9 @@ def validated_quiescent_repository_checkpoint(
         or first["payload"].get("allow_batch_edits", True) != checkpoint.allow_batch_edits
         or first["payload"].get("hierarchical_mode", False) != checkpoint.hierarchical_mode
         or first["payload"].get("syntax_mode", False) != checkpoint.syntax_mode
+        or first["payload"].get("compile_gate", False) != checkpoint.compile_gate
+        or first["payload"].get("allow_revert", False) != checkpoint.allow_revert
+        or first["payload"].get("max_compiles", 6) != checkpoint.max_compiles
         or first["payload"].get("max_output_tokens", 4096) != checkpoint.max_output_tokens
     ):
         raise ValueError("checkpoint does not match session creation evidence")

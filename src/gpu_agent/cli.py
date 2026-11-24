@@ -212,6 +212,9 @@ def harness_repo_run(
     disable_batch_edits: Annotated[bool, typer.Option("--disable-batch-edits")] = False,
     hierarchical: Annotated[bool, typer.Option("--hierarchical")] = False,
     syntax_editing: Annotated[bool, typer.Option("--syntax-editing")] = False,
+    compile_gate: Annotated[bool, typer.Option("--compile-gate")] = False,
+    allow_revert: Annotated[bool, typer.Option("--allow-revert")] = False,
+    max_compiles: Annotated[int, typer.Option("--max-compiles", min=1, max=8)] = 6,
     max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     resume: Annotated[bool, typer.Option("--resume")] = False,
     pause_after_turns: Annotated[
@@ -243,6 +246,7 @@ def harness_repo_run(
             allow_batch_edits=not disable_batch_edits,
             hierarchical_mode=hierarchical,
             syntax_mode=syntax_editing,
+            compile_gate=compile_gate, allow_revert=allow_revert, max_compiles=max_compiles,
             resume=resume,
             pause_after_turns=pause_after_turns,
         )

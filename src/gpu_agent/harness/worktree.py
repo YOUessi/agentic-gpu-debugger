@@ -483,6 +483,26 @@ class PinnedGitWorkspace:
         )
         return self._stage_source(name, target, original, changed)
 
+    def restore_last_accepted_source(
+        self, name: str, *, expected_source_sha256: str, before: bytes, before_sha256: str
+    ) -> str:
+        """Restore only a controller-provided before-image, never a model path/commit."""
+        self._verify_boundary()
+        target = self._checked(name, editable=True)
+        current = read_regular(target, MAX_SOURCE_BYTES)
+        if (
+            name not in self._edited
+            or hashlib.sha256(current).hexdigest() != expected_source_sha256
+            or hashlib.sha256(before).hexdigest() != before_sha256
+        ):
+            raise ValueError("CUDA_REVERT_PROVENANCE_MISMATCH")
+        digest = self._stage_source(name, target, current, before)
+        if not _run_git(self.root, "diff", "--name-only", "HEAD", "--", name):
+            self._edited.remove(name)
+            del self._accepted_hashes[name]
+        self._verify_boundary()
+        return digest
+
     def diff(self) -> str:
         self._verify_boundary()
         paths = self.edited_files

@@ -340,6 +340,15 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
             and snapshot.get("syntax_mode") is True
             and snapshot.get("registered_public_case") in ("h001", "h002", "h003")
         ):
+            recovery = snapshot.get("candidate_recovery")
+            if isinstance(recovery, Mapping):
+                extra = (
+                    " When available, compile the exact edited candidate before numeric checks. "
+                    "Use compiler line/message to remove self-introduced errors. "
+                    "If allowed, revert only the last accepted edit; then re-inspect. "
+                    "Compilation is not numerical correctness. Do not invent arbitrary source paths."
+                )
+                return "gpu-repository-ast-recovery-v1", GPU_REPOSITORY_AST_PROMPT + extra
             return GPU_REPOSITORY_AST_PROMPT_VERSION, GPU_REPOSITORY_AST_PROMPT
         return GPU_REPOSITORY_HARNESS_PROMPT_VERSION, GPU_REPOSITORY_HARNESS_PROMPT
     if kind == "plan" and payload.get("gpu_coding_harness") == "v1":

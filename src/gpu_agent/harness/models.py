@@ -120,6 +120,16 @@ class RepoProbePublic(StrictModel):
     input_size: Literal[32, 33, 65, 129, 257]
 
 
+class RepoCompileCandidate(StrictModel):
+    tool: Literal["repo_compile_candidate"] = "repo_compile_candidate"
+    expected_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RepoRevertLastEdit(StrictModel):
+    tool: Literal["repo_revert_last_edit"] = "repo_revert_last_edit"
+    expected_source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class RepoRunPublicChecks(StrictModel):
     """Public GPU check for an operator-bound registered HardSet case only."""
 
@@ -148,6 +158,8 @@ HarnessAction = Annotated[
     | RepoGitDiff
     | RepoProbePublic
     | RepoRunPublicChecks
+    | RepoCompileCandidate
+    | RepoRevertLastEdit
     | FinishTask,
     Field(discriminator="tool"),
 ]
@@ -230,6 +242,14 @@ class SyntaxState(StrictModel):
     observed_nodes: tuple[SyntaxEvidenceNode, ...] = Field(max_length=90)
 
 
+class CandidateRecoveryView(StrictModel):
+    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    compile_gate: bool
+    remaining_compiles: int = Field(ge=0, le=8)
+    compile_status: Literal["NOT_CHECKED", "BUILD_PASSED", "BUILD_FAILED", "BUILD_UNAVAILABLE"]
+    revert_available: bool
+
+
 class SessionSnapshot(StrictModel):
     goal: str = Field(min_length=3, max_length=1500)
     case_id: str = Field(min_length=1, max_length=80)
@@ -241,6 +261,7 @@ class SessionSnapshot(StrictModel):
     context_mode: Literal["legacy", "evidence_first"] = "legacy"
     syntax_mode: bool = False
     syntax_state: SyntaxState | None = None
+    candidate_recovery: CandidateRecoveryView | None = None
     task_plan: TaskPlan | None = None
     task_progress: TaskProgress | None = None
     task_reflection: TaskReflection | None = None

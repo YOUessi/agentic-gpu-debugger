@@ -14,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from gpu_agent.harness.models import (
     FinishTask,
+    RepoCompileCandidate,
+    RepoRevertLastEdit,
     RepoGitDiff,
     RepoInspectSyntax,
     RepoListFiles,
@@ -37,6 +39,8 @@ _REPO_ACTION_CLASSES: dict[str, type[BaseModel]] = {
     "repo_inspect_syntax": RepoInspectSyntax,
     "repo_replace_syntax": RepoReplaceSyntax,
     "repo_run_public_checks": RepoRunPublicChecks,
+    "repo_compile_candidate": RepoCompileCandidate,
+    "repo_revert_last_edit": RepoRevertLastEdit,
     "finish": FinishTask,
 }
 
@@ -48,6 +52,7 @@ def repository_decision_schema(
     public_probe_phase: Literal["before", "after"] | None = None,
     syntax_state: SyntaxState | None = None,
     bind_syntax_cursor: bool = False,
+    recovery_source_sha256: str | None = None,
 ) -> type[BaseModel]:
     """Return a strict Pydantic response schema for EXACTLY approved tools.
 
@@ -71,6 +76,10 @@ def repository_decision_schema(
             "repo_read_file",
         }:
             fields["path"] = (Literal[registered_kernel_path], ...)
+        if name in {"repo_compile_candidate", "repo_revert_last_edit"}:
+            if recovery_source_sha256 is None or registered_kernel_path is None:
+                raise ValueError("candidate recovery exposed without bound source")
+            fields["expected_source_sha256"] = (Literal[recovery_source_sha256], ...)
         if name == "repo_probe_public" and public_probe_phase is not None:
             fields["phase"] = (Literal[public_probe_phase], ...)
         if name == "repo_inspect_syntax" and bind_syntax_cursor:

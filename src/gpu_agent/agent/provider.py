@@ -637,7 +637,7 @@ def invoke_sdk(
 
         output_model = TaskReflection
     elif request.kind == "plan" and request.payload.get("gpu_repo_harness") == "v1":
-        from gpu_agent.harness.models import SyntaxState
+        from gpu_agent.harness.models import CandidateRecoveryView, SyntaxState
         from gpu_agent.harness.tool_schema import repository_decision_schema
 
         snapshot = request.payload.get("snapshot")
@@ -665,12 +665,18 @@ def invoke_sdk(
         )
         if syntax_state is not None and syntax_state.path != kernel_path:
             raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        recovery_data = snapshot.get("candidate_recovery")
+        recovery = (
+            CandidateRecoveryView.model_validate(recovery_data) if recovery_data is not None
+            else None
+        )
         output_model = repository_decision_schema(
             tuple(names),
             registered_kernel_path=kernel_path,
             public_probe_phase=probe_phase,
             syntax_state=syntax_state,
             bind_syntax_cursor=kernel_path is not None,
+            recovery_source_sha256=recovery.source_sha256 if recovery is not None else None,
         )
     elif request.kind == "plan" and request.payload.get("gpu_coding_harness") == "v1":
         from gpu_agent.harness.models import HarnessDecision
@@ -1171,7 +1177,7 @@ class OpenAIResponsesProvider:
 
         return self._call(
             "plan",
-            {"gpu_repo_task_plan": "v1", "snapshot": snapshot.model_dump(mode="json")},
+            {"gpu_repo_task_plan": "v1", "snapshot": snapshot.model_dump(mode="json", exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None)},
             TaskPlan,
             repository_role="planner",
         )
@@ -1182,7 +1188,7 @@ class OpenAIResponsesProvider:
 
         return self._call(
             "plan",
-            {"gpu_repo_reflection": "v1", "snapshot": snapshot.model_dump(mode="json")},
+            {"gpu_repo_reflection": "v1", "snapshot": snapshot.model_dump(mode="json", exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None)},
             TaskReflection,
             repository_role="reflect",
         )
@@ -1200,7 +1206,7 @@ class OpenAIResponsesProvider:
             "plan",
             {
                 **marker,
-                "snapshot": snapshot.model_dump(mode="json"),
+                "snapshot": snapshot.model_dump(mode="json", exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None),
             },
             HarnessDecision,
             repository_role="executor" if snapshot.case_id == "repository" else None,
@@ -1214,7 +1220,7 @@ class OpenAIResponsesProvider:
             "plan",
             {
                 "hardset_probe_contract": "hardset-v2",
-                "snapshot": snapshot.model_dump(mode="json"),
+                "snapshot": snapshot.model_dump(mode="json", exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None),
             },
             HardsetProbePlanOutput,
         )

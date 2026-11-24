@@ -53,6 +53,8 @@ TOOL_REGISTRY: tuple[ToolDescriptor, ...] = (
         "gpu",
         "Public fixed-size functional probe on registered mutant or staged candidate",
     ),
+    ToolDescriptor("repo_compile_candidate", "gpu", "Compile the exact public candidate only"),
+    ToolDescriptor("repo_revert_last_edit", "edit", "Undo the most recent accepted AST edit once"),
     ToolDescriptor(
         "repo_run_public_checks",
         "gpu",

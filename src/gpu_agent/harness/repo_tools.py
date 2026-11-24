@@ -21,10 +21,14 @@ from gpu_agent.benchmark.hardset_v2 import (
 from gpu_agent.benchmark.hardset_v2_agent_models import HardsetPublicCheck
 from gpu_agent.benchmark.hardset_v2_public_probe import probe_candidate_publicly
 from gpu_agent.benchmark.hardset_v2_selfcheck import check_candidate_publicly
+from gpu_agent.benchmark.public_compile import PublicCompileResult, compile_public_candidate
 from gpu_agent.harness.context import compact_public_context
 from gpu_agent.harness.models import (
+    CandidateRecoveryView,
     FinishTask,
     HarnessAction,
+    RepoCompileCandidate,
+    RepoRevertLastEdit,
     RepoGitDiff,
     RepoInspectSyntax,
     RepoListFiles,
@@ -60,6 +64,8 @@ class RepositoryWorkspaceTools:
         "repo_replace_syntax",
         "repo_probe_public",
         "repo_run_public_checks",
+        "repo_compile_candidate",
+        "repo_revert_last_edit",
         "finish",
     )
     completion_reason = "WORKSPACE_DIFF_STAGED_UNVERIFIED"
@@ -77,6 +83,9 @@ class RepositoryWorkspaceTools:
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
         allow_batch_edits: bool = True,
         syntax_mode: bool = False,
+        compile_gate: bool = False,
+        allow_revert: bool = False,
+        max_compiles: int = 6,
     ) -> None:
         if output.exists() or output.is_symlink():
             raise ValueError("repository agent output already exists")
@@ -119,6 +128,158 @@ class RepositoryWorkspaceTools:
         self._rejected_syntax_edits: set[str] = set()
         self._public_probe_signatures: set[str] = set()
         self._public_probe_run_ids: list[str] = []
+        self._configure_recovery(compile_gate, allow_revert, max_compiles)
+
+    def _configure_recovery(
+        self, compile_gate: bool, allow_revert: bool, max_compiles: int
+    ) -> None:
+        if (
+            type(compile_gate) is not bool or type(allow_revert) is not bool
+            or type(max_compiles) is not int or not 1 <= max_compiles <= 8
+            or ((compile_gate or allow_revert) and (
+                not self._syntax_mode or self._public_kernel_path is None
+            ))
+        ):
+            raise ValueError("candidate recovery requires registered AST mode and bounded budget")
+        self._compile_gate = compile_gate
+        self._allow_revert = allow_revert
+        self._max_compiles = max_compiles
+        self._compile_results: dict[str, PublicCompileResult] = {}
+        self._last_edit_turn: int | None = None
+        self._revert_used = False
+
+    def _before_image(self, turn: int) -> dict[str, Any]:
+        refs = [
+            ref for ref in self._store.load(self.run_id).artifact_refs
+            if ref.name == f"repo-harness/v1/edit-{turn:03d}-before.json"
+        ]
+        if len(refs) != 1:
+            raise ValueError("CUDA_REVERT_PROVENANCE_MISMATCH")
+        value = json.loads(self._store.read(refs[0]))
+        if (
+            value["turn"] != turn or value["path"] != self._public_kernel_path
+            or hashlib.sha256(value["source"].encode()).hexdigest() != value["before_sha256"]
+        ):
+            raise ValueError("CUDA_REVERT_PROVENANCE_MISMATCH")
+        return dict(value)
+
+    def _restore_candidate_recovery(self, tool_calls: int) -> None:
+        if not (self._compile_gate or self._allow_revert):
+            return
+        events = read_repository_tool_events(
+            self._store, self.run_id, expected_count=tool_calls, require_observation=True
+        )
+        for turn, event in enumerate(events, 1):
+            if event["tool"] == "repo_compile_candidate" and event["status"] in ("OK", "FAILED"):
+                result = PublicCompileResult.model_validate_json(event["observation"])
+                self._validate_compile_result(result)
+                if result.candidate_sha256 in self._compile_results:
+                    raise ValueError("recovered duplicate candidate compilation")
+                self._compile_results[result.candidate_sha256] = result
+            if event["status"] != "OK":
+                continue
+            if event["tool"] == "repo_replace_syntax" and self._allow_revert and not self._revert_used:
+                image = self._before_image(turn)
+                if (
+                    image["before_sha256"] != event["action"]["expected_source_sha256"]
+                    or image["after_sha256"] not in event["observation"]
+                ):
+                    raise ValueError("recovered before-image differs from audited edit")
+                self._last_edit_turn = turn
+            elif event["tool"] == "repo_revert_last_edit":
+                if self._revert_used or self._last_edit_turn is None:
+                    raise ValueError("recovered invalid rollback ledger")
+                self._revert_used = True
+                self._last_edit_turn = None
+        if len(self._compile_results) > self._max_compiles:
+            raise ValueError("recovered compilation budget exceeded")
+        if self._last_edit_turn is not None:
+            image = self._before_image(self._last_edit_turn)
+            assert self._public_kernel_path is not None
+            if self._syntax_digest(self._public_kernel_path) != image["after_sha256"]:
+                raise ValueError("recovered rollback source differs from current candidate")
+
+    def _validate_compile_result(self, result: PublicCompileResult) -> None:
+        child = self._store.load(result.run_id)
+        refs = [ref for ref in child.artifact_refs if ref.name == "compile/public-summary.json"]
+        if (
+            child.parent_run_id != self.run_id or child.kind != "hardset_v2_public_compile"
+            or len(refs) != 1
+            or PublicCompileResult.model_validate_json(self._store.read(refs[0])) != result
+            or child.status.value != ("COMPLETED" if result.status == "BUILD_PASSED" else "FAILED")
+        ):
+            raise ValueError("PUBLIC_COMPILE_PROVENANCE_MISMATCH")
+
+    def _candidate_recovery_view(self) -> CandidateRecoveryView | None:
+        if not (self._compile_gate or self._allow_revert) or self._public_kernel_path is None:
+            return None
+        digest = self._syntax_digest(self._public_kernel_path)
+        result = self._compile_results.get(digest)
+        return CandidateRecoveryView(
+            source_sha256=digest,
+            compile_gate=self._compile_gate,
+            remaining_compiles=self._max_compiles - len(self._compile_results),
+            compile_status=result.status if result else "NOT_CHECKED",
+            revert_available=bool(
+                self._allow_revert and not self._revert_used and self._last_edit_turn is not None
+                and self._before_image(self._last_edit_turn)["after_sha256"] == digest
+            ),
+        )
+
+    def _compile_candidate(self, action: RepoCompileCandidate) -> ToolObservation:
+        assert self._public_kernel_path is not None
+        view = self._candidate_recovery_view()
+        if (
+            view is None or not self._compile_gate or view.remaining_compiles <= 0
+            or view.compile_status != "NOT_CHECKED"
+            or action.expected_source_sha256 != view.source_sha256
+        ):
+            raise ValueError("PUBLIC_COMPILE_NOT_AVAILABLE")
+        candidate = read_regular(
+            self.workspace._checked(self._public_kernel_path, editable=True), 1024 * 1024
+        )
+        if hashlib.sha256(candidate).hexdigest() != view.source_sha256:
+            raise ValueError("CUDA_SOURCE_SHA_STALE")
+        result = compile_public_candidate(
+            store=self._store, parent_run_id=self.run_id, repository=self.workspace.root,
+            candidate=candidate, output=self.output / f"compile-{self._tool_calls:03d}",
+        )
+        self._validate_compile_result(result)
+        if result.candidate_sha256 != view.source_sha256:
+            raise ValueError("PUBLIC_COMPILE_PROVENANCE_MISMATCH")
+        self._compile_results[result.candidate_sha256] = result
+        return ToolObservation(
+            tool=action.tool, status="OK" if result.status == "BUILD_PASSED" else "FAILED",
+            content=result.model_dump_json(),
+        )
+
+    def _revert_last_edit(self, action: RepoRevertLastEdit) -> ToolObservation:
+        view = self._candidate_recovery_view()
+        if (
+            view is None or not view.revert_available or self._last_edit_turn is None
+            or action.expected_source_sha256 != view.source_sha256
+        ):
+            raise ValueError("CUDA_REVERT_PROVENANCE_MISMATCH")
+        image = self._before_image(self._last_edit_turn)
+        digest = self.workspace.restore_last_accepted_source(
+            image["path"], expected_source_sha256=action.expected_source_sha256,
+            before=image["source"].encode(), before_sha256=image["before_sha256"],
+        )
+        self._invalidate_syntax_state()
+        self._revert_used = True
+        self._last_edit_turn = None
+        self._last_public_passed = False
+        self._last_file = image["path"]
+        self._last_file_read = self.workspace.read(image["path"])
+        return ToolObservation(
+            tool=action.tool, status="OK",
+            content=json.dumps({
+                "status": "REVERTED", "source_sha256": digest,
+                "reverted_source_sha256": action.expected_source_sha256,
+                "public_checks_passed": False,
+                "correction": "Inspect the restored revision before making a new edit.",
+            }),
+        )
 
     @property
     def observed_query_fingerprints(self) -> tuple[str, ...]:
@@ -208,7 +369,7 @@ class RepositoryWorkspaceTools:
             complete_rejection_ledger = True
             for record in records:
                 if record["status"] == "OK":
-                    if record["tool"] == "repo_replace_syntax":
+                    if record["tool"] in {"repo_replace_syntax", "repo_revert_last_edit"}:
                         active.clear()
                         recorded_rejections.clear()
                         complete_rejection_ledger = True
@@ -366,6 +527,9 @@ class RepositoryWorkspaceTools:
         context_mode: Literal["legacy", "evidence_first"] = "evidence_first",
         allow_batch_edits: bool = True,
         syntax_mode: bool = False,
+        compile_gate: bool = False,
+        allow_revert: bool = False,
+        max_compiles: int = 6,
     ) -> RepositoryWorkspaceTools:
         """Reattach a still-running public session with matching Git evidence."""
         if output.is_symlink() or not output.is_dir():
@@ -491,6 +655,8 @@ class RepositoryWorkspaceTools:
         host._last_file = None
         host._last_file_read = ""
         host._source_version = sha
+        host._configure_recovery(compile_gate, allow_revert, max_compiles)
+        host._restore_candidate_recovery(tool_calls)
         return host
 
     @property
@@ -541,7 +707,9 @@ class RepositoryWorkspaceTools:
                 for name in self.ALLOWED_TOOLS
                 if self._policy.check(name) == "ALLOW"
                 and (name != "repo_replace_many" or self._batch_enabled)
-                and name != "repo_run_public_checks"
+                and name not in {
+                    "repo_run_public_checks", "repo_compile_candidate", "repo_revert_last_edit"
+                }
                 and (
                     name not in {"repo_inspect_syntax", "repo_replace_syntax"} or self._syntax_mode
                 )
@@ -566,12 +734,22 @@ class RepositoryWorkspaceTools:
         if passed:
             return ("finish",) if self._policy.check("finish") == "ALLOW" else ()
         probe_phase = self._public_probe_phase()
+        recovery = self._candidate_recovery_view()
+        needs_compile = bool(
+            dirty and self._compile_gate and recovery is not None
+            and recovery.compile_status != "BUILD_PASSED"
+        )
+        waiting_for_compile = bool(
+            needs_compile and recovery is not None and recovery.compile_status == "NOT_CHECKED"
+            and recovery.remaining_compiles > 0
+        )
         can_check = (
             dirty
             and target_only
             and fresh_candidate
             and self._public_checks_attempted < self._max_public_checks
             and not passed
+            and not needs_compile
         )
         diff_key = self._query_fingerprint(
             {
@@ -601,8 +779,17 @@ class RepositoryWorkspaceTools:
                     )
                     if syntax_key in self._observed_query_fingerprints:
                         continue
+            if name == "repo_compile_candidate" and (
+                not self._compile_gate or not dirty or not target_only or recovery is None
+                or recovery.compile_status != "NOT_CHECKED" or recovery.remaining_compiles <= 0
+            ):
+                continue
+            if name == "repo_revert_last_edit" and (
+                recovery is None or not recovery.revert_available
+            ):
+                continue
             if name == "repo_replace_syntax" and (
-                self.syntax_state is None
+                waiting_for_compile or self.syntax_state is None
                 or not any(not node.code_truncated for node in self.syntax_state.observed_nodes)
             ):
                 continue
@@ -614,6 +801,7 @@ class RepositoryWorkspaceTools:
                 continue
             if name == "repo_probe_public" and (
                 self.public_probes_attempted >= 4 or probe_phase is None
+                or (probe_phase == "after" and needs_compile)
             ):
                 continue
             if name == "repo_run_public_checks" and not can_check:
@@ -699,6 +887,7 @@ class RepositoryWorkspaceTools:
             history=context.recent,
             syntax_mode=self._syntax_mode,
             syntax_state=self.syntax_state,
+            candidate_recovery=self._candidate_recovery_view(),
             context_summary=summary,
             workspace_source=context.source,
             total_public_actions=context.total_actions,
@@ -851,6 +1040,10 @@ class RepositoryWorkspaceTools:
         return result
 
     def _dispatch(self, action: HarnessAction) -> ToolObservation:
+        if isinstance(action, RepoCompileCandidate):
+            return self._compile_candidate(action)
+        if isinstance(action, RepoRevertLastEdit):
+            return self._revert_last_edit(action)
         if isinstance(action, RepoListFiles):
             key = self._query_fingerprint({"tool": action.tool, "suffix": action.suffix})
             self._require_new_observation(key, "REDUNDANT_LIST")
@@ -985,6 +1178,10 @@ class RepositoryWorkspaceTools:
                                 "computation defect; do not fabricate a change."
                             ),
                         )
+                before_image = (
+                    read_regular(self.workspace._checked(action.path, editable=True), 1024 * 1024)
+                    if self._allow_revert and not self._revert_used else None
+                )
                 digest = self.workspace.replace_syntax(
                     action.path,
                     expected_source_sha256=action.expected_source_sha256,
@@ -1004,6 +1201,19 @@ class RepositoryWorkspaceTools:
                         str(exc), source_sha256=current, correction=corrections[str(exc)]
                     ) from None
                 raise
+            if before_image is not None:
+                # The image is limited to the registered public kernel. If
+                # persistence fails after staging, abort rather than permit an
+                # unlogged rollback or silently continue a mutated session.
+                self._store.put(
+                    self.run_id, f"repo-harness/v1/edit-{self._tool_calls:03d}-before.json",
+                    json.dumps({
+                        "turn": self._tool_calls, "path": action.path,
+                        "before_sha256": current, "after_sha256": digest,
+                        "source": before_image.decode("utf-8"),
+                    }, ensure_ascii=False).encode(), "public",
+                )
+                self._last_edit_turn = self._tool_calls
             self._invalidate_syntax_state()
             self._last_file = action.path
             self._last_file_read = self.workspace.read(action.path)
@@ -1012,7 +1222,10 @@ class RepositoryWorkspaceTools:
                 status="OK",
                 content=(
                     f"SHA-bound AST node edit accepted. source_sha256={digest}. "
-                    "Run public CUDA checks on this new candidate."
+                    + (
+                        "Compile this candidate before after-probe or full checks."
+                        if self._compile_gate else "Run public CUDA checks on this new candidate."
+                    )
                 ),
             )
         if isinstance(action, RepoReplaceMany):
