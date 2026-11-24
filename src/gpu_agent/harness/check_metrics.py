@@ -86,10 +86,10 @@ def public_check_lifecycle(
             if event is None:
                 # Incomplete compile-only run is not evidence of a successful build.
                 continue
-            refs = [ref for ref in child.artifact_refs if ref.name == "compile/public-summary.json"]
-            if len(refs) != 1:
+            compile_refs = [ref for ref in child.artifact_refs if ref.name == "compile/public-summary.json"]
+            if len(compile_refs) != 1:
                 raise ValueError("compile summary missing")
-            compile_result = PublicCompileResult.model_validate_json(store.read(refs[0]))
+            compile_result = PublicCompileResult.model_validate_json(store.read(compile_refs[0]))
             if (
                 compile_result != PublicCompileResult.model_validate_json(event["observation"])
                 or compile_result.run_id != child.id

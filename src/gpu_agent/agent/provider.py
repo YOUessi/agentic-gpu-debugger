@@ -602,7 +602,8 @@ def response_termination(envelope: dict[str, Any]) -> ResponseTermination:
                     ):
                         parts.append(part["text"])
     output = "".join(parts)
-    tail = "".join(char if char in '{}[]":, \\n\\t' else "x" for char in output[-96:])
+    tail = "".join(char if char in '{}[]":,' else " " if char.isspace() else "x"
+        for char in output[-96:])
     return ResponseTermination.model_validate(
         {
             "response_status": status,
@@ -1220,7 +1221,7 @@ class OpenAIResponsesProvider:
             "plan",
             {
                 "hardset_probe_contract": "hardset-v2",
-                "snapshot": snapshot.model_dump(mode="json", exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None),
+                "snapshot": snapshot.model_dump(mode="json"),
             },
             HardsetProbePlanOutput,
         )

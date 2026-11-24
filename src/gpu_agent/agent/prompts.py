@@ -346,7 +346,8 @@ def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
                     " When available, compile the exact edited candidate before numeric checks. "
                     "Use compiler line/message to remove self-introduced errors. "
                     "If allowed, revert only the last accepted edit; then re-inspect. "
-                    "Compilation is not numerical correctness. Do not invent arbitrary source paths."
+                    "Compilation is not numerical correctness. "
+                    "Do not invent arbitrary source paths."
                 )
                 return "gpu-repository-ast-recovery-v1", GPU_REPOSITORY_AST_PROMPT + extra
             return GPU_REPOSITORY_AST_PROMPT_VERSION, GPU_REPOSITORY_AST_PROMPT
