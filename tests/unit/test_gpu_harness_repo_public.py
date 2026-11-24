@@ -94,8 +94,12 @@ class Model:
 class FakePublicChecker:
     """Writes the same immutable public RunStore contract as the real checker."""
 
-    def __init__(self, verdicts: list[bool]) -> None:
+    def __init__(
+        self, verdicts: list[bool], *, case_id: str = "h001", dispatched: bool = True
+    ) -> None:
         self.verdicts = verdicts
+        self.case_id = case_id
+        self.dispatched = dispatched
         self.calls: list[str] = []
 
     def __call__(
@@ -108,7 +112,7 @@ class FakePublicChecker:
         candidate: bytes,
         output: Path,
     ) -> HardsetPublicCheck:
-        assert case_id == "h001"
+        assert case_id == self.case_id
         assert repository.is_dir()
         assert not output.exists()
         output.mkdir(mode=0o700)
@@ -117,10 +121,22 @@ class FakePublicChecker:
         passed = self.verdicts[len(self.calls) - 1]
         child = store.create_run("hardset_v2_public_candidate", parent_run_id=parent_run_id)
         store.transition(child.id, "RUNNING", "PREPARING")
+        store.put(
+            child.id, "hardset/public-check-candidate.json",
+            json.dumps({"candidate_sha256": digest, "case_id": case_id}).encode(), "public",
+        )
+        if self.dispatched:
+            store.put(
+                child.id, "hardset/public-numeric-dispatch.json",
+                json.dumps({"candidate_sha256": digest, "input_size": 32}).encode(), "public",
+            )
         result = HardsetPublicCheck(
             candidate_sha256=digest,
             passed=passed,
-            failure_code="PUBLIC_CHECKS_PASSED" if passed else "NUMERIC_MISMATCH",
+            failure_code=(
+                "PUBLIC_CHECKS_PASSED" if passed else
+                "NUMERIC_MISMATCH" if self.dispatched else "PUBLIC_EXECUTION_UNAVAILABLE"
+            ),
             public_run_id=child.id,
         )
         store.put(
@@ -1684,3 +1700,209 @@ def test_ast_rejected_edit_ledger_survives_resume_and_detects_tampering(tmp_path
     after = read_repository_checkpoint(path)
     assert after.rejected_syntax_edits == checkpoint.rejected_syntax_edits
     assert "CUDA_SYNTAX_REPEATED_REJECTED_EDIT" in after.state["history"][-1]["content"]
+
+
+# The real ToolHost/AST/Git/RunStore run here; the model and GPU Checker are
+# deliberately test doubles. These are not measurements of model quality.
+_CASE_REPAIRS = {
+    "h001": [
+        ("denominator += expf(x);", "denominator += expf(x - maximum);"),
+        ("out[i] = expf(own) / denominator;", "out[i] = expf(own - maximum) / denominator;"),
+    ],
+    "h002": [
+        ("const float scale = rsqrtf(sum_sq / 32.0f + 1.0e-5f);",
+         "const float scale = rsqrtf(sum_sq / static_cast<float>(valid) + 1.0e-5f);"),
+    ],
+    "h003": [
+        ("total += a[start + j];", "total += a[start + j] + b[start + j];"),
+    ],
+}
+
+
+class CrossCaseASTFixture:
+    def __init__(self, case_id: str, *, fail_first: bool = False) -> None:
+        self.case_id = case_id
+        self.kernel = f"benchmarks/hardset_v2/{case_id}/mutant/kernel.cu"
+        self.fail_first = fail_first
+        self.snapshots = []
+        self.edits = []
+
+    def choose_harness_v1(self, snapshot):
+        self.snapshots.append(snapshot)
+        state = snapshot.syntax_state
+        if snapshot.public_checks_passed:
+            action = _finish()
+        elif "repo_run_public_checks" in snapshot.allowed_tools:
+            action = _check()
+        elif state is None or state.next_offset is not None:
+            action = {
+                "tool": "repo_inspect_syntax", "path": self.kernel, "symbol": "",
+                "offset": state.next_offset if state else 0, "limit": 8,
+            }
+        else:
+            assert state is not None
+            by_code = {node.code: node.id for node in state.observed_nodes}
+            if self.fail_first and not self.edits:
+                # First candidate is syntactically valid but intentionally wrong.
+                old, _ = _CASE_REPAIRS[self.case_id][0]
+                if self.case_id == "h001":
+                    wrong = "denominator += expf(x - 1.0f);"
+                elif self.case_id == "h002":
+                    wrong = "const float scale = rsqrtf(sum_sq / 16.0f + 1.0e-5f);"
+                else:
+                    wrong = "total += a[start + j] - b[start + j];"
+                corrections = [(old, wrong)]
+            else:
+                corrections = list(_CASE_REPAIRS[self.case_id])
+                if self.fail_first:
+                    previous = self.edits[0]["edits"][0]["replacement_code"]
+                    corrections[0] = (previous, corrections[0][1])
+                    assert state.source_sha256 != self.edits[0]["expected_source_sha256"]
+            action = {
+                "tool": "repo_replace_syntax", "path": self.kernel,
+                "expected_source_sha256": state.source_sha256,
+                "edits": [
+                    {"node_id": by_code[old], "replacement_code": replacement}
+                    for old, replacement in corrections
+                ],
+            }
+            self.edits.append(action)
+        assert action["tool"] in snapshot.allowed_tools
+        return HarnessDecision.model_validate(
+            {"action": action, "reason": "Exercise the real registered AST ToolHost"}
+        )
+
+
+@pytest.mark.parametrize("case_id", ["h001", "h002", "h003"])
+@pytest.mark.parametrize("fail_first", [False, True])
+def test_cross_case_ast_toolhost_full_loop_and_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case_id: str, fail_first: bool,
+) -> None:
+    repo, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([False, True] if fail_first else [True], case_id=case_id)
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    model = CrossCaseASTFixture(case_id, fail_first=fail_first)
+    output = tmp_path / "ast-cross-case"
+    result = run_repository_coding_session(
+        repository=repo, output=output, base_sha=sha,
+        goal="Repair the registered public CUDA kernel and check the exact candidate.",
+        public_case_id=case_id, syntax_mode=True, allow_batch_edits=False,
+        max_steps=18, max_model_calls=20, model_factory=lambda _: model,
+    )
+    assert result.status == "DIFF_STAGED_UNVERIFIED"
+    assert result.public_checks_passed
+    assert result.public_checks_attempted == (2 if fail_first else 1)
+    assert len(set(checker.calls)) == len(checker.calls)
+    metrics = summarize_repository_trajectory(output)
+    assert metrics.public_check_dispatches == result.public_checks_attempted
+    assert metrics.public_check_completions == result.public_checks_attempted
+    assert metrics.first_public_check_admitted_turn == metrics.first_public_check_executed_turn
+    assert metrics.first_public_check_completed_turn == metrics.first_public_check_executed_turn
+    assert metrics.first_public_check_pass_turn is not None
+    assert metrics.rejected_actions == 0
+    if fail_first:
+        assert len(model.edits) == 2
+        assert model.edits[0]["expected_source_sha256"] != model.edits[1]["expected_source_sha256"]
+        assert metrics.first_public_check_completed_turn < metrics.first_public_check_pass_turn
+        assert any(s.history and s.history[-1]["status"] == "FAILED" for s in model.snapshots)
+    assert any(s.syntax_state is None and s.current_candidate_sha256 for s in model.snapshots)
+    if case_id == "h003":
+        assert any(
+            s.syntax_state and {"group_sum", "group_center"}.issubset(
+                {n.function for n in s.syntax_state.observed_nodes}
+            )
+            for s in model.snapshots
+        )
+
+
+def test_h003_ast_resume_mid_page_then_finish(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+
+    repo, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([True], case_id="h003")
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    model = CrossCaseASTFixture("h003")
+    output = tmp_path / "h003-page-resume"
+    options = dict(
+        repository=repo, output=output, base_sha=sha,
+        goal="Repair the registered group centering kernel and verify it publicly.",
+        public_case_id="h003", syntax_mode=True, max_steps=12, max_model_calls=14,
+        model_factory=lambda _: model,
+    )
+    paused = run_repository_coding_session(**options, pause_after_turns=2)
+    assert paused.status == "PAUSED_RESUMABLE"
+    checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
+    pinned = checkpoint.syntax_state
+    assert pinned is not None and pinned.next_offset == 16
+    assert len(pinned.visited_pages) == 2
+    assert {"group_sum", "group_center"}.issubset({n.function for n in pinned.observed_nodes})
+    resumed = run_repository_coding_session(**options, resume=True)
+    assert model.snapshots[2].syntax_state == pinned
+    assert resumed.public_checks_passed
+    assert len(checker.calls) == 1
+
+
+def test_ast_lifecycle_rejected_request_and_unavailable_backend_are_distinct(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, sha = _registered_repository(tmp_path)
+    fake = FakePublicChecker([False], dispatched=False)
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", fake)
+    model = CrossCaseASTFixture("h002")
+
+    class WithRejectedRequest:
+        calls = 0
+
+        def choose_harness_v1(self, snapshot):
+            self.calls += 1
+            if self.calls == 1:
+                return HarnessDecision(action=RepoRunPublicChecks(), reason="Test denied check")
+            return model.choose_harness_v1(snapshot)
+
+    output = tmp_path / "ast-no-backend"
+    outcome = run_repository_coding_session(
+        repository=repo, output=output, base_sha=sha, goal="Repair public RMS kernel",
+        public_case_id="h002", syntax_mode=True,
+        max_steps=6, max_model_calls=8, model_factory=lambda _: WithRejectedRequest(),
+    )
+    assert outcome.status == "INCONCLUSIVE"
+    metrics = summarize_repository_trajectory(output)
+    assert metrics.first_public_check_request_turn == 1
+    assert metrics.first_public_check_admitted_turn == 6
+    assert metrics.first_public_check_executed_turn is None
+    assert metrics.first_public_check_completed_turn == 6
+    assert metrics.first_public_check_pass_turn is None
+
+
+def test_failed_ast_session_recovers_completed_check_and_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpu_agent.harness.ablation import _failed_repository_public_audit
+
+    repo, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([False], case_id="h002")
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    model = CrossCaseASTFixture("h002")
+
+    class FailAfterCheck:
+        def choose_harness_v1(self, snapshot):
+            if snapshot.history and snapshot.history[-1]["tool"] == "repo_run_public_checks":
+                raise RuntimeError("injected model failure after checker")
+            return model.choose_harness_v1(snapshot)
+
+    folder = tmp_path / "failed-trial"
+    with pytest.raises(RuntimeError, match="injected model failure"):
+        run_repository_coding_session(
+            repository=repo, output=folder / "agent", base_sha=sha, goal="Repair public RMS",
+            public_case_id="h002", syntax_mode=True, max_steps=12, max_model_calls=14,
+            model_factory=lambda _: FailAfterCheck(),
+        )
+    assert not (folder / "agent/result.json").exists()
+    recovered = _failed_repository_public_audit(folder)
+    assert recovered["first_edit_turn"] == 4
+    assert recovered["first_public_check_request_turn"] == 5
+    assert recovered["first_public_check_executed_turn"] == 5
+    assert recovered["first_public_check_completed_turn"] == 5
+    assert recovered["first_public_check_pass_turn"] is None
+    assert recovered["public_checks_attempted"] == 1
+    assert recovered["public_check_dispatches"] == 1

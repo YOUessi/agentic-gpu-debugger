@@ -406,6 +406,15 @@ def test_planner_only_frozen_arm_pair_holds_tools_context_and_budget_equal(
                 "hierarchical_syntax",
             }
     assert plan.max_steps == 8 and plan.max_model_calls == 10
+    assert plan.model_budget_scheme == "equal_executor_v1"
+    for unit in plan.units:
+        assert unit.executor_format_retry_limit == 2
+        if unit.arm == "hierarchical_syntax":
+            assert unit.physical_model_call_limit == 14
+            assert unit.auxiliary_model_call_limit == 4
+        else:
+            assert unit.physical_model_call_limit == 10
+            assert unit.auxiliary_model_call_limit == 0
     with pytest.raises(ValueError, match="invalid registered"):
         create_benchmark_plan(root, architecture_study=True, planner_only_study=True)
     with pytest.raises(ValueError, match="invalid registered"):
