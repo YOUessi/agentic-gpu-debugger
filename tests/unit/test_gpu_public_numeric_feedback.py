@@ -86,7 +86,7 @@ def test_numeric_failure_does_not_mask_sanitizer_in_diagnostic_mode(
         def run_sanitizer(self, request):
             calls.append(request.tool)
             return SimpleNamespace(
-                completed=True, check_outcome="FINDINGS", program_output_ref=None
+                completed=True, check_outcome="FINDING", program_output_ref=None
             )
 
         def cleanup(self, handle):

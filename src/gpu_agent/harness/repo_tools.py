@@ -255,8 +255,8 @@ class RepositoryWorkspaceTools:
         for record in records_to_replay:
             if record["tool"] == "repo_inspect_syntax_node":
                 full = RepoInspectSyntaxNode.model_validate(record["action"])
-                mapping = self._read_full_syntax_node(full)
-                if record["observation_sha256"] != hashlib.sha256(mapping.encode()).hexdigest():
+                full_content = self._read_full_syntax_node(full)
+                if record["observation_sha256"] != hashlib.sha256(full_content.encode()).hexdigest():
                     raise ValueError("recovered full AST node differs from audited observation")
                 continue
             page = next(pages)
@@ -1037,6 +1037,7 @@ class RepositoryWorkspaceTools:
                 )
             try:
                 observed = {node.id: node for node in state.observed_nodes}
+                unchanged: list[SyntaxEvidenceNode] = []
                 for edit in action.edits:
                     node = observed.get(edit.node_id)
                     if node is None:
@@ -1053,18 +1054,26 @@ class RepositoryWorkspaceTools:
                             correction="Only complete observed nodes are editable.",
                         )
                     if edit.replacement_code.strip() == node.code.strip():
-                        requirement = PUBLIC_REQUIREMENTS.get(self._public_case_id or "", "")
-                        raise SyntaxRejection(
-                            "CUDA_SYNTAX_NOOP",
-                            node_id=node.id,
-                            source_sha256=current,
-                            original_code=node.code,
-                            functional_requirement=requirement,
-                            correction=(
-                                "replacement_code must differ from the original and address the "
-                                "computation defect; do not fabricate a change."
-                            ),
-                        )
+                        unchanged.append(node)
+                if unchanged:
+                    requirement = PUBLIC_REQUIREMENTS.get(self._public_case_id or "", "")
+                    unchanged_ids = [node.id for node in unchanged]
+                    raise SyntaxRejection(
+                        "CUDA_SYNTAX_NOOP",
+                        node_id=unchanged[0].id,
+                        source_sha256=current,
+                        original_code=unchanged[0].code[:300],
+                        functional_requirement=requirement,
+                        unchanged_node_ids=unchanged_ids,
+                        changed_node_ids=[
+                            edit.node_id for edit in action.edits
+                            if edit.node_id not in unchanged_ids
+                        ],
+                        correction=(
+                            "Omit every unchanged entry from the edit list. Keep only meaningful "
+                            "changed nodes; no subset was applied. Do not fabricate a change."
+                        ),
+                    )
                 digest = self.workspace.replace_syntax(
                     action.path,
                     expected_source_sha256=action.expected_source_sha256,

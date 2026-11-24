@@ -174,7 +174,7 @@ def check_candidate_publicly(
                                 tool=tool.value,
                                 status=(
                                     "CLEAN" if clean else "FINDINGS"
-                                    if result.completed and result.check_outcome == "FINDINGS"
+                                    if result.completed and result.check_outcome == "FINDING"
                                     else "INCONCLUSIVE"
                                 ),
                                 numeric_output_matches=numeric_match,

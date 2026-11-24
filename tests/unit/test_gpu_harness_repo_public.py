@@ -2032,3 +2032,41 @@ def test_extended_toolhost_full_node_upgrade_resume_and_edit(tmp_path: Path) -> 
     assert edited.status == "PAUSED_RESUMABLE"
     assert read_repository_checkpoint(output / "session-checkpoint.json").syntax_state is None
     assert _CASE_REPAIRS["h002"][0][1] in (output / "worktree" / kernel).read_text()
+
+
+def test_mixed_noop_reports_all_unchanged_without_staging_subset(tmp_path: Path) -> None:
+    repo, sha = _registered_repository(tmp_path)
+    with RepositoryWorkspaceTools(
+        origin=repo, output=tmp_path / "mixed-noop", sha=sha,
+        public_case_id="h001", syntax_mode=True,
+    ) as host:
+        obs = host.invoke(RepoInspectSyntax(path=KERNEL, symbol="softmax32", limit=20))
+        assert obs.status == "OK"
+        state = host.syntax_state
+        assert state is not None
+        nodes = {n.code: n for n in state.observed_nodes}
+        first = nodes["denominator += expf(x);"]
+        second = nodes["out[i] = expf(own) / denominator;"]
+        changed = nodes["const float own = a[i] + b[i];"]
+        action = RepoReplaceSyntax(
+            path=KERNEL, expected_source_sha256=state.source_sha256,
+            edits=[
+                RepoSyntaxEdit(node_id=first.id, replacement_code=first.code),
+                RepoSyntaxEdit(node_id=second.id, replacement_code=second.code),
+                RepoSyntaxEdit(
+                    node_id=changed.id,
+                    replacement_code="const float own = a[i] + b[i] - maximum;",
+                ),
+            ],
+        )
+        rejected = host.invoke(action)
+        assert rejected.status == "REJECTED"
+        assert "Omit every unchanged entry" in rejected.content
+        assert not host.workspace.diff()
+        from gpu_agent.harness.repo_audit import read_repository_tool_events
+        events = read_repository_tool_events(
+            host.store, host.run_id, expected_count=2, require_observation=True
+        )
+        detail = events[-1]["rejection_detail"]
+        assert detail["unchanged_node_ids"] == [first.id, second.id]
+        assert detail["changed_node_ids"] == [changed.id]

@@ -16,6 +16,8 @@ from typing import Any
 import tree_sitter_cuda
 from tree_sitter import Language, Node, Parser
 
+from gpu_agent.harness.syntax_feedback import SyntaxRejection
+
 _NODE_TYPES = frozenset({"expression_statement", "return_statement", "declaration"})
 _MAX_NODES = 90
 _MAX_SOURCE = 1024 * 1024
@@ -339,5 +341,18 @@ def rewrite_syntax_nodes(
         raise ValueError("CUDA_SYNTAX_RESULT_TOO_LARGE")
     after = _parser().parse(rewritten)
     if after.root_node.has_error:
+        if extended:
+            pending = [after.root_node]
+            while pending:
+                node = pending.pop()
+                if node.is_error or node.is_missing:
+                    raise SyntaxRejection(
+                        "CUDA_SYNTAX_REPLACEMENT_PARSE_ERROR",
+                        candidate_line=node.start_point.row + 1,
+                        candidate_column=node.start_point.column + 1,
+                        parser_issue="MISSING_NODE" if node.is_missing else "ERROR_NODE",
+                        correction="Repair the syntax at the reported candidate location.",
+                    )
+                pending.extend(reversed(node.children))
         raise ValueError("CUDA_SYNTAX_REPLACEMENT_PARSE_ERROR")
     return rewritten
