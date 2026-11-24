@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from gpu_agent.harness.check_metrics import public_check_lifecycle
 from gpu_agent.harness.journal import read_verified_journal, recovery_disposition
 from gpu_agent.harness.models import RepoHarnessOutcome
 from gpu_agent.harness.repo_audit import read_repository_tool_events
@@ -49,6 +50,12 @@ class RepositoryTrajectoryMetrics(BaseModel):
     inspected_actions: int = Field(ge=0)
     first_accepted_edit_turn: int | None = Field(default=None, ge=1)
     first_public_check_request_turn: int | None = Field(default=None, ge=1)
+    first_public_check_admitted_turn: int | None = Field(default=None, ge=1)
+    first_public_check_executed_turn: int | None = Field(default=None, ge=1)
+    first_public_check_completed_turn: int | None = Field(default=None, ge=1)
+    first_public_check_pass_turn: int | None = Field(default=None, ge=1)
+    public_check_dispatches: int = Field(default=0, ge=0)
+    public_check_completions: int = Field(default=0, ge=0)
     first_public_pass_turn: int | None = Field(default=None, ge=1)
     first_accepted_finish_turn: int | None = Field(default=None, ge=1)
     rejected_actions: int = Field(ge=0)
@@ -147,30 +154,20 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         ),
         None,
     )
-    first_check = next(
-        (step.turn for step in sequence if step.tool == "repo_run_public_checks"),
-        None,
-    )
-    first_public_pass = next(
-        (
-            step.turn
-            for step in sequence
-            if step.tool == "repo_run_public_checks" and step.status == "OK"
-        ),
-        None,
-    )
+    lifecycle = public_check_lifecycle(store, result.public_run_id, journal, records)
+    first_public_pass = min(lifecycle.passed, default=None)
     first_finish = next(
         (step.turn for step in sequence if step.tool == "finish" and step.status == "OK"),
         None,
     )
     if (first_finish is not None) != (result.status == "DIFF_STAGED_UNVERIFIED"):
         raise ValueError("completion state contradicts tool evidence")
-    completed_gpu_calls = sum(
-        step.tool == "repo_run_public_checks" and step.status in {"OK", "FAILED"}
-        for step in sequence
-    )
-    if completed_gpu_calls > result.public_checks_attempted:
+    if len(lifecycle.admitted) > result.public_checks_attempted:
         raise ValueError("GPU evidence exceeds the recorded public check budget")
+    if payload.get("public_check_audit_version") == 1 and (
+        len(lifecycle.admitted) != result.public_checks_attempted
+    ):
+        raise ValueError("public check admission count disagrees with session result")
     if result.public_checks_passed and first_public_pass is None:
         raise ValueError("public success has no successful public GPU observation")
 
@@ -188,7 +185,13 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         model_tokens=result.model_tokens,
         inspected_actions=sum(step.tool in _READ_TOOLS for step in sequence),
         first_accepted_edit_turn=first_edit,
-        first_public_check_request_turn=first_check,
+        first_public_check_request_turn=min(lifecycle.requested, default=None),
+        first_public_check_admitted_turn=min(lifecycle.admitted, default=None),
+        first_public_check_executed_turn=min(lifecycle.executed, default=None),
+        first_public_check_completed_turn=min(lifecycle.completed, default=None),
+        first_public_check_pass_turn=first_public_pass,
+        public_check_dispatches=len(lifecycle.executed),
+        public_check_completions=len(lifecycle.completed),
         first_public_pass_turn=first_public_pass,
         first_accepted_finish_turn=first_finish,
         rejected_actions=sum(step.status == "REJECTED" for step in sequence),

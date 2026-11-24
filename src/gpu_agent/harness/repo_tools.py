@@ -1150,6 +1150,22 @@ class RepositoryWorkspaceTools:
         if candidate_sha in self._attempted_candidate_hashes:
             raise ValueError("identical CUDA candidate was already checked")
         diff_sha = self.workspace.integrity()["diff_sha256"]
+        # Durable admission before the backend call. A crash or rejected
+        # backend request is not a completed check.
+        self._store.put(
+            self.run_id,
+            f"repo-harness/v1/check-{self._tool_calls:03d}-admitted.json",
+            json.dumps(
+                {
+                    "turn": self._tool_calls,
+                    "candidate_sha256": candidate_sha,
+                    "diff_sha256": diff_sha,
+                    "case_id": self._public_case_id,
+                },
+                sort_keys=True,
+            ).encode(),
+            "public",
+        )
         self._attempted_candidate_hashes.add(candidate_sha)
         self._public_checks_attempted += 1
         result = check_candidate_publicly(

@@ -8,6 +8,7 @@ This is the feedback loop for Agent revisions, *not* the private verifier.
 from __future__ import annotations
 
 import hashlib
+import json
 import tempfile
 from pathlib import Path
 
@@ -53,6 +54,12 @@ def check_candidate_publicly(
     run = store.create_run("hardset_v2_public_candidate", parent_run_id=parent_run_id)
     store.transition(run.id, "RUNNING", "PREPARING")
     candidate_hash = hashlib.sha256(candidate).hexdigest()
+    store.put(
+        run.id,
+        "hardset/public-check-candidate.json",
+        json.dumps({"candidate_sha256": candidate_hash, "case_id": case_id}).encode(),
+        "public",
+    )
     feedback = HardsetPublicCheck(
         candidate_sha256=candidate_hash,
         passed=False,
@@ -89,6 +96,17 @@ def check_candidate_publicly(
                 for size in PUBLIC_CHECK_SIZES:
                     payload = sample_input(case_id, size)
                     ref = store.put(run.id, f"hardset/public-input-n{size}.json", payload, "public")
+                    if size == PUBLIC_CHECK_SIZES[0]:
+                        # Records dispatch of a numeric workload, not proof that
+                        # the GPU kernel completed. Build failures do not count.
+                        store.put(
+                            run.id,
+                            "hardset/public-numeric-dispatch.json",
+                            json.dumps(
+                                {"candidate_sha256": candidate_hash, "input_size": size}
+                            ).encode(),
+                            "public",
+                        )
                     execution = backend.run(
                         ExecutionRequest(workspace_id=handle.id, stdin_ref=ref, timeout_seconds=120)
                     )

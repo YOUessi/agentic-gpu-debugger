@@ -24,8 +24,10 @@ from gpu_agent.agent.models import ProviderError
 from gpu_agent.agent.provider import OpenAIProviderSettings, provider_invocations
 from gpu_agent.benchmark.hardset_v2 import HARDSET_CASES, load_registry
 from gpu_agent.benchmark.hardset_v2_agent import run_autonomous_hardset
+from gpu_agent.harness.check_metrics import public_check_lifecycle
 from gpu_agent.harness.journal import read_verified_journal
 from gpu_agent.harness.metrics import summarize_repository_trajectory
+from gpu_agent.harness.repo_audit import read_repository_tool_events
 from gpu_agent.harness.repo_runner import run_repository_coding_session
 from gpu_agent.harness.repo_verification import verify_repository_hardset_candidate
 from gpu_agent.store import RunStore, read_regular, reject_symlinks, sync_directory
@@ -114,12 +116,23 @@ class TrialRecord(BenchmarkModel):
     model_tokens: int | None = Field(default=None, ge=0)
     tool_turns: int | None = Field(default=None, ge=0)
     first_edit_turn: int | None = Field(default=None, ge=1)
+    # Legacy name is retained as an admitted request, not proof of GPU execution.
     first_public_check_turn: int | None = Field(default=None, ge=1)
+    first_public_check_request_turn: int | None = Field(default=None, ge=1)
+    first_public_check_admitted_turn: int | None = Field(default=None, ge=1)
+    first_public_check_executed_turn: int | None = Field(default=None, ge=1)
+    first_public_check_completed_turn: int | None = Field(default=None, ge=1)
+    first_public_check_pass_turn: int | None = Field(default=None, ge=1)
+    public_check_dispatches: int | None = Field(default=None, ge=0)
+    public_check_completions: int | None = Field(default=None, ge=0)
+    public_audit_available: bool = True
     redundant_reads: int | None = Field(default=None, ge=0)
     public_gpu_checks: int | None = Field(default=None, ge=0)
     public_probes: int | None = Field(default=None, ge=0)
     effective_patch: bool = False
     public_check_reached: bool = False
+    public_check_executed: bool | None = None
+    public_check_completed: bool | None = None
     elapsed_seconds: float = Field(ge=0)
     failure_type: str | None = None
     evaluation_kind: Literal["experimental-HardSet-V2"] = "experimental-HardSet-V2"
@@ -356,6 +369,13 @@ class PartialAudit(TypedDict, total=False):
     tool_turns: int
     first_edit_turn: int | None
     first_public_check_turn: int | None
+    first_public_check_request_turn: int | None
+    first_public_check_executed_turn: int | None
+    first_public_check_completed_turn: int | None
+    first_public_check_pass_turn: int | None
+    public_checks_attempted: int
+    public_check_dispatches: int
+    public_check_completions: int
 
 
 def _failed_repository_public_audit(unit_directory: Path) -> PartialAudit:
@@ -384,34 +404,40 @@ def _failed_repository_public_audit(unit_directory: Path) -> PartialAudit:
             if item.usage is not None and item.usage.total_tokens is not None
         ]
         tokens = sum(complete_usage) if len(complete_usage) == calls else None
-        tool_events: list[tuple[int, str, str]] = []
-        for ref in parent.artifact_refs:
-            if not (ref.name.startswith("repo-harness/v1/tool-") and ref.name.endswith(".json")):
-                continue
-            index = int(ref.name.rsplit("-", 1)[1].removesuffix(".json"))
-            row = json.loads(store.read(ref))
-            if row.get("tool") and row.get("status"):
-                tool_events.append((index, row["tool"], row["status"]))
-        tool_events.sort()
+        count = sum(
+            ref.name.startswith("repo-harness/v1/tool-") and ref.name.endswith(".json")
+            for ref in parent.artifact_refs
+        )
+        events = read_repository_tool_events(store, run_id, expected_count=count)
+        started = {
+            row["payload"]["turn"]: row["payload"]["tool"]
+            for row in journal if row["kind"] == "tool_started"
+        }
+        if any(started.get(turn) != row["tool"] for turn, row in enumerate(events, 1)):
+            raise ValueError("partial public tools do not match started journal requests")
         first_edit = next(
             (
-                index
-                for index, tool, status in tool_events
-                if tool in {"repo_replace_snippet", "repo_replace_many"} and status == "OK"
-            ),
-            None,
+                index for index, row in enumerate(events, 1)
+                if row["tool"] in {
+                    "repo_replace_snippet", "repo_replace_many", "repo_replace_syntax"
+                } and row["status"] == "OK"
+            ), None,
         )
-        first_gpu = next(
-            (index for index, tool, _ in tool_events if tool == "repo_run_public_checks"),
-            None,
-        )
+        lifecycle = public_check_lifecycle(store, run_id, journal, events)
         return {
             "run_id": run_id,
             "model_calls": calls,
             "model_tokens": tokens,
-            "tool_turns": sum(row["kind"] == "tool_completed" for row in journal),
+            "tool_turns": count,
             "first_edit_turn": first_edit,
-            "first_public_check_turn": first_gpu,
+            "first_public_check_turn": min(lifecycle.admitted, default=None),
+            "first_public_check_request_turn": min(lifecycle.requested, default=None),
+            "first_public_check_executed_turn": min(lifecycle.executed, default=None),
+            "first_public_check_completed_turn": min(lifecycle.completed, default=None),
+            "first_public_check_pass_turn": min(lifecycle.passed, default=None),
+            "public_checks_attempted": len(lifecycle.admitted),
+            "public_check_dispatches": len(lifecycle.executed),
+            "public_check_completions": len(lifecycle.completed),
         }
     except (OSError, ValueError, TypeError, KeyError, IndexError):
         # Missing or corrupt partial audit is a real evidence gap, not zero cost.
@@ -530,17 +556,57 @@ def _run_one(
             metrics.first_accepted_edit_turn if metrics else recovered.get("first_edit_turn")
         ),
         first_public_check_turn=(
-            metrics.first_public_check_request_turn
-            if metrics
-            else recovered.get("first_public_check_turn")
+            metrics.first_public_check_admitted_turn
+            if metrics else recovered.get("first_public_check_turn")
         ),
+        first_public_check_request_turn=(
+            metrics.first_public_check_request_turn
+            if metrics else recovered.get("first_public_check_request_turn")
+        ),
+        first_public_check_admitted_turn=(
+            metrics.first_public_check_admitted_turn
+            if metrics else recovered.get("first_public_check_turn")
+        ),
+        first_public_check_executed_turn=(
+            metrics.first_public_check_executed_turn
+            if metrics else recovered.get("first_public_check_executed_turn")
+        ),
+        first_public_check_completed_turn=(
+            metrics.first_public_check_completed_turn
+            if metrics else recovered.get("first_public_check_completed_turn")
+        ),
+        first_public_check_pass_turn=(
+            metrics.first_public_check_pass_turn
+            if metrics else recovered.get("first_public_check_pass_turn")
+        ),
+        public_check_dispatches=(
+            metrics.public_check_dispatches
+            if metrics else recovered.get("public_check_dispatches")
+        ),
+        public_check_completions=(
+            metrics.public_check_completions
+            if metrics else recovered.get("public_check_completions")
+        ),
+        public_audit_available=metrics is not None or bool(recovered),
         redundant_reads=metrics.redundant_inspection_rejections if metrics else None,
-        public_gpu_checks=result.public_checks_attempted if result else None,
+        public_gpu_checks=(
+            result.public_checks_attempted if result else recovered.get("public_checks_attempted")
+        ),
         public_probes=result.public_probes_attempted if result else None,
         effective_patch=bool(
             metrics.first_accepted_edit_turn if metrics else recovered.get("first_edit_turn")
         ),
-        public_check_reached=bool(result and result.public_checks_attempted > 0),
+        public_check_reached=bool(
+            result.public_checks_attempted if result else recovered.get("public_checks_attempted")
+        ),
+        public_check_executed=(
+            bool(metrics.public_check_dispatches) if metrics
+            else bool(recovered["public_check_dispatches"]) if recovered else None
+        ),
+        public_check_completed=(
+            bool(metrics.public_check_completions) if metrics
+            else bool(recovered["public_check_completions"]) if recovered else None
+        ),
         failure_type=failure,
         elapsed_seconds=round(time.monotonic() - begin, 3),
     )
@@ -574,6 +640,9 @@ def summarize_sweep(plan: BenchmarkPlan, records: tuple[TrialRecord, ...]) -> Sw
             "public_check_reached_rate": (
                 sum(item.public_check_reached for item in group) / len(group) if group else None
             ),
+            "public_check_executed_trials": sum(item.public_check_executed is True for item in group),
+            "public_check_completed_trials": sum(item.public_check_completed is True for item in group),
+            "missing_public_audits": sum(not item.public_audit_available for item in group),
             "first_effective_edit_turn_mean": sum(edits) / len(edits) if edits else None,
             "planned": sum(item.arm == arm for item in plan.units),
             "observed": len(group),

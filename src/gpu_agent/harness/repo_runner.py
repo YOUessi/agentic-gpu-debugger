@@ -192,6 +192,7 @@ def run_repository_coding_session(
                         "allow_batch_edits": allow_batch_edits,
                         "hierarchical_mode": hierarchical_mode,
                         "syntax_mode": syntax_mode,
+                        "public_check_audit_version": 1,
                         "repository_call_budget": {
                             "executor_decisions": role_budget.executor_decisions,
                             "executor_format_retries": role_budget.executor_format_retries,
