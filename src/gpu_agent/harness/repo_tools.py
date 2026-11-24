@@ -1417,7 +1417,8 @@ class RepositoryWorkspaceTools:
         number = self.public_probes_attempted + 1
         probe = (
             partial(probe_candidate_publicly, diagnostic_mode=True)
-            if self._public_diagnostics else probe_candidate_publicly
+            if self._public_diagnostics
+            else probe_candidate_publicly
         )
         result = probe(
             store=self._store,
@@ -1477,7 +1478,8 @@ class RepositoryWorkspaceTools:
         self._public_checks_attempted += 1
         checker = (
             partial(check_candidate_publicly, diagnostic_mode=True)
-            if self._public_diagnostics else check_candidate_publicly
+            if self._public_diagnostics
+            else check_candidate_publicly
         )
         result = checker(
             store=self._store,
@@ -1497,8 +1499,8 @@ class RepositoryWorkspaceTools:
             tool="repo_run_public_checks",
             status="OK" if result.passed else "FAILED",
             content=result.model_dump_json(
-                exclude=None if self._public_diagnostics else {
-                    "numeric_diagnostic", "sanitizer_diagnostics"
-                }
+                exclude=None
+                if self._public_diagnostics
+                else {"numeric_diagnostic", "sanitizer_diagnostics"}
             ),
         )

@@ -63,8 +63,11 @@ def load_prior(raw: bytes, case: str, failure_kind: str) -> dict[str, Any]:
         ):
             raise ValueError("prior report is not a failed accepted model edit")
         feedback = json.loads(data["checker_feedback"])
-        selected = {"action": data["action"], "candidate_sha256": data["candidate_sha256"],
-                    "checker_feedback": feedback}
+        selected = {
+            "action": data["action"],
+            "candidate_sha256": data["candidate_sha256"],
+            "checker_feedback": feedback,
+        }
     elif isinstance(data, list):
         selected = None
         last_edit = None
@@ -77,7 +80,8 @@ def load_prior(raw: bytes, case: str, failure_kind: str) -> dict[str, Any]:
             elif event["tool"] == "repo_run_public_checks" and event["status"] == "FAILED":
                 feedback = json.loads(event["observation"])
                 if (
-                    last_edit is not None and feedback["failure_code"] == failure
+                    last_edit is not None
+                    and feedback["failure_code"] == failure
                     and feedback["candidate_sha256"] == last_edit["candidate_sha256"]
                 ):
                     selected = {**last_edit, "checker_feedback": feedback}
@@ -100,10 +104,17 @@ def load_prior(raw: bytes, case: str, failure_kind: str) -> dict[str, Any]:
 
 class PriorFailureRecovery:
     def __init__(
-        self, host: RepositoryWorkspaceTools, prior: dict[str, Any], *,
-        failure_kind: str, settings: OpenAIProviderSettings,
-        max_steps: int, max_model_calls: int, compile_gate: bool,
-        allow_revert: bool, public_diagnostics: bool,
+        self,
+        host: RepositoryWorkspaceTools,
+        prior: dict[str, Any],
+        *,
+        failure_kind: str,
+        settings: OpenAIProviderSettings,
+        max_steps: int,
+        max_model_calls: int,
+        compile_gate: bool,
+        allow_revert: bool,
+        public_diagnostics: bool,
     ) -> None:
         self.host = host
         self.prior = prior
@@ -121,7 +132,8 @@ class PriorFailureRecovery:
                 AgentBudget(max_llm_calls=max_model_calls, max_wall_time_seconds=600),
                 reserve_repair_stages=False,
             ),
-            host.store, host.run_id,
+            host.store,
+            host.run_id,
             call_policy=DevelopmentCallPolicy(max_llm_calls=max_model_calls),
             repository_budget=RepositoryCallBudget.from_session(
                 max_steps=max_steps, max_model_calls=max_model_calls, hierarchical=False
@@ -142,8 +154,10 @@ class PriorFailureRecovery:
         if self.prefix_complete:
             return self.provider.choose_harness_v1(snapshot)
         events = read_repository_tool_events(
-            self.host.store, self.host.run_id,
-            expected_count=self.host.tool_calls, require_observation=True,
+            self.host.store,
+            self.host.run_id,
+            expected_count=self.host.tool_calls,
+            require_observation=True,
         )
         if events and events[-1]["status"] == "REJECTED":
             raise ValueError("operator failure prefix rejected")
@@ -153,9 +167,14 @@ class PriorFailureRecovery:
             if state is None or not {e.node_id for e in self.edit.edits}.issubset(observed):
                 if state is not None and state.next_offset is None:
                     raise ValueError("prior candidate targets not available")
-                return self._prefix_action(snapshot, RepoInspectSyntax(
-                    path=self.edit.path, offset=state.next_offset if state else 0, limit=8,
-                ))
+                return self._prefix_action(
+                    snapshot,
+                    RepoInspectSyntax(
+                        path=self.edit.path,
+                        offset=state.next_offset if state else 0,
+                        limit=8,
+                    ),
+                )
             if state.source_sha256 != self.edit.expected_source_sha256:
                 raise ValueError("prior edit refers to a different mutant SHA")
             return self._prefix_action(snapshot, self.edit)
@@ -170,9 +189,9 @@ class PriorFailureRecovery:
             if view is None or not view.compile_gate or view.source_sha256 != actual:
                 raise ValueError("compile gate not active in actual snapshot")
             if view.compile_status == "NOT_CHECKED":
-                return self._prefix_action(snapshot, RepoCompileCandidate(
-                    expected_source_sha256=actual
-                ))
+                return self._prefix_action(
+                    snapshot, RepoCompileCandidate(expected_source_sha256=actual)
+                )
         if self.failure_kind == "build":
             if view is None or view.compile_status != "BUILD_FAILED":
                 raise ValueError("build recovery precondition did not reproduce")
@@ -191,8 +210,8 @@ class PriorFailureRecovery:
         if last["tool"] != expected_tool or last["status"] != "FAILED":
             raise ValueError("first failure did not reproduce")
         feedback = json.loads(last["observation"])
-        failure = feedback.get("status") if self.failure_kind == "build" else feedback.get(
-            "failure_code"
+        failure = (
+            feedback.get("status") if self.failure_kind == "build" else feedback.get("failure_code")
         )
         if failure != self.prior["checker_feedback"]["failure_code"]:
             raise ValueError("reproduced failure class differs")
@@ -202,28 +221,43 @@ class PriorFailureRecovery:
         self.prefix_complete = True
         # Attest the exact capability list seen by the first live decision.
         self.host.store.put(
-            self.host.run_id, "recovery/handoff.json",
-            json.dumps({
-                "operator_prefix_tool_turns": self.prefix_turns,
-                "failed_candidate_sha256": actual,
-                "allowed_tools": snapshot.allowed_tools,
-                "candidate_recovery": view.model_dump(mode="json") if view else None,
-                "failure_feedback": feedback,
-            }).encode(), "public",
+            self.host.run_id,
+            "recovery/handoff.json",
+            json.dumps(
+                {
+                    "operator_prefix_tool_turns": self.prefix_turns,
+                    "failed_candidate_sha256": actual,
+                    "allowed_tools": snapshot.allowed_tools,
+                    "candidate_recovery": view.model_dump(mode="json") if view else None,
+                    "failure_feedback": feedback,
+                }
+            ).encode(),
+            "public",
         )
         return self.provider.choose_harness_v1(snapshot)
 
 
 def summarize_trial(
-    output: Path, *, config: dict[str, Any], model: PriorFailureRecovery | None,
-    outcome: Any, error_code: str | None,
+    output: Path,
+    *,
+    config: dict[str, Any],
+    model: PriorFailureRecovery | None,
+    outcome: Any,
+    error_code: str | None,
 ) -> dict[str, Any]:
     """Use audited events and candidate identities even if the model aborted."""
     agent = output / "agent"
     journal = read_verified_journal(agent / "session-events.jsonl")
     started = journal[0]["payload"]
-    for key in ("compile_gate", "allow_revert", "public_diagnostics", "max_compiles",
-                "max_steps", "max_model_calls", "max_output_tokens"):
+    for key in (
+        "compile_gate",
+        "allow_revert",
+        "public_diagnostics",
+        "max_compiles",
+        "max_steps",
+        "max_model_calls",
+        "max_output_tokens",
+    ):
         if started.get(key) != config[key]:
             raise ValueError(f"actual journal disagrees with frozen {key}")
     store = RunStore(agent / "public")
@@ -245,7 +279,8 @@ def summarize_trial(
     live = [(i, e) for i, e in enumerate(events, 1) if i > prefix]
     live_edits = [
         (i, _SHA.search(e["observation"]))
-        for i, e in live if e["tool"] == "repo_replace_syntax" and e["status"] == "OK"
+        for i, e in live
+        if e["tool"] == "repo_replace_syntax" and e["status"] == "OK"
     ]
     if any(match is None for _, match in live_edits):
         raise ValueError("live accepted edit lacks source hash")
@@ -258,11 +293,13 @@ def summarize_trial(
             admission = json.loads(store.read(ref))
             admitted_by_turn[admission["turn"]] = admission["candidate_sha256"]
     dispatched = {
-        admitted_by_turn[t] for t in lifecycle.executed
+        admitted_by_turn[t]
+        for t in lifecycle.executed
         if t > prefix and admitted_by_turn.get(t) in candidates
     }
     passed = {
-        admitted_by_turn[t] for t in lifecycle.passed
+        admitted_by_turn[t]
+        for t in lifecycle.passed
         if t > prefix and admitted_by_turn.get(t) in candidates
     }
     builds_failed = []
@@ -296,8 +333,11 @@ def summarize_trial(
     terminal_reason = outcome.reason if outcome is not None else error_code
     metrics = summarize_repository_trajectory(agent).model_dump(mode="json") if outcome else None
     return {
-        **config, "public_run_id": run_id, "operator_prefix_tool_turns": prefix,
-        "live_tool_turns": len(live), "total_tool_turns": count,
+        **config,
+        "public_run_id": run_id,
+        "operator_prefix_tool_turns": prefix,
+        "live_tool_turns": len(live),
+        "total_tool_turns": count,
         "first_failure_reproduced": model.prefix_complete if model else None,
         "initial_failure_feedback": model.failure_feedback if model else None,
         "build_failure_observed": bool(builds_failed),
@@ -329,8 +369,13 @@ def summarize_trial(
         "outcome": outcome.model_dump(mode="json") if outcome else None,
         "metrics": metrics,
         "tool_trace": [
-            {"turn": i, "actor": "operator" if i <= prefix else "model",
-             "tool": e["tool"], "status": e["status"], "rejection_code": e.get("rejection_code")}
+            {
+                "turn": i,
+                "actor": "operator" if i <= prefix else "model",
+                "tool": e["tool"],
+                "status": e["status"],
+                "rejection_code": e.get("rejection_code"),
+            }
             for i, e in enumerate(events, 1)
         ],
     }
@@ -339,7 +384,9 @@ def summarize_trial(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repository", type=Path, required=True)
-    parser.add_argument("--output", type=Path, required=True, help="New trial directory; agent/ contains session")
+    parser.add_argument(
+        "--output", type=Path, required=True, help="New trial directory; agent/ contains session"
+    )
     parser.add_argument("--case", choices=("h001", "h002", "h003"), required=True)
     parser.add_argument("--failure-kind", choices=("build", "numeric", "none"), required=True)
     parser.add_argument("--prior-result", type=Path)
@@ -375,12 +422,18 @@ def main() -> int:
     reject_symlinks(args.repository)
     repo = args.repository.resolve(strict=True)
     sha = subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True,
-        capture_output=True, text=True, timeout=20,
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
     ).stdout.strip()
     if subprocess.run(
-        ["git", "-C", str(repo), "status", "--porcelain"], check=True,
-        capture_output=True, text=True, timeout=20,
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
     ).stdout.strip():
         parser.error("experiment requires a clean frozen checkout")
     settings = OpenAIProviderSettings.from_environment().model_copy(
@@ -390,16 +443,25 @@ def main() -> int:
         parser.error("provider configuration missing")
     config = {
         "experiment": "conditional_recovery" if prior else "autonomous_from_mutant",
-        "case_id": args.case, "failure_kind": args.failure_kind, "base_sha": sha,
+        "case_id": args.case,
+        "failure_kind": args.failure_kind,
+        "base_sha": sha,
         "prior_result_sha256": args.prior_result_sha256,
         "prior_candidate_sha256": prior["candidate_sha256"] if prior else None,
-        "compile_gate": args.compile_gate, "allow_revert": args.allow_revert,
-        "public_diagnostics": args.public_diagnostics, "extended_syntax": False,
-        "hierarchical_mode": False, "max_compiles": args.max_compiles,
-        "max_public_checks": 2, "max_steps": args.max_steps,
-        "max_model_calls": args.max_model_calls, "max_output_tokens": args.max_output_tokens,
-        "model": settings.model, "request_timeout_seconds": settings.timeout_seconds,
-        "wall_budget_seconds": 600, "prefix_included_in_step_budget": True,
+        "compile_gate": args.compile_gate,
+        "allow_revert": args.allow_revert,
+        "public_diagnostics": args.public_diagnostics,
+        "extended_syntax": False,
+        "hierarchical_mode": False,
+        "max_compiles": args.max_compiles,
+        "max_public_checks": 2,
+        "max_steps": args.max_steps,
+        "max_model_calls": args.max_model_calls,
+        "max_output_tokens": args.max_output_tokens,
+        "model": settings.model,
+        "request_timeout_seconds": settings.timeout_seconds,
+        "wall_budget_seconds": 600,
+        "prefix_included_in_step_budget": True,
     }
     output = args.output.absolute()
     reject_symlinks(output)
@@ -410,9 +472,14 @@ def main() -> int:
     def factory(host: RepositoryWorkspaceTools):
         assert prior is not None
         model = PriorFailureRecovery(
-            host, prior, failure_kind=args.failure_kind, settings=settings,
-            max_steps=args.max_steps, max_model_calls=args.max_model_calls,
-            compile_gate=args.compile_gate, allow_revert=args.allow_revert,
+            host,
+            prior,
+            failure_kind=args.failure_kind,
+            settings=settings,
+            max_steps=args.max_steps,
+            max_model_calls=args.max_model_calls,
+            compile_gate=args.compile_gate,
+            allow_revert=args.allow_revert,
             public_diagnostics=args.public_diagnostics,
         )
         holder.append(model)
@@ -422,13 +489,23 @@ def main() -> int:
     error_code = None
     try:
         outcome = run_repository_coding_session(
-            repository=repo, output=output / "agent", base_sha=sha, goal=GOAL,
-            public_case_id=args.case, syntax_mode=True, allow_batch_edits=False,
-            context_mode="evidence_first", max_steps=args.max_steps,
-            max_model_calls=args.max_model_calls, max_public_checks=2,
-            compile_gate=args.compile_gate, allow_revert=args.allow_revert,
-            max_compiles=args.max_compiles, public_diagnostics=args.public_diagnostics,
-            provider_settings=settings, allow_paid_calls=True,
+            repository=repo,
+            output=output / "agent",
+            base_sha=sha,
+            goal=GOAL,
+            public_case_id=args.case,
+            syntax_mode=True,
+            allow_batch_edits=False,
+            context_mode="evidence_first",
+            max_steps=args.max_steps,
+            max_model_calls=args.max_model_calls,
+            max_public_checks=2,
+            compile_gate=args.compile_gate,
+            allow_revert=args.allow_revert,
+            max_compiles=args.max_compiles,
+            public_diagnostics=args.public_diagnostics,
+            provider_settings=settings,
+            allow_paid_calls=True,
             model_factory=factory if prior else None,
         )
     except ProviderError as exc:
@@ -438,13 +515,19 @@ def main() -> int:
         print(f"EXPERIMENT_ABORTED: {error_code}", flush=True)
     try:
         report = summarize_trial(
-            output, config=config, model=holder[0] if holder else None,
-            outcome=outcome, error_code=error_code,
+            output,
+            config=config,
+            model=holder[0] if holder else None,
+            outcome=outcome,
+            error_code=error_code,
         )
     except Exception as exc:
         report = {
-            **config, "terminal_reason": error_code, "audit_error": type(exc).__name__,
-            "public_pass": None, "first_failure_reproduced": None,
+            **config,
+            "terminal_reason": error_code,
+            "audit_error": type(exc).__name__,
+            "public_pass": None,
+            "first_failure_reproduced": None,
         }
     (output / "controlled-recovery.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, ensure_ascii=False), flush=True)
