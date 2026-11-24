@@ -1950,3 +1950,135 @@ def test_failed_ast_session_recovers_completed_check_and_edit(
     assert recovered["first_public_check_pass_turn"] is None
     assert recovered["public_checks_attempted"] == 1
     assert recovered["public_check_dispatches"] == 1
+
+
+def test_compile_gate_and_one_revert_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real AST host, worktree, checkpoint; isolated NVCC and model are test doubles."""
+    from gpu_agent.benchmark.public_compile import CompileDiagnostic, PublicCompileResult
+    from gpu_agent.harness.models import RepoCompileCandidate, RepoRevertLastEdit
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+
+    repo, sha = _registered_repository(tmp_path)
+    calls = []
+    def fake_compile(*, store, parent_run_id, repository, candidate, output):
+        child = store.create_run("hardset_v2_public_compile", parent_run_id=parent_run_id)
+        store.transition(child.id, "RUNNING", "PREPARING")
+        digest = hashlib.sha256(candidate).hexdigest()
+        calls.append(digest)
+        result = PublicCompileResult(
+            candidate_sha256=digest, run_id=child.id, status="BUILD_FAILED",
+            diagnostic=CompileDiagnostic(line=12, message="const assignment error"),
+        )
+        store.put(child.id, "compile/public-summary.json", result.model_dump_json().encode(), "public")
+        store.transition(child.id, "FAILED", None)
+        return result
+
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.compile_public_candidate", fake_compile)
+    path = "benchmarks/hardset_v2/h003/mutant/kernel.cu"
+    before = hashlib.sha256((repo / path).read_bytes()).hexdigest()
+
+    class FirstCandidate:
+        def choose_harness_v1(self, snapshot):
+            state = snapshot.syntax_state
+            if snapshot.current_candidate_sha256 is None:
+                if state is None or not any(
+                    n.code.startswith("const unsigned int valid =") for n in state.observed_nodes
+                ):
+                    action = RepoInspectSyntax(path=path, offset=state.next_offset if state else 0)
+                else:
+                    node = next(
+                        n for n in state.observed_nodes if n.code.startswith("const unsigned int valid =")
+                    )
+                    action = RepoReplaceSyntax(
+                        path=path, expected_source_sha256=state.source_sha256,
+                        edits=[RepoSyntaxEdit(
+                            node_id=node.id, replacement_code=node.code + " if (valid == 0) valid = 1;",
+                        )],
+                    )
+            else:
+                recovery = snapshot.candidate_recovery
+                assert recovery is not None
+                assert "repo_run_public_checks" not in snapshot.allowed_tools
+                assert "repo_probe_public" not in snapshot.allowed_tools
+                if recovery.compile_status == "NOT_CHECKED":
+                    assert "repo_compile_candidate" in snapshot.allowed_tools
+                    action = RepoCompileCandidate(expected_source_sha256=recovery.source_sha256)
+                else:
+                    assert recovery.compile_status == "BUILD_FAILED"
+                    assert "repo_compile_candidate" not in snapshot.allowed_tools
+                    action = RepoRevertLastEdit(expected_source_sha256=recovery.source_sha256)
+            return HarnessDecision(action=action, reason="Test candidate recovery gate")
+
+    opts = dict(
+        repository=repo, output=tmp_path / "compile-revert-resume", base_sha=sha,
+        goal="Exercise compile and rollback for the registered CUDA candidate.",
+        public_case_id="h003", syntax_mode=True, compile_gate=True, allow_revert=True,
+        max_steps=9, max_model_calls=11, model_factory=lambda _: FirstCandidate(),
+    )
+    output = opts["output"]
+    paused = run_repository_coding_session(**opts, pause_after_turns=3)
+    assert paused.status == "PAUSED_RESUMABLE"
+    ck = read_repository_checkpoint(output / "session-checkpoint.json")
+    assert ck.state["history"][-1]["tool"] == "repo_compile_candidate"
+    assert paused.public_checks_attempted == 0 and len(calls) == 1
+    with pytest.raises(ValueError, match="budgets differ"):
+        run_repository_coding_session(**{**opts, "allow_revert": False}, resume=True)
+    paused = run_repository_coding_session(**opts, resume=True, pause_after_turns=4)
+    assert paused.status == "PAUSED_RESUMABLE"
+    ck = read_repository_checkpoint(output / "session-checkpoint.json")
+    assert ck.state["history"][-1]["tool"] == "repo_revert_last_edit"
+    assert ck.syntax_state is None and ck.accepted_hashes == {}
+    assert not ck.last_public_passed
+    assert hashlib.sha256((output / "worktree" / path).read_bytes()).hexdigest() == before
+    assert len(calls) == 1
+
+
+def test_compile_gate_is_independent_and_counts_unique_buildable_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from gpu_agent.benchmark.public_compile import PublicCompileResult
+    from gpu_agent.harness.models import RepoCompileCandidate
+
+    repo, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([True], case_id="h002")
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+
+    def fake_compile(*, store, parent_run_id, repository, candidate, output):
+        child = store.create_run("hardset_v2_public_compile", parent_run_id=parent_run_id)
+        store.transition(child.id, "RUNNING", "PREPARING")
+        result = PublicCompileResult(
+            candidate_sha256=hashlib.sha256(candidate).hexdigest(), run_id=child.id,
+            status="BUILD_PASSED",
+        )
+        store.put(child.id, "compile/public-summary.json", result.model_dump_json().encode(), "public")
+        store.transition(child.id, "COMPLETED", None)
+        return result
+
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.compile_public_candidate", fake_compile)
+    fixture = CrossCaseASTFixture("h002")
+
+    class CompileThenCheck:
+        def choose_harness_v1(self, snapshot):
+            if "repo_compile_candidate" in snapshot.allowed_tools:
+                assert "repo_revert_last_edit" not in snapshot.allowed_tools
+                assert "repo_run_public_checks" not in snapshot.allowed_tools
+                return HarnessDecision(
+                    action=RepoCompileCandidate(
+                        expected_source_sha256=snapshot.candidate_recovery.source_sha256
+                    ),
+                    reason="Compile edited candidate before checking",
+                )
+            return fixture.choose_harness_v1(snapshot)
+
+    output = tmp_path / "buildable-candidate"
+    result = run_repository_coding_session(
+        repository=repo, output=output, base_sha=sha, goal="Repair the public RMS kernel",
+        public_case_id="h002", syntax_mode=True, compile_gate=True, allow_revert=False,
+        max_steps=12, max_model_calls=14, model_factory=lambda _: CompileThenCheck(),
+    )
+    assert result.public_checks_attempted == 1 and result.public_checks_passed
+    metrics = summarize_repository_trajectory(output)
+    assert metrics.ast_edit_accepted_count == 1
+    assert metrics.build_passed_candidate_count == 1
+    assert metrics.numeric_dispatched_candidate_count == 1
+    assert metrics.public_check_passed_candidate_count == 1
