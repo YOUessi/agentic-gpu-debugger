@@ -159,7 +159,9 @@ def verify_repository_hardset_candidate(
     if not patch:
         raise ValueError("the registered candidate does not modify its original")
     with tempfile.TemporaryDirectory(prefix="gpu-repo-strict-preflight-") as temporary:
-        folder = Path(temporary)
+        # The controller created this directory, not the model. Canonicalize
+        # only this trusted temp path (macOS /var -> /private/var).
+        folder = Path(temporary).resolve(strict=True)
         (folder / "kernel.cu").write_bytes(original)
         snapshot = SourceSnapshot(
             parent_run_id="0" * 32,

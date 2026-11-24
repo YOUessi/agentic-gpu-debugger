@@ -27,7 +27,13 @@ from gpu_agent.agent.models import (
     PublicEvidence,
     PublicSource,
 )
-from gpu_agent.agent.policy import CallKind, LLMCallGate, validate_diagnosis
+from gpu_agent.agent.policy import (
+    CallKind,
+    LLMCallGate,
+    RepositoryCallBudget,
+    RepositoryCallRole,
+    validate_diagnosis,
+)
 from gpu_agent.agent.prompts import PROMPT_VERSION, select_prompt
 from gpu_agent.agent.transport import TransportError, classify_transport_error
 from gpu_agent.contracts import new_id, now
@@ -330,6 +336,7 @@ class Invocation(ExecutionModel):
     invocation_id: str
     run_id: str
     kind: CallKind
+    repository_role: RepositoryCallRole | None = None
     attempt: int
     state: Literal["STARTED", "COMPLETED", "FAILED", "UNCERTAIN"]
     started_at: datetime
@@ -793,9 +800,15 @@ class OpenAIResponsesProvider:
         diff_validator: Callable[[str], object] | None = None,
         idempotency_key: str | None = None,
         call_policy: DevelopmentCallPolicy | None = None,
+        repository_budget: RepositoryCallBudget | None = None,
     ) -> None:
         self.settings, self.gate, self.store, self.run_id = settings, gate, store, run_id
         self._call_policy = call_policy
+        self._repository_budget = repository_budget
+        if repository_budget is not None and (
+            call_policy is None or repository_budget.total != call_policy.max_llm_calls
+        ):
+            raise ValueError("repository role limits must match the physical call ceiling")
         self.model_name = settings.model
         if settings.endpoint and _is_deepseek_endpoint(settings.endpoint):
             self.provider_name = "deepseek-responses"
@@ -832,6 +845,23 @@ class OpenAIResponsesProvider:
         ):
             raise ProviderError("AGENT_BUDGET_EXHAUSTED")
 
+    def _check_repository_role(
+        self, role: RepositoryCallRole | None, attempt: int
+    ) -> None:
+        budget = self._repository_budget
+        if budget is None:
+            return
+        if role is None:
+            raise ProviderError("LLM_REPOSITORY_ROLE_REQUIRED")
+        records = self.invocations()
+        if any(item.repository_role is None for item in records):
+            raise ProviderError("LLM_LEGACY_REPOSITORY_BUDGET_UNRESUMABLE")
+        used = sum(
+            item.repository_role == role and item.attempt == attempt for item in records
+        )
+        if used >= budget.limit(role, attempt):
+            raise ProviderError("LLM_REPOSITORY_ROLE_BUDGET_EXHAUSTED")
+
     @staticmethod
     def _metadata(response: dict[str, Any]) -> dict[str, object]:
         usage = response.get("usage")
@@ -862,6 +892,7 @@ class OpenAIResponsesProvider:
         *,
         wire_model: type[BaseModel] | None = None,
         convert: Callable[[Any], Output] | None = None,
+        repository_role: RepositoryCallRole | None = None,
     ) -> Output:
         self.ensure_available()
         if self._cancel is not None and self._cancel.is_set():
@@ -889,11 +920,18 @@ class OpenAIResponsesProvider:
         self._call_sequence += 1
         for attempt in range(2):
             self._check_call_limit()
-            timeout = min(self.settings.timeout_seconds, self.gate.reserve(kind, attempt=attempt))
+            self._check_repository_role(repository_role, attempt)
+            timeout = min(
+                self.settings.timeout_seconds,
+                self.gate.reserve(
+                    kind, attempt=attempt, role_scoped_retry=self._repository_budget is not None
+                ),
+            )
             invocation = Invocation(
                 invocation_id=new_id(),
                 run_id=self.run_id,
                 kind=kind,
+                repository_role=repository_role,
                 attempt=attempt,
                 state="STARTED",
                 request_timeout_seconds=timeout,
@@ -1043,6 +1081,7 @@ class OpenAIResponsesProvider:
             "plan",
             {"gpu_repo_task_plan": "v1", "snapshot": snapshot.model_dump(mode="json")},
             TaskPlan,
+            repository_role="planner",
         )
 
     def reflect_repository_task(self, snapshot: "SessionSnapshot") -> "TaskReflection":
@@ -1053,6 +1092,7 @@ class OpenAIResponsesProvider:
             "plan",
             {"gpu_repo_reflection": "v1", "snapshot": snapshot.model_dump(mode="json")},
             TaskReflection,
+            repository_role="reflect",
         )
 
     def choose_harness_v1(self, snapshot: "SessionSnapshot") -> "HarnessDecision":
@@ -1071,6 +1111,7 @@ class OpenAIResponsesProvider:
                 "snapshot": snapshot.model_dump(mode="json"),
             },
             HarnessDecision,
+            repository_role="executor" if snapshot.case_id == "repository" else None,
         )
 
     def plan_hardset_v2(self, snapshot: "PlannerSnapshot") -> "ProbeChoice":

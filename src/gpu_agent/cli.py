@@ -42,7 +42,12 @@ def harness_sweep_repo(
     cases: Annotated[str, typer.Option("--cases")] = "h001",
     repetitions: Annotated[int, typer.Option("--repetitions", min=1, max=3)] = 1,
     max_steps: Annotated[int, typer.Option("--max-steps", min=4, max=24)] = 12,
-    max_model_calls: Annotated[int, typer.Option("--max-model-calls", min=6, max=32)] = 14,
+    max_model_calls: Annotated[
+        int, typer.Option(
+            "--max-model-calls", min=6, max=32,
+            help="Shared executor physical ceiling; hierarchical arms reserve four auxiliary calls.",
+        )
+    ] = 14,
     max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     include_workflow_d: Annotated[bool, typer.Option("--include-workflow-d")] = False,
     architecture_study: Annotated[bool, typer.Option("--architecture-study")] = False,

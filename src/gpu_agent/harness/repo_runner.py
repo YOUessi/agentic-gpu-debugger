@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
 from gpu_agent.agent.models import AgentBudget
-from gpu_agent.agent.policy import LLMCallGate
+from gpu_agent.agent.policy import LLMCallGate, RepositoryCallBudget
 from gpu_agent.agent.provider import (
     DevelopmentCallPolicy,
     OpenAIProviderSettings,
@@ -69,6 +69,13 @@ def run_repository_coding_session(
         raise ValueError("real model use requires explicit allow_paid_calls")
     if not 1 <= max_steps <= 38 or not max_steps + 2 <= max_model_calls <= 40:
         raise ValueError("model calls must exceed step budget, within operator cap")
+    role_budget = (
+        RepositoryCallBudget.from_session(
+            max_steps=max_steps, max_model_calls=max_model_calls, hierarchical=hierarchical_mode
+        )
+        if model_factory is None
+        else None
+    )
     if (hierarchical_mode or syntax_mode) and public_case_id is None:
         raise ValueError("hierarchical and AST modes require registered public CUDA case")
     if not goal.strip() or len(goal) > 1500:
@@ -151,6 +158,7 @@ def run_repository_coding_session(
                 tools.store,
                 tools.run_id,
                 call_policy=DevelopmentCallPolicy(max_llm_calls=max_model_calls),
+                repository_budget=role_budget,
             )
             provider.ensure_available()
             model: RepositoryDecisionModel = provider
@@ -184,6 +192,15 @@ def run_repository_coding_session(
                         "allow_batch_edits": allow_batch_edits,
                         "hierarchical_mode": hierarchical_mode,
                         "syntax_mode": syntax_mode,
+                        "repository_call_budget": {
+                            "executor_decisions": role_budget.executor_decisions,
+                            "executor_format_retries": role_budget.executor_format_retries,
+                            "planner_decisions": role_budget.planner_decisions,
+                            "reflect_decisions": role_budget.reflect_decisions,
+                            "planner_format_retries": role_budget.planner_format_retries,
+                            "reflect_format_retries": role_budget.reflect_format_retries,
+                            "physical_ceiling": role_budget.total,
+                        } if role_budget is not None else None,
                     },
                 )
                 events = 0

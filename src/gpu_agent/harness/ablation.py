@@ -70,6 +70,9 @@ class TrialSpec(BenchmarkModel):
     case_id: Literal["h001", "h002", "h003"]
     repetition: int = Field(ge=1, le=3)
     arm: Arm
+    physical_model_call_limit: int | None = Field(default=None, ge=1, le=40)
+    executor_format_retry_limit: int | None = Field(default=None, ge=0)
+    auxiliary_model_call_limit: int | None = Field(default=None, ge=0)
 
 
 class BenchmarkPlan(BenchmarkModel):
@@ -82,6 +85,9 @@ class BenchmarkPlan(BenchmarkModel):
     endpoint_host: str | None
     max_steps: int = Field(ge=4, le=24)
     max_model_calls: int = Field(ge=6, le=32)
+    # For new plans max_model_calls is the shared executor ceiling; auxiliary
+    # Plan/Reflect and their retries are separately reserved per trial.
+    model_budget_scheme: Literal["legacy_shared", "equal_executor_v1"] = "legacy_shared"
     max_public_checks: int = Field(ge=1, le=3)
     include_workflow_D: bool
     architecture_study: bool = False
@@ -229,6 +235,15 @@ def create_benchmark_plan(
                         case_id=case_id,  # type: ignore[arg-type]
                         repetition=repetition,
                         arm=arm,
+                        physical_model_call_limit=(
+                            max_model_calls + 4 if arm == "hierarchical_syntax" else max_model_calls
+                        ),
+                        executor_format_retry_limit=(
+                            None if arm == "workflow_D" else max_model_calls - max_steps
+                        ),
+                        auxiliary_model_call_limit=(
+                            None if arm == "workflow_D" else 4 if arm == "hierarchical_syntax" else 0
+                        ),
                     )
                 )
     return BenchmarkPlan(
@@ -240,6 +255,7 @@ def create_benchmark_plan(
         endpoint_host=host,
         max_steps=max_steps,
         max_model_calls=max_model_calls,
+        model_budget_scheme="equal_executor_v1",
         max_public_checks=max_public_checks,
         include_workflow_D=include_workflow_D,
         architecture_study=architecture_study,
@@ -468,7 +484,7 @@ def _run_one(
             hierarchical_mode=hierarchical,
             syntax_mode=syntax,
             max_steps=plan.max_steps,
-            max_model_calls=plan.max_model_calls,
+            max_model_calls=spec.physical_model_call_limit or plan.max_model_calls,
             max_public_checks=plan.max_public_checks,
             allow_paid_calls=True,
         )
