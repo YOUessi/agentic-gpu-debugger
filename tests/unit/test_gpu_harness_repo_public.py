@@ -1575,3 +1575,60 @@ def test_ast_replay_rejects_observation_hash_mismatch(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="public observation does not match"):
         read_repository_tool_events(store, run.id, expected_count=1, require_observation=True)
+
+
+def test_ast_rejected_edit_ledger_survives_resume_and_detects_tampering(tmp_path: Path) -> None:
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+
+    repo, sha = _registered_repository(tmp_path)
+    output = tmp_path / "ast-rejection-resume"
+
+    class RejectOnce:
+        action = None
+
+        def choose_harness_v1(self, snapshot):
+            if snapshot.syntax_state is None:
+                return HarnessDecision(
+                    action=RepoInspectSyntax(path=KERNEL, symbol="softmax32", limit=3),
+                    reason="Collect initial AST evidence",
+                )
+            state = snapshot.syntax_state
+            node = state.observed_nodes[0]
+            self.action = RepoReplaceSyntax(
+                path=KERNEL, expected_source_sha256=state.source_sha256,
+                edits=[RepoSyntaxEdit(node_id=node.id, replacement_code=node.code)],
+            )
+            return HarnessDecision(action=self.action, reason="Exercise exact NOOP rejection")
+
+    model = RejectOnce()
+    options = dict(
+        repository=repo, output=output, base_sha=sha, goal=GOAL,
+        public_case_id="h001", syntax_mode=True, max_steps=8, max_model_calls=10,
+    )
+    first = run_repository_coding_session(
+        **options, pause_after_turns=2, model_factory=lambda _: model,
+    )
+    assert first.status == "PAUSED_RESUMABLE"
+    path = output / "session-checkpoint.json"
+    original = path.read_bytes()
+    checkpoint = read_repository_checkpoint(path)
+    assert len(checkpoint.rejected_syntax_edits) == 1
+    body = json.loads(original)
+    body["rejected_syntax_edits"] = []
+    path.write_text(json.dumps(body))
+    never_called = Model([])
+    with pytest.raises(ValueError, match="recovered AST rejected edits differ"):
+        run_repository_coding_session(
+            **options, resume=True, model_factory=lambda _: never_called,
+        )
+    assert not never_called.snapshots
+    path.write_bytes(original)
+    assert model.action is not None
+    repeated = Model([model.action.model_dump(mode="json")])
+    resumed = run_repository_coding_session(
+        **options, resume=True, pause_after_turns=3, model_factory=lambda _: repeated,
+    )
+    assert resumed.status == "PAUSED_RESUMABLE"
+    after = read_repository_checkpoint(path)
+    assert after.rejected_syntax_edits == checkpoint.rejected_syntax_edits
+    assert "CUDA_SYNTAX_REPEATED_REJECTED_EDIT" in after.state["history"][-1]["content"]

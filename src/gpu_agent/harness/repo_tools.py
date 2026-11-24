@@ -41,7 +41,7 @@ from gpu_agent.harness.models import (
     ToolObservation,
 )
 from gpu_agent.harness.registry import ToolPermissionPolicy
-from gpu_agent.harness.repo_audit import read_repository_tool_events
+from gpu_agent.harness.repo_audit import action_fingerprint, read_repository_tool_events
 from gpu_agent.harness.syntax_feedback import SyntaxRejection
 from gpu_agent.harness.worktree import PinnedGitWorkspace
 from gpu_agent.store import RunStore, read_regular
@@ -192,7 +192,8 @@ class RepositoryWorkspaceTools:
         )
 
     def _restore_syntax_state(
-        self, state: SyntaxState | None, *, tool_calls: int
+        self, state: SyntaxState | None, *, tool_calls: int,
+        rejected_syntax_edits: tuple[str, ...],
     ) -> None:
         """Re-enumerate pinned AST pages and bind them to completed public actions."""
         active: list[dict[str, Any]] = []
@@ -200,13 +201,23 @@ class RepositoryWorkspaceTools:
             records = read_repository_tool_events(
                 self._store, self.run_id, expected_count=tool_calls, require_action=True
             )
+            recorded_rejections: set[str] = set()
+            complete_rejection_ledger = True
             for record in records:
-                if record["status"] != "OK":
-                    continue
-                if record["tool"] == "repo_replace_syntax":
-                    active.clear()
-                elif record["tool"] == "repo_inspect_syntax":
-                    active.append(record)
+                if record["status"] == "OK":
+                    if record["tool"] == "repo_replace_syntax":
+                        active.clear()
+                        recorded_rejections.clear()
+                        complete_rejection_ledger = True
+                    elif record["tool"] == "repo_inspect_syntax":
+                        active.append(record)
+                if "rejected_edit_fingerprint" not in record:
+                    # Old audit records did not persist this optional field.
+                    complete_rejection_ledger = False
+                elif record["rejected_edit_fingerprint"] is not None:
+                    recorded_rejections.add(record["rejected_edit_fingerprint"])
+            if complete_rejection_ledger and recorded_rejections != set(rejected_syntax_edits):
+                raise ValueError("recovered AST rejected edits differ from audited actions")
         if state is None:
             if active:
                 raise ValueError("recovered AST state omitted completed inspection evidence")
@@ -409,7 +420,9 @@ class RepositoryWorkspaceTools:
         host._observed_query_fingerprints = set(observed_query_fingerprints)
         host._syntax_state = None
         host._rejected_syntax_edits = set()
-        host._restore_syntax_state(syntax_state, tool_calls=tool_calls)
+        host._restore_syntax_state(
+            syntax_state, tool_calls=tool_calls, rejected_syntax_edits=rejected_syntax_edits
+        )
         if (
             len(rejected_syntax_edits) > tool_calls
             or len(set(rejected_syntax_edits)) != len(rejected_syntax_edits)
@@ -803,6 +816,7 @@ class RepositoryWorkspaceTools:
                         "ValueError: CUDA_",
                         "ValueError: PUBLIC_",
                         "ValueError: REGISTERED_",
+                        "OSError: PUBLIC_",
                     )
                 )
                 else None
@@ -813,6 +827,14 @@ class RepositoryWorkspaceTools:
             # executor artifacts or the private verifier's observations.
             record["observation"] = result.content
             record["rejection_detail"] = detail
+            fingerprint = action_fingerprint(record["action"])
+            record["rejected_edit_fingerprint"] = (
+                fingerprint
+                if isinstance(action, RepoReplaceSyntax)
+                and result.status == "REJECTED"
+                and fingerprint in self._rejected_syntax_edits
+                else None
+            )
         self._store.put(
             self.run_id,
             f"repo-harness/v1/tool-{self._tool_calls:03d}.json",
@@ -918,11 +940,7 @@ class RepositoryWorkspaceTools:
                     actual_source_sha256=current,
                     correction="Inspect the current revision before editing.",
                 )
-            fingerprint = hashlib.sha256(
-                json.dumps(
-                    action.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-                ).encode()
-            ).hexdigest()
+            fingerprint = action_fingerprint(action.model_dump(mode="json"))
             if fingerprint in self._rejected_syntax_edits:
                 raise SyntaxRejection(
                     "CUDA_SYNTAX_REPEATED_REJECTED_EDIT",
@@ -965,8 +983,19 @@ class RepositoryWorkspaceTools:
                     expected_source_sha256=action.expected_source_sha256,
                     edits=[(e.node_id, e.replacement_code) for e in action.edits],
                 )
-            except ValueError:
+            except ValueError as exc:
                 self._rejected_syntax_edits.add(fingerprint)
+                corrections = {
+                    "CUDA_SYNTAX_DUPLICATE_NODE": "Submit each observed alias only once.",
+                    "CUDA_SYNTAX_OVERLAPPING_NODES": "Submit disjoint observed AST nodes.",
+                    "CUDA_SYNTAX_REPLACEMENT_INVALID": "Use bounded valid UTF-8 CUDA code.",
+                    "CUDA_SYNTAX_REPLACEMENT_PARSE_ERROR": "Fix the replacement CUDA syntax.",
+                    "CUDA_SYNTAX_RESULT_TOO_LARGE": "Keep the source within the size limit.",
+                }
+                if not isinstance(exc, SyntaxRejection) and str(exc) in corrections:
+                    raise SyntaxRejection(
+                        str(exc), source_sha256=current, correction=corrections[str(exc)]
+                    ) from None
                 raise
             self._invalidate_syntax_state()
             self._last_file = action.path

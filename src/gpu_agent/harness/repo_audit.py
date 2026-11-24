@@ -17,6 +17,13 @@ from gpu_agent.store import RunStore
 _TOOL_EVENT = re.compile(r"^repo-harness/v1/tool-([0-9]{3})\.json$")
 
 
+def action_fingerprint(action: dict[str, Any]) -> str:
+    """Fingerprint a complete typed action, including the expected source SHA."""
+    return hashlib.sha256(
+        json.dumps(action, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def read_repository_tool_events(
     store: RunStore,
     run_id: str,
@@ -69,6 +76,14 @@ def read_repository_tool_events(
                 raise ValueError("public observation does not match recorded hash")
         elif require_observation:
             raise ValueError("full public observation unavailable for this legacy event")
+        fingerprint = body.get("rejected_edit_fingerprint")
+        if fingerprint is not None and (
+            tool != "repo_replace_syntax"
+            or status != "REJECTED"
+            or not isinstance(action, dict)
+            or fingerprint != action_fingerprint(action)
+        ):
+            raise ValueError("rejected edit fingerprint does not match recorded action")
         records[turn] = body
     if sorted(records) != list(range(1, expected_count + 1)):
         raise ValueError("repository tool ledger is not contiguous")

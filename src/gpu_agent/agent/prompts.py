@@ -297,12 +297,14 @@ GPU_REPOSITORY_AST_PROMPT = BASE + (
     "replacement_code must be valid CUDA and address the functional defect, not copy the "
     "original node or introduce arbitrary changes just to avoid NOOP. "
     "If rejected, use the controller's code and correction; never repeat identical rejected edits. "
-    "A successful edit invalidates previous aliases. Re-inspect only if further edits need evidence. "
+    "A successful edit invalidates previous aliases. "
+    "Re-inspect only if further edits need evidence. "
     "Use an allowed before/after public probe or the full public checker as appropriate. "
     "After a valid edit prioritize the full public numeric/sanitizer checker; a probe is not "
     "a substitute. Syntax validity does not prove correctness. Finish only if allowed by the "
     "controller for the checked current candidate. No hidden verification is exposed. "
-    "Respect remaining steps and BUDGET_ALERT. Use task_plan or task_reflection only when supplied. "
+    "Respect remaining steps and BUDGET_ALERT. "
+    "Use task_plan or task_reflection only when supplied. "
     "Never inspect Oracle, clean references, tests, evaluator files or arbitrary host paths."
 )
 
