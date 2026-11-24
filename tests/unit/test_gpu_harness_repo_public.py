@@ -1952,7 +1952,9 @@ def test_failed_ast_session_recovers_completed_check_and_edit(
     assert recovered["public_check_dispatches"] == 1
 
 
-def test_compile_gate_and_one_revert_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_compile_gate_and_one_revert_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Real AST host, worktree, checkpoint; isolated NVCC and model are test doubles."""
     from gpu_agent.benchmark.public_compile import CompileDiagnostic, PublicCompileResult
     from gpu_agent.harness.models import RepoCompileCandidate, RepoRevertLastEdit
@@ -1960,16 +1962,21 @@ def test_compile_gate_and_one_revert_resume(tmp_path: Path, monkeypatch: pytest.
 
     repo, sha = _registered_repository(tmp_path)
     calls = []
+
     def fake_compile(*, store, parent_run_id, repository, candidate, output):
         child = store.create_run("hardset_v2_public_compile", parent_run_id=parent_run_id)
         store.transition(child.id, "RUNNING", "PREPARING")
         digest = hashlib.sha256(candidate).hexdigest()
         calls.append(digest)
         result = PublicCompileResult(
-            candidate_sha256=digest, run_id=child.id, status="BUILD_FAILED",
+            candidate_sha256=digest,
+            run_id=child.id,
+            status="BUILD_FAILED",
             diagnostic=CompileDiagnostic(line=12, message="const assignment error"),
         )
-        store.put(child.id, "compile/public-summary.json", result.model_dump_json().encode(), "public")
+        store.put(
+            child.id, "compile/public-summary.json", result.model_dump_json().encode(), "public"
+        )
         store.transition(child.id, "FAILED", None)
         return result
 
@@ -1987,13 +1994,19 @@ def test_compile_gate_and_one_revert_resume(tmp_path: Path, monkeypatch: pytest.
                     action = RepoInspectSyntax(path=path, offset=state.next_offset if state else 0)
                 else:
                     node = next(
-                        n for n in state.observed_nodes if n.code.startswith("const unsigned int valid =")
+                        n
+                        for n in state.observed_nodes
+                        if n.code.startswith("const unsigned int valid =")
                     )
                     action = RepoReplaceSyntax(
-                        path=path, expected_source_sha256=state.source_sha256,
-                        edits=[RepoSyntaxEdit(
-                            node_id=node.id, replacement_code=node.code + " if (valid == 0) valid = 1;",
-                        )],
+                        path=path,
+                        expected_source_sha256=state.source_sha256,
+                        edits=[
+                            RepoSyntaxEdit(
+                                node_id=node.id,
+                                replacement_code=node.code + " if (valid == 0) valid = 1;",
+                            )
+                        ],
                     )
             else:
                 recovery = snapshot.candidate_recovery
@@ -2010,10 +2023,17 @@ def test_compile_gate_and_one_revert_resume(tmp_path: Path, monkeypatch: pytest.
             return HarnessDecision(action=action, reason="Test candidate recovery gate")
 
     opts = dict(
-        repository=repo, output=tmp_path / "compile-revert-resume", base_sha=sha,
+        repository=repo,
+        output=tmp_path / "compile-revert-resume",
+        base_sha=sha,
         goal="Exercise compile and rollback for the registered CUDA candidate.",
-        public_case_id="h003", syntax_mode=True, compile_gate=True, allow_revert=True,
-        max_steps=9, max_model_calls=11, model_factory=lambda _: FirstCandidate(),
+        public_case_id="h003",
+        syntax_mode=True,
+        compile_gate=True,
+        allow_revert=True,
+        max_steps=9,
+        max_model_calls=11,
+        model_factory=lambda _: FirstCandidate(),
     )
     output = opts["output"]
     paused = run_repository_coding_session(**opts, pause_after_turns=3)
@@ -2034,7 +2054,8 @@ def test_compile_gate_and_one_revert_resume(tmp_path: Path, monkeypatch: pytest.
 
 
 def test_compile_gate_is_independent_and_counts_unique_buildable_candidate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from gpu_agent.benchmark.public_compile import PublicCompileResult
     from gpu_agent.harness.models import RepoCompileCandidate
@@ -2047,10 +2068,13 @@ def test_compile_gate_is_independent_and_counts_unique_buildable_candidate(
         child = store.create_run("hardset_v2_public_compile", parent_run_id=parent_run_id)
         store.transition(child.id, "RUNNING", "PREPARING")
         result = PublicCompileResult(
-            candidate_sha256=hashlib.sha256(candidate).hexdigest(), run_id=child.id,
+            candidate_sha256=hashlib.sha256(candidate).hexdigest(),
+            run_id=child.id,
             status="BUILD_PASSED",
         )
-        store.put(child.id, "compile/public-summary.json", result.model_dump_json().encode(), "public")
+        store.put(
+            child.id, "compile/public-summary.json", result.model_dump_json().encode(), "public"
+        )
         store.transition(child.id, "COMPLETED", None)
         return result
 
@@ -2072,9 +2096,17 @@ def test_compile_gate_is_independent_and_counts_unique_buildable_candidate(
 
     output = tmp_path / "buildable-candidate"
     result = run_repository_coding_session(
-        repository=repo, output=output, base_sha=sha, goal="Repair the public RMS kernel",
-        public_case_id="h002", syntax_mode=True, compile_gate=True, allow_revert=False,
-        max_steps=12, max_model_calls=14, model_factory=lambda _: CompileThenCheck(),
+        repository=repo,
+        output=output,
+        base_sha=sha,
+        goal="Repair the public RMS kernel",
+        public_case_id="h002",
+        syntax_mode=True,
+        compile_gate=True,
+        allow_revert=False,
+        max_steps=12,
+        max_model_calls=14,
+        model_factory=lambda _: CompileThenCheck(),
     )
     assert result.public_checks_attempted == 1 and result.public_checks_passed
     metrics = summarize_repository_trajectory(output)

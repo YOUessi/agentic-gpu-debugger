@@ -602,8 +602,9 @@ def response_termination(envelope: dict[str, Any]) -> ResponseTermination:
                     ):
                         parts.append(part["text"])
     output = "".join(parts)
-    tail = "".join(char if char in '{}[]":,' else " " if char.isspace() else "x"
-        for char in output[-96:])
+    tail = "".join(
+        char if char in '{}[]":,' else " " if char.isspace() else "x" for char in output[-96:]
+    )
     return ResponseTermination.model_validate(
         {
             "response_status": status,
@@ -668,7 +669,8 @@ def invoke_sdk(
             raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
         recovery_data = snapshot.get("candidate_recovery")
         recovery = (
-            CandidateRecoveryView.model_validate(recovery_data) if recovery_data is not None
+            CandidateRecoveryView.model_validate(recovery_data)
+            if recovery_data is not None
             else None
         )
         output_model = repository_decision_schema(
@@ -1178,7 +1180,13 @@ class OpenAIResponsesProvider:
 
         return self._call(
             "plan",
-            {"gpu_repo_task_plan": "v1", "snapshot": snapshot.model_dump(mode="json", exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None)},
+            {
+                "gpu_repo_task_plan": "v1",
+                "snapshot": snapshot.model_dump(
+                    mode="json",
+                    exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None,
+                ),
+            },
             TaskPlan,
             repository_role="planner",
         )
@@ -1189,7 +1197,13 @@ class OpenAIResponsesProvider:
 
         return self._call(
             "plan",
-            {"gpu_repo_reflection": "v1", "snapshot": snapshot.model_dump(mode="json", exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None)},
+            {
+                "gpu_repo_reflection": "v1",
+                "snapshot": snapshot.model_dump(
+                    mode="json",
+                    exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None,
+                ),
+            },
             TaskReflection,
             repository_role="reflect",
         )
@@ -1207,7 +1221,10 @@ class OpenAIResponsesProvider:
             "plan",
             {
                 **marker,
-                "snapshot": snapshot.model_dump(mode="json", exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None),
+                "snapshot": snapshot.model_dump(
+                    mode="json",
+                    exclude={"candidate_recovery"} if snapshot.candidate_recovery is None else None,
+                ),
             },
             HarnessDecision,
             repository_role="executor" if snapshot.case_id == "repository" else None,

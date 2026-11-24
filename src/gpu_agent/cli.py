@@ -246,7 +246,9 @@ def harness_repo_run(
             allow_batch_edits=not disable_batch_edits,
             hierarchical_mode=hierarchical,
             syntax_mode=syntax_editing,
-            compile_gate=compile_gate, allow_revert=allow_revert, max_compiles=max_compiles,
+            compile_gate=compile_gate,
+            allow_revert=allow_revert,
+            max_compiles=max_compiles,
             resume=resume,
             pause_after_turns=pause_after_turns,
         )

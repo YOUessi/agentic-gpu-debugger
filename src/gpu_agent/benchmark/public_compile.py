@@ -65,7 +65,8 @@ def public_compile_diagnostic(stderr: bytes, candidate: bytes) -> CompileDiagnos
         message = re.sub(r"(?<![\w])/(?:[^\s\"'<>:]+)", "<path>", match[3])
         message = "".join(c if c.isprintable() else " " for c in message)[:360]
         return CompileDiagnostic(
-            line=number, column=column if column and column <= 100000 else None,
+            line=number,
+            column=column if column and column <= 100000 else None,
             message=message or "CUDA compilation error",
             source_excerpt=source_lines[number - 1].strip()[:300],
         )
@@ -74,7 +75,9 @@ def public_compile_diagnostic(stderr: bytes, candidate: bytes) -> CompileDiagnos
         if match:
             message = re.sub(r"(?<![\w])/(?:[^\s\"'<>:]+)", "<path>", match[1])
             return CompileDiagnostic(message=message[:360])
-    return CompileDiagnostic(message="Compilation failed; no bounded kernel.cu diagnostic available")
+    return CompileDiagnostic(
+        message="Compilation failed; no bounded kernel.cu diagnostic available"
+    )
 
 
 def compile_public_candidate(
@@ -104,15 +107,19 @@ def compile_public_candidate(
             backend = IsolatedGPUBackend(store, source, output / "workspaces")
             if backend.availability().ready:
                 handle = backend.prepare(
-                    WorkspaceRequest(run_id=child.id, source_manifest=manifest, trust_level="UNTRUSTED")
+                    WorkspaceRequest(
+                        run_id=child.id, source_manifest=manifest, trust_level="UNTRUSTED"
+                    )
                 )
                 try:
                     build = backend.build(BuildRequest(workspace_id=handle.id))
                     if build.success:
                         result = result.model_copy(update={"status": "BUILD_PASSED"})
                     elif not (
-                        build.tool_result.timed_out or build.tool_result.cancelled
-                        or build.tool_result.truncated or build.tool_result.tool_error
+                        build.tool_result.timed_out
+                        or build.tool_result.cancelled
+                        or build.tool_result.truncated
+                        or build.tool_result.tool_error
                     ):
                         error = public_compile_diagnostic(
                             store.read(build.tool_result.stderr_artifact), candidate

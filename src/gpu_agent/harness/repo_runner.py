@@ -103,7 +103,9 @@ def run_repository_coding_session(
             allow_batch_edits=allow_batch_edits,
             hierarchical_mode=hierarchical_mode,
             syntax_mode=syntax_mode,
-            compile_gate=compile_gate, allow_revert=allow_revert, max_compiles=max_compiles,
+            compile_gate=compile_gate,
+            allow_revert=allow_revert,
+            max_compiles=max_compiles,
         )
         if syntax_mode and "syntax_state" not in checkpoint.model_fields_set:
             raise ValueError("legacy AST checkpoint cannot resume with short aliases")
@@ -131,7 +133,8 @@ def run_repository_coding_session(
             context_mode=checkpoint.context_mode,
             allow_batch_edits=checkpoint.allow_batch_edits,
             syntax_mode=checkpoint.syntax_mode,
-            compile_gate=checkpoint.compile_gate, allow_revert=checkpoint.allow_revert,
+            compile_gate=checkpoint.compile_gate,
+            allow_revert=checkpoint.allow_revert,
             max_compiles=checkpoint.max_compiles,
         )
         if host.workspace.integrity()["diff_sha256"] != checkpoint.diff_sha256:
@@ -149,7 +152,9 @@ def run_repository_coding_session(
             context_mode=context_mode,
             allow_batch_edits=allow_batch_edits,
             syntax_mode=syntax_mode,
-            compile_gate=compile_gate, allow_revert=allow_revert, max_compiles=max_compiles,
+            compile_gate=compile_gate,
+            allow_revert=allow_revert,
+            max_compiles=max_compiles,
         )
 
     with host as tools:
@@ -203,7 +208,8 @@ def run_repository_coding_session(
                         "allow_batch_edits": allow_batch_edits,
                         "hierarchical_mode": hierarchical_mode,
                         "syntax_mode": syntax_mode,
-                        "compile_gate": compile_gate, "allow_revert": allow_revert,
+                        "compile_gate": compile_gate,
+                        "allow_revert": allow_revert,
                         "max_compiles": max_compiles,
                         "public_check_audit_version": 1,
                         "max_output_tokens": output_cap,
@@ -283,7 +289,8 @@ def run_repository_coding_session(
                         allow_batch_edits=allow_batch_edits,
                         hierarchical_mode=hierarchical_mode,
                         syntax_mode=syntax_mode,
-                        compile_gate=compile_gate, allow_revert=allow_revert,
+                        compile_gate=compile_gate,
+                        allow_revert=allow_revert,
                         max_compiles=max_compiles,
                         public_checks_attempted=tools.public_checks_attempted,
                         public_probes_attempted=tools.public_probes_attempted,

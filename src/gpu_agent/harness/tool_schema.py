@@ -15,7 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from gpu_agent.harness.models import (
     FinishTask,
     RepoCompileCandidate,
-    RepoRevertLastEdit,
     RepoGitDiff,
     RepoInspectSyntax,
     RepoListFiles,
@@ -24,6 +23,7 @@ from gpu_agent.harness.models import (
     RepoReplaceMany,
     RepoReplaceSnippet,
     RepoReplaceSyntax,
+    RepoRevertLastEdit,
     RepoRunPublicChecks,
     RepoSyntaxEdit,
     SyntaxState,
