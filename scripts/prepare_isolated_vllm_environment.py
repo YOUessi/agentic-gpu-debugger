@@ -41,7 +41,8 @@ ROOTS = [
     "numpy",
     "pydantic",
 ]
-APT = {"markupsafe": "python3-markupsafe", "wheel": "python3-wheel", "psutil": "python3-psutil"}
+APT = {"markupsafe": "python3-markupsafe", "wheel": "python3-wheel",
+       "psutil": "python3-psutil", "cryptography": "python3-cryptography"}
 
 
 def sha(path: pathlib.Path) -> str:
@@ -53,21 +54,28 @@ def sha(path: pathlib.Path) -> str:
 
 
 def distributions() -> dict:
-    stack = list(ROOTS)
+    stack = [(name, set()) for name in ROOTS]
     result = {}
+    extras_by_name = {}
     while stack:
-        name = stack.pop()
+        name, extras = stack.pop()
         key = canonicalize_name(name)
-        if key in result:
+        previous = extras_by_name.get(key)
+        if previous is not None and extras <= previous:
             continue
+        active = (previous or set()) | extras
+        extras_by_name[key] = active
         dist = md.distribution(name)
         result[key] = dist
         for raw in dist.requires or ():
             req = Requirement(raw)
-            if req.marker and not req.marker.evaluate({**default_environment(), "extra": ""}):
+            if req.marker and not any(
+                req.marker.evaluate({**default_environment(), "extra": extra})
+                for extra in active | {""}
+            ):
                 continue
             assert req.specifier.contains(md.version(req.name), prereleases=True), raw
-            stack.append(req.name)
+            stack.append((req.name, set(req.extras)))
     return result
 
 
