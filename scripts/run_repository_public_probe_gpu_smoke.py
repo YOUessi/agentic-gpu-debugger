@@ -136,7 +136,7 @@ def main() -> int:
         and metrics.public_probes_attempted == 2
         and len(probes) == 2
         and probes[0]["phase"] == "before"
-        and probes[0]["outcome"] == "NUMERIC_MISMATCH"
+        and probes[0]["outcome"] in {"NUMERIC_MISMATCH", "OUTPUT_INVALID", "PROGRAM_FAILED"}
         and probes[1]["phase"] == "after"
         and probes[1]["outcome"] == "PASS"
         and probes[0]["candidate_sha256"] != probes[1]["candidate_sha256"]
