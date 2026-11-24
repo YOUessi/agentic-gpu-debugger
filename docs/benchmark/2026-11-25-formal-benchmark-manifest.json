@@ -1,0 +1,815 @@
+{
+  "schema_version": "agentic-gpu-debugger-benchmark-v1",
+  "status": "PRECOMMITTED_DEVELOPMENT_REPEATABILITY",
+  "candidate_release_sha": "e6f31d0f7d45491e0781d80a825e3d2cf4886801",
+  "frozen_runtime_sha": "be3dafd6988972dfdb51cf2faee6984103565973",
+  "runtime_git_objects": {
+    "src": "524366543b27955ff58da5ce098fffdcfdbbab8a",
+    "benchmarks": "b664d8238305321bbd8733b79411807bfacf2508",
+    "scripts/run_repository_failed_candidate_recovery.py": "aeadc12ea0c1ed2ef9c75d78ca673ab912554f68",
+    "pyproject.toml": "868d3b4cbba845dd333c9bbae915da556f0b2998"
+  },
+  "development_set": {
+    "designation": "Development Set; extensively used in implementation; not a holdout",
+    "independent_task_count": 3,
+    "mutants": {
+      "h001": {
+        "defect": "Softmax numerical stability",
+        "sha256": "47e69f940ca6c8b9ab287b5ee5c9aed7973f4d1eeb7ac41b7e855a01609c9bce"
+      },
+      "h002": {
+        "defect": "RMSNorm partial-group divisor",
+        "sha256": "c1bb8ad1c3894a76c317e7cae1ab5064dded2f26853fb988e19082bff84bf0b1"
+      },
+      "h003": {
+        "defect": "Group centering incomplete reduction",
+        "sha256": "e8c6b2386175d3e77689311b9fc2dd54a7014365b45e2017a454a79fa5958bde"
+      }
+    },
+    "historical_p7": {
+      "included_in_new_denominator": false,
+      "trajectories": 4,
+      "independent_tasks": 3,
+      "from_mutant_trajectories": 1,
+      "recovery_trajectories": 3,
+      "distinct_verified_source_shas": 3,
+      "strict_passed_trajectories": 4
+    }
+  },
+  "budget": {
+    "max_tool_steps": 16,
+    "max_model_calls": 18,
+    "max_format_retries": 2,
+    "max_output_tokens": 8192,
+    "request_timeout_seconds": 180,
+    "model_admission_wall_seconds": 600,
+    "agent_watchdog_wall_seconds": 600,
+    "strict_watchdog_wall_seconds": 600,
+    "max_compile_only": 6,
+    "max_full_public_checks": 2,
+    "max_public_probes": 4,
+    "revert_limit": 1,
+    "operator_prefix_counts_toward_steps": true,
+    "operator_prefix_excluded_from_live_edit_success": true,
+    "timeout_policy": "Terminate only the owned CLI process group; stop suite for operator inspection; retain attempt, no resample."
+  },
+  "harness": {
+    "syntax_editing": true,
+    "ast_target_binding": true,
+    "state_scoped_actions": true,
+    "context_mode": "evidence_first",
+    "batch_edits": false,
+    "planner": false,
+    "extended_syntax": false,
+    "strict_verifier": "existing harness verify-repo; if closed session has attested public-passing exact SHA but no Finish, existing operator benchmark verify-hardset on exact audited diff; do not fabricate Finish",
+    "public_pass_only_for_strict": true
+  },
+  "runtime": {
+    "device": "Tang",
+    "gpu": "NVIDIA GeForce RTX 4090 Laptop GPU, 16376 MiB",
+    "driver": "580.178.04",
+    "cuda_image": "gpu-agent-cuda:t07",
+    "cuda_image_id": "sha256:ec7f38d73b44d6e363f23cf5f2c22d7bdb93865b2a05d4110f068a7591b5f515",
+    "python": "3.11.16",
+    "packages": {
+      "openai": "3.13.0",
+      "pydantic": "2.13.5",
+      "langgraph": "1.2.20",
+      "tree-sitter": "0.25.2",
+      "tree-sitter-cuda": "0.21.2",
+      "typer": "0.27.2"
+    },
+    "gpu_lock": "~/.cache/llm_opt_shared_gpu.lock",
+    "max_idle_gpu_memory_mib": 1000
+  },
+  "models": {
+    "qwen": {
+      "model_id": "qwen3-8b-awq",
+      "precision": "AWQ",
+      "framework": "vLLM 0.19.1",
+      "endpoint": "http://127.0.0.1:8127/v1",
+      "thinking": "default; qwen3 reasoning parser",
+      "sampling": "server defaults, no explicit request-level temperature/top_p/seed; server seed preassigned by repetition",
+      "server": {
+        "host": "127.0.0.1",
+        "port": 8127,
+        "max_model_len": 16384,
+        "gpu_memory_utilization": 0.65,
+        "enforce_eager": true,
+        "reasoning_parser": "qwen3",
+        "seeds": [
+          43,
+          44,
+          45,
+          46,
+          47
+        ]
+      },
+      "files_sha256": {
+        "config.json": "7457674d8044143cd4159e47deecf28fd6698a9826569094b60d7bead8f351ee",
+        "tokenizer.json": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4",
+        "tokenizer_config.json": "d5d09f07b48c3086c508b30d1c9114bd1189145b74e982a265350c923acd8101",
+        "model-00001-of-00002.safetensors": "6e112429856bc65e3837a9f38d6f6b71ffdda832cb46299a12f4fa8f6352516e",
+        "model-00002-of-00002.safetensors": "20c2d6366ab85c90786ccdd829cd2b9e7d30ef3b2ebbb998280e7e4014b542ff"
+      }
+    },
+    "deepseek": {
+      "model_id": "deepseek-v4-pro",
+      "endpoint": "https://api.deepseek.com",
+      "precision": "undisclosed",
+      "framework": "undisclosed",
+      "weights_revision": "undisclosed; record returned model for each invocation",
+      "api": "official Responses; unchanged frozen adapter",
+      "thinking": {
+        "effort": "none"
+      },
+      "sampling": "API defaults; request seed unavailable/not sent",
+      "credential": "existing project provider configuration read only on operator host; never include value in argv or reports",
+      "billing": "record actual billed amount only if available; otherwise null"
+    }
+  },
+  "design": {
+    "repetitions_per_model_unit": 5,
+    "total_trajectories": 60,
+    "models": 2,
+    "units_per_model": 6,
+    "per_model_planned": 30,
+    "from_mutant_per_model": 15,
+    "recovery_per_model": 15,
+    "deepseek_max_physical_calls": 540,
+    "order": "alternating model blocks, rotate unit order by repetition; new session per trial; independent strict invocation per public-passing trial even when SHA repeats",
+    "no_retry_or_replacement_on_trial_failure": true,
+    "comparison": "model-system, not pure capacity; separate from-head and conditional recovery denominators"
+  },
+  "units": [
+    {
+      "id": "F-h001",
+      "group": "from_mutant",
+      "case_id": "h001",
+      "failure_kind": "none",
+      "compile_gate": true,
+      "allow_revert": true,
+      "public_diagnostics": true
+    },
+    {
+      "id": "F-h002",
+      "group": "from_mutant",
+      "case_id": "h002",
+      "failure_kind": "none",
+      "compile_gate": true,
+      "allow_revert": true,
+      "public_diagnostics": true
+    },
+    {
+      "id": "F-h003",
+      "group": "from_mutant",
+      "case_id": "h003",
+      "failure_kind": "none",
+      "compile_gate": true,
+      "allow_revert": true,
+      "public_diagnostics": true
+    },
+    {
+      "id": "R-A-h001",
+      "group": "conditional_recovery",
+      "case_id": "h001",
+      "failure_kind": "build",
+      "compile_gate": true,
+      "allow_revert": true,
+      "public_diagnostics": false,
+      "prior_path": "p0-fair-budget-closure/react-seed43-h001/actions.json",
+      "prior_sha256": "0dc4ba91f2c298376f238b57d62d3a63630623f59f738488d4cc0c0c985dfcc0",
+      "prior_candidate_sha256": "a3a89df8bb0aa97a3631097129b36969bc8ea9c6b6c2dd43615689b8278a6488"
+    },
+    {
+      "id": "R-B-h001",
+      "group": "conditional_recovery",
+      "case_id": "h001",
+      "failure_kind": "numeric",
+      "compile_gate": true,
+      "allow_revert": false,
+      "public_diagnostics": true,
+      "prior_path": "ast-audit-closure/single-seed43-h001/single-step-result.json",
+      "prior_sha256": "f62ba346378f6a42f1ceb4699a12bc484fb7abdf80ec75ed72eec32f6361bc4d",
+      "prior_candidate_sha256": "992264e8d9c65ba504357399a1d8229fe03a6396f215f0e226da5618ea9c9f73"
+    },
+    {
+      "id": "R-A-h003",
+      "group": "conditional_recovery",
+      "case_id": "h003",
+      "failure_kind": "build",
+      "compile_gate": true,
+      "allow_revert": true,
+      "public_diagnostics": false,
+      "prior_path": "p0-fair-budget-closure/react-seed43-h003/actions.json",
+      "prior_sha256": "d5d377d154be04a9c02103615a7011a0a5cb2f63b5e603beedb3e281a3f75647",
+      "prior_candidate_sha256": "acfe74458931f8fc7fff369c9f5a26425b6357214d8a87aa9df44a52319503b8"
+    }
+  ],
+  "blocks": [
+    {
+      "rep": 1,
+      "model": "deepseek",
+      "server_seed": null,
+      "trial_ids": [
+        "r01-deepseek-F-h001",
+        "r01-deepseek-F-h002",
+        "r01-deepseek-F-h003",
+        "r01-deepseek-R-A-h001",
+        "r01-deepseek-R-B-h001",
+        "r01-deepseek-R-A-h003"
+      ]
+    },
+    {
+      "rep": 1,
+      "model": "qwen",
+      "server_seed": 43,
+      "trial_ids": [
+        "r01-qwen-F-h001",
+        "r01-qwen-F-h002",
+        "r01-qwen-F-h003",
+        "r01-qwen-R-A-h001",
+        "r01-qwen-R-B-h001",
+        "r01-qwen-R-A-h003"
+      ]
+    },
+    {
+      "rep": 2,
+      "model": "qwen",
+      "server_seed": 44,
+      "trial_ids": [
+        "r02-qwen-F-h002",
+        "r02-qwen-F-h003",
+        "r02-qwen-R-A-h001",
+        "r02-qwen-R-B-h001",
+        "r02-qwen-R-A-h003",
+        "r02-qwen-F-h001"
+      ]
+    },
+    {
+      "rep": 2,
+      "model": "deepseek",
+      "server_seed": null,
+      "trial_ids": [
+        "r02-deepseek-F-h002",
+        "r02-deepseek-F-h003",
+        "r02-deepseek-R-A-h001",
+        "r02-deepseek-R-B-h001",
+        "r02-deepseek-R-A-h003",
+        "r02-deepseek-F-h001"
+      ]
+    },
+    {
+      "rep": 3,
+      "model": "deepseek",
+      "server_seed": null,
+      "trial_ids": [
+        "r03-deepseek-F-h003",
+        "r03-deepseek-R-A-h001",
+        "r03-deepseek-R-B-h001",
+        "r03-deepseek-R-A-h003",
+        "r03-deepseek-F-h001",
+        "r03-deepseek-F-h002"
+      ]
+    },
+    {
+      "rep": 3,
+      "model": "qwen",
+      "server_seed": 45,
+      "trial_ids": [
+        "r03-qwen-F-h003",
+        "r03-qwen-R-A-h001",
+        "r03-qwen-R-B-h001",
+        "r03-qwen-R-A-h003",
+        "r03-qwen-F-h001",
+        "r03-qwen-F-h002"
+      ]
+    },
+    {
+      "rep": 4,
+      "model": "qwen",
+      "server_seed": 46,
+      "trial_ids": [
+        "r04-qwen-R-A-h001",
+        "r04-qwen-R-B-h001",
+        "r04-qwen-R-A-h003",
+        "r04-qwen-F-h001",
+        "r04-qwen-F-h002",
+        "r04-qwen-F-h003"
+      ]
+    },
+    {
+      "rep": 4,
+      "model": "deepseek",
+      "server_seed": null,
+      "trial_ids": [
+        "r04-deepseek-R-A-h001",
+        "r04-deepseek-R-B-h001",
+        "r04-deepseek-R-A-h003",
+        "r04-deepseek-F-h001",
+        "r04-deepseek-F-h002",
+        "r04-deepseek-F-h003"
+      ]
+    },
+    {
+      "rep": 5,
+      "model": "deepseek",
+      "server_seed": null,
+      "trial_ids": [
+        "r05-deepseek-R-B-h001",
+        "r05-deepseek-R-A-h003",
+        "r05-deepseek-F-h001",
+        "r05-deepseek-F-h002",
+        "r05-deepseek-F-h003",
+        "r05-deepseek-R-A-h001"
+      ]
+    },
+    {
+      "rep": 5,
+      "model": "qwen",
+      "server_seed": 47,
+      "trial_ids": [
+        "r05-qwen-R-B-h001",
+        "r05-qwen-R-A-h003",
+        "r05-qwen-F-h001",
+        "r05-qwen-F-h002",
+        "r05-qwen-F-h003",
+        "r05-qwen-R-A-h001"
+      ]
+    }
+  ],
+  "trial_order": [
+    {
+      "id": "r01-deepseek-F-h001",
+      "model": "deepseek",
+      "rep": 1,
+      "unit": "F-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r01-deepseek-F-h002",
+      "model": "deepseek",
+      "rep": 1,
+      "unit": "F-h002",
+      "server_seed": null
+    },
+    {
+      "id": "r01-deepseek-F-h003",
+      "model": "deepseek",
+      "rep": 1,
+      "unit": "F-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r01-deepseek-R-A-h001",
+      "model": "deepseek",
+      "rep": 1,
+      "unit": "R-A-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r01-deepseek-R-B-h001",
+      "model": "deepseek",
+      "rep": 1,
+      "unit": "R-B-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r01-deepseek-R-A-h003",
+      "model": "deepseek",
+      "rep": 1,
+      "unit": "R-A-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r01-qwen-F-h001",
+      "model": "qwen",
+      "rep": 1,
+      "unit": "F-h001",
+      "server_seed": 43
+    },
+    {
+      "id": "r01-qwen-F-h002",
+      "model": "qwen",
+      "rep": 1,
+      "unit": "F-h002",
+      "server_seed": 43
+    },
+    {
+      "id": "r01-qwen-F-h003",
+      "model": "qwen",
+      "rep": 1,
+      "unit": "F-h003",
+      "server_seed": 43
+    },
+    {
+      "id": "r01-qwen-R-A-h001",
+      "model": "qwen",
+      "rep": 1,
+      "unit": "R-A-h001",
+      "server_seed": 43
+    },
+    {
+      "id": "r01-qwen-R-B-h001",
+      "model": "qwen",
+      "rep": 1,
+      "unit": "R-B-h001",
+      "server_seed": 43
+    },
+    {
+      "id": "r01-qwen-R-A-h003",
+      "model": "qwen",
+      "rep": 1,
+      "unit": "R-A-h003",
+      "server_seed": 43
+    },
+    {
+      "id": "r02-qwen-F-h002",
+      "model": "qwen",
+      "rep": 2,
+      "unit": "F-h002",
+      "server_seed": 44
+    },
+    {
+      "id": "r02-qwen-F-h003",
+      "model": "qwen",
+      "rep": 2,
+      "unit": "F-h003",
+      "server_seed": 44
+    },
+    {
+      "id": "r02-qwen-R-A-h001",
+      "model": "qwen",
+      "rep": 2,
+      "unit": "R-A-h001",
+      "server_seed": 44
+    },
+    {
+      "id": "r02-qwen-R-B-h001",
+      "model": "qwen",
+      "rep": 2,
+      "unit": "R-B-h001",
+      "server_seed": 44
+    },
+    {
+      "id": "r02-qwen-R-A-h003",
+      "model": "qwen",
+      "rep": 2,
+      "unit": "R-A-h003",
+      "server_seed": 44
+    },
+    {
+      "id": "r02-qwen-F-h001",
+      "model": "qwen",
+      "rep": 2,
+      "unit": "F-h001",
+      "server_seed": 44
+    },
+    {
+      "id": "r02-deepseek-F-h002",
+      "model": "deepseek",
+      "rep": 2,
+      "unit": "F-h002",
+      "server_seed": null
+    },
+    {
+      "id": "r02-deepseek-F-h003",
+      "model": "deepseek",
+      "rep": 2,
+      "unit": "F-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r02-deepseek-R-A-h001",
+      "model": "deepseek",
+      "rep": 2,
+      "unit": "R-A-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r02-deepseek-R-B-h001",
+      "model": "deepseek",
+      "rep": 2,
+      "unit": "R-B-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r02-deepseek-R-A-h003",
+      "model": "deepseek",
+      "rep": 2,
+      "unit": "R-A-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r02-deepseek-F-h001",
+      "model": "deepseek",
+      "rep": 2,
+      "unit": "F-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r03-deepseek-F-h003",
+      "model": "deepseek",
+      "rep": 3,
+      "unit": "F-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r03-deepseek-R-A-h001",
+      "model": "deepseek",
+      "rep": 3,
+      "unit": "R-A-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r03-deepseek-R-B-h001",
+      "model": "deepseek",
+      "rep": 3,
+      "unit": "R-B-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r03-deepseek-R-A-h003",
+      "model": "deepseek",
+      "rep": 3,
+      "unit": "R-A-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r03-deepseek-F-h001",
+      "model": "deepseek",
+      "rep": 3,
+      "unit": "F-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r03-deepseek-F-h002",
+      "model": "deepseek",
+      "rep": 3,
+      "unit": "F-h002",
+      "server_seed": null
+    },
+    {
+      "id": "r03-qwen-F-h003",
+      "model": "qwen",
+      "rep": 3,
+      "unit": "F-h003",
+      "server_seed": 45
+    },
+    {
+      "id": "r03-qwen-R-A-h001",
+      "model": "qwen",
+      "rep": 3,
+      "unit": "R-A-h001",
+      "server_seed": 45
+    },
+    {
+      "id": "r03-qwen-R-B-h001",
+      "model": "qwen",
+      "rep": 3,
+      "unit": "R-B-h001",
+      "server_seed": 45
+    },
+    {
+      "id": "r03-qwen-R-A-h003",
+      "model": "qwen",
+      "rep": 3,
+      "unit": "R-A-h003",
+      "server_seed": 45
+    },
+    {
+      "id": "r03-qwen-F-h001",
+      "model": "qwen",
+      "rep": 3,
+      "unit": "F-h001",
+      "server_seed": 45
+    },
+    {
+      "id": "r03-qwen-F-h002",
+      "model": "qwen",
+      "rep": 3,
+      "unit": "F-h002",
+      "server_seed": 45
+    },
+    {
+      "id": "r04-qwen-R-A-h001",
+      "model": "qwen",
+      "rep": 4,
+      "unit": "R-A-h001",
+      "server_seed": 46
+    },
+    {
+      "id": "r04-qwen-R-B-h001",
+      "model": "qwen",
+      "rep": 4,
+      "unit": "R-B-h001",
+      "server_seed": 46
+    },
+    {
+      "id": "r04-qwen-R-A-h003",
+      "model": "qwen",
+      "rep": 4,
+      "unit": "R-A-h003",
+      "server_seed": 46
+    },
+    {
+      "id": "r04-qwen-F-h001",
+      "model": "qwen",
+      "rep": 4,
+      "unit": "F-h001",
+      "server_seed": 46
+    },
+    {
+      "id": "r04-qwen-F-h002",
+      "model": "qwen",
+      "rep": 4,
+      "unit": "F-h002",
+      "server_seed": 46
+    },
+    {
+      "id": "r04-qwen-F-h003",
+      "model": "qwen",
+      "rep": 4,
+      "unit": "F-h003",
+      "server_seed": 46
+    },
+    {
+      "id": "r04-deepseek-R-A-h001",
+      "model": "deepseek",
+      "rep": 4,
+      "unit": "R-A-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r04-deepseek-R-B-h001",
+      "model": "deepseek",
+      "rep": 4,
+      "unit": "R-B-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r04-deepseek-R-A-h003",
+      "model": "deepseek",
+      "rep": 4,
+      "unit": "R-A-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r04-deepseek-F-h001",
+      "model": "deepseek",
+      "rep": 4,
+      "unit": "F-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r04-deepseek-F-h002",
+      "model": "deepseek",
+      "rep": 4,
+      "unit": "F-h002",
+      "server_seed": null
+    },
+    {
+      "id": "r04-deepseek-F-h003",
+      "model": "deepseek",
+      "rep": 4,
+      "unit": "F-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r05-deepseek-R-B-h001",
+      "model": "deepseek",
+      "rep": 5,
+      "unit": "R-B-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r05-deepseek-R-A-h003",
+      "model": "deepseek",
+      "rep": 5,
+      "unit": "R-A-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r05-deepseek-F-h001",
+      "model": "deepseek",
+      "rep": 5,
+      "unit": "F-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r05-deepseek-F-h002",
+      "model": "deepseek",
+      "rep": 5,
+      "unit": "F-h002",
+      "server_seed": null
+    },
+    {
+      "id": "r05-deepseek-F-h003",
+      "model": "deepseek",
+      "rep": 5,
+      "unit": "F-h003",
+      "server_seed": null
+    },
+    {
+      "id": "r05-deepseek-R-A-h001",
+      "model": "deepseek",
+      "rep": 5,
+      "unit": "R-A-h001",
+      "server_seed": null
+    },
+    {
+      "id": "r05-qwen-R-B-h001",
+      "model": "qwen",
+      "rep": 5,
+      "unit": "R-B-h001",
+      "server_seed": 47
+    },
+    {
+      "id": "r05-qwen-R-A-h003",
+      "model": "qwen",
+      "rep": 5,
+      "unit": "R-A-h003",
+      "server_seed": 47
+    },
+    {
+      "id": "r05-qwen-F-h001",
+      "model": "qwen",
+      "rep": 5,
+      "unit": "F-h001",
+      "server_seed": 47
+    },
+    {
+      "id": "r05-qwen-F-h002",
+      "model": "qwen",
+      "rep": 5,
+      "unit": "F-h002",
+      "server_seed": 47
+    },
+    {
+      "id": "r05-qwen-F-h003",
+      "model": "qwen",
+      "rep": 5,
+      "unit": "F-h003",
+      "server_seed": 47
+    },
+    {
+      "id": "r05-qwen-R-A-h001",
+      "model": "qwen",
+      "rep": 5,
+      "unit": "R-A-h001",
+      "server_seed": 47
+    }
+  ],
+  "statistics": {
+    "primary": "Strict Fix on each independent task (from-mutant, 5 repeats per model); separate per-unit conditional recovery",
+    "interval": "Wilson 95% descriptive interval for each complete five-trial cell, not an independent-task generalization CI",
+    "first_correct_edit": "earliest live accepted edit producing a subsequently independently verified exact candidate SHA, null if no such candidate",
+    "gpu_time": "sum verified public ToolResult elapsed_ms, numeric and sanitizer separately from compile; includes container overhead, not kernel-active time; strict verifier wall separately",
+    "cost_per_success": "sum all attempts' costs/latency/calls divided by successful strict outcomes, not successful-only mean; unavailable billing stays null",
+    "unique_sha": "dedup verified source SHA and report per case; repeated runs do not add tasks",
+    "format_failure": "separate physical schema-invalid call from rejected tool and incomplete response",
+    "wrong_target": "mechanical binding checked automatically; semantic correctness independently reviewed from accepted source pairs, no invented score for failed/unreviewed edits"
+  },
+  "holdout": {
+    "status": "NOT_CREATED_NOT_RUN",
+    "separation": "independent author/evaluator; seal task sources, task IDs, public requirements/checks and private verifier before unlock; no tuning on held-out failures",
+    "proposed_single_kernel_strata": [
+      "numerical stability",
+      "tail/mask",
+      "cross-warp reduction",
+      "synchronization/race",
+      "out-of-bounds",
+      "boundary/divisor",
+      "multi-defect recovery"
+    ],
+    "proposed_minimum_tasks_per_stratum": 3,
+    "proposed_total_single_kernel": 21,
+    "scope": "single registered editable kernel; separately report multi-file/signature/macro tasks only when supported",
+    "registration_blocker": "current frozen controller, registry and strict verifier restrict to h001-h003; new task registration/evaluator boundary must be separately reviewed and frozen, rerun all arms if runtime changes. No claim of holdout readiness or invisible tasks yet.",
+    "no_reuse_after_tuning": true
+  },
+  "baselines": {
+    "status": "NOT_RUN",
+    "model": "deepseek-v4-pro, same returned model identity and frozen reasoning policy",
+    "arms": [
+      {
+        "name": "Direct Edit / One-shot",
+        "design": "one logical typed AST edit with all public source/requirement and necessary static AST pages, same scope and external verification; no agent tool loop; count permitted format repair separately"
+      },
+      {
+        "name": "Fixed Workflow",
+        "design": "select existing best workflow on Development Set only; re-run with identical DeepSeek provider, output cap, GPU resources and independent verifier; do not carry old-model scores"
+      },
+      {
+        "name": "Ordinary Coding Agent",
+        "design": "generic read/edit/build/test loop under equivalent isolated backend and public evidence, no hidden evaluator access; freeze allowed tools and prompt before testing"
+      },
+      {
+        "name": "Repository Harness",
+        "design": "frozen AST binding, compile gate, revert, Probe, state-scoped tools and verifier; no planner"
+      }
+    ],
+    "fairness": "same outer wall/physical call/output cap and total public GPU admission/workload budgets; compare actual spend including failed runs and format retries; identical hidden evaluator and independent tasks; precommit exact arm-specific tool mappings before holdout unlock",
+    "component_ablations": "only after primary comparisons"
+  }
+}
