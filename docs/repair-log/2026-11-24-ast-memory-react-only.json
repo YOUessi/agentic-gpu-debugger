@@ -1,0 +1,112 @@
+{
+  "date": "2026-11-24",
+  "frozen_source": "1d41cfb22bd50a37d4c524a121ba6c292ef23c40",
+  "model": "Qwen3-8B-AWQ",
+  "case": "h001",
+  "gpu": "Tang RTX 4090",
+  "hierarchical_mode": false,
+  "syntax_mode": true,
+  "context_mode": "evidence_first",
+  "max_steps": 12,
+  "max_model_calls": 16,
+  "max_public_checks": 2,
+  "turns": 6,
+  "model_physical_calls": 6,
+  "model_tokens": 31543,
+  "first_accepted_edit_turn": 4,
+  "first_public_check_request_turn": 5,
+  "first_public_pass_turn": 5,
+  "first_accepted_finish_turn": 6,
+  "rejected_actions": 0,
+  "duplicate_inspect_pages": 0,
+  "node_not_found": 0,
+  "legal_non_noop_edits": 1,
+  "public_gpu_checks_attempted": 1,
+  "public_checks_passed_final": true,
+  "status": "DIFF_STAGED_UNVERIFIED",
+  "independent_hidden_verification": false,
+  "public_run_id": "f7d2064b2d454db6b09f742ba2d325a0",
+  "public_checker_run_id": "13865474748e4f029ef0a7777798ab1d",
+  "candidate_sha256": "88dd297b8a0bc53dc3b93b7d1a4678551346b4855d7139b4edaddecef0070ba4",
+  "diff_sha256": "c79e717905fbb36dc3af38ac877a47727680bc234d7b22cfdf8fca565e86704e",
+  "action_trace": [
+    {
+      "turn": 1,
+      "action": {
+        "tool": "repo_read_file",
+        "path": "benchmarks/hardset_v2/h001/mutant/kernel.cu",
+        "start_line": 27,
+        "lines": 1
+      },
+      "status": "OK",
+      "rejection_code": null
+    },
+    {
+      "turn": 2,
+      "action": {
+        "tool": "repo_inspect_syntax",
+        "path": "benchmarks/hardset_v2/h001/mutant/kernel.cu",
+        "symbol": "",
+        "offset": 0,
+        "limit": 8
+      },
+      "status": "OK",
+      "rejection_code": null
+    },
+    {
+      "turn": 3,
+      "action": {
+        "tool": "repo_inspect_syntax",
+        "path": "benchmarks/hardset_v2/h001/mutant/kernel.cu",
+        "symbol": "",
+        "offset": 8,
+        "limit": 8
+      },
+      "status": "OK",
+      "rejection_code": null
+    },
+    {
+      "turn": 4,
+      "action": {
+        "tool": "repo_replace_syntax",
+        "path": "benchmarks/hardset_v2/h001/mutant/kernel.cu",
+        "expected_source_sha256": "47e69f940ca6c8b9ab287b5ee5c9aed7973f4d1eeb7ac41b7e855a01609c9bce",
+        "edits": [
+          {
+            "node_id": "n13",
+            "replacement_code": "denominator += expf(x - maximum);"
+          },
+          {
+            "node_id": "n15",
+            "replacement_code": "out[i] = expf(own - maximum) / denominator;"
+          }
+        ]
+      },
+      "status": "OK",
+      "rejection_code": null
+    },
+    {
+      "turn": 5,
+      "action": {
+        "tool": "repo_run_public_checks"
+      },
+      "status": "OK",
+      "rejection_code": null
+    },
+    {
+      "turn": 6,
+      "action": {
+        "tool": "finish",
+        "summary": "The CUDA kernel already satisfies the functional requirement as verified by the public GPU checks. No further modifications are needed."
+      },
+      "status": "OK",
+      "rejection_code": null
+    }
+  ],
+  "artifact_hashes": {
+    "qwen-react-only-h001.metrics.json": "b00e4511d1323a5a6a8d7c2556f76cd25db167ad618691cffbc80b72477e58bf",
+    "qwen-react-only-h001/result.json": "ae90809118c87187971dd06d90840aff8930ff87caff386a7afeaff2545f4d59",
+    "qwen-react-only-h001/session-events.jsonl": "a1dde82b7d205fe6d5277dfb9d49878d2bb7a34a9bb43996bccb2beac0694336",
+    "qwen-react-only-h001/session-checkpoint.json": "88c8275603e0b19be117f252f693f66381fbe49ef87fe9962f074111aa4a220f"
+  }
+}
