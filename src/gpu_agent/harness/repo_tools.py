@@ -593,35 +593,20 @@ class RepositoryWorkspaceTools:
                     "path": action.path,
                     "source_sha256": digest,
                     "symbol": action.symbol,
+                    "offset": action.offset,
+                    "limit": action.limit,
                 }
             )
             self._require_new_observation(key, "REDUNDANT_SYNTAX_INSPECTION")
-            mapping = self.workspace.inspect_syntax(action.path, symbol=action.symbol)
+            mapping = self.workspace.inspect_syntax(
+                action.path, symbol=action.symbol, offset=action.offset, limit=action.limit
+            )
             self._observed_query_fingerprints.add(key)
-            nodes = mapping["nodes"]
-            if isinstance(nodes, list):
-                # Prioritize executable statements: presenting just the first
-                # declarations hid the Softmax bug from the model entirely.
-                ordered = sorted(
-                    nodes,
-                    key=lambda item: (
-                        0 if item["kind"] == "expression_statement" else 1,
-                        item["start_line"],
-                    ),
-                )
-                selected_nodes = ordered[:12]
-                mapping["nodes"] = selected_nodes
-                if len(ordered) > 12:
-                    mapping["more_nodes_available"] = True
-                serialized = json.dumps(mapping, ensure_ascii=False)
-                while len(serialized) > 3900 and selected_nodes:
-                    selected_nodes.pop()
-                    mapping["more_nodes_available"] = True
-                    serialized = json.dumps(mapping, ensure_ascii=False)
-                if not selected_nodes:
-                    raise ValueError("CUDA_SYNTAX_RESPONSE_BUDGET_EXHAUSTED")
-            else:
-                raise ValueError("invalid controller syntax node map")
+            # Parsing and cursor pagination are controller owned. Never trim
+            # the serialized JSON: callers can use next_offset for more nodes.
+            serialized = json.dumps(mapping, ensure_ascii=False)
+            if len(serialized) > 3900 or not mapping["nodes"]:
+                raise ValueError("CUDA_SYNTAX_PAGE_INVALID_OR_OVER_BUDGET")
             return ToolObservation(
                 tool=action.tool,
                 status="OK",

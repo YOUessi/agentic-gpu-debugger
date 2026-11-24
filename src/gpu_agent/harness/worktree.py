@@ -424,16 +424,18 @@ class PinnedGitWorkspace:
         pieces.append(text[cursor:])
         return self._stage_source(name, target, original, "".join(pieces).encode("utf-8"))
 
-    def inspect_syntax(self, name: str, *, symbol: str = "") -> dict[str, object]:
+    def inspect_syntax(
+        self, name: str, *, symbol: str = "", offset: int = 0, limit: int = 8
+    ) -> dict[str, object]:
         """Parse only an existing approved CUDA source file, without executing it."""
-        from gpu_agent.harness.syntax_tools import syntax_nodes
+        from gpu_agent.harness.syntax_tools import syntax_page
 
         self._verify_boundary()
         path = self._checked(name, editable=False)
         if path.suffix not in {".cu", ".cuh"}:
             raise ValueError("CUDA_SYNTAX_ONLY_CUDA_SOURCE")
         raw = read_regular(path, MAX_SOURCE_BYTES)
-        return syntax_nodes(raw, symbol=symbol)
+        return syntax_page(raw, symbol=symbol, offset=offset, limit=limit)
 
     def replace_syntax(
         self,
