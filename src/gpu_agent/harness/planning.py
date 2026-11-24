@@ -12,7 +12,7 @@ from typing import Literal
 
 from gpu_agent.harness.models import TaskProgress, TaskReflection
 
-_INSPECT = {"repo_read_file", "repo_inspect_syntax"}
+_INSPECT = {"repo_read_file", "repo_inspect_syntax", "repo_probe_public"}
 _EDIT = {"repo_replace_snippet", "repo_replace_many", "repo_replace_syntax"}
 _REDUNDANT = {"REDUNDANT_READ", "REDUNDANT_LIST", "REDUNDANT_DIFF"}
 

@@ -50,6 +50,9 @@ class RepositoryCheckpoint(BaseModel):
     syntax_mode: bool = False
     max_public_checks: int = Field(default=2, ge=1, le=3)
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
+    public_probes_attempted: int = Field(default=0, ge=0, le=4)
+    public_probe_signatures: tuple[str, ...] = ()
+    public_probe_run_ids: tuple[str, ...] = ()
     attempted_candidate_hashes: tuple[str, ...] = ()
     observed_query_fingerprints: tuple[str, ...] = ()
     last_public_run_id: str | None = Field(default=None, pattern=r"^[a-f0-9]{32}$")
@@ -121,6 +124,13 @@ def write_repository_checkpoint(path: Path, checkpoint: RepositoryCheckpoint) ->
         raise ValueError("checkpoint planning mode and state shape disagree")
     if checkpoint.event_counter != 4 * checkpoint.state["turns"]:
         raise ValueError("checkpoint trace count disagrees with completed turns")
+    if (
+        checkpoint.public_probes_attempted != len(checkpoint.public_probe_signatures)
+        or checkpoint.public_probes_attempted != len(checkpoint.public_probe_run_ids)
+        or len(set(checkpoint.public_probe_signatures)) != checkpoint.public_probes_attempted
+        or len(set(checkpoint.public_probe_run_ids)) != checkpoint.public_probes_attempted
+    ):
+        raise ValueError("checkpoint public functional probe ledger invalid")
     if len(checkpoint.accepted_hashes) > checkpoint.max_edited_files:
         raise ValueError("checkpoint file limit exceeded")
     if (
@@ -172,6 +182,13 @@ def read_repository_checkpoint(path: Path) -> RepositoryCheckpoint:
         raise ValueError("checkpoint planning mode and state shape disagree")
     if checkpoint.event_counter != 4 * checkpoint.state["turns"]:
         raise ValueError("checkpoint action trace is inconsistent")
+    if (
+        checkpoint.public_probes_attempted != len(checkpoint.public_probe_signatures)
+        or checkpoint.public_probes_attempted != len(checkpoint.public_probe_run_ids)
+        or len(set(checkpoint.public_probe_signatures)) != checkpoint.public_probes_attempted
+        or len(set(checkpoint.public_probe_run_ids)) != checkpoint.public_probes_attempted
+    ):
+        raise ValueError("checkpoint public functional probe ledger invalid")
     if len(checkpoint.accepted_hashes) > checkpoint.max_edited_files:
         raise ValueError("checkpoint changed-file budget exceeded")
     if (

@@ -55,6 +55,7 @@ class RepositoryTrajectoryMetrics(BaseModel):
     rejected_actions: int = Field(ge=0)
     redundant_inspection_rejections: int = Field(ge=0)
     public_gpu_checks_attempted: int = Field(ge=0, le=3)
+    public_probes_attempted: int = Field(default=0, ge=0, le=4)
     public_checks_passed_final: bool = False
     independent_hidden_verification: Literal[False] = False
     independently_verified: Literal[False] = False
@@ -204,6 +205,7 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
             step.status == "REJECTED" and step.rejection_code in _REDUNDANT for step in sequence
         ),
         public_gpu_checks_attempted=result.public_checks_attempted,
+        public_probes_attempted=result.public_probes_attempted,
         public_checks_passed_final=result.public_checks_passed,
         tool_trajectory=sequence,
     )

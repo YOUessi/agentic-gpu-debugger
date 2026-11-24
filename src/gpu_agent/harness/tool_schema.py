@@ -63,7 +63,7 @@ def repository_decision_schema(
             path=(Literal[registered_kernel_path], ...),
         )
         if registered_kernel_path is not None
-        and name in {"repo_inspect_syntax", "repo_replace_syntax"}
+        and name in {"repo_inspect_syntax", "repo_replace_syntax", "repo_read_file"}
         else create_model(
             "BoundRepoProbePublic",
             __base__=RepoProbePublic,
