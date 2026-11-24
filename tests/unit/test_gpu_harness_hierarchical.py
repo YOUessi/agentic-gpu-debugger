@@ -296,3 +296,35 @@ def test_plan_only_agent_does_not_reserve_nonexistent_repair_model_calls() -> No
         old.reserve("plan")
     with pytest.raises(ValueError, match="invalid model-call reservation"):
         LLMCallGate(AgentBudget(max_llm_calls=10), reserve_repair_stages="no")
+
+
+def test_ast_pagination_has_complete_json_no_lost_nodes_or_hidden_truncation() -> None:
+    import json
+
+    from gpu_agent.harness.syntax_tools import syntax_page
+
+    source = CUDA_FILE.read_bytes()
+    full = syntax_nodes(source, symbol="softmax32")
+    total = len(full["nodes"])
+    offset = 0
+    observed: list[dict[str, object]] = []
+    while True:
+        page = syntax_page(source, symbol="softmax32", offset=offset, limit=3, max_chars=1050)
+        raw = json.dumps(page, ensure_ascii=False)
+        assert len(raw) <= 1050
+        assert json.loads(raw)["source_sha256"] == hashlib.sha256(source).hexdigest()
+        assert page["total_nodes"] == total
+        observed.extend(page["nodes"])
+        if not page["has_more"]:
+            assert page["next_offset"] is None
+            break
+        assert page["next_offset"] > offset
+        offset = page["next_offset"]
+    assert len(observed) == total
+    assert len({item["id"] for item in observed}) == total
+    assert any(item["code"] == "denominator += expf(x);" for item in observed)
+    assert any(item["code"] == "out[i] = expf(own) / denominator;" for item in observed)
+    with pytest.raises(ValueError, match="CUDA_SYNTAX_CURSOR_EXHAUSTED"):
+        syntax_page(source, symbol="softmax32", offset=total)
+    with pytest.raises(ValueError, match="CUDA_SYNTAX_PAGE_BOUNDS_INVALID"):
+        syntax_page(source, symbol="softmax32", offset=-1)
