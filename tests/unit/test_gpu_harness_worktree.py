@@ -257,16 +257,21 @@ def test_oracle_and_evaluator_sources_are_not_readable_or_editable(
         path.write_text(raw)
     _git(source, "add", ".")
     _git(
-        source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
-        "commit", "-q", "-m", "audit forbidden paths"
+        source,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-q",
+        "-m",
+        "audit forbidden paths",
     )
     sha = _git(source, "rev-parse", "HEAD")
     workspace = PinnedGitWorkspace(origin=source, root=tmp_path / "read-isolation", sha=sha)
     names = workspace.list_files()
     assert "src/kernel.cu" in names
-    for name in (
-        *extra, "tests/test_kernel.py", "benchmarks/hardset_v2/h001/clean/kernel.cu"
-    ):
+    for name in (*extra, "tests/test_kernel.py", "benchmarks/hardset_v2/h001/clean/kernel.cu"):
         assert name not in names
         with pytest.raises(ValueError):
             workspace.read(name)
