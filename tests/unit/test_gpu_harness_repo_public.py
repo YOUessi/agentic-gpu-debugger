@@ -1025,3 +1025,135 @@ def test_hierarchical_syntax_mode_persists_planner_reflection_and_verified_gates
     assert metrics.first_public_pass_turn == 3
     assert metrics.first_accepted_finish_turn == 4
     assert metrics.independently_verified is False
+
+
+class FakeBoundedPublicProbe:
+    """Controller-only stub; tests never run CUDA or expose CPU expected values."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, int, str]] = []
+
+    def __call__(
+        self, *, store, parent_run_id, repository, case_id, phase, input_size,
+        candidate, output,
+    ):
+        from gpu_agent.benchmark.hardset_v2_public_probe import PublicProbeResult
+
+        assert case_id == "h001"
+        assert input_size in {32, 33, 65, 129, 257}
+        assert repository.is_dir()
+        output.mkdir(mode=0o700)
+        child = store.create_run(
+            "hardset_v2_public_functional_probe", parent_run_id=parent_run_id
+        )
+        store.transition(child.id, "RUNNING", "PREPARING")
+        digest = hashlib.sha256(candidate).hexdigest()
+        outcome = "NUMERIC_MISMATCH" if phase == "before" else "PASS"
+        result = PublicProbeResult(
+            case_id="h001",
+            phase=phase,
+            input_size=input_size,
+            input_sha256="a" * 64,
+            candidate_sha256=digest,
+            run_id=child.id,
+            outcome=outcome,
+            diagnostic_region="cross_warp_tail",
+        )
+        store.put(child.id, "probe/public-summary.json", result.model_dump_json().encode(), "public")
+        store.transition(child.id, "COMPLETED", None)
+        self.calls.append((phase, input_size, digest))
+        return result
+
+
+def test_registered_toolhost_before_after_probes_and_read_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gpu_agent.harness.models import RepoProbePublic, RepoReadFile
+
+    repo, sha = _registered_repository(tmp_path)
+    fake = FakeBoundedPublicProbe()
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.probe_candidate_publicly", fake)
+    with RepositoryWorkspaceTools(
+        origin=repo,
+        output=tmp_path / "public-before-after",
+        sha=sha,
+        public_case_id="h001",
+        syntax_mode=False,
+    ) as host:
+        start = host.snapshot(GOAL, [], 7)
+        assert start.public_probe_phase == "before"
+        assert start.remaining_public_probes == 4
+        assert "repo_probe_public" in start.allowed_tools
+        before = host.invoke(RepoProbePublic(phase="before", input_size=33))
+        assert before.status == "OK"
+        public = json.loads(before.content)
+        assert public["outcome"] == "NUMERIC_MISMATCH"
+        assert public["diagnostic_region"] == "cross_warp_tail"
+        assert "expected" not in before.content.lower()
+        assert host.invoke(RepoProbePublic(phase="before", input_size=33)).status == "REJECTED"
+        assert host.public_probes_attempted == 1
+        for name in (
+            "benchmarks/hardset_v2/h001/clean/kernel.cu",
+            "benchmarks/harness/vector_io.cpp",
+            "src/other.cuh",
+        ):
+            denied = host.invoke(RepoReadFile(path=name))
+            assert denied.status == "REJECTED", (name, denied)
+            assert "oracle" in denied.content.lower() or "scope" in denied.content.lower()
+        assert "benchmarks/hardset_v2/h001/clean/kernel.cu" not in host.workspace.list_files()
+        assert host.invoke(
+            HarnessDecision.model_validate(
+                {"action": _edit_denominator(), "reason": "Apply first verified source edit"}
+            ).action
+        ).status == "OK"
+        assert host.snapshot(GOAL, [], 5).public_probe_phase == "after"
+        assert host.invoke(RepoProbePublic(phase="before", input_size=65)).status == "REJECTED"
+        after = host.invoke(RepoProbePublic(phase="after", input_size=33))
+        assert after.status == "OK"
+        assert json.loads(after.content)["outcome"] == "PASS"
+        assert host.public_probes_attempted == 2
+        assert len(host.public_probe_run_ids) == 2
+        assert len(host.public_probe_signatures) == 2
+        assert len(fake.calls) == 2
+
+
+def test_public_probe_evidence_survives_checkpoint_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+    from gpu_agent.harness.models import RepoProbePublic
+
+    repo, sha = _registered_repository(tmp_path)
+    fake = FakeBoundedPublicProbe()
+    checker = FakePublicChecker([True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.probe_candidate_publicly", fake)
+    monkeypatch.setattr(
+        "gpu_agent.harness.repo_tools.check_candidate_publicly", checker
+    )
+    output = tmp_path / "probe-resume"
+    paused = run_repository_coding_session(
+        repository=repo, output=output, base_sha=sha, goal=GOAL,
+        public_case_id="h001", max_steps=8, max_model_calls=10,
+        pause_after_turns=1,
+        model_factory=lambda _: Model([{"tool": "repo_probe_public", "phase": "before", "input_size": 33}]),
+    )
+    assert paused.status == "PAUSED_RESUMABLE"
+    checkpoint = read_repository_checkpoint(output / "session-checkpoint.json")
+    assert checkpoint.public_probes_attempted == 1
+    assert len(checkpoint.public_probe_run_ids) == 1
+    resumed = run_repository_coding_session(
+        repository=repo, output=output, base_sha=sha, goal=GOAL,
+        public_case_id="h001", max_steps=8, max_model_calls=10,
+        resume=True,
+        model_factory=lambda _: Model([
+            _edit_denominator(),
+            {"tool": "repo_probe_public", "phase": "after", "input_size": 33},
+            _edit_numerator(), _check(), _finish(),
+        ]),
+    )
+    assert resumed.status == "DIFF_STAGED_UNVERIFIED"
+    assert resumed.public_probes_attempted == 2
+    metrics = summarize_repository_trajectory(output)
+    assert metrics.public_probes_attempted == 2
+    assert metrics.public_gpu_checks_attempted == 1
+    assert len(fake.calls) == 2
