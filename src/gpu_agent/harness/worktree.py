@@ -309,8 +309,8 @@ class PinnedGitWorkspace:
             raise ValueError("only existing source-code files are editable")
         if not editable and PurePosixPath(norm).suffix not in PUBLIC_READ_EXTENSIONS:
             raise ValueError("file extension is not public-readable")
-        if not editable and not _model_read_allowed(norm):
-            raise ValueError("model read of evaluator, Oracle or test source is forbidden")
+        if not _model_read_allowed(norm):
+            raise ValueError("model access to evaluator, Oracle or test source is forbidden")
         candidate = self.root
         for part in parts:
             candidate /= part
