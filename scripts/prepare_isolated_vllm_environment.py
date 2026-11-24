@@ -84,21 +84,29 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=pathlib.Path, required=True)
     parser.add_argument("--report", type=pathlib.Path, required=True)
+    parser.add_argument("--resume-relocation", action="store_true")
     args = parser.parse_args()
     os.umask(0o077)
     target = args.target.absolute()
-    assert not target.exists() and not args.report.exists()
+    assert not args.report.exists()
+    assert not target.exists() or args.resume_relocation
     assert sys.version_info[:2] == (3, 10)
     assert pathlib.Path(sys.prefix).name == "llm-opt-serving"
     dists = distributions()
     assert dists["vllm"].version == "0.19.1"
     assert dists["torch"].version == "2.10.0"
     assert dists["typing-extensions"].version == "4.15.0"
-    subprocess.run([sys.executable, "-I", "-m", "venv", "--copies", "--without-pip",
-                    str(target)], check=True)
+    if target.exists():
+        cfg = (target / "pyvenv.cfg").read_text()
+        assert not target.is_symlink() and "include-system-site-packages = false" in cfg
+        assert (target / "bin/python").is_file()
+    else:
+        subprocess.run([sys.executable, "-I", "-m", "venv", "--copies", "--without-pip",
+                        str(target)], check=True)
     dest = target / "lib/python3.10/site-packages"
     expected = {}
     records = []
+    record_collisions = []
     for name, dist in sorted(dists.items()):
         root = pathlib.Path(dist.locate_file("")).resolve(strict=True)
         roots = (
@@ -125,6 +133,22 @@ def main():
         for src, rel, h in sorted(files, key=lambda x: str(x[1])):
             if rel.is_absolute() or ".." in rel.parts:
                 raise ValueError("package escaped target site-packages")
+            # The original installation has one verified shared-path collision.
+            # Preserve the existing effective bytes, not the overwritten copy
+            # described by torch-c-dlpack-ext's old wheel RECORD.
+            if name == "torch-c-dlpack-ext" and str(rel) == "build_backend.py":
+                owner = dists["flashinfer-python"]
+                other = next(f for f in owner.files if str(f) == str(rel))
+                assert pathlib.Path(owner.locate_file(other)).resolve() == src.resolve()
+                assert sha(src) == "d034bb09167e69d48f61ffbddf3a0f2e4f6b4233e76f295eaa11b38ac535b657"
+                assert h is not None and other.hash is not None
+                record_collisions.append({
+                    "path": str(rel), "overwritten_record_owner": name,
+                    "matching_record_owner": "flashinfer-python",
+                    "effective_sha256": sha(src), "original_expected_hash": h.value,
+                    "matching_record_hash": other.hash.value,
+                })
+                h = other.hash
             value = install_file(src, dest / rel, h)
             installed.append([str(rel), value])
         assert installed
@@ -171,7 +195,8 @@ print(json.dumps({'executable':sys.executable,'prefix':str(prefix),
     report = {"schema_version":"isolated-serving-relocation-v1",
               "source_python":sys.executable, "target_python":str(python),
               "relocation_method":"copy exact installed package files into separate no-system-site venv; verify wheel RECORD and copied bytes",
-              "package_records":records,"module_identity":identity,"pip_freeze":freeze,
+              "package_records":records,"shared_path_record_collisions":record_collisions,
+              "module_identity":identity,"pip_freeze":freeze,
               "pip_freeze_sha256":hashlib.sha256(freeze.encode()).hexdigest()}
     args.report.parent.mkdir(parents=True, exist_ok=True)
     with args.report.open("x", encoding="utf-8") as stream:
