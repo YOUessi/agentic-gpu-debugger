@@ -7,6 +7,7 @@ the model still selects an action and all source edits itself.
 
 from __future__ import annotations
 
+from types import GenericAlias
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, create_model
@@ -96,7 +97,7 @@ def repository_decision_schema(
                 node_id=(Literal[aliases], ...),
             )
             fields["expected_source_sha256"] = (Literal[syntax_state.source_sha256], ...)
-            fields["edits"] = (list[edit], Field(min_length=1, max_length=4))
+            fields["edits"] = (GenericAlias(list, edit), Field(min_length=1, max_length=4))
         if fields:
             return create_model(f"Bound{name.title().replace('_', '')}", __base__=base, **fields)
         return base
