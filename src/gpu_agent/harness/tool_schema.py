@@ -17,6 +17,7 @@ from gpu_agent.harness.models import (
     RepoInspectSyntax,
     RepoListFiles,
     RepoReadFile,
+    RepoProbePublic,
     RepoReplaceMany,
     RepoReplaceSnippet,
     RepoReplaceSyntax,
@@ -26,6 +27,7 @@ from gpu_agent.harness.models import (
 _REPO_ACTION_CLASSES: dict[str, type[BaseModel]] = {
     "repo_list_files": RepoListFiles,
     "repo_read_file": RepoReadFile,
+    "repo_probe_public": RepoProbePublic,
     "repo_replace_snippet": RepoReplaceSnippet,
     "repo_replace_many": RepoReplaceMany,
     "repo_git_diff": RepoGitDiff,
@@ -40,6 +42,7 @@ def repository_decision_schema(
     allowed_tools: tuple[str, ...],
     *,
     registered_kernel_path: str | None = None,
+    public_probe_phase: Literal["before", "after"] | None = None,
 ) -> type[BaseModel]:
     """Return a strict Pydantic response schema for EXACTLY approved tools.
 
@@ -61,6 +64,12 @@ def repository_decision_schema(
         )
         if registered_kernel_path is not None
         and name in {"repo_inspect_syntax", "repo_replace_syntax"}
+        else create_model(
+            "BoundRepoProbePublic",
+            __base__=RepoProbePublic,
+            phase=(Literal[public_probe_phase], ...),
+        )
+        if name == "repo_probe_public" and public_probe_phase is not None
         else _REPO_ACTION_CLASSES[name]
         for name in allowed_tools
     )

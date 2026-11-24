@@ -112,6 +112,14 @@ class RepoGitDiff(StrictModel):
     tool: Literal["repo_git_diff"] = "repo_git_diff"
 
 
+class RepoProbePublic(StrictModel):
+    """Run a fixed, public pre/post-edit functional CUDA probe only."""
+
+    tool: Literal["repo_probe_public"] = "repo_probe_public"
+    phase: Literal["before", "after"]
+    input_size: Literal[32, 33, 65, 129, 257]
+
+
 class RepoRunPublicChecks(StrictModel):
     """Public GPU check for an operator-bound registered HardSet case only."""
 
@@ -138,6 +146,7 @@ HarnessAction = Annotated[
     | RepoInspectSyntax
     | RepoReplaceSyntax
     | RepoGitDiff
+    | RepoProbePublic
     | RepoRunPublicChecks
     | FinishTask,
     Field(discriminator="tool"),
@@ -217,6 +226,8 @@ class SessionSnapshot(StrictModel):
     context_summary: str = Field(default="", max_length=2800)
     total_public_actions: int = Field(default=0, ge=0)
     remaining_public_checks: int = Field(default=3, ge=0)
+    public_probe_phase: Literal["before", "after"] | None = None
+    remaining_public_probes: int = Field(default=0, ge=0, le=4)
 
 
 class RepoHarnessOutcome(StrictModel):
@@ -236,6 +247,7 @@ class RepoHarnessOutcome(StrictModel):
     hierarchical_mode: bool = False
     syntax_mode: bool = False
     public_checks_attempted: int = Field(default=0, ge=0, le=3)
+    public_probes_attempted: int = Field(default=0, ge=0, le=4)
     public_checks_passed: bool = False
     public_checked_candidate_sha256: str | None = Field(default=None, pattern=r"^[a-f0-9]{64}$")
 
