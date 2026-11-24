@@ -663,7 +663,10 @@ print(json.dumps({'executable':sys.executable,'prefix':str(p),
     # before taking the shared GPU lock or admitting an experiment.
     subprocess.run(
         [str(a.serving_python), "-I", "-m", "vllm.entrypoints.cli.main", "serve", "--help"],
-        env=env, check=True, timeout=90, stdout=subprocess.DEVNULL,
+        env=env,
+        check=True,
+        timeout=90,
+        stdout=subprocess.DEVNULL,
     )
     return {
         "infra_version": INFRA,

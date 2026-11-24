@@ -41,8 +41,12 @@ ROOTS = [
     "numpy",
     "pydantic",
 ]
-APT = {"markupsafe": "python3-markupsafe", "wheel": "python3-wheel",
-       "psutil": "python3-psutil", "cryptography": "python3-cryptography"}
+APT = {
+    "markupsafe": "python3-markupsafe",
+    "wheel": "python3-wheel",
+    "psutil": "python3-psutil",
+    "cryptography": "python3-cryptography",
+}
 
 
 def sha(path: pathlib.Path) -> str:
