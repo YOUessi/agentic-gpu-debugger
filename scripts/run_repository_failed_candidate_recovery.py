@@ -36,7 +36,11 @@ from gpu_agent.store import read_regular
 
 class PriorFailureRecovery:
     def __init__(
-        self, host: RepositoryWorkspaceTools, prior: dict, *, max_steps: int,
+        self,
+        host: RepositoryWorkspaceTools,
+        prior: dict,
+        *,
+        max_steps: int,
         max_model_calls: int,
     ) -> None:
         self.host = host
@@ -132,11 +136,17 @@ def main() -> int:
     repo = args.repository.resolve(strict=True)
     sha = subprocess.run(
         ["git", "-C", str(repo), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True, timeout=20,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
     ).stdout.strip()
     if subprocess.run(
         ["git", "-C", str(repo), "status", "--porcelain"],
-        check=True, capture_output=True, text=True, timeout=20,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=20,
     ).stdout.strip():
         parser.error("controlled recovery requires a clean frozen checkout")
     holder = []
@@ -149,22 +159,31 @@ def main() -> int:
         return model
 
     outcome = run_repository_coding_session(
-        repository=repo, output=args.output.absolute(), base_sha=sha,
+        repository=repo,
+        output=args.output.absolute(),
+        base_sha=sha,
         goal=(
             "Repair the registered CUDA kernel to satisfy its functional requirement. "
             "Use approved public GPU checks before finish; do not inspect hidden tests."
         ),
-        public_case_id=case, syntax_mode=True, allow_batch_edits=False,
-        context_mode="evidence_first", max_steps=args.max_steps,
-        max_model_calls=args.max_steps + 2, max_public_checks=2,
-        allow_paid_calls=True, model_factory=factory,
+        public_case_id=case,
+        syntax_mode=True,
+        allow_batch_edits=False,
+        context_mode="evidence_first",
+        max_steps=args.max_steps,
+        max_model_calls=args.max_steps + 2,
+        max_public_checks=2,
+        allow_paid_calls=True,
+        model_factory=factory,
     )
     metrics = summarize_repository_trajectory(args.output)
     model = holder[0]
     revised = [
-        step.turn for step in metrics.tool_trajectory
+        step.turn
+        for step in metrics.tool_trajectory
         if step.turn > model.prefix_turns
-        and step.tool == "repo_replace_syntax" and step.status == "OK"
+        and step.tool == "repo_replace_syntax"
+        and step.status == "OK"
     ]
     report = {
         "experiment": "controlled_recovery_from_prior_model_candidate",
@@ -174,16 +193,16 @@ def main() -> int:
         "first_failure_reproduced": model.prefix_complete,
         "real_model_first_edit_turn": min(revised, default=None),
         "real_model_recovery_pass": bool(
-            model.prefix_complete and revised and outcome.public_checks_passed
+            model.prefix_complete
+            and revised
+            and outcome.public_checks_passed
             and metrics.first_public_check_pass_turn is not None
             and metrics.first_public_check_pass_turn > model.prefix_turns
         ),
         "outcome": outcome.model_dump(mode="json"),
         "metrics": metrics.model_dump(mode="json"),
     }
-    (args.output / "controlled-recovery.json").write_text(
-        json.dumps(report, indent=2) + "\n"
-    )
+    (args.output / "controlled-recovery.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
     return 0
 
