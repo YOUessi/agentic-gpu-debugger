@@ -77,7 +77,10 @@ _REDUNDANT = {
     "REDUNDANT_SYNTAX_INSPECTION",
 }
 _READ_TOOLS = {
-    "repo_list_files", "repo_read_file", "repo_git_diff", "repo_inspect_syntax",
+    "repo_list_files",
+    "repo_read_file",
+    "repo_git_diff",
+    "repo_inspect_syntax",
     "repo_inspect_syntax_node",
 }
 
@@ -117,8 +120,10 @@ def summarize_repository_trajectory(output: Path) -> RepositoryTrajectoryMetrics
         or type(syntax) is not bool
         or result.hierarchical_mode != hierarchical
         or result.syntax_mode != syntax
-        or type(extended) is not bool or result.extended_syntax != extended
-        or type(diagnostics) is not bool or result.public_diagnostics != diagnostics
+        or type(extended) is not bool
+        or result.extended_syntax != extended
+        or type(diagnostics) is not bool
+        or result.public_diagnostics != diagnostics
     ):
         raise ValueError("hierarchical or syntax experiment identity changed")
     if public_case is not None and public_case not in {"h001", "h002", "h003"}:

@@ -445,7 +445,12 @@ class PinnedGitWorkspace:
         return self._stage_source(name, target, original, "".join(pieces).encode("utf-8"))
 
     def inspect_syntax(
-        self, name: str, *, symbol: str = "", offset: int = 0, limit: int = 8,
+        self,
+        name: str,
+        *,
+        symbol: str = "",
+        offset: int = 0,
+        limit: int = 8,
         extended: bool = False,
     ) -> dict[str, object]:
         """Parse only an existing approved CUDA source file, without executing it."""
@@ -468,8 +473,10 @@ class PinnedGitWorkspace:
         if path.suffix not in {".cu", ".cuh"}:
             raise ValueError("CUDA_SYNTAX_ONLY_CUDA_SOURCE")
         return syntax_node_detail(
-            read_regular(path, MAX_SOURCE_BYTES), expected_source_sha256=expected_source_sha256,
-            node_id=node_id, extended=extended,
+            read_regular(path, MAX_SOURCE_BYTES),
+            expected_source_sha256=expected_source_sha256,
+            node_id=node_id,
+            extended=extended,
         )
 
     def replace_syntax(
@@ -495,7 +502,9 @@ class PinnedGitWorkspace:
             raise ValueError("workspace modified-file budget exhausted")
         original = read_regular(target, MAX_SOURCE_BYTES)
         changed = rewrite_syntax_nodes(
-            original, expected_source_sha256=expected_source_sha256, edits=edits,
+            original,
+            expected_source_sha256=expected_source_sha256,
+            edits=edits,
             extended=extended,
         )
         return self._stage_source(name, target, original, changed)

@@ -247,7 +247,8 @@ class SyntaxState(StrictModel):
         if not self.extended_syntax or len(self.full_node_reads) >= 8:
             return ()
         return tuple(
-            node.id for node in self.observed_nodes
+            node.id
+            for node in self.observed_nodes
             if node.code_truncated and node.code_bytes is not None and node.code_bytes <= 1200
         )
 

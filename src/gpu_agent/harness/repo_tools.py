@@ -249,14 +249,19 @@ class RepositoryWorkspaceTools:
         if self._syntax_digest(state.path) != state.source_sha256:
             raise ValueError("recovered AST state has stale source SHA")
         pages = iter(state.visited_pages)
-        records_to_replay = active if self._public_case_id is not None else [
-            {"tool": "repo_inspect_syntax"} for _ in state.visited_pages
-        ]
+        records_to_replay = (
+            active
+            if self._public_case_id is not None
+            else [{"tool": "repo_inspect_syntax"} for _ in state.visited_pages]
+        )
         for record in records_to_replay:
             if record["tool"] == "repo_inspect_syntax_node":
                 full = RepoInspectSyntaxNode.model_validate(record["action"])
                 full_content = self._read_full_syntax_node(full)
-                if record["observation_sha256"] != hashlib.sha256(full_content.encode()).hexdigest():
+                if (
+                    record["observation_sha256"]
+                    != hashlib.sha256(full_content.encode()).hexdigest()
+                ):
                     raise ValueError("recovered full AST node differs from audited observation")
                 continue
             page = next(pages)
@@ -272,7 +277,10 @@ class RepositoryWorkspaceTools:
                 path=state.path, symbol=state.symbol, offset=page.offset, limit=page.limit
             )
             mapping = self.workspace.inspect_syntax(
-                state.path, symbol=state.symbol, offset=page.offset, limit=page.limit,
+                state.path,
+                symbol=state.symbol,
+                offset=page.offset,
+                limit=page.limit,
                 extended=self._extended_syntax,
             )
             if self._public_case_id is not None:
@@ -634,7 +642,8 @@ class RepositoryWorkspaceTools:
                     if syntax_key in self._observed_query_fingerprints:
                         continue
             if name == "repo_inspect_syntax_node" and (
-                not self._extended_syntax or self.syntax_state is None
+                not self._extended_syntax
+                or self.syntax_state is None
                 or not self.syntax_state.readable_truncated_aliases
             ):
                 continue
@@ -896,33 +905,44 @@ class RepositoryWorkspaceTools:
         actual = self._syntax_digest(action.path)
         if actual != action.expected_source_sha256:
             raise SyntaxRejection(
-                "CUDA_SOURCE_SHA_STALE", expected_source_sha256=action.expected_source_sha256,
-                actual_source_sha256=actual, correction="Inspect the current revision.",
+                "CUDA_SOURCE_SHA_STALE",
+                expected_source_sha256=action.expected_source_sha256,
+                actual_source_sha256=actual,
+                correction="Inspect the current revision.",
             )
         if state is None or action.node_id not in state.readable_truncated_aliases:
             raise SyntaxRejection(
-                "CUDA_SYNTAX_FULL_NODE_UNAVAILABLE", node_id=action.node_id,
+                "CUDA_SYNTAX_FULL_NODE_UNAVAILABLE",
+                node_id=action.node_id,
                 correction="Read only a bounded, observed and still truncated node.",
             )
         mapping = self.workspace.inspect_syntax_node(
-            action.path, expected_source_sha256=actual, node_id=action.node_id,
+            action.path,
+            expected_source_sha256=actual,
+            node_id=action.node_id,
             extended=True,
         )
         node = SyntaxEvidenceNode.model_validate(mapping["node"])
         previous = next(n for n in state.observed_nodes if n.id == action.node_id)
         if (
-            mapping["source_sha256"] != actual or node.code_truncated
+            mapping["source_sha256"] != actual
+            or node.code_truncated
             or not node.code.startswith(previous.code)
-            or node.kind != previous.kind or node.function != previous.function
+            or node.kind != previous.kind
+            or node.function != previous.function
         ):
             raise ValueError("CUDA_SYNTAX_FULL_NODE_PROVENANCE_MISMATCH")
         content = json.dumps(mapping, ensure_ascii=False)
         if len(content) > 3900:
             raise ValueError("CUDA_SYNTAX_PAGE_INVALID_OR_OVER_BUDGET")
-        self._syntax_state = state.model_copy(update={
-            "observed_nodes": tuple(node if n.id == node.id else n for n in state.observed_nodes),
-            "full_node_reads": (*state.full_node_reads, node.id),
-        })
+        self._syntax_state = state.model_copy(
+            update={
+                "observed_nodes": tuple(
+                    node if n.id == node.id else n for n in state.observed_nodes
+                ),
+                "full_node_reads": (*state.full_node_reads, node.id),
+            }
+        )
         return content
 
     def _dispatch(self, action: HarnessAction) -> ToolObservation:
@@ -999,7 +1019,10 @@ class RepositoryWorkspaceTools:
             )
             self._require_new_observation(key, "REDUNDANT_SYNTAX_INSPECTION")
             mapping = self.workspace.inspect_syntax(
-                action.path, symbol=action.symbol, offset=action.offset, limit=action.limit,
+                action.path,
+                symbol=action.symbol,
+                offset=action.offset,
+                limit=action.limit,
                 extended=self._extended_syntax,
             )
             # Parsing and cursor pagination are controller owned. Never trim
@@ -1066,7 +1089,8 @@ class RepositoryWorkspaceTools:
                         functional_requirement=requirement,
                         unchanged_node_ids=unchanged_ids,
                         changed_node_ids=[
-                            edit.node_id for edit in action.edits
+                            edit.node_id
+                            for edit in action.edits
                             if edit.node_id not in unchanged_ids
                         ],
                         correction=(
@@ -1207,7 +1231,8 @@ class RepositoryWorkspaceTools:
         number = self.public_probes_attempted + 1
         probe = (
             partial(probe_candidate_publicly, diagnostic_mode=True)
-            if self._public_diagnostics else probe_candidate_publicly
+            if self._public_diagnostics
+            else probe_candidate_publicly
         )
         result = probe(
             store=self._store,
@@ -1265,7 +1290,8 @@ class RepositoryWorkspaceTools:
         self._public_checks_attempted += 1
         checker = (
             partial(check_candidate_publicly, diagnostic_mode=True)
-            if self._public_diagnostics else check_candidate_publicly
+            if self._public_diagnostics
+            else check_candidate_publicly
         )
         result = checker(
             store=self._store,

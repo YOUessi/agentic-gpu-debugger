@@ -104,15 +104,23 @@ def _entries(raw: bytes, *, extended: bool = False) -> tuple[str, list[SyntaxNod
 
         visit(function_node)
         if extended:
+
             def extra(node: Node) -> None:
                 targets: list[tuple[str, str]] = []
-                if node.type in {"if_statement", "while_statement", "do_statement", "switch_statement"}:
+                if node.type in {
+                    "if_statement",
+                    "while_statement",
+                    "do_statement",
+                    "switch_statement",
+                }:
                     targets.append(("condition", "condition_expression"))
                 elif node.type == "for_statement":
-                    targets.extend((
-                        ("condition", "loop_condition_expression"),
-                        ("update", "loop_update_expression"),
-                    ))
+                    targets.extend(
+                        (
+                            ("condition", "loop_condition_expression"),
+                            ("update", "loop_update_expression"),
+                        )
+                    )
                 elif node.type == "assignment_expression":
                     targets.append(("right", "assignment_rhs"))
                 elif node.type == "init_declarator":
@@ -123,10 +131,14 @@ def _entries(raw: bytes, *, extended: bool = False) -> tuple[str, list[SyntaxNod
                         continue
                     if part.type == "condition_clause":
                         part = part.child_by_field_name("value")
-                    if part is not None and (
-                        part.type.endswith("_expression")
-                        or part.type in {"identifier", "number_literal", "true", "false"}
-                    ) and part.type not in {"lambda_expression"}:
+                    if (
+                        part is not None
+                        and (
+                            part.type.endswith("_expression")
+                            or part.type in {"identifier", "number_literal", "true", "false"}
+                        )
+                        and part.type not in {"lambda_expression"}
+                    ):
                         if not any(
                             x.start_byte == part.start_byte and x.end_byte == part.end_byte
                             for x in entries
@@ -145,9 +157,7 @@ def _entries(raw: bytes, *, extended: bool = False) -> tuple[str, list[SyntaxNod
     return source_sha256, entries
 
 
-def syntax_nodes(
-    raw: bytes, *, symbol: str = "", extended: bool = False
-) -> dict[str, Any]:
+def syntax_nodes(raw: bytes, *, symbol: str = "", extended: bool = False) -> dict[str, Any]:
     """Expose only ordinary public source structure; never a clean reference."""
     if symbol and not re.fullmatch(r"[A-Za-z_]\w{0,79}", symbol):
         raise ValueError("invalid CUDA function symbol")
@@ -170,10 +180,7 @@ def syntax_nodes(
                 "end_line": item.end_line,
                 "code": item.code[:300],
                 "code_truncated": len(item.code) > 300,
-                **(
-                    {"code_bytes": len(item.code.encode("utf-8"))}
-                    if extended else {}
-                ),
+                **({"code_bytes": len(item.code.encode("utf-8"))} if extended else {}),
             }
             for alias, item in indexed
         ],
@@ -254,17 +261,24 @@ def syntax_node_detail(
     return {
         "source_sha256": digest,
         "node": {
-            "id": node_id, "function": item.function, "kind": item.kind,
-            "start_line": item.start_line, "end_line": item.end_line,
-            "code": item.code, "code_truncated": False,
+            "id": node_id,
+            "function": item.function,
+            "kind": item.kind,
+            "start_line": item.start_line,
+            "end_line": item.end_line,
+            "code": item.code,
+            "code_truncated": False,
             "code_bytes": len(item.code.encode("utf-8")),
         },
     }
 
 
 _EXPRESSION_TARGETS = {
-    "condition_expression", "loop_condition_expression", "loop_update_expression",
-    "assignment_rhs", "initializer_expression",
+    "condition_expression",
+    "loop_condition_expression",
+    "loop_update_expression",
+    "assignment_rhs",
+    "initializer_expression",
 }
 
 
@@ -284,7 +298,8 @@ def _validate_expression_replacement(code: bytes) -> None:
     declarator = declaration.child_by_field_name("declarator")
     value = declarator.child_by_field_name("value") if declarator is not None else None
     if (
-        value is None or value.type != "parenthesized_expression"
+        value is None
+        or value.type != "parenthesized_expression"
         or value.start_byte != len(prefix) - 1
         or value.end_byte != len(prefix) + len(code) + 1
         or len(value.named_children) != 1

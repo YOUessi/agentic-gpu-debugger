@@ -1975,38 +1975,56 @@ def test_extended_toolhost_full_node_upgrade_resume_and_edit(tmp_path: Path) -> 
             elif long_code not in source:
                 node = next(n for n in state.observed_nodes if n.code == original)
                 action = RepoReplaceSyntax(
-                    path=kernel, expected_source_sha256=state.source_sha256,
+                    path=kernel,
+                    expected_source_sha256=state.source_sha256,
                     edits=[RepoSyntaxEdit(node_id=node.id, replacement_code=long_code)],
                 )
             else:
-                node = next(n for n in state.observed_nodes if n.kind == "declaration"
-                            and n.code.startswith(original[:-1]))
+                node = next(
+                    n
+                    for n in state.observed_nodes
+                    if n.kind == "declaration" and n.code.startswith(original[:-1])
+                )
                 if node.code_truncated:
                     action = RepoInspectSyntaxNode(
                         path=kernel, expected_source_sha256=state.source_sha256, node_id=node.id
                     )
                     grammar = repository_decision_schema(
-                        snapshot.allowed_tools, registered_kernel_path=kernel,
-                        syntax_state=state, bind_syntax_cursor=True,
+                        snapshot.allowed_tools,
+                        registered_kernel_path=kernel,
+                        syntax_state=state,
+                        bind_syntax_cursor=True,
                     )
-                    grammar.model_validate({
-                        "action": action.model_dump(mode="json"), "reason": "Read full node",
-                    })
+                    grammar.model_validate(
+                        {
+                            "action": action.model_dump(mode="json"),
+                            "reason": "Read full node",
+                        }
+                    )
                 else:
                     action = RepoReplaceSyntax(
-                        path=kernel, expected_source_sha256=state.source_sha256,
-                        edits=[RepoSyntaxEdit(
-                            node_id=node.id, replacement_code=_CASE_REPAIRS["h002"][0][1]
-                        )],
+                        path=kernel,
+                        expected_source_sha256=state.source_sha256,
+                        edits=[
+                            RepoSyntaxEdit(
+                                node_id=node.id, replacement_code=_CASE_REPAIRS["h002"][0][1]
+                            )
+                        ],
                     )
             return HarnessDecision(action=action, reason="Exercise extended public AST tool")
 
     model = ModelWithNode()
     opts = dict(
-        repository=repo, output=output, base_sha=sha,
+        repository=repo,
+        output=output,
+        base_sha=sha,
         goal="Exercise long-node editing with the public RMS kernel.",
-        public_case_id="h002", syntax_mode=True, extended_syntax=True,
-        max_steps=24, max_model_calls=26, model_factory=lambda _: model,
+        public_case_id="h002",
+        syntax_mode=True,
+        extended_syntax=True,
+        max_steps=24,
+        max_model_calls=26,
+        model_factory=lambda _: model,
     )
     # Pause after each completed action until the full-node tool succeeds.
     paused = run_repository_coding_session(**opts, pause_after_turns=1)
@@ -2025,7 +2043,9 @@ def test_extended_toolhost_full_node_upgrade_resume_and_edit(tmp_path: Path) -> 
     assert alias not in pinned.readable_truncated_aliases
     with pytest.raises(ValueError, match="budgets differ"):
         run_repository_coding_session(
-            **{**opts, "extended_syntax": False}, resume=True, pause_after_turns=turn + 1,
+            **{**opts, "extended_syntax": False},
+            resume=True,
+            pause_after_turns=turn + 1,
         )
     next_turn = checkpoint.state["turns"] + 1
     edited = run_repository_coding_session(**opts, resume=True, pause_after_turns=next_turn)
@@ -2037,8 +2057,11 @@ def test_extended_toolhost_full_node_upgrade_resume_and_edit(tmp_path: Path) -> 
 def test_mixed_noop_reports_all_unchanged_without_staging_subset(tmp_path: Path) -> None:
     repo, sha = _registered_repository(tmp_path)
     with RepositoryWorkspaceTools(
-        origin=repo, output=tmp_path / "mixed-noop", sha=sha,
-        public_case_id="h001", syntax_mode=True,
+        origin=repo,
+        output=tmp_path / "mixed-noop",
+        sha=sha,
+        public_case_id="h001",
+        syntax_mode=True,
     ) as host:
         obs = host.invoke(RepoInspectSyntax(path=KERNEL, symbol="softmax32", limit=20))
         assert obs.status == "OK"
@@ -2049,7 +2072,8 @@ def test_mixed_noop_reports_all_unchanged_without_staging_subset(tmp_path: Path)
         second = nodes["out[i] = expf(own) / denominator;"]
         changed = nodes["const float own = a[i] + b[i];"]
         action = RepoReplaceSyntax(
-            path=KERNEL, expected_source_sha256=state.source_sha256,
+            path=KERNEL,
+            expected_source_sha256=state.source_sha256,
             edits=[
                 RepoSyntaxEdit(node_id=first.id, replacement_code=first.code),
                 RepoSyntaxEdit(node_id=second.id, replacement_code=second.code),
@@ -2064,6 +2088,7 @@ def test_mixed_noop_reports_all_unchanged_without_staging_subset(tmp_path: Path)
         assert "Omit every unchanged entry" in rejected.content
         assert not host.workspace.diff()
         from gpu_agent.harness.repo_audit import read_repository_tool_events
+
         events = read_repository_tool_events(
             host.store, host.run_id, expected_count=2, require_observation=True
         )

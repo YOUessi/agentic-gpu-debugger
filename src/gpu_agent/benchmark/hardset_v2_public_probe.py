@@ -16,7 +16,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from gpu_agent.benchmark.hardset_v2 import HARDSET_CASES, sample_input, verify_numeric
 from gpu_agent.benchmark.hardset_v2_selfcheck import HARNESS
-from gpu_agent.benchmark.public_numeric_feedback import PublicNumericDiagnostic, classify_public_numeric
+from gpu_agent.benchmark.public_numeric_feedback import (
+    PublicNumericDiagnostic,
+    classify_public_numeric,
+)
 from gpu_agent.execution.isolated import IsolatedGPUBackend
 from gpu_agent.execution.models import BuildRequest, ExecutionRequest, WorkspaceRequest
 from gpu_agent.store import RunStore, read_regular, reject_symlinks
@@ -147,9 +150,13 @@ def probe_candidate_publicly(
                         )
                     result = result.model_copy(update={"outcome": outcome})
                     if diagnostic_mode:
-                        result = result.model_copy(update={
-                            "numeric_diagnostic": classify_public_numeric(case_id, payload, observed)
-                        })
+                        result = result.model_copy(
+                            update={
+                                "numeric_diagnostic": classify_public_numeric(
+                                    case_id, payload, observed
+                                )
+                            }
+                        )
     except (OSError, ValueError):
         result = result.model_copy(update={"outcome": "PROBE_INCONCLUSIVE"})
     finally:

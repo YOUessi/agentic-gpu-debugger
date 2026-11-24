@@ -352,7 +352,7 @@ def test_ast_aliases_match_full_file_and_symbol_filtered_pages() -> None:
 
 
 def test_extended_ast_expression_slots_and_parent_child_overlap() -> None:
-    from gpu_agent.harness.syntax_tools import syntax_nodes, rewrite_syntax_nodes
+    from gpu_agent.harness.syntax_tools import rewrite_syntax_nodes, syntax_nodes
 
     source = (
         b"__global__ void kernel(int* x, int n) { "
@@ -372,9 +372,7 @@ def test_extended_ast_expression_slots_and_parent_child_overlap() -> None:
         (by_code["n + 1"], "n + 2"),
     ]
     sha = mapping["source_sha256"]
-    revised = rewrite_syntax_nodes(
-        source, expected_source_sha256=sha, edits=edits, extended=True
-    )
+    revised = rewrite_syntax_nodes(source, expected_source_sha256=sha, edits=edits, extended=True)
     assert b"if (threadIdx.x <= n)" in revised
     assert b"i < n - 1; i += 2" in revised
     assert b"x[0] = n + 2;" in revised
@@ -382,21 +380,23 @@ def test_extended_ast_expression_slots_and_parent_child_overlap() -> None:
         rewrite_syntax_nodes(revised, expected_source_sha256=sha, edits=edits, extended=True)
     with pytest.raises(ValueError, match="CUDA_SYNTAX_OVERLAPPING_NODES"):
         rewrite_syntax_nodes(
-            source, expected_source_sha256=sha, extended=True,
+            source,
+            expected_source_sha256=sha,
+            extended=True,
             edits=[(by_code["x[0] = n + 1;"], "x[0] = 2;"), (by_code["n + 1"], "n + 3")],
         )
     with pytest.raises(ValueError, match="CUDA_SYNTAX_EXPRESSION_SLOT_INVALID"):
         rewrite_syntax_nodes(
-            source, expected_source_sha256=sha, extended=True,
+            source,
+            expected_source_sha256=sha,
+            extended=True,
             edits=[(by_code["threadIdx.x < n"], "true) {} x[0] = 42; if (true")],
         )
-    assert "condition_expression" not in {
-        n["kind"] for n in syntax_nodes(source)["nodes"]
-    }
+    assert "condition_expression" not in {n["kind"] for n in syntax_nodes(source)["nodes"]}
 
 
 def test_full_node_read_bound() -> None:
-    from gpu_agent.harness.syntax_tools import syntax_nodes, syntax_node_detail
+    from gpu_agent.harness.syntax_tools import syntax_node_detail, syntax_nodes
 
     text = b"__global__ void k(float* x) { x[0] = 1.0f /*" + b"a" * 400 + b"*/; }"
     mapping = syntax_nodes(text, extended=True)
@@ -411,6 +411,8 @@ def test_full_node_read_bound() -> None:
     over = syntax_nodes(overlarge, extended=True)
     with pytest.raises(ValueError, match="CUDA_SYNTAX_NODE_EXCEEDS_EDIT_BOUND"):
         syntax_node_detail(
-            overlarge, expected_source_sha256=over["source_sha256"],
-            node_id=node["id"], extended=True,
+            overlarge,
+            expected_source_sha256=over["source_sha256"],
+            node_id=node["id"],
+            extended=True,
         )

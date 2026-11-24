@@ -1,4 +1,5 @@
 """Bounded public mismatch categories; reference values never leave the controller."""
+
 from __future__ import annotations
 
 import json
@@ -15,8 +16,13 @@ class PublicNumericDiagnostic(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
     category: Literal[
-        "PASS", "OUTPUT_INVALID", "NON_FINITE_OUTPUT", "SHAPE_MISMATCH",
-        "ALL_ZERO_OUTPUT", "GROUP_TAIL_MISMATCH", "MULTI_GROUP_MISMATCH",
+        "PASS",
+        "OUTPUT_INVALID",
+        "NON_FINITE_OUTPUT",
+        "SHAPE_MISMATCH",
+        "ALL_ZERO_OUTPUT",
+        "GROUP_TAIL_MISMATCH",
+        "MULTI_GROUP_MISMATCH",
         "FINITE_NUMERIC_MISMATCH",
     ]
     input_size: int = Field(ge=1, le=65536)
@@ -45,9 +51,13 @@ def _contains_nonfinite_numeric_values(raw: bytes) -> bool:
             return False
         values, shape = obj["values"], obj["shape"]
         if (
-            obj["dtype"] != "float32" or not isinstance(shape, list) or len(shape) != 1
-            or type(shape[0]) is not int or not 1 <= shape[0] <= 65536
-            or not isinstance(values, list) or len(values) != shape[0]
+            obj["dtype"] != "float32"
+            or not isinstance(shape, list)
+            or len(shape) != 1
+            or type(shape[0]) is not int
+            or not 1 <= shape[0] <= 65536
+            or not isinstance(values, list)
+            or len(values) != shape[0]
             or any(type(v) not in (int, float) for v in values)
         ):
             return False
@@ -57,7 +67,9 @@ def _contains_nonfinite_numeric_values(raw: bytes) -> bool:
 
 
 def classify_public_numeric(
-    case_id: str, public_input: bytes, observed: bytes,
+    case_id: str,
+    public_input: bytes,
+    observed: bytes,
 ) -> PublicNumericDiagnostic:
     """Use exactly the registered numeric tolerance, exposing only bounded labels.
 
@@ -72,17 +84,16 @@ def classify_public_numeric(
         nonfinite = _contains_nonfinite_numeric_values(observed)
         return PublicNumericDiagnostic(
             category="NON_FINITE_OUTPUT" if nonfinite else "OUTPUT_INVALID",
-            input_size=n, output_finite=False if nonfinite else None,
+            input_size=n,
+            output_finite=False if nonfinite else None,
         )
     if len(actual) != n:
-        return PublicNumericDiagnostic(
-            category="SHAPE_MISMATCH", input_size=n, output_finite=True
-        )
+        return PublicNumericDiagnostic(category="SHAPE_MISMATCH", input_size=n, output_finite=True)
     oracle = NumericOracle(3e-5, 3e-5, False, False)
     groups = [
         offset // 32
         for offset in range(0, n, 32)
-        if not oracle.check(actual[offset:offset+32], reference[offset:offset+32]).passed
+        if not oracle.check(actual[offset : offset + 32], reference[offset : offset + 32]).passed
     ]
     all_zero = all(value == 0.0 for value in actual)
     if not groups:
@@ -92,14 +103,24 @@ def classify_public_numeric(
     tail_group = n // 32 if n % 32 else None
     first = groups[0]
     category: Literal[
-        "ALL_ZERO_OUTPUT", "GROUP_TAIL_MISMATCH", "MULTI_GROUP_MISMATCH",
+        "ALL_ZERO_OUTPUT",
+        "GROUP_TAIL_MISMATCH",
+        "MULTI_GROUP_MISMATCH",
         "FINITE_NUMERIC_MISMATCH",
     ] = (
-        "ALL_ZERO_OUTPUT" if all_zero else "GROUP_TAIL_MISMATCH"
-        if tail_group is not None and groups == [tail_group] else
-        "MULTI_GROUP_MISMATCH" if len(groups) > 1 else "FINITE_NUMERIC_MISMATCH"
+        "ALL_ZERO_OUTPUT"
+        if all_zero
+        else "GROUP_TAIL_MISMATCH"
+        if tail_group is not None and groups == [tail_group]
+        else "MULTI_GROUP_MISMATCH"
+        if len(groups) > 1
+        else "FINITE_NUMERIC_MISMATCH"
     )
     return PublicNumericDiagnostic(
-        category=category, input_size=n, output_finite=True, all_zero=all_zero,
-        first_failing_group=first, failing_group_is_tail=first == tail_group,
+        category=category,
+        input_size=n,
+        output_finite=True,
+        all_zero=all_zero,
+        first_failing_group=first,
+        failing_group_is_tail=first == tail_group,
     )

@@ -14,7 +14,8 @@ from pathlib import Path
 
 from gpu_agent.benchmark.hardset_v2 import sample_input, verify_numeric
 from gpu_agent.benchmark.hardset_v2_agent_models import (
-    HardsetPublicCheck, PublicSanitizerDiagnostic,
+    HardsetPublicCheck,
+    PublicSanitizerDiagnostic,
 )
 from gpu_agent.benchmark.public_numeric_feedback import classify_public_numeric
 from gpu_agent.execution.isolated import IsolatedGPUBackend
@@ -129,11 +130,13 @@ def check_candidate_publicly(
                     if not verify_numeric(case_id, payload, observed):
                         failure = ("NUMERIC_MISMATCH", size)
                         if diagnostic_mode:
-                            feedback = feedback.model_copy(update={
-                                "numeric_diagnostic": classify_public_numeric(
-                                    case_id, payload, observed
-                                ),
-                            })
+                            feedback = feedback.model_copy(
+                                update={
+                                    "numeric_diagnostic": classify_public_numeric(
+                                        case_id, payload, observed
+                                    ),
+                                }
+                            )
                         break
                 if failure is not None:
                     feedback = feedback.model_copy(
@@ -166,29 +169,39 @@ def check_candidate_publicly(
                         output_ref = result.program_output_ref
                         numeric_match = (
                             verify_numeric(case_id, input_data, store.read(output_ref))
-                            if result.completed and output_ref is not None else None
+                            if result.completed and output_ref is not None
+                            else None
                         )
                         clean = result.completed and result.check_outcome == "CLEAN"
                         if diagnostic_mode:
                             detail = PublicSanitizerDiagnostic(
                                 tool=tool.value,
                                 status=(
-                                    "CLEAN" if clean else "FINDINGS"
+                                    "CLEAN"
+                                    if clean
+                                    else "FINDINGS"
                                     if result.completed and result.check_outcome == "FINDING"
                                     else "INCONCLUSIVE"
                                 ),
                                 numeric_output_matches=numeric_match,
                             )
-                            feedback = feedback.model_copy(update={
-                                "sanitizer_diagnostics": (*feedback.sanitizer_diagnostics, detail)
-                            })
+                            feedback = feedback.model_copy(
+                                update={
+                                    "sanitizer_diagnostics": (
+                                        *feedback.sanitizer_diagnostics,
+                                        detail,
+                                    )
+                                }
+                            )
                         if not clean or numeric_match is not True:
                             if failure is None and feedback.passed:
-                                feedback = feedback.model_copy(update={
-                                    "passed": False,
-                                    "failure_code": "SANITIZER_FAILED",
-                                    "public_error_excerpt": tool.value,
-                                })
+                                feedback = feedback.model_copy(
+                                    update={
+                                        "passed": False,
+                                        "failure_code": "SANITIZER_FAILED",
+                                        "public_error_excerpt": tool.value,
+                                    }
+                                )
                             if not diagnostic_mode:
                                 break
         except (OSError, ValueError) as error:

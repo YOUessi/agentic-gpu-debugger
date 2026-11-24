@@ -1,4 +1,5 @@
 """Public diagnostic categories and independently reported sanitizer stage."""
+
 from __future__ import annotations
 
 import json
@@ -8,8 +9,8 @@ from types import SimpleNamespace
 import pytest
 
 from gpu_agent.benchmark.hardset_v2 import expected_output, sample_input
-from gpu_agent.benchmark.public_numeric_feedback import classify_public_numeric
 from gpu_agent.benchmark.hardset_v2_selfcheck import check_candidate_publicly
+from gpu_agent.benchmark.public_numeric_feedback import classify_public_numeric
 from gpu_agent.store import RunStore
 
 
@@ -29,17 +30,30 @@ def test_numeric_diagnostic_categories_are_bounded_and_match_checker() -> None:
     multi = correct.copy()
     multi[0] += 1.0
     multi[32] += 1.0
-    assert classify_public_numeric("h002", payload, _output(multi)).category == "MULTI_GROUP_MISMATCH"
-    assert classify_public_numeric("h002", payload, _output([0.0] * 65)).category == "ALL_ZERO_OUTPUT"
+    assert (
+        classify_public_numeric("h002", payload, _output(multi)).category == "MULTI_GROUP_MISMATCH"
+    )
+    assert (
+        classify_public_numeric("h002", payload, _output([0.0] * 65)).category == "ALL_ZERO_OUTPUT"
+    )
     nonfinite = correct.copy()
     nonfinite[0] = float("inf")
     d = classify_public_numeric("h002", payload, _output(nonfinite))
     assert d.category == "NON_FINITE_OUTPUT" and d.output_finite is False
-    assert classify_public_numeric("h002", payload, _output(correct[:-1])).category == "SHAPE_MISMATCH"
-    assert classify_public_numeric("h002", payload, b'{"secret":"unexpected"}').category == "OUTPUT_INVALID"
+    assert (
+        classify_public_numeric("h002", payload, _output(correct[:-1])).category == "SHAPE_MISMATCH"
+    )
+    assert (
+        classify_public_numeric("h002", payload, b'{"secret":"unexpected"}').category
+        == "OUTPUT_INVALID"
+    )
     assert set(d.model_dump()) == {
-        "category", "input_size", "output_finite", "all_zero",
-        "first_failing_group", "failing_group_is_tail",
+        "category",
+        "input_size",
+        "output_finite",
+        "all_zero",
+        "first_failing_group",
+        "failing_group_is_tail",
     }
 
 
@@ -74,29 +88,31 @@ def test_numeric_failure_does_not_mask_sanitizer_in_diagnostic_mode(
         def run(self, request):
             raw = self.store.read(request.stdin_ref)
             n = json.loads(raw)["n"]
-            ref = self.store.put(
-                self.run_id, "fixture/numeric.json", _output([0.0] * n), "public"
-            )
+            ref = self.store.put(self.run_id, "fixture/numeric.json", _output([0.0] * n), "public")
             return SimpleNamespace(
-                output_ref=ref, runtime_status="SUCCESS",
-                tool_result=SimpleNamespace(tool_error=None, timed_out=False,
-                                            cancelled=False, truncated=False),
+                output_ref=ref,
+                runtime_status="SUCCESS",
+                tool_result=SimpleNamespace(
+                    tool_error=None, timed_out=False, cancelled=False, truncated=False
+                ),
             )
 
         def run_sanitizer(self, request):
             calls.append(request.tool)
-            return SimpleNamespace(
-                completed=True, check_outcome="FINDING", program_output_ref=None
-            )
+            return SimpleNamespace(completed=True, check_outcome="FINDING", program_output_ref=None)
 
         def cleanup(self, handle):
             return None
 
     monkeypatch.setattr("gpu_agent.benchmark.hardset_v2_selfcheck.IsolatedGPUBackend", Backend)
     result = check_candidate_publicly(
-        store=store, parent_run_id=parent.id, repository=repo, case_id="h002",
+        store=store,
+        parent_run_id=parent.id,
+        repository=repo,
+        case_id="h002",
         candidate=(repo / "benchmarks/hardset_v2/h002/mutant/kernel.cu").read_bytes(),
-        output=tmp_path / "check", diagnostic_mode=diagnostic_mode,
+        output=tmp_path / "check",
+        diagnostic_mode=diagnostic_mode,
     )
     assert result.failure_code == "NUMERIC_MISMATCH" and not result.passed
     if diagnostic_mode:
