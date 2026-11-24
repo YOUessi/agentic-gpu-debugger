@@ -100,3 +100,26 @@ def test_registered_kernel_path_is_literal_in_model_output_grammar() -> None:
                 "reason": "Tried to edit a different registered CUDA task",
             }
         )
+
+
+def test_public_probe_schema_phase_is_operator_bound() -> None:
+    model = repository_decision_schema(
+        ("repo_probe_public", "repo_read_file"),
+        registered_kernel_path="benchmarks/hardset_v2/h001/mutant/kernel.cu",
+        public_probe_phase="before",
+    )
+    result = model.model_validate(
+        {"action": {"tool": "repo_probe_public", "phase": "before", "input_size": 33},
+         "reason": "Run the registered public mutant functional probe"}
+    )
+    assert result.action.phase == "before"
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {"action": {"tool": "repo_probe_public", "phase": "after", "input_size": 33},
+             "reason": "Cannot submit an after probe before any edit"}
+        )
+    with pytest.raises(ValidationError):
+        model.model_validate(
+            {"action": {"tool": "repo_probe_public", "phase": "before", "input_size": 514},
+             "reason": "Hidden evaluator sizes are forbidden"}
+        )

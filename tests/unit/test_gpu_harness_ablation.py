@@ -371,3 +371,60 @@ def test_three_arm_architecture_plan_preserves_causal_separation(tmp_path: Path)
     assert report.expected_units == 6
     assert report.completed_units == 0
     assert not report.all_units_accounted_for
+
+
+def test_planner_only_frozen_arm_pair_holds_tools_context_and_budget_equal(
+    tmp_path: Path,
+) -> None:
+    from gpu_agent.harness.ablation import _arm_configuration
+
+    root = _repo(tmp_path)
+    plan = create_benchmark_plan(
+        root, cases=("h001", "h002"), repetitions=2, planner_only_study=True,
+        max_steps=8, max_model_calls=10, max_public_checks=2,
+    )
+    assert plan.planner_only_study
+    assert not plan.architecture_study
+    assert len(plan.units) == 8
+    assert plan.public_probe_budget == 4
+    for arm in ("react_syntax", "hierarchical_syntax"):
+        config = _arm_configuration(arm)
+        assert config[0] == "evidence_first"
+        assert config[1] is False
+        assert config[3] is True
+    assert _arm_configuration("react_syntax")[2] is False
+    assert _arm_configuration("hierarchical_syntax")[2] is True
+    for case in ("h001", "h002"):
+        for rep in (1, 2):
+            assert {u.arm for u in plan.units if u.case_id == case and u.repetition == rep} == {
+                "react_syntax", "hierarchical_syntax"
+            }
+    assert plan.max_steps == 8 and plan.max_model_calls == 10
+    with pytest.raises(ValueError, match="invalid registered"):
+        create_benchmark_plan(root, architecture_study=True, planner_only_study=True)
+    with pytest.raises(ValueError, match="invalid registered"):
+        create_benchmark_plan(root, include_workflow_D=True, planner_only_study=True)
+
+
+def test_planner_only_primary_metrics_do_not_count_rejected_edits_as_valid(
+    tmp_path: Path,
+) -> None:
+    plan = create_benchmark_plan(_repo(tmp_path), planner_only_study=True)
+    first = TrialRecord(
+        spec=plan.units[0], disposition="PUBLIC_NOT_ACCEPTED",
+        public_accepted=False, strict_verdict=None, source_candidate_sha256=None,
+        public_run_id=None, elapsed_seconds=0.1, first_edit_turn=2,
+        effective_patch=True, public_check_reached=False,
+    )
+    second = TrialRecord(
+        spec=plan.units[1], disposition="PUBLIC_NOT_ACCEPTED",
+        public_accepted=False, strict_verdict=None, source_candidate_sha256=None,
+        public_run_id=None, elapsed_seconds=0.1,
+        effective_patch=False, public_check_reached=False,
+    )
+    report = summarize_sweep(plan, (first, second))
+    assert report.by_arm[first.spec.arm]["effective_patch_rate"] == 1.0
+    assert report.by_arm[first.spec.arm]["first_effective_edit_turn_mean"] == 2.0
+    assert report.by_arm[second.spec.arm]["effective_patch_rate"] == 0.0
+    assert report.by_arm[second.spec.arm]["public_check_reached_rate"] == 0.0
+    assert report.missing_units == 0

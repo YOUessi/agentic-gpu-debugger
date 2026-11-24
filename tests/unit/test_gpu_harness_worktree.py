@@ -238,3 +238,38 @@ def test_atomic_batch_rejects_protected_paths_before_any_write(tmp_path: Path) -
             workspace.replace_batch(name, [("foo", "bar"), ("bar", "baz")])
     assert workspace.edited_files == ()
     assert workspace.diff() == ""
+
+
+def test_oracle_and_evaluator_sources_are_not_readable_or_editable(
+    tmp_path: Path,
+) -> None:
+    source, _ = _repository(tmp_path)
+    extra = {
+        "src/gpu_agent/benchmark/hardset_v2.py": "def expected_output(): return [1]\n",
+        "src/gpu_agent/verification/oracle.py": "def reference(): return 1\n",
+        "evaluation/hidden_score.json": '{"private": true}\n',
+        "benchmarks/development_truth/ref/kernel.cu": "int reference() { return 1; }\n",
+        "docs/expected-output.md": "protected test answer\n",
+    }
+    for name, raw in extra.items():
+        path = source / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(raw)
+    _git(source, "add", ".")
+    _git(
+        source, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+        "commit", "-q", "-m", "audit forbidden paths"
+    )
+    sha = _git(source, "rev-parse", "HEAD")
+    workspace = PinnedGitWorkspace(origin=source, root=tmp_path / "read-isolation", sha=sha)
+    names = workspace.list_files()
+    assert "src/kernel.cu" in names
+    for name in (
+        *extra, "tests/test_kernel.py", "benchmarks/hardset_v2/h001/clean/kernel.cu"
+    ):
+        assert name not in names
+        with pytest.raises(ValueError):
+            workspace.read(name)
+        with pytest.raises(ValueError):
+            workspace.replace_exact(name, "return", "nope")
+    assert workspace.diff() == ""
