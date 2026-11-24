@@ -46,6 +46,7 @@ def harness_sweep_repo(
     max_public_checks: Annotated[int, typer.Option("--max-public-checks", min=1, max=3)] = 2,
     include_workflow_d: Annotated[bool, typer.Option("--include-workflow-d")] = False,
     architecture_study: Annotated[bool, typer.Option("--architecture-study")] = False,
+    planner_only_study: Annotated[bool, typer.Option("--planner-only-study")] = False,
     evaluator_secret_file: Annotated[Path | None, typer.Option("--evaluator-secret-file")] = None,
     execute: Annotated[bool, typer.Option("--execute")] = False,
     allow_paid_calls: Annotated[bool, typer.Option("--allow-paid-calls")] = False,
@@ -78,6 +79,7 @@ def harness_sweep_repo(
                 max_public_checks=max_public_checks,
                 include_workflow_D=include_workflow_d,
                 architecture_study=architecture_study,
+                planner_only_study=planner_only_study,
             )
             typer.echo(report.model_dump_json(indent=2))
             return
@@ -94,6 +96,7 @@ def harness_sweep_repo(
             max_public_checks=max_public_checks,
             include_workflow_D=include_workflow_d,
             architecture_study=architecture_study,
+            planner_only_study=planner_only_study,
             allow_paid_calls=allow_paid_calls,
             allow_real_gpu=allow_real_gpu,
         )
