@@ -46,6 +46,7 @@ Disposition = Literal[
     "MODEL_OR_RUNTIME_ERROR",
     "INCONCLUSIVE",
 ]
+_PLANNER_ONLY_ARMS: tuple[Arm, ...] = ("react_syntax", "hierarchical_syntax")
 _ARCHITECTURE_ARMS: tuple[Arm, ...] = (
     "evidence_single",
     "react_syntax",
@@ -84,6 +85,8 @@ class BenchmarkPlan(BenchmarkModel):
     max_public_checks: int = Field(ge=1, le=3)
     include_workflow_D: bool
     architecture_study: bool = False
+    planner_only_study: bool = False
+    public_probe_budget: Literal[4] = 4
     units: tuple[TrialSpec, ...]
 
 
@@ -108,6 +111,9 @@ class TrialRecord(BenchmarkModel):
     first_public_check_turn: int | None = Field(default=None, ge=1)
     redundant_reads: int | None = Field(default=None, ge=0)
     public_gpu_checks: int | None = Field(default=None, ge=0)
+    public_probes: int | None = Field(default=None, ge=0)
+    effective_patch: bool = False
+    public_check_reached: bool = False
     elapsed_seconds: float = Field(ge=0)
     failure_type: str | None = None
     evaluation_kind: Literal["experimental-HardSet-V2"] = "experimental-HardSet-V2"
@@ -123,7 +129,7 @@ class SweepReport(BenchmarkModel):
     missing_units: int
     all_units_accounted_for: bool
     records: tuple[TrialRecord, ...]
-    by_arm: dict[str, dict[str, int | None]]
+    by_arm: dict[str, dict[str, int | float | None]]
 
 
 def _sha(value: bytes) -> str:
@@ -176,6 +182,7 @@ def create_benchmark_plan(
     max_public_checks: int = 2,
     include_workflow_D: bool = False,
     architecture_study: bool = False,
+    planner_only_study: bool = False,
 ) -> BenchmarkPlan:
     """Freeze case/arm order before seeing any model answer or GPU feedback."""
     reject_symlinks(repository)
@@ -193,6 +200,8 @@ def create_benchmark_plan(
         or not 1 <= max_public_checks <= 3
         or type(include_workflow_D) is not bool
         or type(architecture_study) is not bool
+        or type(planner_only_study) is not bool
+        or (planner_only_study and (architecture_study or include_workflow_D))
     ):
         raise ValueError("invalid registered paired experiment contract")
     root = repository.resolve(strict=True)
@@ -204,7 +213,13 @@ def create_benchmark_plan(
         for case_index, case_id in enumerate(cases):
             # Rotate precommitted order across cases and repeated trials to
             # avoid systematically giving the new arm the freshest GPU cache.
-            arms = _ARCHITECTURE_ARMS if architecture_study else _ARMS
+            arms = (
+                _PLANNER_ONLY_ARMS
+                if planner_only_study
+                else _ARCHITECTURE_ARMS
+                if architecture_study
+                else _ARMS
+            )
             shift = (case_index + repetition - 1) % len(arms)
             sequence: tuple[Arm, ...] = arms[shift:] + arms[:shift]
             for arm in (*sequence, *((("workflow_D",)) if include_workflow_D else ())):
@@ -228,6 +243,7 @@ def create_benchmark_plan(
         max_public_checks=max_public_checks,
         include_workflow_D=include_workflow_D,
         architecture_study=architecture_study,
+        planner_only_study=planner_only_study,
         units=tuple(units),
     )
 
@@ -244,6 +260,7 @@ def preflight_paired_experiment(
     max_public_checks: int = 2,
     include_workflow_D: bool = False,
     architecture_study: bool = False,
+    planner_only_study: bool = False,
 ) -> Preflight:
     """NO model, GPU or Docker side effects; expose presence not secret contents."""
     plan = create_benchmark_plan(
@@ -255,6 +272,7 @@ def preflight_paired_experiment(
         max_public_checks=max_public_checks,
         include_workflow_D=include_workflow_D,
         architecture_study=architecture_study,
+        planner_only_study=planner_only_study,
     )
     errors: list[str] = []
     settings = OpenAIProviderSettings.from_environment()
@@ -431,6 +449,8 @@ def _run_one(
                 model_tokens=report.model_total_tokens,
                 tool_turns=None,  # Its fixed graph is NOT comparable to repo tool turns.
                 public_gpu_checks=report.candidates,
+                effective_patch=report.candidate_sha256 is not None,
+                public_check_reached=report.candidates > 0,
                 elapsed_seconds=round(time.monotonic() - begin, 3),
             )
         context, batch, hierarchical, syntax = _arm_configuration(mode)
@@ -500,6 +520,11 @@ def _run_one(
         ),
         redundant_reads=metrics.redundant_inspection_rejections if metrics else None,
         public_gpu_checks=result.public_checks_attempted if result else None,
+        public_probes=result.public_probes_attempted if result else None,
+        effective_patch=bool(
+            metrics.first_accepted_edit_turn if metrics else recovered.get("first_edit_turn")
+        ),
+        public_check_reached=bool(result and result.public_checks_attempted > 0),
         failure_type=failure,
         elapsed_seconds=round(time.monotonic() - begin, 3),
     )
@@ -512,12 +537,29 @@ def summarize_sweep(plan: BenchmarkPlan, records: tuple[TrialRecord, ...]) -> Sw
         item.spec != plan.units[item.spec.index - 1] for item in records
     ):
         raise ValueError("paired sweep result does not match frozen unit identities")
-    by_arm: dict[str, dict[str, int | None]] = {}
-    arms = _ARCHITECTURE_ARMS if plan.architecture_study else _ARMS
+    by_arm: dict[str, dict[str, int | float | None]] = {}
+    arms = (
+        _PLANNER_ONLY_ARMS
+        if plan.planner_only_study
+        else _ARCHITECTURE_ARMS
+        if plan.architecture_study
+        else _ARMS
+    )
     for arm in (*arms, *(("workflow_D",) if plan.include_workflow_D else ())):
         group = [item for item in records if item.spec.arm == arm]
         reported = [item.model_tokens for item in group]
+        edits = [item.first_edit_turn for item in group if item.first_edit_turn is not None]
         by_arm[arm] = {
+            "effective_patch_trials": sum(item.effective_patch for item in group),
+            "effective_patch_rate": (
+                sum(item.effective_patch for item in group) / len(group) if group else None
+            ),
+            "public_check_reached_trials": sum(item.public_check_reached for item in group),
+            "public_check_reached_rate": (
+                sum(item.public_check_reached for item in group) / len(group)
+                if group else None
+            ),
+            "first_effective_edit_turn_mean": sum(edits) / len(edits) if edits else None,
             "planned": sum(item.arm == arm for item in plan.units),
             "observed": len(group),
             "strict_fixed": sum(item.disposition == "EXPERIMENTAL_STRICT_FIXED" for item in group),
@@ -551,6 +593,7 @@ def run_paired_experiment(
     max_public_checks: int = 2,
     include_workflow_D: bool = False,
     architecture_study: bool = False,
+    planner_only_study: bool = False,
     allow_paid_calls: bool = False,
     allow_real_gpu: bool = False,
 ) -> SweepReport | Preflight:
@@ -572,6 +615,7 @@ def run_paired_experiment(
         max_public_checks=max_public_checks,
         include_workflow_D=include_workflow_D,
         architecture_study=architecture_study,
+        planner_only_study=planner_only_study,
     )
     if output.exists() or output.is_symlink():
         raise ValueError("experiment output already exists; evidence is immutable")
@@ -593,6 +637,7 @@ def run_paired_experiment(
             max_public_checks=max_public_checks,
             include_workflow_D=include_workflow_D,
             architecture_study=architecture_study,
+            planner_only_study=planner_only_study,
         )
         if (
             snapshot.base_sha != preflight.plan.base_sha
@@ -600,6 +645,7 @@ def run_paired_experiment(
             or snapshot.model_name != preflight.plan.model_name
             or snapshot.endpoint_host != preflight.plan.endpoint_host
             or snapshot.architecture_study != preflight.plan.architecture_study
+            or snapshot.planner_only_study != preflight.plan.planner_only_study
         ):
             raise ValueError("frozen benchmark source changed during comparison")
         record = _run_one(repository, output, preflight.plan, spec, secret)
