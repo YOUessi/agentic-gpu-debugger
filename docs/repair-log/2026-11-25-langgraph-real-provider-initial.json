@@ -1,0 +1,156 @@
+{
+  "schema": "langgraph-real-provider-smoke-v1",
+  "source_commit": "bf9e224d14e7a9382e2f40e450c0e35cda41e670",
+  "model": "deepseek-v4-pro",
+  "runtime": "langgraph",
+  "hierarchical": true,
+  "gpu_checks": 0,
+  "wall_seconds": 40.541,
+  "result": {
+    "schema_version": "gpu-repository-harness-v1",
+    "status": "DIFF_STAGED_UNVERIFIED",
+    "base_sha": "35e0b8bb704090500365b45ddc6229b32684b716",
+    "diff_sha256": "60e63ff91f87f19cf42906b5ad81622e9aa14b6a3bf058b077b5f8c42b3d973d",
+    "edited_files": [
+      "bias.cu",
+      "kernel.cu"
+    ],
+    "turns": 10,
+    "tool_calls": 10,
+    "model_calls": 12,
+    "model_tokens": 35517,
+    "reason": "WORKSPACE_DIFF_STAGED_UNVERIFIED",
+    "public_run_id": "0dba7c4332dc400da8b02b7d0e2948e6",
+    "context_mode": "evidence_first",
+    "allow_batch_edits": true,
+    "hierarchical_mode": true,
+    "syntax_mode": false,
+    "public_checks_attempted": 0,
+    "public_probes_attempted": 0,
+    "public_checks_passed": false,
+    "public_checked_candidate_sha256": null
+  },
+  "independent_checks": {
+    "scale": true,
+    "bias": true
+  },
+  "graph": {
+    "version": "repository-langgraph-v3-task-memory",
+    "checkpoint_count": 163,
+    "turns": 10,
+    "reason": "WORKSPACE_DIFF_STAGED_UNVERIFIED",
+    "plan_revision": 2,
+    "observed_physical_calls": 12,
+    "effects_completed": 22
+  },
+  "trajectory": [
+    {
+      "id": "planner_completed:0:0",
+      "kind": "planner_completed",
+      "new_revision": 1
+    },
+    {
+      "turn": 1,
+      "tool": "repo_list_files",
+      "status": "OK",
+      "path": "",
+      "task_id": "t1",
+      "failure": null
+    },
+    {
+      "turn": 2,
+      "tool": "repo_read_file",
+      "status": "OK",
+      "path": "kernel.cu",
+      "task_id": "t2",
+      "failure": null
+    },
+    {
+      "turn": 3,
+      "tool": "repo_replace_snippet",
+      "status": "OK",
+      "path": "kernel.cu",
+      "task_id": "t3",
+      "failure": null
+    },
+    {
+      "turn": 4,
+      "tool": "repo_read_file",
+      "status": "OK",
+      "path": "bias.cu",
+      "task_id": "t4",
+      "failure": null
+    },
+    {
+      "turn": 5,
+      "tool": "repo_git_diff",
+      "status": "OK",
+      "path": "",
+      "task_id": "t2",
+      "failure": null
+    },
+    {
+      "turn": 6,
+      "tool": "repo_replace_snippet",
+      "status": "REJECTED",
+      "path": "bias.cu",
+      "task_id": "t3",
+      "failure": {
+        "turn": 6,
+        "tool": "repo_replace_snippet",
+        "status": "REJECTED",
+        "code": "GRAPH_TASK_SCOPE_DENIED",
+        "evidence": "ValueError: GRAPH_TASK_SCOPE_DENIED"
+      }
+    },
+    {
+      "turn": 7,
+      "tool": "repo_replace_snippet",
+      "status": "OK",
+      "path": "bias.cu",
+      "task_id": "t2",
+      "failure": null
+    },
+    {
+      "turn": 8,
+      "tool": "repo_git_diff",
+      "status": "OK",
+      "path": "",
+      "task_id": "t3",
+      "failure": null
+    },
+    {
+      "turn": 9,
+      "tool": "repo_git_diff",
+      "status": "REJECTED",
+      "path": "",
+      "task_id": "t4",
+      "failure": {
+        "turn": 9,
+        "tool": "repo_git_diff",
+        "status": "REJECTED",
+        "code": "REDUNDANT_DIFF",
+        "evidence": "ValueError: REDUNDANT_DIFF: unchanged inspection already completed; use prior evidence"
+      }
+    },
+    {
+      "turn": 10,
+      "tool": "finish",
+      "status": "OK",
+      "path": "",
+      "task_id": "t4",
+      "failure": null
+    }
+  ],
+  "artifacts": {
+    "run.py": "34bd4de7d11826f76839678dbd283f84123c92bfb3b844720230c716dd76c2a7",
+    "summary.json": "f0d0af8b78cc2bcbdb1199110fe7b7fdd0f079af8a105c0ab1ee781887e9a7e7",
+    "session/session-events.jsonl": "7cb534b0c2aa396979b3792a5e04fe96a056b88e70666cfcd3e792da840e9819",
+    "session/langgraph-effects.jsonl": "d82914c91e28a4e9b27597e4ade0e9d7aa6b24754f123010b4cb2dff7b5456ab",
+    "session/langgraph-checkpoints.sqlite3": "a936d2e291ff677fe4f3fb8996cba1b480ee279667b2758ec66aacb4515f6af4"
+  },
+  "limitations": [
+    "Development smoke with a real model and real Git edits; no CUDA execution or hidden verification.",
+    "Helper inspection evidence triggered redundant scheduling; retained as original pre-fix observation."
+  ]
+}

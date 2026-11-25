@@ -629,7 +629,14 @@ def execute(args, repo, root, manifest):
     lock = args.gpu_lock.resolve(strict=True)
     envs = environments(repo, manifest)
     with lock.open("a") as stream:
-        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        wait = getattr(args, "wait_for_gpu_lock", False)
+        if wait:
+            print("WAITING_FOR_SHARED_GPU_LOCK", flush=True)
+        fcntl.flock(stream, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        # A queued controller may wait for another frozen study to finish.
+        # Verify the checkout and dependencies again before admitting a trial.
+        validate_manifest(repo, manifest)
+        print("SHARED_GPU_LOCK_ACQUIRED", flush=True)
 
         def cleanup():
             ensure_no_live_attempt(root)
@@ -677,6 +684,11 @@ def main():
     parser.add_argument("--endpoint", default="https://api.deepseek.com")
     parser.add_argument("--repetitions", type=int, default=5)
     parser.add_argument("--gpu-lock", type=Path)
+    parser.add_argument(
+        "--wait-for-gpu-lock",
+        action="store_true",
+        help="Queue behind the existing GPU owner without admitting a trial or model call.",
+    )
     parser.add_argument("--evaluator-secret-file", type=Path)
     parser.add_argument("--allow-paid-calls", action="store_true")
     parser.add_argument("--allow-real-gpu", action="store_true")

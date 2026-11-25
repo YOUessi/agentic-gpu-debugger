@@ -27,6 +27,8 @@ def worker_command() -> list[str]:
         "-I",
         "-c",
         "import sys,runpy; sys.path.insert(0,sys.argv[1]); "
+        "from gpu_agent.agent.provider_lifetime import bind_parent_lifetime; "
+        f"bind_parent_lifetime({os.getpid()}); "
         "runpy.run_module('gpu_agent.agent.provider_worker',run_name='__main__')",
         source_root,
     ]

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import fcntl
 import importlib.util
+import select
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,6 +16,55 @@ SPEC = importlib.util.spec_from_file_location("comparison", PATH)
 assert SPEC is not None and SPEC.loader is not None
 comparison = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(comparison)
+
+
+def test_queued_controller_waits_for_real_shared_lock_before_admission(tmp_path):
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"fixture-only" * 3)
+    secret.chmod(0o600)
+    lock = tmp_path / "gpu.lock"
+    marker = tmp_path / "admitted"
+    child = """
+import importlib.util
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location('queued_comparison', sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+root = Path(sys.argv[2])
+module.environments = lambda *args: ({}, {})
+module.validate_manifest = lambda *args: None
+def idle():
+    (root / 'admitted').write_text('GPU admission occurred')
+    return {'idle': True}
+module.idle_proof = idle
+args = SimpleNamespace(allow_paid_calls=True, allow_real_gpu=True,
+    evaluator_secret_file=root/'secret', gpu_lock=root/'gpu.lock',
+    wait_for_gpu_lock=True)
+raise SystemExit(module.execute(args, root/'repo', root/'output', {'trials': []}))
+"""
+    with lock.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        proc = subprocess.Popen(
+            [sys.executable, "-u", "-c", child, str(PATH), str(tmp_path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            assert proc.stdout is not None
+            assert select.select([proc.stdout], [], [], 5)[0], "queued controller did not start"
+            assert proc.stdout.readline().strip() == "WAITING_FOR_SHARED_GPU_LOCK"
+            assert proc.poll() is None and not marker.exists()
+            fcntl.flock(held, fcntl.LOCK_UN)
+            out, err = proc.communicate(timeout=5)
+            assert proc.returncode == 0, err
+            assert "SHARED_GPU_LOCK_ACQUIRED" in out and marker.exists()
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
 
 
 def fake_manifest():

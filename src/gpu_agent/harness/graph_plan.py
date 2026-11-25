@@ -181,15 +181,18 @@ def evaluate_tasks(
             if matches
             else "READY"
         )
-        if status == "DONE":
-            used_turns.add(current[-1]["turn"])
+        # Keep the earliest admissible proof stable. A later supporting read
+        # must not move a completed prerequisite past its dependent edits.
+        proof = min(current, key=lambda e: e["turn"]) if status == "DONE" else None
+        if proof is not None:
+            used_turns.add(proof["turn"])
         results[task.task_id] = {
             "task_id": task.task_id,
             "gate": task.gate,
             "target": task.target,
             "status": status,
-            "evidence_turn": current[-1]["turn"] if status == "DONE" else None,
-            "artifact_id": current[-1].get("artifact_id") if status == "DONE" else None,
+            "evidence_turn": proof["turn"] if proof is not None else None,
+            "artifact_id": proof.get("artifact_id") if proof is not None else None,
         }
     return list(results.values())
 
