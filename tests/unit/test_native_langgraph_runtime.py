@@ -771,3 +771,117 @@ def test_context_projection_keeps_budget_and_current_ast_evidence():
     assert "BUDGET_ALERT" in projection["summary"] and "BUILD_FAILED" in projection["summary"]
     assert state["history"][0]["content"] == "y" * 3900
     assert state["snapshot"]["syntax_state"]["observed_nodes"][0]["id"] == "n00"
+
+
+
+def _crash_child(repository, output, mode):
+    """Use an actual process death, not a caught test exception."""
+    import os
+    from gpu_agent.harness.native_graph import EffectJournal
+    from gpu_agent.harness import repo_runner
+
+    class CrashModel(Model):
+        def choose_harness_v1(self, snapshot):
+            if mode == "inside_model" and len(self.decisions) == 1:
+                os._exit(91)
+            return super().choose_harness_v1(snapshot)
+
+    original_perform = EffectJournal.perform
+
+    def perform(self, key, role, operation):
+        result = original_perform(self, key, role, operation)
+        if mode == "after_model_result" and key == "decision-2":
+            os._exit(92)
+        if mode == "after_tool_result" and key == "tool-2":
+            os._exit(93)
+        return result
+
+    EffectJournal.perform = perform
+    original_checkpoint = repo_runner.write_repository_checkpoint
+
+    def write_checkpoint(path, value):
+        original_checkpoint(path, value)
+        if mode == "between_checkpoints" and value.state["turns"] == 2:
+            os._exit(94)
+
+    repo_runner.write_repository_checkpoint = write_checkpoint
+    seen = 0
+
+    def observe(event):
+        nonlocal seen
+        if event["node"] == "context":
+            seen += 1
+            if mode == "safe_boundary" and seen == 2:
+                os._exit(95)
+
+    model = CrashModel([READ, EDIT, FINISH])
+    run_repository_coding_session(**args(
+        repository, output, model, on_graph_update=observe,
+    ))
+    os._exit(99)
+
+
+@pytest.mark.parametrize("mode,code", [
+    ("inside_model", 91), ("after_model_result", 92),
+    ("after_tool_result", 93), ("between_checkpoints", 94),
+])
+def test_process_crash_after_admission_never_replays(repository, tmp_path, mode, code):
+    import multiprocessing
+    out = tmp_path / mode
+    child = multiprocessing.get_context("fork").Process(
+        target=_crash_child, args=(repository, out, mode),
+    )
+    child.start()
+    child.join(25)
+    if child.is_alive():
+        child.kill()
+        child.join()
+        pytest.fail("fault-injection process did not exit")
+    assert child.exitcode == code
+    resumed = Model([])
+    with pytest.raises(ValueError):
+        run_repository_coding_session(**args(repository, out, resumed, resume=True))
+    assert not resumed.decisions and not resumed.plans
+
+
+def test_actual_process_crash_at_quiet_boundary_resumes_without_replay(repository, tmp_path):
+    import multiprocessing
+    from gpu_agent.harness.native_graph import EFFECT_NAME
+
+    out = tmp_path / "quiet-crash"
+    child = multiprocessing.get_context("fork").Process(
+        target=_crash_child, args=(repository, out, "safe_boundary"),
+    )
+    child.start()
+    child.join(25)
+    if child.is_alive():
+        child.kill()
+        child.join()
+        pytest.fail("fault-injection process did not exit")
+    assert child.exitcode == 95
+    saved = inspect_native_graph(out)
+    assert saved["turns"] == 1
+    second = Model([EDIT, FINISH])
+    result = run_repository_coding_session(**args(repository, out, second, resume=True))
+    assert result.status == "DIFF_STAGED_UNVERIFIED"
+    assert result.turns == 3
+    assert len(second.decisions) == 2 and not second.plans
+    ids = [e["payload"]["effect_key"] for e in read_verified_journal(out / EFFECT_NAME)
+           if e["kind"] in ("model_started", "tool_started")]
+    assert len(ids) == len(set(ids)) == 7
+    assert (out / "worktree/kernel.cu").read_text() == "float x = 2.0f;\n"
+
+
+def test_native_rejects_semantically_equal_but_rewritten_host_checkpoint(repository, tmp_path):
+    out = tmp_path / "tampered-cp"
+    report = run_repository_coding_session(**args(
+        repository, out, Model([READ]), pause_after_turns=1,
+    ))
+    assert report.status == "PAUSED_RESUMABLE"
+    cp = out / "session-checkpoint.json"
+    data = json.loads(cp.read_text())
+    cp.write_text(json.dumps(data, indent=2) + "\n")
+    model = Model([])
+    with pytest.raises(ValueError, match="disagree"):
+        run_repository_coding_session(**args(repository, out, model, resume=True))
+    assert not model.decisions and not model.plans

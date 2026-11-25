@@ -45,7 +45,7 @@ from gpu_agent.harness.journal import (
 from gpu_agent.harness.models import HarnessDecision, SessionSnapshot, ToolObservation
 from gpu_agent.harness.runner import AgentLoopState
 
-VERSION = "repository-langgraph-v2"
+VERSION = "repository-langgraph-v3-task-memory"
 DB_NAME = "langgraph-checkpoints.sqlite3"
 HEADER_NAME = "langgraph-runtime.json"
 EFFECT_NAME = "langgraph-effects.jsonl"
@@ -405,6 +405,8 @@ def build_native_graph(
         return SessionSnapshot.model_validate_json(json.dumps(data))
 
     def plan_node(state: NativeState) -> dict[str, Any]:
+        if time.time() >= state["deadline"]:
+            return {"stop": True, "reason": "GRAPH_DEADLINE_EXHAUSTED"}
         old = state.get("plan")
         revision = state.get("plan_revision", 0) + 1
         callback = getattr(model, "choose_graph_plan", None)
@@ -423,7 +425,14 @@ def build_native_graph(
         )
         if not isinstance(plan, GraphTaskPlan):
             raise ValueError("graph planner returned an invalid DAG")
-        plan.validate_scope(state["snapshot"])
+        try:
+            plan.validate_scope(state["snapshot"])
+        except ValueError:
+            calls = state.get("logical_model_calls", 0) + 1
+            return {"stop": True, "reason": "GRAPH_PLAN_INVALID_SCOPE",
+                    "logical_model_calls": calls, "observed_physical_calls": _physical_calls(model, calls),
+                    "effects_completed": ledger.completed, "effects_head_sha256": ledger.journal.head_hash,
+                    "events": _event(state, "plan_rejected", code="GRAPH_PLAN_INVALID_SCOPE")}
         value = plan.model_dump(mode="json")
         calls = state.get("logical_model_calls", 0) + 1
         return {
@@ -449,6 +458,8 @@ def build_native_graph(
         }
 
     def gate(state: NativeState) -> dict[str, Any]:
+        if state.get("stop"):
+            return {}
         reason = (
             "GRAPH_DEADLINE_EXHAUSTED"
             if time.time() >= state["deadline"]
@@ -753,6 +764,8 @@ def build_native_graph(
         return {"stop": True, "events": _event(state, "terminal", reason=state.get("reason"))}
 
     def learn(state: NativeState, runtime: Runtime) -> dict[str, Any]:
+        if state.get("effects_head_sha256") != ledger.journal.head_hash or state.get("effects_completed") != ledger.completed:
+            raise ValueError("cannot learn from unreconciled external effects")
         config = state["identity"]["memory"]
         if config["mode"] != "learn" or runtime.store is None:
             return {}
