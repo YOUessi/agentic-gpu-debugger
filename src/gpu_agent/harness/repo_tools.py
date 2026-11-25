@@ -1147,14 +1147,30 @@ class RepositoryWorkspaceTools:
             )
         return None
 
-    def invoke(self, action: HarnessAction) -> ToolObservation:
+    def invoke(
+        self, action: HarnessAction, *,
+        graph_allowed_tools: tuple[str, ...] | None = None,
+        graph_target: str = "",
+    ) -> ToolObservation:
         if self._finished:
             raise ValueError("repository workspace already finalized")
         self._tool_calls += 1
         permission = self._policy.check(action.tool)
         full_public_audit = self._syntax_mode and self._public_case_id is not None
         detail: dict[str, Any] | None = None
-        if (
+        graph_denied = graph_allowed_tools is not None and (
+            action.tool not in graph_allowed_tools
+            or (
+                graph_target and isinstance(action, (RepoReplaceSnippet, RepoReplaceMany, RepoReplaceSyntax))
+                and action.path != graph_target
+            )
+        )
+        if graph_denied:
+            result = ToolObservation(
+                tool=action.tool, status="REJECTED",
+                content="ValueError: GRAPH_TASK_SCOPE_DENIED",
+            )
+        elif (
             permission != "ALLOW"
             or action.tool not in self.ALLOWED_TOOLS
             or action.tool not in self._currently_allowed_tools()
@@ -1222,6 +1238,7 @@ class RepositoryWorkspaceTools:
                         "ValueError: CUDA_",
                         "ValueError: PUBLIC_",
                         "ValueError: REGISTERED_",
+                        "ValueError: GRAPH_",
                         "OSError: PUBLIC_",
                     )
                 )

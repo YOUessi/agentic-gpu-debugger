@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
-from langgraph.types import Command, interrupt
+from langgraph.types import Command, Send, interrupt
 
 from gpu_agent.harness.graph_plan import (
     TOOL_GATES,
@@ -27,6 +27,9 @@ from gpu_agent.harness.graph_plan import (
     compatibility_plan,
     compatibility_progress,
     evaluate_tasks,
+)
+from gpu_agent.harness.graph_schedule import (
+    assess_frontier_task, evidence_task_key, frontier_inputs, select_frontier,
 )
 from gpu_agent.harness.journal import (
     SessionJournal,
@@ -80,6 +83,8 @@ class NativeState(TypedDict, total=False):
     plan_revision: int
     plan_revisions: list[dict[str, Any]]
     task_status: list[dict[str, Any]]
+    frontier_assessments: Annotated[list[dict[str, Any]], merge_events]
+    active_task: dict[str, Any] | None
     task_progress: dict[str, Any]
     last_failure: dict[str, Any] | None
     failure_streak: int
@@ -369,6 +374,15 @@ def build_native_graph(
                 + "\n"
                 + data.get("context_summary", "")
             )[:2800]
+        active = state.get("active_task")
+        if active:
+            data["allowed_tools"] = active["scope"]
+            task = active["task"]
+            task_line = (
+                f"ACTIVE_TASK {task['task_id']} gate={task['gate']} "
+                f"target={task['target']} objective={task['objective']}\n"
+            )
+            data["context_summary"] = (task_line + data.get("context_summary", ""))[:2800]
         return SessionSnapshot.model_validate_json(json.dumps(data))
 
     def plan_node(state: NativeState) -> dict[str, Any]:
@@ -382,7 +396,7 @@ def build_native_graph(
             f"plan-{revision}",
             role,
             lambda: callback(
-                model_snapshot(state),
+                model_snapshot(cast(NativeState, {**state, "active_task": None})),
                 previous_plan=old,
                 task_status=state.get("task_status", []),
                 failure=state.get("last_failure"),
@@ -406,6 +420,7 @@ def build_native_graph(
                 },
             ],
             "last_plan_turn": state.get("turns", 0),
+            "active_task": None,
             "logical_model_calls": calls,
             "observed_physical_calls": _physical_calls(model, calls),
             "effects_completed": ledger.completed,
@@ -441,7 +456,50 @@ def build_native_graph(
             and state["max_model_calls"] - state["observed_physical_calls"] >= 2
         ):
             return "replan"
-        return "executor"
+        return "frontier" if state["hierarchical"] else "executor"
+
+    def frontier(state: NativeState) -> dict[str, Any]:
+        return {"active_task": None}
+
+    def send_frontier(state: NativeState):
+        items = frontier_inputs(state)
+        return [Send("assess_task", item) for item in items] if items else "select_task"
+
+    def assess_task(item: dict[str, Any]) -> dict[str, Any]:
+        return {"frontier_assessments": [assess_frontier_task(item)]}
+
+    def select_task(state: NativeState) -> dict[str, Any]:
+        selected = select_frontier(
+            state.get("frontier_assessments", []), state["plan_revision"], state["turns"]
+        )
+        if selected:
+            return {
+                "active_task": selected,
+                "events": _event(state, "task_dispatched", task=selected["task"],
+                                 task_key=selected["task_key"], scope=selected["scope"]),
+            }
+        return {"active_task": None, "events": _event(state, "task_frontier_blocked")}
+
+    def route_selection(state: NativeState) -> str:
+        if state.get("active_task"):
+            return "executor"
+        if (
+            state.get("plan_revision", 0) <= state["max_replans"]
+            and state["max_model_calls"] - state["observed_physical_calls"] >= 2
+            and state["max_steps"] - state["turns"] >= 1
+        ):
+            return "blocked_replan"
+        return "blocked_terminal"
+
+    def blocked_replan(state: NativeState) -> dict[str, Any]:
+        return {
+            "last_failure": {"turn": state["turns"], "tool": "task_scheduler",
+                             "status": "REJECTED", "code": "GRAPH_TASK_FRONTIER_BLOCKED",
+                             "evidence": "No dependency-ready task fits current permissions/budget."},
+        }
+
+    def blocked_terminal(state: NativeState) -> dict[str, Any]:
+        return {"stop": True, "reason": "GRAPH_TASK_FRONTIER_BLOCKED"}
 
     def choose(state: NativeState) -> dict[str, Any]:
         if time.time() >= state["deadline"]:
@@ -487,7 +545,15 @@ def build_native_graph(
         turn = state["turns"] + 1
         decision = HarnessDecision.model_validate(state["decision"])
         on_event({"stage": "tool_started", "turn": turn, "tool": decision.action.tool})
-        observation = ledger.perform(f"tool-{turn}", "tool", lambda: host.invoke(decision.action))
+        active = state.get("active_task")
+        if active:
+            operation = lambda: host.invoke(
+                decision.action, graph_allowed_tools=tuple(active["scope"]),
+                graph_target=active["task"]["target"],
+            )
+        else:
+            operation = lambda: host.invoke(decision.action)
+        observation = ledger.perform(f"tool-{turn}", "tool", operation)
         if not isinstance(observation, ToolObservation):
             raise ValueError("tool host returned an invalid observation")
         if observation.tool != decision.action.tool:
@@ -532,6 +598,10 @@ def build_native_graph(
             "candidate_before": state["snapshot"].get("current_candidate_sha256"),
             "candidate": after.get("current_candidate_sha256"),
             "artifact_id": observation.artifact_id,
+            "task_id": active["task"]["task_id"] if active else None,
+            "task_key": evidence_task_key(active, observation.tool, path),
+            "plan_revision": state.get("plan_revision", 0),
+            "action_sha256": digest(decision.action.model_dump(mode="json")),
             "observation_sha256": digest(observation.model_dump(mode="json")),
         }
         return {
@@ -664,6 +734,11 @@ def build_native_graph(
     graph.add_node("budget_gate", gate)
     graph.add_node("planner", plan_node)
     graph.add_node("replan", plan_node)
+    graph.add_node("frontier", frontier)
+    graph.add_node("assess_task", assess_task)
+    graph.add_node("select_task", select_task)
+    graph.add_node("blocked_replan", blocked_replan)
+    graph.add_node("blocked_terminal", blocked_terminal)
     graph.add_node("executor", executor.compile())
     graph.add_node("reconcile", refresh)
     graph.add_node("recovery", recovery_node)
@@ -675,10 +750,15 @@ def build_native_graph(
     graph.add_conditional_edges(
         "budget_gate",
         route_gate,
-        {n: n for n in ("planner", "replan", "executor", "terminal")},
+        {n: n for n in ("planner", "replan", "frontier", "executor", "terminal")},
     )
     graph.add_edge("planner", "refresh")
     graph.add_edge("replan", "refresh")
+    graph.add_conditional_edges("frontier", send_frontier, ["assess_task", "select_task"])
+    graph.add_edge("assess_task", "select_task")
+    graph.add_conditional_edges("select_task", route_selection, ["executor", "blocked_replan", "blocked_terminal"])
+    graph.add_edge("blocked_replan", "replan")
+    graph.add_edge("blocked_terminal", "terminal")
     graph.add_edge("executor", "reconcile")
     graph.add_edge("reconcile", "recovery")
     graph.add_edge("recovery", "checkpoint")
@@ -781,7 +861,8 @@ def run_native_repository_agent(
                 ("replan",),
                 ("checkpoint",),
                 ("executor",),
-            ):
+                ("frontier",), ("select_task",), ("blocked_replan",),
+            ) and not (saved.next and set(saved.next) == {"assess_task"}):
                 raise ValueError("native graph has no safe continuation boundary")
             else:
                 graph_input = None
@@ -802,6 +883,8 @@ def run_native_repository_agent(
                 "effects_completed": 0,
                 "effects_head_sha256": ledger.journal.head_hash,
                 "plan_revisions": [],
+                "frontier_assessments": [],
+                "active_task": None,
                 "plan_revision": 0,
                 "last_plan_turn": 0,
                 "last_failure": None,
@@ -900,6 +983,8 @@ def inspect_native_graph(output: Path) -> dict[str, Any]:
             "reason": values.get("reason"),
             "plan_revision": values.get("plan_revision", 0),
             "task_status": values.get("task_status", []),
+            "active_task": values.get("active_task"),
+            "frontier_assessments": values.get("frontier_assessments", []),
             "observed_physical_calls": values.get("observed_physical_calls", 0),
             "effects_completed": values.get("effects_completed", 0),
             "graph_events": values.get("events", []),

@@ -89,7 +89,20 @@ def evaluate_tasks(
 ) -> list[dict[str, Any]]:
     """Use exact candidate identity for build/probe/check/finish evidence."""
     candidate = snapshot.get("current_candidate_sha256")
+    # A successful observation may discharge only one distinct milestone.
+    # Proofs explicitly bound to another objective are not silently reused.
+    from gpu_agent.harness.graph_schedule import task_fingerprint
+
     results: dict[str, dict[str, Any]] = {}
+    used_turns: set[int] = set()
+    failed_candidate = any(
+        e.get("candidate") == candidate and candidate
+        and e.get("gate") in {"compile", "public_check"}
+        and e.get("status") == "FAILED"
+        for e in evidence
+    )
+    if snapshot.get("public_checks_passed"):
+        failed_candidate = False
     for task in plan.tasks:
         matches = [
             e
@@ -97,12 +110,15 @@ def evaluate_tasks(
             if e["gate"] == task.gate
             and e["status"] == "OK"
             and (not task.target or e.get("path") == task.target)
+            and e.get("task_key") in (None, task_fingerprint(task))
+            and e["turn"] not in used_turns
         ]
         if (
             task.gate == "inspect"
             and snapshot.get("registered_public_case")
             and snapshot.get("context_mode") == "evidence_first"
             and task.target in ("", snapshot.get("registered_kernel_path"))
+            and 0 not in used_turns
         ):
             matches.insert(
                 0,
@@ -123,6 +139,20 @@ def evaluate_tasks(
                     or (not e.get("path") and e.get("candidate") == candidate)
                 )
             ]
+        if task.gate == "edit" and failed_candidate:
+            matches = [e for e in matches if e.get("candidate") != candidate]
+        if task.gate == "edit" and failed_candidate:
+            # A failed current candidate cannot satisfy the repair milestone,
+            # even when a previous revision also changed this file.
+            matches = []
+        if task.gate == "edit":
+            last_revert = max(
+                (e["turn"] for e in evidence if e.get("gate") == "revert"
+                 and e.get("status") == "OK"
+                 and (not task.target or e.get("path") == task.target)),
+                default=-1,
+            )
+            matches = [e for e in matches if e["turn"] > last_revert]
         if task.gate in ("compile", "probe", "public_check", "finish"):
             current = [e for e in matches if e.get("candidate") == candidate]
         else:
@@ -148,6 +178,8 @@ def evaluate_tasks(
             if matches
             else "READY"
         )
+        if status == "DONE":
+            used_turns.add(current[-1]["turn"])
         results[task.task_id] = {
             "task_id": task.task_id,
             "gate": task.gate,
