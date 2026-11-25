@@ -3,7 +3,6 @@
 import ctypes
 import multiprocessing
 import os
-import select
 import signal
 import subprocess
 import sys
@@ -12,8 +11,8 @@ import time
 import pytest
 
 pytestmark = pytest.mark.skipif(
-    sys.platform != "linux" or not hasattr(os, "pidfd_open"),
-    reason="Linux parent-death signals and pidfds are required",
+    sys.platform != "linux",
+    reason="Linux parent-death signals and subreaper support are required",
 )
 
 
@@ -66,6 +65,18 @@ if {pause_before_bootstrap!r}:
         signal.pause()
 
 
+def _wait_for_owned_worker(worker_pid, timeout):
+    """Bounded reap after the dead owner reparents its worker to this subreaper."""
+    deadline = time.monotonic() + timeout
+    while True:
+        reaped, status = os.waitpid(worker_pid, os.WNOHANG)
+        if reaped == worker_pid:
+            return status
+        if time.monotonic() >= deadline:
+            return None
+        time.sleep(0.005)
+
+
 def _assert_parent_death_stops_worker(tmp_path, death_signal, *, before_bootstrap=False):
     context = multiprocessing.get_context("fork")
     receiver, sender = context.Pipe(duplex=False)
@@ -73,20 +84,18 @@ def _assert_parent_death_stops_worker(tmp_path, death_signal, *, before_bootstra
         target=_own_blocking_worker,
         args=(sender, tmp_path, before_bootstrap),
     )
-    worker_fd = None
     worker_pid = None
     owner.start()
     sender.close()
     try:
         assert receiver.poll(5), "controller did not launch its worker"
         worker_pid = receiver.recv()
-        worker_fd = os.pidfd_open(worker_pid)
         deadline = time.monotonic() + 5
         while not (tmp_path / "ready").exists() and time.monotonic() < deadline:
-            assert not select.select([worker_fd], [], [], 0.01)[0], "worker exited before ready"
+            assert owner.is_alive(), "controller exited before worker readiness"
+            time.sleep(0.005)
         assert (tmp_path / "ready").exists(), "worker did not reach the controlled boundary"
         assert os.getpgid(worker_pid) == worker_pid  # Reproduce the detached worker boundary.
-        assert not select.select([worker_fd], [], [], 0)[0]
 
         os.kill(owner.pid, death_signal)
         owner.join(5)
@@ -94,25 +103,26 @@ def _assert_parent_death_stops_worker(tmp_path, death_signal, *, before_bootstra
         if before_bootstrap:
             (tmp_path / "release").touch()
 
-        assert select.select([worker_fd], [], [], 2)[0], (
-            "detached SDK worker survived its controller's death"
-        )
+        status = _wait_for_owned_worker(worker_pid, 2)
+        if status is not None:
+            worker_pid = None  # Reaped: never signal this numeric PID again.
+        assert status is not None, "detached SDK worker survived its controller's death"
         if before_bootstrap:
             assert not (tmp_path / "work-started").exists(), "orphan admitted SDK work"
-        reaped, status = os.waitpid(worker_pid, 0)
-        assert reaped == worker_pid and os.waitstatus_to_exitcode(status) == -signal.SIGKILL
-        worker_pid = None
+        assert os.waitstatus_to_exitcode(status) == -signal.SIGKILL
     finally:
         if owner.is_alive():
             owner.kill()
         owner.join(5)
-        if worker_fd is not None:
-            if not select.select([worker_fd], [], [], 0)[0]:
-                signal.pidfd_send_signal(worker_fd, signal.SIGKILL)
-            assert select.select([worker_fd], [], [], 5)[0], "owned worker cleanup failed"
-            os.close(worker_fd)
+        assert owner.exitcode is not None, "owned controller cleanup failed"
         if worker_pid is not None:
-            os.waitpid(worker_pid, 0)
+            # waitpid proves ownership before signaling. An unreaped child keeps
+            # its PID reserved, including if it exits between this check and kill.
+            status = _wait_for_owned_worker(worker_pid, 0)
+            if status is None:
+                os.kill(worker_pid, signal.SIGKILL)
+                status = _wait_for_owned_worker(worker_pid, 5)
+            assert status is not None, "owned worker cleanup failed"
         receiver.close()
         owner.close()
 

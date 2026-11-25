@@ -1,0 +1,65 @@
+{
+  "model_repository": "sentence-transformers/paraphrase-MiniLM-L3-v2",
+  "model_revision": "4ca70771034acceecb2e72475f72050fcdde4ddc",
+  "official_source": "https://huggingface.co/sentence-transformers/paraphrase-MiniLM-L3-v2/tree/4ca70771034acceecb2e72475f72050fcdde4ddc",
+  "actual_transport": "https://hf-mirror.com",
+  "pinning": "Weights used an explicit revision URL and official weight SHA256. Small files obtained via main were accepted only when X-Repo-Commit equaled the pinned revision. Every file is now content-locked below.",
+  "official_weight_sha256_source": "https://huggingface.co/sentence-transformers/paraphrase-MiniLM-L3-v2/blob/main/model.safetensors",
+  "files": [
+    {
+      "path": "1_Pooling/config.json",
+      "bytes": 190,
+      "sha256": "4be450dde3b0273bb9787637cfbd28fe04a7ba6ab9d36ac48e92b11e350ffc23"
+    },
+    {
+      "path": "README.md",
+      "bytes": 3828,
+      "sha256": "367a3b024bae0609cd4c9c355d4ef968a974c03d9bde297550508472e5dc0db9"
+    },
+    {
+      "path": "config.json",
+      "bytes": 629,
+      "sha256": "fc00f0ca1c3380f17937a4050908dd2cf743c36bebe437cf448b8aa4e7ddfe4d"
+    },
+    {
+      "path": "config_sentence_transformers.json",
+      "bytes": 122,
+      "sha256": "b8c64b5cece00d8424b4896ea75b512b6008576088497609dfeb6bd63e6d36b8"
+    },
+    {
+      "path": "model.safetensors",
+      "bytes": 69569488,
+      "sha256": "cf1e4e2d420c664973037c3c73125d7a8fc69952495093ef8f50596f8943a433"
+    },
+    {
+      "path": "modules.json",
+      "bytes": 229,
+      "sha256": "8f4b264b80206c830bebbdcae377e137925650a433b689343a63bdc9b3145460"
+    },
+    {
+      "path": "sentence_bert_config.json",
+      "bytes": 53,
+      "sha256": "70f4448f31320443fe3557cacea5abf2dcc4915dda8c80646bec9f3bb0aa5a1f"
+    },
+    {
+      "path": "special_tokens_map.json",
+      "bytes": 112,
+      "sha256": "303df45a03609e4ead04bc3dc1536d0ab19b5358db685b6f3da123d05ec200e3"
+    },
+    {
+      "path": "tokenizer.json",
+      "bytes": 466248,
+      "sha256": "a9576e4dadfe7f78f071a1c00ba6902cc83ec6ed7e9b590ee974950bd4d54393"
+    },
+    {
+      "path": "tokenizer_config.json",
+      "bytes": 314,
+      "sha256": "bebb08142e831e77fd87b6fac54626c2ca527ad27203e9de5e787f1e8063608b"
+    },
+    {
+      "path": "vocab.txt",
+      "bytes": 231508,
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  ]
+}

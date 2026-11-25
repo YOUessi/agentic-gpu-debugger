@@ -1,0 +1,42 @@
+[
+  {
+    "path": "/home/you/projects/agentic-gpu-graph-native-dev-20261125/embedding-validation/README.md",
+    "bytes": 6133,
+    "sha256": "448c57aca330b89038d479c07eb7d5d8d06e3b4164e3e98365ee5aee2ff98005"
+  },
+  {
+    "path": "/home/you/projects/agentic-gpu-graph-native-dev-20261125/embedding-validation/validate_real_embeddings.py",
+    "bytes": 11993,
+    "sha256": "940bc7ea29b704f19d07e4fcee839b37da471ac586f2b9eb9ee249f60d9ccfe5"
+  },
+  {
+    "path": "/home/you/projects/agentic-gpu-graph-native-dev-20261125/embedding-validation/download_model.py",
+    "bytes": 2629,
+    "sha256": "fcf185b59091c701707eef48bea7156b57df2799a2aa2b4d947f210cb8d2de0f"
+  },
+  {
+    "path": "/home/you/projects/agentic-gpu-graph-native-dev-20261125/embedding-validation/results/real-embedding-validation-final.json",
+    "bytes": 11060,
+    "sha256": "637491cf40edde747da745fa2d19a6c4cd25a3434339a993c4aabb5b706812a4"
+  },
+  {
+    "path": "/home/you/projects/agentic-gpu-graph-native-dev-20261125/embedding-validation/results/real-embedding-validation.json",
+    "bytes": 6754,
+    "sha256": "2b2a9388988f9d7d2a3387089412382cf00c2b4550e3b3e2f8b1e8da966ffadd"
+  },
+  {
+    "path": "/home/you/projects/agentic-gpu-graph-native-dev-20261125/embedding-validation/results/cross-process-repeatability.json",
+    "bytes": 461,
+    "sha256": "e6a674cd4c4828759bd9df38314897bd07b12a8875e937e881e9a4e109d9ee31"
+  },
+  {
+    "path": "/home/you/projects/agentic-gpu-graph-native-dev-20261125/embedding-validation/results/model-lock.json",
+    "bytes": 2375,
+    "sha256": "954ee36cf2cbff5aeb764e20b985cd3ed23c356806f26a6b4762cdc339eec8e9"
+  },
+  {
+    "path": "/home/you/projects/agentic-gpu-graph-native-dev-20261125/embedding-validation/results/embedding-requirements.freeze.txt",
+    "bytes": 590,
+    "sha256": "0ff073bbba00e95df8b40fba58aadaafe56f06b1fa0932814ef2986391020981"
+  }
+]

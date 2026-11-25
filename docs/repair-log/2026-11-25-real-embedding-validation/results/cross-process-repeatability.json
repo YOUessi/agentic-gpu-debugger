@@ -1,0 +1,8 @@
+{
+  "same_fixed_queries": true,
+  "separate_process_rankings_and_scores_identical": true,
+  "embedding_identity_identical": true,
+  "initial_result_sha256": "2b2a9388988f9d7d2a3387089412382cf00c2b4550e3b3e2f8b1e8da966ffadd",
+  "final_result_sha256": "637491cf40edde747da745fa2d19a6c4cd25a3434339a993c4aabb5b706812a4",
+  "final_result_note": "Final schema includes same-fixture BM25 baseline ranks and expected document text. Retrieval outputs are unchanged."
+}

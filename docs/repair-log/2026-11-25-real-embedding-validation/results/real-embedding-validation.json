@@ -1,0 +1,232 @@
+{
+  "test_kind": "controlled real pretrained CPU embedding smoke validation",
+  "source_commit": "bf9e224d14e7a9382e2f40e450c0e35cda41e670",
+  "graph_memory_sha256": "d2b746c381ef18cada7e6967f389c0b5ea1b848fcbdbfd6aca5264b91e6cf203",
+  "model_repository": "sentence-transformers/paraphrase-MiniLM-L3-v2",
+  "model_revision": "4ca70771034acceecb2e72475f72050fcdde4ddc",
+  "model_weight_sha256": "cf1e4e2d420c664973037c3c73125d7a8fc69952495093ef8f50596f8943a433",
+  "expected_weight_sha256_from_official_huggingface": "cf1e4e2d420c664973037c3c73125d7a8fc69952495093ef8f50596f8943a433",
+  "official_weight_source": "https://huggingface.co/sentence-transformers/paraphrase-MiniLM-L3-v2/blob/main/model.safetensors",
+  "versions": {
+    "torch": "2.5.1+cpu",
+    "sentence-transformers": "3.4.1",
+    "transformers": "4.48.3",
+    "langgraph": "1.2.20"
+  },
+  "cuda_visible_devices": "",
+  "torch_cuda_build": null,
+  "checks": {
+    "official_weight_hash_matches": true,
+    "cpu_only_torch_build": true,
+    "model_files_are_regular_without_symlinks": true,
+    "all_model_parameters_on_cpu": true,
+    "real_384_dimension_finite_normalized_embedding": true,
+    "repeated_encode_identical": true,
+    "all_queries_have_zero_lexical_score": true,
+    "lexical_only_returns_no_results": true,
+    "semantic_top1_all_five": false,
+    "namespace_sentinel_never_returned": true,
+    "list_namespaces_is_bound_scope_only": true,
+    "read_only_and_scope_violations_rejected": true,
+    "readonly_database_bytes_and_mtime_unchanged": true,
+    "reopened_model_identity_identical": true,
+    "reopened_store_rankings_and_scores_identical": true,
+    "sqlite_persisted_real_384_dimension_vectors": true,
+    "sanitized_lesson_removes_untrusted_text": true,
+    "sanitized_lesson_retains_observed_recovery": true,
+    "offline_inference_no_network_attempts": true
+  },
+  "embedding_identity": "e14bd10fe9f0fa175fc6b3c015bcab6a09c1b402c783722c9beb53961595ba00",
+  "model_device": "cpu",
+  "embedding_dimension": 384,
+  "embedding_norm": 1.0000000086449417,
+  "repeat_max_abs_delta": 0.0,
+  "retrieval_cases": [
+    {
+      "query": "Correct malformed punctuation during translation",
+      "expected": "compile",
+      "top1": "numeric",
+      "top1_correct": false,
+      "ranking": [
+        {
+          "key": "numeric",
+          "score": 0.06754231080420542
+        },
+        {
+          "key": "ast",
+          "score": 0.03184831100935092
+        },
+        {
+          "key": "generic_paraphrase_control",
+          "score": 0.016219588745683713
+        },
+        {
+          "key": "infrastructure",
+          "score": 0.0070845089838334875
+        }
+      ],
+      "bm25_scores": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "lexical_only_hits": [],
+      "query_expected_document_token_overlap": []
+    },
+    {
+      "query": "Normalize probabilities safely when exponential values explode",
+      "expected": "numeric",
+      "top1": "numeric",
+      "top1_correct": true,
+      "ranking": [
+        {
+          "key": "numeric",
+          "score": 0.15737754753811553
+        },
+        {
+          "key": "compile",
+          "score": 0.01599297511382348
+        }
+      ],
+      "bm25_scores": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "lexical_only_hits": [],
+      "query_expected_document_token_overlap": []
+    },
+    {
+      "query": "Locate updated syntax tree targets following a revision",
+      "expected": "ast",
+      "top1": "ast",
+      "top1_correct": true,
+      "ranking": [
+        {
+          "key": "ast",
+          "score": 0.18360799556419063
+        },
+        {
+          "key": "compile",
+          "score": 0.1400814585231612
+        },
+        {
+          "key": "numeric",
+          "score": 0.08814116806341434
+        }
+      ],
+      "bm25_scores": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "lexical_only_hits": [],
+      "query_expected_document_token_overlap": []
+    },
+    {
+      "query": "Network outage blocks communication",
+      "expected": "infrastructure",
+      "top1": "infrastructure",
+      "top1_correct": true,
+      "ranking": [
+        {
+          "key": "infrastructure",
+          "score": 0.27143716049416566
+        },
+        {
+          "key": "numeric",
+          "score": 0.07346251201396686
+        },
+        {
+          "key": "compile",
+          "score": 0.06996141657830321
+        },
+        {
+          "key": "ast",
+          "score": 0.06250776761665056
+        }
+      ],
+      "bm25_scores": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "lexical_only_hits": [],
+      "query_expected_document_token_overlap": []
+    },
+    {
+      "query": "doctor treats ill youngster",
+      "expected": "generic_paraphrase_control",
+      "top1": "generic_paraphrase_control",
+      "top1_correct": true,
+      "ranking": [
+        {
+          "key": "generic_paraphrase_control",
+          "score": 0.47774468178030743
+        },
+        {
+          "key": "compile",
+          "score": 0.08088200329042666
+        }
+      ],
+      "bm25_scores": [
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      "lexical_only_hits": [],
+      "query_expected_document_token_overlap": []
+    }
+  ],
+  "rejected_operations": {
+    "read_only_put": "memory database is read-only",
+    "read_only_delete": "memory database is read-only",
+    "wrong_scope_get": "memory namespace is outside the operator-bound repository scope",
+    "wrong_scope_search": "memory namespace is outside the operator-bound repository scope",
+    "wrong_scope_put": "memory namespace is outside the operator-bound repository scope"
+  },
+  "stored_embedding_rows": 6,
+  "sanitized_lesson": {
+    "run_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "outcome": "UNRESOLVED",
+    "episodes": [
+      {
+        "strategy": "COMPILE_REPAIR",
+        "after_failure": [
+          {
+            "tool": "repo_compile_candidate",
+            "status": "OK"
+          }
+        ]
+      }
+    ],
+    "strategies": [
+      "COMPILE_REPAIR"
+    ],
+    "tool_sequence": [
+      "repo_compile_candidate",
+      "repo_compile_candidate"
+    ],
+    "query_text": "cuda coding repair UNRESOLVED compile build compiler nvcc syntax diagnostic repo_compile_candidate repo_compile_candidate"
+  },
+  "network_attempts_during_inference": [],
+  "elapsed_seconds": 1.694,
+  "passed_checks": 18,
+  "total_checks": 19,
+  "all_passed": false,
+  "limitations": [
+    "Controlled smoke fixtures only; no benchmark quality claim.",
+    "No GPU or paid provider inference.",
+    "Model transported from hf-mirror.com after direct HuggingFace access failed; safetensors SHA256 independently matches the official HuggingFace page."
+  ]
+}
