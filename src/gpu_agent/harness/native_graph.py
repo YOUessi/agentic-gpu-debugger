@@ -271,12 +271,12 @@ def classify_recovery(failure: dict[str, Any] | None, snapshot: dict[str, Any]) 
             "Use public numeric/sanitizer evidence to diagnose the current candidate. "
             "An informative probe is not a full check; do not repeat a rejected candidate."
         )
-    elif code.startswith(("CUDA_AST_", "CUDA_SYNTAX_", "CUDA_SOURCE_SHA_")):
-        strategy = "AST_REBIND"
-        guidance = "Reconcile the source SHA and exact observed node binding; change the rejected edit."
     elif code.startswith("REDUNDANT_") or code == "CUDA_SYNTAX_REPEATED_REJECTED_EDIT":
         strategy = "AVOID_DUPLICATE"
         guidance = "Use existing evidence or choose a materially different permitted action."
+    elif code.startswith(("CUDA_AST_", "CUDA_SYNTAX_", "CUDA_SOURCE_SHA_")):
+        strategy = "AST_REBIND"
+        guidance = "Reconcile the source SHA and exact observed node binding; change the rejected edit."
     else:
         strategy = "REPLAN"
         guidance = "Revise the task DAG using the specific observed rejection or failure."

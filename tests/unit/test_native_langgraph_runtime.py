@@ -312,3 +312,89 @@ def test_registered_cuda_public_failure_replan_and_native_review(tmp_path, monke
     assert final.public_checks_passed and final.turns == 5
     assert len(checker.calls) == 2 and len(second.plans) == 0
     assert inspect_native_graph(out)["task_status"][-1]["status"] == "DONE"
+
+
+
+def test_native_ast_resume_preserves_exact_node_binding(tmp_path, monkeypatch):
+    from test_gpu_harness_repo_public import FakePublicChecker, GOAL, KERNEL, _registered_repository
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+
+    repo, sha = _registered_repository(tmp_path)
+    out = tmp_path / "native-ast"
+    checker = FakePublicChecker([True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+    options = dict(
+        repository=repo, output=out, base_sha=sha, goal=GOAL, public_case_id="h001",
+        runtime_mode="langgraph", syntax_mode=True, ast_target_binding=True,
+        state_scoped_actions=True, max_steps=8, max_model_calls=10,
+    )
+    first = Model([action("repo_inspect_syntax", path=KERNEL, symbol="softmax32", limit=20)])
+    result = run_repository_coding_session(
+        **options, pause_after_turns=1, model_factory=lambda _: first,
+    )
+    assert result.status == "PAUSED_RESUMABLE"
+    state = read_repository_checkpoint(out / "session-checkpoint.json").syntax_state
+    assert state is not None
+    d = next(node for node in state.observed_nodes if node.code == "denominator += expf(x);")
+    n = next(node for node in state.observed_nodes if node.code == "out[i] = expf(own) / denominator;")
+    edits = [
+        {"node_id": d.id, "expected_old_code": d.code, "replacement_code": "denominator += expf(x - maximum);"},
+        {"node_id": n.id, "expected_old_code": n.code, "replacement_code": "out[i] = expf(own - maximum) / denominator;"},
+    ]
+    bad_edits = [{**edits[0], "expected_old_code": n.code}, edits[1]]
+    def replace(rows):
+        return action("repo_replace_syntax", path=KERNEL, expected_source_sha256=state.source_sha256, edits=rows)
+
+    second = Model([replace(bad_edits), replace(edits), action("repo_run_public_checks"), FINISH])
+    result = run_repository_coding_session(**options, resume=True, model_factory=lambda _: second)
+    assert result.status == "DIFF_STAGED_UNVERIFIED"
+    assert result.turns == 5 and len(checker.calls) == 1
+    assert second.decisions[0].syntax_state == state
+    info = inspect_native_graph(out)
+    assert any(e["kind"] == "failure_routed" and e["recovery"]["strategy"] == "AST_REBIND" for e in info["graph_events"])
+    from gpu_agent.harness.repo_audit import read_repository_tool_events
+    from gpu_agent.store import RunStore
+    rows = read_repository_tool_events(RunStore(out / "public"), result.public_run_id, expected_count=5, require_action=True, require_observation=True)
+    assert rows[1]["status"] == "REJECTED"
+    assert rows[1]["rejection_code"] == "CUDA_AST_TARGET_BINDING_MISMATCH"
+    assert rows[1]["diff_sha256"] == rows[0]["diff_sha256"]
+    assert rows[2]["status"] == "OK"
+
+
+def test_real_provider_adapter_admits_planner_and_replanner_roles(repository, tmp_path):
+    from pydantic import SecretStr
+    from gpu_agent.agent.models import AgentBudget
+    from gpu_agent.agent.policy import LLMCallGate, RepositoryCallBudget
+    from gpu_agent.agent.provider import DevelopmentCallPolicy, OpenAIProviderSettings, OpenAIResponsesProvider, SDKResult
+    from gpu_agent.harness.repo_tools import RepositoryWorkspaceTools
+    from gpu_agent.store import RunStore
+
+    calls = []
+    class Port:
+        def call(self, request):
+            calls.append(request)
+            return SDKResult(value=plan(bool(request.payload["previous_plan"])).model_dump(mode="json"))
+
+    store = RunStore(tmp_path / "wire")
+    run = store.create_run("native_plan_wire")
+    provider = OpenAIResponsesProvider(
+        OpenAIProviderSettings(endpoint="https://api.deepseek.com", model="mock-only",
+                                api_key=SecretStr("fixture-only"), supports_store_false=True),
+        LLMCallGate(AgentBudget(max_llm_calls=10), reserve_repair_stages=False),
+        store, run.id, port=Port(),
+        call_policy=DevelopmentCallPolicy(max_llm_calls=10),
+        repository_budget=RepositoryCallBudget(executor_decisions=4, executor_format_retries=2,
+                                               planner_decisions=1, planner_format_retries=1,
+                                               reflect_decisions=1, reflect_format_retries=1),
+    )
+    repo, sha = repository
+    with RepositoryWorkspaceTools(origin=repo, output=tmp_path / "host", sha=sha) as host:
+        snapshot = host.snapshot("Correct the float literal in source", [], 4)
+        initial = provider.choose_graph_plan(snapshot, previous_plan=None, task_status=[], failure=None)
+        revised = provider.choose_graph_plan(snapshot, previous_plan=initial.model_dump(mode="json"),
+                                              task_status=[], failure={"code": "REJECTED"})
+    assert isinstance(initial, GraphTaskPlan) and isinstance(revised, GraphTaskPlan)
+    assert len(calls) == 2
+    assert all(req.payload["gpu_repo_graph_plan"] == "v1" for req in calls)
+    assert [i.repository_role for i in provider.invocations()] == ["planner", "reflect"]
+    assert all(i.prompt_version == "gpu-repository-graph-dag-v1" for i in provider.invocations())
