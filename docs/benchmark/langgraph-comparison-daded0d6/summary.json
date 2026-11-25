@@ -81,38 +81,48 @@
       "agent_wall_seconds_observed": 0,
       "determinate": 0,
       "physical_calls_observed": 0,
-      "primary": null,
+      "primary": 0.0,
       "secondary": null,
       "seconds_per_success_lower_bound": null,
-      "started": 0,
-      "states": {},
+      "started": 1,
+      "states": {
+        "RESERVED_UNRECONCILED": 1
+      },
       "strict_wall_seconds_observed": 0,
       "success": 0,
       "timeouts": 0,
       "tokens_lower_bound": 0,
       "tokens_per_success_lower_bound": null,
-      "tokens_total": 0,
+      "tokens_total": null,
       "total_wall_seconds_observed": 0,
-      "wilson95": null
+      "wilson95": [
+        0,
+        0.7934506856227626
+      ]
     },
     "legacy-react:h001": {
       "actual_billed_cost": null,
       "agent_wall_seconds_observed": 0,
       "determinate": 0,
       "physical_calls_observed": 0,
-      "primary": null,
+      "primary": 0.0,
       "secondary": null,
       "seconds_per_success_lower_bound": null,
-      "started": 0,
-      "states": {},
+      "started": 1,
+      "states": {
+        "RESERVED_UNRECONCILED": 1
+      },
       "strict_wall_seconds_observed": 0,
       "success": 0,
       "timeouts": 0,
       "tokens_lower_bound": 0,
       "tokens_per_success_lower_bound": null,
-      "tokens_total": 0,
+      "tokens_total": null,
       "total_wall_seconds_observed": 0,
-      "wilson95": null
+      "wilson95": [
+        0,
+        0.7934506856227626
+      ]
     },
     "legacy-react:h002": {
       "actual_billed_cost": null,
@@ -305,8 +315,10 @@
       "wilson95": null
     }
   },
-  "pending": 60,
+  "pending": 59,
   "planned": 60,
-  "reserved": 0,
-  "states": {}
+  "reserved": 1,
+  "states": {
+    "RESERVED_UNRECONCILED": 1
+  }
 }
