@@ -277,3 +277,97 @@ def test_real_orchestration_boundaries(
     if expected == "COMPLETED_SUCCESS":
         assert resume.read(folder / "trial-record.json")["success"]
     assert all(x["state"] == "PENDING" for key, x in recovered.states.items() if key != tid)
+
+
+
+def test_watchdog_never_resamples_and_next_trial_is_pending(tmp_path, manifest, monkeypatch):
+    output = tmp_path / "output"
+    (output / "trials").mkdir(parents=True)
+    args = SimpleNamespace(output=output, repository=tmp_path, evidence_root=tmp_path)
+    ledger = resume.Ledger(output / "scheduler-v2/events", manifest)
+    tid, nxt = list(ledger.trials)[:2]
+    calls = {"model": 0, "strict": 0, "cleanup": 0}
+
+    def fake_invoke(*unused):
+        calls["model"] += 1
+        return {"exit_code": -15, "timed_out": True, "wall_seconds": 600.008}
+
+    def forbidden(*unused, **kwargs):
+        calls["strict"] += 1
+        raise AssertionError("timed out trial must never be evaluated again")
+
+    def cleanup(*unused):
+        calls["cleanup"] += 1
+        return {"verified_fake_cleanup": True}
+
+    monkeypatch.setattr(resume, "trial_argv", lambda *_: ["fake-frozen-cli"])
+    monkeypatch.setattr(resume.frozen, "invoke", fake_invoke)
+    monkeypatch.setattr(resume, "finish_agent", forbidden)
+    monkeypatch.setattr(resume, "idle_proof", cleanup)
+    assert resume.run_new(args, ledger, tid, {}) == "OUTCOME_UNKNOWN"
+    folder = output / "trials" / tid
+    record = resume.read(folder / "timeout-record.json")
+    assert record["strict_fix_within_budget"] is False
+    assert record["candidate_correctness"] == "UNKNOWN"
+    assert record["retry_same_replicate"] is False
+    assert record["elapsed_seconds"] == 600.008
+    assert resume.reconcile_watchdogs(args, ledger)
+    fresh = resume.Ledger(ledger.root, manifest)
+    assert fresh.states[nxt]["state"] == "PENDING"
+    assert resume.reconcile_watchdogs(args, fresh)
+    with pytest.raises(AssertionError):
+        resume.run_new(args, fresh, tid, {})
+    assert calls == {"model": 1, "strict": 0, "cleanup": 2}
+    metrics = resume.budget_metrics(args, fresh, [tid, nxt])
+    assert metrics["started"] == metrics["timeouts"] == 1
+    assert metrics["primary_success_rate"] == 0
+    assert metrics["secondary_completed_success_rate"] is None
+    assert metrics["agent_wall_observed_seconds"] == 600.008
+    assert metrics["total_tokens"] is None
+
+
+def test_historical_watchdog_adoption_preserves_terminal_event(tmp_path, manifest, monkeypatch):
+    args = SimpleNamespace(output=tmp_path)
+    ledger = new_ledger(tmp_path, manifest)
+    tid = next(iter(ledger.trials))
+    folder = tmp_path / "trials" / tid
+    folder.mkdir(parents=True)
+    ledger.append("RESERVED", tid, state="RUNNING", phase="RESERVED", attempt="a" * 32)
+    ledger.phase(tid, "AGENT_STARTED")
+    resume.atomic_json(folder / "agent-execution.json", {
+        "exit_code": -15, "timed_out": True, "wall_seconds": 600.008
+    })
+    ledger.phase(tid, "AGENT_RECORDED")
+    terminal = ledger.terminal(tid, "OUTCOME_UNKNOWN", {"watchdog": True, "no_resample": True})
+    old = [p.read_bytes() for p in sorted(ledger.root.glob("event-*.json"))]
+    monkeypatch.setattr(resume, "idle_proof", lambda *_: {"verified_fake_cleanup": True})
+    assert resume.reconcile_watchdogs(args, ledger)
+    assert ledger.states[tid]["details"] == terminal["details"]
+    assert [p.read_bytes() for p in sorted(ledger.root.glob("event-*.json"))[:len(old)]] == old
+    assert (folder / "timeout-record.json").is_file()
+
+
+def test_unknown_without_watchdog_still_blocks(tmp_path, manifest):
+    args = SimpleNamespace(output=tmp_path)
+    ledger = new_ledger(tmp_path, manifest)
+    tid = next(iter(ledger.trials))
+    ledger.append("RESERVED", tid, state="RUNNING", phase="RESERVED", attempt="a" * 32)
+    ledger.phase(tid, "AGENT_STARTED")
+    ledger.terminal(tid, "OUTCOME_UNKNOWN", {"no_resample": True})
+    assert not resume.reconcile_watchdogs(args, ledger)
+
+
+def test_timeout_recovery_after_execution_write_never_finalizes(tmp_path, manifest, monkeypatch):
+    args = SimpleNamespace(output=tmp_path)
+    ledger = new_ledger(tmp_path, manifest)
+    tid = next(iter(ledger.trials))
+    folder = tmp_path / "trials" / tid
+    folder.mkdir(parents=True)
+    ledger.append("RESERVED", tid, state="RUNNING", phase="RESERVED", attempt="a" * 32)
+    ledger.phase(tid, "AGENT_STARTED")
+    resume.atomic_json(folder / "agent-execution.json", {
+        "exit_code": -15, "timed_out": True, "wall_seconds": 600.008
+    })
+    monkeypatch.setattr(resume, "finish_agent", lambda *_: pytest.fail("no additional action"))
+    assert resume.recover_running(args, ledger, tid) == "OUTCOME_UNKNOWN"
+    assert ledger.states[tid]["details"]["watchdog_stage"] == "agent"

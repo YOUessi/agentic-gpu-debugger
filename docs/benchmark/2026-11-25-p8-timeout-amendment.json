@@ -1,0 +1,27 @@
+{
+  "schema": "p8-controller-amendment-v1",
+  "controller_version": "p8-infra-v3-timeout-isolation",
+  "original_manifest_sha256": "47d38ec2b9c363dd4acb29074f46aad6dd9913dac2bc35bc10bcd0d3ba050610",
+  "original_controller_commit": "c15e4043363fb7f4d662ec55425a88c217bad973",
+  "frozen_runtime_sha": "be3dafd6988972dfdb51cf2faee6984103565973",
+  "trial_budget_changes": false,
+  "changes": [
+    "Append-only timeout evidence; historical watchdog terminal remains immutable",
+    "Explicit agent/strict watchdog isolation only after read-only evidence and cleanup under shared GPU lock",
+    "Continue only original PENDING trials in precommitted order; do not replay timed-out trials, including no new model or GPU verification",
+    "Report all started attempts as primary denominator, completed-only secondary, timeout count, observed usage lower bound, elapsed cost and timeout sensitivity"
+  ],
+  "fixed": {
+    "max_tool_steps": 16,
+    "max_model_calls": 18,
+    "max_output_tokens": 8192,
+    "agent_watchdog_seconds": 600,
+    "strict_watchdog_seconds": 600,
+    "model_and_sampling_configs": "unchanged",
+    "trial_order": "unchanged",
+    "harness_and_verifier": "unchanged"
+  },
+  "statistical_caveat": "Restarting the local server after an interruption uses the same prescribed block seed and configuration, but cannot restore a prior server RNG stream or cache. Log partial-block restarts; health requests are infrastructure, not formal attempts. No request-level reseeding or replacement sample.",
+  "exclusion_rule": "Only confirmed watchdog termination may proceed after clearance; other OUTCOME_UNKNOWN and INFRA_ABORTED conditions still halt.",
+  "accounting_rule": "A timeout is OUTCOME_UNKNOWN for candidate correctness and false for Strict Fix within budget. Unobserved invocation usage is unknown; report observed lower bound, not zero cost."
+}

@@ -15,6 +15,8 @@ import hashlib
 import json
 import os
 import re
+import socket
+import statistics
 import subprocess
 import sys
 import tempfile
@@ -25,7 +27,8 @@ from typing import Any
 
 import run_frozen_benchmark_repetitions as frozen
 
-INFRA = "p8-infra-v2"
+INFRA = "p8-infra-v3-timeout-isolation"
+AMENDMENT = "docs/benchmark/2026-11-25-p8-timeout-amendment.json"
 MANIFEST_SHA = "47d38ec2b9c363dd4acb29074f46aad6dd9913dac2bc35bc10bcd0d3ba050610"
 ORIGINAL_RUNNER_SHA = "83c9596269b14bae146adf948fde86916d73c0d208c9798288990763b80e0f7d"
 TERMINAL = {"COMPLETED_SUCCESS", "COMPLETED_MODEL_FAILURE", "INFRA_ABORTED", "OUTCOME_UNKNOWN"}
@@ -493,6 +496,297 @@ def verify_record(a, trial, unit, folder):
     )
 
 
+
+def watchdog_stage(state, folder):
+    """Only a recorded watchdog termination, not arbitrary uncertain outcomes."""
+    if state["state"] != "OUTCOME_UNKNOWN":
+        return None
+    details = state.get("details", {})
+    if not (details.get("watchdog") or details.get("strict", {}).get("timed_out")):
+        return None
+    stage = details.get("watchdog_stage", "strict" if details.get("strict") else "agent")
+    assert stage in ("agent", "strict")
+    execution = read(folder / f"{stage}-execution.json")
+    assert execution["timed_out"] is True and execution["exit_code"] is not None
+    assert execution["wall_seconds"] >= 600
+    return stage
+
+
+def timeout_evidence(a, ledger, tid, stage):
+    """Offline-only projection of the interrupted trial; never run a provider or checker."""
+    folder = a.output / "trials" / tid
+    agent = folder / "session/agent"
+    execution = read(folder / f"{stage}-execution.json")
+    assert execution["timed_out"] is True and execution["exit_code"] is not None
+    assert execution["wall_seconds"] >= 600
+    journal_path = agent / "session-events.jsonl"
+    checkpoint_path = agent / "session-checkpoint.json"
+    journal, checkpoint, invocations, children = [], None, [], []
+    seal = {}
+    if journal_path.exists():
+        from gpu_agent.harness.journal import read_verified_journal
+
+        journal = read_verified_journal(journal_path)
+        seal["journal_sha256"] = frozen.file_digest(journal_path)
+        seal["journal_head_sha256"] = journal[-1]["sha256"]
+    if checkpoint_path.exists():
+        checkpoint = read(checkpoint_path)
+        assert checkpoint["journal_head_sha256"] in {x["sha256"] for x in journal}
+        assert checkpoint["base_sha"] == frozen.FROZEN
+        seal["checkpoint_sha256"] = frozen.file_digest(checkpoint_path)
+        seal["checkpoint_journal_head_sha256"] = checkpoint["journal_head_sha256"]
+    if journal:
+        from gpu_agent.agent.provider import provider_invocations
+        from gpu_agent.store import RunStore
+
+        rid = journal[0]["payload"]["public_run_id"]
+        if checkpoint:
+            assert checkpoint["public_run_id"] == rid
+        store = RunStore(agent / "public")
+        seal["public_inventory"] = public_inventory(store, rid)
+        for inv in provider_invocations(store, rid):
+            row = inv.model_dump(mode="json")
+            invocations.append({
+                k: row.get(k) for k in (
+                    "invocation_id", "state", "started_at", "finished_at", "elapsed_ms",
+                    "client_request_id", "provider_request_id", "response_id", "usage",
+                    "error_code", "format_retry_of",
+                )
+            })
+        for child in store.children(rid):
+            results = []
+            for ref in child.artifact_refs:
+                if ref.name.endswith("/result.json") and ref.name.split("/")[0] in (
+                    "build", "run", "sanitizer",
+                ):
+                    value = json.loads(store.read(ref))
+                    results.append({
+                        "kind": ref.name.split("/")[0],
+                        "elapsed_ms": value.get("elapsed_ms"),
+                        "exit_code": value.get("exit_code"),
+                        "timed_out": value.get("timed_out"),
+                    })
+            children.append({
+                "run_id": child.id, "kind": child.kind,
+                "status": child.status.value, "results": results,
+            })
+    for rel in (
+        "attempt-reserved.json", "agent-execution.json", "strict-execution.json",
+        "public-audit.json", "strict-projection.json", "agent-stdout.log",
+        "agent-stderr.log", "session/experiment-config.json",
+    ):
+        path = folder / rel
+        if path.is_file():
+            seal[rel] = frozen.file_digest(path)
+    token_keys = ("input_tokens", "output_tokens", "reasoning_tokens", "cached_tokens", "total_tokens")
+    usage = {
+        k: sum((x["usage"] or {}).get(k) or 0 for x in invocations) for k in token_keys
+    }
+    completed_tools = [x for x in journal if x["kind"] == "tool_completed"]
+    gpu_ms = collections.Counter()
+    gpu_counts = collections.Counter()
+    for child in children:
+        for result in child["results"]:
+            gpu_counts[result["kind"]] += 1
+            gpu_ms[result["kind"]] += result["elapsed_ms"] or 0
+    t = ledger.trials[tid]
+    return {
+        "schema": "p8-timeout-v1", "manifest_sha256": MANIFEST_SHA,
+        "trial": t, "unit": ledger.units[t["unit"]],
+        "attempt_id": ledger.states[tid]["attempt_id"],
+        "replicate": t["rep"], "model": t["model"],
+        "outcome": "OUTCOME_UNKNOWN / TIMEOUT",
+        "candidate_correctness": "UNKNOWN", "watchdog_stage": stage,
+        "wall_budget_seconds": 600, "elapsed_seconds": execution["wall_seconds"],
+        "retry_same_replicate": False, "strict_fix_within_budget": False,
+        "agent_execution": read(folder / "agent-execution.json"),
+        "strict_execution": read(folder / "strict-execution.json")
+        if (folder / "strict-execution.json").is_file() else None,
+        "seal": seal, "journal_event_count": len(journal),
+        "last_journal_event": journal[-1] if journal else None,
+        "last_complete_tool_boundary": completed_tools[-1] if completed_tools else None,
+        "completed_tool_turns_including_prefix": len(completed_tools),
+        "pending_effects": sorted([list(x) for x in pending_effects(journal)]),
+        "checkpoint_event_counter": checkpoint.get("event_counter") if checkpoint else None,
+        "invocations": invocations, "physical_calls_observed": len(invocations),
+        "usage_observed_lower_bound": usage,
+        "usage_complete": bool(invocations) and all(
+            x["state"] not in ("STARTED", "UNCERTAIN")
+            and (x["usage"] or {}).get("total_tokens") is not None for x in invocations
+        ),
+        "completed_provider_elapsed_ms": sum(x["elapsed_ms"] or 0 for x in invocations),
+        "public_children": sorted(children, key=lambda x: x["run_id"]),
+        "public_gpu_result_counts": dict(gpu_counts),
+        "public_gpu_result_elapsed_ms": dict(gpu_ms),
+        "actual_billed_cost": None,
+    }
+
+
+def ensure_timeout_record(a, ledger, tid, stage):
+    folder = a.output / "trials" / tid
+    path = folder / "timeout-record.json"
+    record = timeout_evidence(a, ledger, tid, stage)
+    if path.exists():
+        assert read(path) == record, "immutable timeout evidence changed"
+    else:
+        atomic_json(path, record)
+    return frozen.file_digest(path)
+
+
+def terminal_timeout(a, ledger, tid, stage):
+    digest = ensure_timeout_record(a, ledger, tid, stage)
+    ledger.terminal(tid, "OUTCOME_UNKNOWN", {
+        "watchdog": True, "watchdog_stage": stage, "no_resample": True,
+        "timeout_record_sha256": digest,
+    })
+    return "OUTCOME_UNKNOWN"
+
+
+def idle_proof(a, tid):
+    """Read-only proof under the controller's exclusive shared GPU lock.
+
+    No name-based killing, no model requests, no compile/check/probe. Refuse
+    continuation on any possible residual compute, container, port or trial process.
+    """
+    marker = str(a.output / "trials" / tid).encode()
+    for _ in range(30):
+        gpu = frozen.gpu_state()
+        compute = subprocess.check_output([
+            "nvidia-smi", "--query-compute-apps=pid", "--format=csv,noheader"
+        ], text=True, timeout=10).strip()
+        containers = subprocess.check_output(
+            ["docker", "ps", "-q"], text=True, timeout=10
+        ).strip()
+        with socket.socket() as sock:
+            sock.settimeout(0.2)
+            port_closed = sock.connect_ex(("127.0.0.1", 8127)) != 0
+        owners = []
+        for path in Path("/proc").glob("[0-9]*/cmdline"):
+            try:
+                raw = path.read_bytes()
+            except (FileNotFoundError, ProcessLookupError, PermissionError):
+                continue
+            if marker in raw:
+                owners.append(path.parent.name)
+        if gpu["memory_used_mib"] < 1000 and not compute and not containers and port_closed and not owners:
+            return {
+                "gpu": gpu, "compute_processes": [], "running_containers": [],
+                "port_8127_closed": True, "trial_processes": [],
+                "shared_gpu_lock": "held_exclusively_by_controller",
+                "checked_unix_seconds": time.time(),
+            }
+        time.sleep(2)
+    raise ValueError("watchdog isolation not confirmed; do not admit more trials")
+
+
+def clear_watchdog(a, ledger, tid):
+    folder = a.output / "trials" / tid
+    stage = watchdog_stage(ledger.states[tid], folder)
+    assert stage is not None
+    digest = ensure_timeout_record(a, ledger, tid, stage)
+    state_digest = ledger.states[tid]["details"].get("timeout_record_sha256")
+    assert state_digest is None or state_digest == digest
+    prior = [e for e in ledger.records if e["kind"] == "INFRA_EVENT"
+             and e["details"].get("event") == "WATCHDOG_ISOLATED"
+             and e["details"].get("trial_id") == tid]
+    for e in prior:
+        assert e["details"]["timeout_record_sha256"] == digest
+    # Fresh proof before resumption; historical terminal event remains unchanged.
+    proof = idle_proof(a, tid)
+    ledger.append("INFRA_EVENT", details={
+        "event": "WATCHDOG_ISOLATED", "trial_id": tid,
+        "timeout_record_sha256": digest, "watchdog_stage": stage,
+        "no_resample": True, "cleanup": proof,
+    })
+
+
+def reconcile_watchdogs(a, ledger):
+    for tid, state in ledger.states.items():
+        if state["state"] == "INFRA_ABORTED":
+            return False
+        if state["state"] == "OUTCOME_UNKNOWN" and not watchdog_stage(
+            state, a.output / "trials" / tid
+        ):
+            return False
+    for tid, state in ledger.states.items():
+        if state["state"] == "OUTCOME_UNKNOWN":
+            clear_watchdog(a, ledger, tid)
+    return True
+
+
+def budget_metrics(a, ledger, labels):
+    started_set = {
+        e["trial_id"] for e in ledger.records
+        if e["kind"] == "LEGACY_ADOPTED" or e.get("phase") == "AGENT_STARTED"
+    }
+    started = [tid for tid in labels if tid in started_set]
+    successes = sum(ledger.states[t]["state"] == "COMPLETED_SUCCESS" for t in labels)
+    complete = sum(ledger.states[t]["state"].startswith("COMPLETED_") for t in labels)
+    timeouts = 0
+    calls = tokens = 0
+    usage_complete = wall_complete = True
+    walls, completed_walls, strict_walls = [], [], []
+    for tid in started:
+        state = ledger.states[tid]
+        folder = a.output / "trials" / tid
+        if state["state"].startswith("COMPLETED_"):
+            row = read(folder / "trial-record.json")
+            usage = row["audit"]["usage"]
+            calls += usage.get("physical_calls") or 0
+            if usage.get("total_tokens") is None:
+                usage_complete = False
+            tokens += usage.get("total_tokens") or 0
+            agent_execution, strict_execution = row["agent_execution"], row["strict"]
+            if agent_execution.get("wall_seconds") is not None:
+                completed_walls.append(agent_execution["wall_seconds"])
+        elif watchdog_stage(state, folder):
+            timeouts += 1
+            if (folder / "timeout-record.json").is_file():
+                row = read(folder / "timeout-record.json")
+                calls += row["physical_calls_observed"]
+                tokens += row["usage_observed_lower_bound"]["total_tokens"]
+                usage_complete &= row["usage_complete"]
+            else:
+                usage_complete = False
+            agent_execution = read(folder / "agent-execution.json")
+            strict_execution = read(folder / "strict-execution.json") if (
+                folder / "strict-execution.json"
+            ).is_file() else {}
+        else:
+            usage_complete = wall_complete = False
+            continue
+        wall = agent_execution.get("wall_seconds")
+        if wall is None:
+            wall_complete = False
+        else:
+            walls.append(wall)
+        strict_wall = (strict_execution or {}).get("wall_seconds")
+        if strict_wall is not None:
+            strict_walls.append(strict_wall)
+        elif (strict_execution or {}).get("status") == "VERIFIED_FIXED":
+            wall_complete = False
+    n = len(started)
+    return {
+        "started": n, "completed_determinate": complete, "timeouts": timeouts,
+        "successes": successes, "primary_success_rate": successes / n if n else None,
+        "secondary_completed_success_rate": successes / complete if complete else None,
+        "primary_wilson_95": frozen.wilson(successes, n),
+        "secondary_wilson_95": frozen.wilson(successes, complete),
+        "timeout_sensitivity_range": [successes / n, (successes + timeouts) / n] if n else None,
+        "observed_model_calls_lower_bound": calls,
+        "observed_total_tokens_lower_bound": tokens,
+        "total_tokens": tokens if usage_complete else None,
+        "agent_wall_observed_seconds": round(sum(walls), 3),
+        "strict_wall_observed_seconds": round(sum(strict_walls), 3),
+        "total_trial_wall_seconds": round(sum(walls) + sum(strict_walls), 3) if wall_complete else None,
+        "completed_agent_wall_median_seconds": statistics.median(completed_walls) if completed_walls else None,
+        "tokens_per_success_lower_bound": tokens / successes if successes else None,
+        "trial_wall_seconds_per_success": (sum(walls) + sum(strict_walls)) / successes
+        if successes and wall_complete else None,
+        "actual_billed_cost": None,
+    }
+
+
 def progress(a, ledger):
     states = collections.Counter(x["state"] for x in ledger.states.values())
     cells = []
@@ -513,6 +807,7 @@ def progress(a, ledger):
                     "valid_model_trials": n,
                     "strict_successes": count["COMPLETED_SUCCESS"],
                     "wilson_95": frozen.wilson(count["COMPLETED_SUCCESS"], n) if n == 5 else None,
+                    "budget_metrics": budget_metrics(a, ledger, labels),
                 }
             )
     summary = {
@@ -524,6 +819,11 @@ def progress(a, ledger):
         "cells": cells,
         "completed_model_trials": states["COMPLETED_SUCCESS"] + states["COMPLETED_MODEL_FAILURE"],
         "trial_states": ledger.states,
+        "budget_metrics": {
+            model: budget_metrics(a, ledger, [tid for tid, t in ledger.trials.items() if t["model"] == model])
+            for model in ("deepseek", "qwen")
+        },
+        "all_budget_metrics": budget_metrics(a, ledger, list(ledger.trials)),
     }
     atomic_json(a.output / "scheduler-v2/progress.json", summary, replace=True)
     return summary
@@ -883,6 +1183,8 @@ def finish_agent(a, ledger, tid, env, *, existing_strict=False):
             "STRICT_RECORDED",
             {"strict_record_sha256": frozen.file_digest(folder / "strict-execution.json")},
         )
+    if strict.get("timed_out") is True:
+        return terminal_timeout(a, ledger, tid, "strict")
     if strict["status"] not in ("VERIFIED_FIXED", "NOT_VERIFIED", "NOT_PUBLIC_PASSED"):
         ledger.terminal(
             tid,
@@ -948,13 +1250,18 @@ def run_new(a, ledger, tid, env):
         {"execution_sha256": frozen.file_digest(folder / "agent-execution.json")},
     )
     if result["timed_out"]:
-        ledger.terminal(tid, "OUTCOME_UNKNOWN", {"watchdog": True, "no_resample": True})
-        return "OUTCOME_UNKNOWN"
+        return terminal_timeout(a, ledger, tid, "agent")
     return finish_agent(a, ledger, tid, env)
 
 
 def recover_running(a, ledger, tid):
     folder = a.output / "trials" / tid
+    for stage, phase in (("agent", "AGENT_RECORDED"), ("strict", "STRICT_RECORDED")):
+        execution_path = folder / f"{stage}-execution.json"
+        if execution_path.is_file() and read(execution_path).get("timed_out") is True:
+            if PHASES.index(ledger.states[tid]["phase"]) < PHASES.index(phase):
+                ledger.phase(tid, phase, {"execution_sha256": frozen.file_digest(execution_path)})
+            return terminal_timeout(a, ledger, tid, stage)
     record = (folder / "trial-record.json").is_file()
     agent_done = (folder / "session/controlled-recovery.json").is_file()
     strict_done = (folder / "strict-execution.json").is_file() or (
@@ -1029,6 +1336,12 @@ def main():
         setattr(a, key, getattr(a, key).expanduser().resolve(strict=True))
     a.infra_output = a.infra_output.expanduser().absolute()
     m = read(a.manifest)
+    amendment_path = Path(__file__).resolve().parents[1] / AMENDMENT
+    amendment = read(amendment_path)
+    assert amendment["original_manifest_sha256"] == MANIFEST_SHA
+    assert amendment["controller_version"] == INFRA
+    assert amendment["trial_budget_changes"] is False
+    amendment_sha256 = frozen.file_digest(amendment_path)
     sys.path.insert(0, str(a.repository / "src"))
     env_manifest = environment_preflight(a, m)  # All imports/checks before GPU lock.
     root = a.output / "scheduler-v2/events"
@@ -1106,6 +1419,7 @@ def main():
             "SCHEDULER_STARTED",
             details={
                 "environment_report_sha256": env_manifest["environment_report_sha256"],
+                "timeout_amendment_sha256": amendment_sha256,
                 "controller_commit": frozen.git(
                     Path(__file__).resolve().parents[1], "rev-parse", "HEAD"
                 ),
@@ -1127,92 +1441,105 @@ def main():
                     recovered = "OUTCOME_UNKNOWN"
                 print("RECONCILED", tid, recovered, flush=True)
                 progress(a, ledger)
-        if any(s["state"] in ("OUTCOME_UNKNOWN", "INFRA_ABORTED") for s in ledger.states.values()):
+        if not reconcile_watchdogs(a, ledger):
             ledger.append(
                 "SCHEDULER_STOPPED",
-                details={"reason": "unresolved or aborted reserved trial; no replacement"},
+                details={"reason": "unresolved non-watchdog or aborted reserved trial; no replacement"},
             )
             return 2
         for block in m["blocks"]:
-            pending = [
-                tid for tid in block["trial_ids"] if ledger.states[tid]["state"] == "PENDING"
-            ]
-            if not pending:
-                continue
-            frozen.require_frozen(a.repository, m)
-            try:
-                if block["model"] == "qwen":
-                    startup = uuid.uuid4().hex
+            while True:
+                pending = [
+                    tid for tid in block["trial_ids"] if ledger.states[tid]["state"] == "PENDING"
+                ]
+                if not pending:
+                    break
+                timed_out_tid = None
+                frozen.require_frozen(a.repository, m)
+                try:
+                    if block["model"] == "qwen":
+                        startup = uuid.uuid4().hex
+                        ledger.append(
+                            "INFRA_EVENT",
+                            details={
+                                "event": "LOCAL_SERVER_START",
+                                "block": block["trial_ids"][0],
+                                "startup_attempt_id": startup,
+                                "command_sha256": h(serve_argv(a, block["server_seed"])),
+                                "partial_block_restart": len(pending) < len(block["trial_ids"]),
+                            },
+                        )
+                        context = server(
+                            a, block["server_seed"], a.infra_output / f"serve-{startup}.log"
+                        )
+                    else:
+                        context = contextlib.nullcontext(None)
+                    with context as health:
+                        if health:
+                            ledger.append(
+                                "HEALTH_PASSED",
+                                details={"health": health, "startup_attempt_id": startup},
+                            )
+                        env = frozen.session_environment(a, block["model"])
+                        for tid in pending:
+                            try:
+                                category = run_new(a, ledger, tid, env)
+                            except Exception as exc:
+                                if ledger.states[tid]["state"] == "RUNNING":
+                                    ledger.terminal(
+                                        tid,
+                                        "OUTCOME_UNKNOWN",
+                                        {"error_type": type(exc).__name__, "no_resample": True},
+                                    )
+                                print(
+                                    "TRIAL_INFRA_ERROR",
+                                    tid,
+                                    type(exc).__name__,
+                                    str(exc)[:200],
+                                    flush=True,
+                                )
+                                progress(a, ledger)
+                                return 2
+                            print("TRIAL_END", tid, category, flush=True)
+                            progress(a, ledger)
+                            if category == "OUTCOME_UNKNOWN" and watchdog_stage(
+                                ledger.states[tid], a.output / "trials" / tid
+                            ):
+                                timed_out_tid = tid
+                                break  # exit owned server context before cleanup
+                            if not category.startswith("COMPLETED_"):
+                                return 2
+                except Exception as exc:
                     ledger.append(
                         "INFRA_EVENT",
                         details={
-                            "event": "LOCAL_SERVER_START",
+                            "event": "BLOCK_INFRA_ABORTED",
                             "block": block["trial_ids"][0],
-                            "startup_attempt_id": startup,
-                            "command_sha256": h(serve_argv(a, block["server_seed"])),
+                            "error_type": type(exc).__name__,
+                            "unreserved_trials": len(pending),
                         },
                     )
-                    context = server(
-                        a, block["server_seed"], a.infra_output / f"serve-{startup}.log"
+                    print(
+                        "BLOCK_INFRA_ABORTED",
+                        block["trial_ids"][0],
+                        type(exc).__name__,
+                        str(exc)[:200],
+                        flush=True,
                     )
+                    progress(a, ledger)
+                    return 2
+                for _ in range(30):
+                    if frozen.gpu_state()["memory_used_mib"] < 1000:
+                        break
+                    time.sleep(2)
                 else:
-                    context = contextlib.nullcontext(None)
-                with context as health:
-                    if health:
-                        ledger.append(
-                            "HEALTH_PASSED",
-                            details={"health": health, "startup_attempt_id": startup},
-                        )
-                    env = frozen.session_environment(a, block["model"])
-                    for tid in pending:
-                        try:
-                            category = run_new(a, ledger, tid, env)
-                        except Exception as exc:
-                            if ledger.states[tid]["state"] == "RUNNING":
-                                ledger.terminal(
-                                    tid,
-                                    "OUTCOME_UNKNOWN",
-                                    {"error_type": type(exc).__name__, "no_resample": True},
-                                )
-                            print(
-                                "TRIAL_INFRA_ERROR",
-                                tid,
-                                type(exc).__name__,
-                                str(exc)[:200],
-                                flush=True,
-                            )
-                            progress(a, ledger)
-                            return 2
-                        print("TRIAL_END", tid, category, flush=True)
-                        progress(a, ledger)
-                        if not category.startswith("COMPLETED_"):
-                            return 2
-            except Exception as exc:
-                ledger.append(
-                    "INFRA_EVENT",
-                    details={
-                        "event": "BLOCK_INFRA_ABORTED",
-                        "block": block["trial_ids"][0],
-                        "error_type": type(exc).__name__,
-                        "unreserved_trials": len(pending),
-                    },
-                )
-                print(
-                    "BLOCK_INFRA_ABORTED",
-                    block["trial_ids"][0],
-                    type(exc).__name__,
-                    str(exc)[:200],
-                    flush=True,
-                )
-                progress(a, ledger)
-                return 2
-            for _ in range(30):
-                if frozen.gpu_state()["memory_used_mib"] < 1000:
-                    break
-                time.sleep(2)
-            else:
-                ledger.append("INFRA_EVENT", details={"event": "GPU_NOT_IDLE_AFTER_BLOCK"})
-                return 2
+                    ledger.append("INFRA_EVENT", details={"event": "GPU_NOT_IDLE_AFTER_BLOCK"})
+                    return 2
+                if timed_out_tid is not None:
+                    clear_watchdog(a, ledger, timed_out_tid)
+                    progress(a, ledger)
+                    continue  # next original PENDING unit, never the timed-out one
+                break
         final = progress(a, ledger)
         ledger.append(
             "SCHEDULER_STOPPED",
@@ -1222,7 +1549,8 @@ def main():
             },
         )
         progress(a, ledger)
-        return 0 if final["completed_model_trials"] == 60 else 2
+        metrics = final["all_budget_metrics"]
+        return 0 if metrics["completed_determinate"] + metrics["timeouts"] == 60 else 2
 
 
 if __name__ == "__main__":
