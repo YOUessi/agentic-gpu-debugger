@@ -1,0 +1,28 @@
+{
+  "admitted": true,
+  "agent_execution": {
+    "exit_code": 1,
+    "timed_out": false,
+    "wall_seconds": 8.186
+  },
+  "candidate_correctness": "UNKNOWN",
+  "manifest_sha256": "97a3399a4f6f85d1c4699f7e1a7954fecc24a0b7e213a60e4252831bde9cd897",
+  "retry_same_replicate": false,
+  "status": "MODEL_FAILURE",
+  "strict_execution": null,
+  "strict_fix_within_budget": false,
+  "trial": {
+    "arm": "native-dag",
+    "case": "h002",
+    "hierarchical": true,
+    "id": "r04-h002-native-dag",
+    "replicate": 4,
+    "runtime": "langgraph"
+  },
+  "usage": {
+    "physical_calls": 1,
+    "tokens_complete": true,
+    "tokens_lower_bound": 2661,
+    "uncertain_calls": 0
+  }
+}

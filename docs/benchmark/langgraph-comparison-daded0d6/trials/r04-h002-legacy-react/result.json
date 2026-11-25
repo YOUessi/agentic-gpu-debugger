@@ -1,0 +1,28 @@
+{
+  "admitted": true,
+  "agent_execution": {
+    "exit_code": 1,
+    "timed_out": false,
+    "wall_seconds": 87.0
+  },
+  "candidate_correctness": "UNKNOWN",
+  "manifest_sha256": "97a3399a4f6f85d1c4699f7e1a7954fecc24a0b7e213a60e4252831bde9cd897",
+  "retry_same_replicate": false,
+  "status": "MODEL_FAILURE",
+  "strict_execution": null,
+  "strict_fix_within_budget": false,
+  "trial": {
+    "arm": "legacy-react",
+    "case": "h002",
+    "hierarchical": false,
+    "id": "r04-h002-legacy-react",
+    "replicate": 4,
+    "runtime": "legacy"
+  },
+  "usage": {
+    "physical_calls": 17,
+    "tokens_complete": true,
+    "tokens_lower_bound": 74541,
+    "uncertain_calls": 0
+  }
+}
