@@ -1,0 +1,38 @@
+{
+  "admitted": true,
+  "agent_execution": {
+    "exit_code": 0,
+    "timed_out": false,
+    "wall_seconds": 102.207
+  },
+  "candidate_correctness": "VERIFIED_FIXED",
+  "manifest_sha256": "97a3399a4f6f85d1c4699f7e1a7954fecc24a0b7e213a60e4252831bde9cd897",
+  "retry_same_replicate": false,
+  "status": "STRICT_SUCCESS",
+  "strict_execution": {
+    "exit_code": 0,
+    "timed_out": false,
+    "wall_seconds": 11.746
+  },
+  "strict_fix_within_budget": true,
+  "strict_projection": {
+    "candidate_sha256": "89b8996dcb27dd9680b987efbdf1e2b003c25cf8a2647f03ffa4c9f439f92106",
+    "projection_sha256": "6ed15ec0b70d24a007ee6eb9341581690bdcfab520df28ee166ea768351bb1d9",
+    "public_run_id": "166e4a688b7f4c50af068ab1464abc58",
+    "verdict": "VERIFIED_FIXED"
+  },
+  "trial": {
+    "arm": "legacy-planner",
+    "case": "h001",
+    "hierarchical": true,
+    "id": "r03-h001-legacy-planner",
+    "replicate": 3,
+    "runtime": "legacy"
+  },
+  "usage": {
+    "physical_calls": 20,
+    "tokens_complete": true,
+    "tokens_lower_bound": 99347,
+    "uncertain_calls": 0
+  }
+}
