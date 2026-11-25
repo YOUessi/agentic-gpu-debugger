@@ -103,7 +103,10 @@ def assess_frontier_task(item: dict[str, Any]) -> dict[str, Any]:
         "task_key": task_fingerprint(task),
         "primary": sorted(primary),
         "scope": sorted(primary | helpers),
-        "feasible": item["remaining_steps"] >= item["unfinished"] and bool(primary or prerequisite),
+        # Remaining step budget is enforced at admission. Requiring one remaining
+        # step for every DAG milestone incorrectly blocked legitimate recovery:
+        # one tool may discharge a branch and a plan can be revised.
+        "feasible": item["remaining_steps"] > 0 and bool(primary or prerequisite),
         "priority": [repair_priority, int(bool(primary)), item["descendants"], -item["position"]],
     }
 

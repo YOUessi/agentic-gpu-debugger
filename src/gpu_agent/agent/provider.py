@@ -631,9 +631,15 @@ def invoke_sdk(
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
     output_model: type[BaseModel]
     if request.kind == "plan" and request.payload.get("gpu_repo_graph_plan") == "v1":
-        from gpu_agent.harness.graph_plan import GraphTaskPlan
+        from gpu_agent.harness.graph_plan import scoped_graph_plan_model
 
-        output_model = GraphTaskPlan
+        snapshot = request.payload.get("snapshot")
+        if not isinstance(snapshot, dict):
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED")
+        try:
+            output_model = scoped_graph_plan_model(snapshot)
+        except ValueError:
+            raise ProviderError("LLM_INVALID_TOOL_GRAMMAR", state="FAILED") from None
     elif request.kind == "plan" and request.payload.get("gpu_repo_task_plan") == "v1":
         from gpu_agent.harness.models import TaskPlan
 
@@ -1210,6 +1216,16 @@ class OpenAIResponsesProvider:
         """Typed variable task DAG; replan only from observed graph evidence."""
         from gpu_agent.harness.graph_plan import GraphTaskPlan
 
+        def validate_scope(value: GraphTaskPlan) -> GraphTaskPlan:
+            try:
+                value.validate_scope(snapshot.model_dump(mode="json"))
+            except ValueError:
+                # _call's existing role-scoped format retry handles this, with
+                # no additional model budget. The rejected plan never enters
+                # the execution DAG.
+                raise ProviderError("LLM_INVALID_OUTPUT", state="FAILED") from None
+            return value
+
         return self._call(
             "plan",
             {
@@ -1220,6 +1236,7 @@ class OpenAIResponsesProvider:
                 "observed_failure": failure,
             },
             GraphTaskPlan,
+            validate=validate_scope,
             repository_role="reflect" if previous_plan else "planner",
         )
 

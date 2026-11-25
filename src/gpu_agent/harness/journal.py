@@ -21,8 +21,10 @@ EventKind = Literal[
     "session_started",
     "model_started",
     "model_selected",
+    "model_failed",
     "tool_started",
     "tool_completed",
+    "tool_failed",
     "session_finished",
     "session_failed",
     "session_resumed",
@@ -110,8 +112,10 @@ class SessionJournal:
             "session_started",
             "model_started",
             "model_selected",
+            "model_failed",
             "tool_started",
             "tool_completed",
+            "tool_failed",
             "session_finished",
             "session_failed",
             "session_resumed",
@@ -182,6 +186,7 @@ def recovery_disposition(records: list[dict[str, Any]]) -> str:
     if not records:
         return "INVALID"
     pending: set[tuple[str, int]] = set()
+    uncertain_failed_effect = False
     for item in records:
         kind = item["kind"]
         payload = item.get("payload", {})
@@ -190,13 +195,17 @@ def recovery_disposition(records: list[dict[str, Any]]) -> str:
             continue
         if kind == "model_started":
             pending.add(("model", turn))
-        elif kind == "model_selected":
+        elif kind in {"model_selected", "model_failed"}:
             pending.discard(("model", turn))
+            if kind == "model_failed" and payload.get("delivery_state") == "UNCERTAIN":
+                uncertain_failed_effect = True
         elif kind == "tool_started":
             pending.add(("tool", turn))
-        elif kind == "tool_completed":
+        elif kind in {"tool_completed", "tool_failed"}:
             pending.discard(("tool", turn))
-    if pending:
+            if kind == "tool_failed" and payload.get("delivery_state") == "UNCERTAIN":
+                uncertain_failed_effect = True
+    if pending or uncertain_failed_effect:
         return "UNCERTAIN_EXTERNAL_EFFECT_RECONCILE_MANUALLY"
     if records[-1]["kind"] == "session_finished":
         return "FINISHED"

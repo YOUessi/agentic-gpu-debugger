@@ -22,6 +22,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
 from langgraph.types import Command, RetryPolicy, Send, interrupt
 
+from gpu_agent.agent.models import ProviderError
 from gpu_agent.harness.graph_context import compact_projection
 from gpu_agent.harness.graph_memory import (
     SQLiteRepairStore,
@@ -99,6 +100,7 @@ class NativeState(TypedDict, total=False):
     active_task: dict[str, Any] | None
     task_progress: dict[str, Any]
     last_failure: dict[str, Any] | None
+    terminal_failure: dict[str, Any] | None
     failure_streak: int
     stalled_turns: int
     recovery_state: dict[str, Any] | None
@@ -189,12 +191,22 @@ class EffectJournal:
                 else:
                     expected = (
                         "model_started"
-                        if row["kind"] == "model_selected"
+                        if row["kind"] in ("model_selected", "model_failed")
                         else "tool_started"
-                        if row["kind"] == "tool_completed"
+                        if row["kind"] in ("tool_completed", "tool_failed")
                         else ""
                     )
-                    if pending != (key, index, expected) or not data.get("result_sha256"):
+                    if (
+                        pending != (key, index, expected)
+                        or (
+                            row["kind"] in ("model_selected", "tool_completed")
+                            and not data.get("result_sha256")
+                        )
+                        or (
+                            row["kind"] in ("model_failed", "tool_failed")
+                            and not data.get("error_code")
+                        )
+                    ):
                         raise ValueError("invalid graph effect completion")
                     self.completed += 1
                     pending = None
@@ -215,7 +227,28 @@ class EffectJournal:
             {"effect_key": key, "turn": index, "role": role},
         )
         self.keys.add(key)
-        value = operation()
+        try:
+            value = operation()
+        except Exception as exc:
+            # A failed provider output is an observed terminal result of the
+            # logical admission, not a successful decision. If delivery itself
+            # was uncertain, the audit says so and still forbids all replay.
+            provider = isinstance(exc, ProviderError)
+            state = exc.state if provider else "UNCERTAIN"
+            code = exc.code if provider else "GRAPH_EXTERNAL_EFFECT_EXCEPTION"
+            self.journal.append(
+                "model_failed" if model else "tool_failed",
+                {
+                    "effect_key": key,
+                    "turn": index,
+                    "role": role,
+                    "error_code": code,
+                    "delivery_state": state,
+                    "exception_type": type(exc).__name__,
+                },
+            )
+            self.completed += 1
+            raise
         result = value.model_dump(mode="json")
         self.journal.append(
             "model_selected" if model else "tool_completed",
@@ -238,7 +271,9 @@ def project_state(state: NativeState) -> AgentLoopState:
         "stop": state.get("stop", False),
         "reason": state.get("reason", "CONTINUE"),
     }
-    if state.get("hierarchical"):
+    if state.get("terminal_failure") is not None:
+        view["terminal_failure"] = state["terminal_failure"]
+    if state.get("hierarchical") and state.get("plan"):
         view.update(
             task_plan=compatibility_plan(GraphTaskPlan.model_validate(state["plan"])).model_dump(
                 mode="json"
@@ -422,6 +457,48 @@ def build_native_graph(
         data["context_summary"] = compact_projection(state)["summary"]
         return SessionSnapshot.model_validate_json(json.dumps(data))
 
+    def provider_failed(state: NativeState, role: str, exc: ProviderError) -> dict[str, Any]:
+        code = exc.code
+        reason = (
+            f"GRAPH_{role.upper()}_INVALID_OUTPUT"
+            if code == "LLM_INVALID_OUTPUT"
+            else f"GRAPH_{role.upper()}_MODEL_ERROR"
+        )
+        calls = _physical_calls(model, state.get("logical_model_calls", 0))
+        on_event(
+            {
+                "stage": "model_failed",
+                "turn": state.get("turns", 0) + 1,
+                "role": role,
+                "error_code": code,
+                "delivery_state": exc.state,
+            }
+        )
+        failure = {
+            "stage": "planner"
+            if role == "planner"
+            else "replanner"
+            if role == "reflect"
+            else "executor",
+            "role": role,
+            "error_code": code,
+            "delivery_state": exc.state,
+            "last_complete_tool_turn": state.get("turns", 0),
+            "physical_calls": calls,
+            "effect_head_sha256": ledger.journal.head_hash,
+            "replay_allowed": False,
+        }
+        return {
+            "stop": True,
+            "reason": reason,
+            "terminal_failure": failure,
+            "logical_model_calls": state.get("logical_model_calls", 0) + 1,
+            "observed_physical_calls": calls,
+            "effects_completed": ledger.completed,
+            "effects_head_sha256": ledger.journal.head_hash,
+            "events": _event(state, "model_failure_terminal", failure=failure),
+        }
+
     def plan_node(state: NativeState) -> dict[str, Any]:
         if time.time() >= state["deadline"]:
             return {"stop": True, "reason": "GRAPH_DEADLINE_EXHAUSTED"}
@@ -431,25 +508,28 @@ def build_native_graph(
         if not callable(callback):
             raise ValueError("graph planner requires typed choose_graph_plan")
         role = "reflect" if old else "planner"
-        plan = ledger.perform(
-            f"plan-{revision}",
-            role,
-            lambda: callback(
-                model_snapshot(cast(NativeState, {**state, "active_task": None})),
-                previous_plan=old,
-                task_status=state.get("task_status", []),
-                failure=state.get("last_failure")
-                or (
-                    {
-                        "code": "GRAPH_TASK_STALLED",
-                        "turn": state["turns"],
-                        "evidence": "No new milestone proof after three supporting turns.",
-                    }
-                    if state.get("stalled_turns", 0) >= 3
-                    else None
+        try:
+            plan = ledger.perform(
+                f"plan-{revision}",
+                role,
+                lambda: callback(
+                    model_snapshot(cast(NativeState, {**state, "active_task": None})),
+                    previous_plan=old,
+                    task_status=state.get("task_status", []),
+                    failure=state.get("last_failure")
+                    or (
+                        {
+                            "code": "GRAPH_TASK_STALLED",
+                            "turn": state["turns"],
+                            "evidence": "No new milestone proof after three supporting turns.",
+                        }
+                        if state.get("stalled_turns", 0) >= 3
+                        else None
+                    ),
                 ),
-            ),
-        )
+            )
+        except ProviderError as exc:
+            return provider_failed(state, role, exc)
         if not isinstance(plan, GraphTaskPlan):
             raise ValueError("graph planner returned an invalid DAG")
         try:
@@ -559,28 +639,65 @@ def build_native_graph(
             return "blocked_replan"
         return "blocked_terminal"
 
+    def frontier_block_reason(state: NativeState) -> str:
+        statuses = state.get("task_status", [])
+        if not statuses:
+            return "GRAPH_TASK_PLAN_EMPTY"
+        ready = [row for row in statuses if row["status"] in {"READY", "STALE"}]
+        if not ready:
+            if all(row["status"] == "DONE" for row in statuses):
+                return "GRAPH_FINISH_NOT_ACCEPTED"
+            return "GRAPH_TASK_DEPENDENCY_BLOCKED"
+        if state["max_steps"] <= state["turns"]:
+            return "STEP_BUDGET_EXHAUSTED"
+        available = select_frontier(
+            state.get("frontier_assessments", []), state["plan_revision"], state["turns"]
+        )
+        if available is None:
+            return "GRAPH_TASK_NO_ADMISSIBLE_TOOL"
+        return "GRAPH_TASK_FRONTIER_INCONSISTENT"
+
     def blocked_replan(state: NativeState) -> dict[str, Any]:
+        reason = frontier_block_reason(state)
         return {
             "last_failure": {
                 "turn": state["turns"],
                 "tool": "task_scheduler",
                 "status": "REJECTED",
-                "code": "GRAPH_TASK_FRONTIER_BLOCKED",
-                "evidence": "No dependency-ready task fits current permissions/budget.",
+                "code": reason,
+                "evidence": "No dependency-ready task is currently executable; "
+                "the next plan revision must respect the current tool scope.",
             },
+            "events": _event(state, "task_frontier_replan", reason=reason),
         }
 
     def blocked_terminal(state: NativeState) -> dict[str, Any]:
-        return {"stop": True, "reason": "GRAPH_TASK_FRONTIER_BLOCKED"}
+        reason = frontier_block_reason(state)
+        return {
+            "stop": True,
+            "reason": reason,
+            "events": _event(
+                state,
+                "task_frontier_terminal",
+                reason=reason,
+                task_status=state.get("task_status", []),
+                remaining_steps=state["max_steps"] - state["turns"],
+            ),
+        }
 
     def choose(state: NativeState) -> dict[str, Any]:
         if time.time() >= state["deadline"]:
             return {"stop": True, "reason": "GRAPH_DEADLINE_EXHAUSTED"}
         turn = state["turns"] + 1
         on_event({"stage": "model_started", "turn": turn})
-        decision = ledger.perform(
-            f"decision-{turn}", "executor", lambda: model.choose_harness_v1(model_snapshot(state))
-        )
+        try:
+            decision = ledger.perform(
+                f"decision-{turn}",
+                "executor",
+                lambda: model.choose_harness_v1(model_snapshot(state)),
+            )
+        except ProviderError as exc:
+            return provider_failed(state, "executor", exc)
         if not isinstance(decision, HarnessDecision):
             raise ValueError("executor must return one typed HarnessDecision")
         on_event(
@@ -721,8 +838,12 @@ def build_native_graph(
         }
 
     def save_boundary(state: NativeState) -> dict[str, Any]:
-        if state.get("stop") and state.get("reason") == "GRAPH_DEADLINE_EXHAUSTED":
-            # Incomplete model-only turn: do not forge a completed host checkpoint.
+        if state.get("stop") and (
+            state.get("reason") == "GRAPH_DEADLINE_EXHAUSTED"
+            or state.get("terminal_failure") is not None
+        ):
+            # A failed model choice has no matching completed tool. Retain the
+            # last genuine host checkpoint rather than fabricating an edit turn.
             return {}
         turn = state["turns"]
         snap = state["snapshot"]
@@ -989,19 +1110,45 @@ def run_native_repository_agent(
                 )
             elif state.get("stop"):
                 raise ValueError("terminal native session cannot be resumed")
-            elif saved.next not in (
-                ("refresh",),
-                ("budget_gate",),
-                ("planner",),
-                ("replan",),
-                ("checkpoint",),
-                ("executor",),
-                ("frontier",),
-                ("select_task",),
-                ("blocked_replan",),
-                ("retrieve_memory",),
-                ("context",),
-            ) and not (saved.next and set(saved.next) == {"assess_task"}):
+            elif (
+                saved.next
+                not in (
+                    ("refresh",),
+                    ("budget_gate",),
+                    ("planner",),
+                    ("replan",),
+                    ("checkpoint",),
+                    ("executor",),
+                    ("frontier",),
+                    ("select_task",),
+                    ("blocked_replan",),
+                    ("retrieve_memory",),
+                    ("context",),
+                )
+                and not (saved.next and set(saved.next) == {"assess_task"})
+                and not (
+                    not saved.next
+                    and saved.tasks
+                    and all(
+                        task.name
+                        in {
+                            "context",
+                            "frontier",
+                            "assess_task",
+                            "select_task",
+                            "refresh",
+                            "retrieve_memory",
+                            "budget_gate",
+                        }
+                        and not task.interrupts
+                        for task in saved.tasks
+                    )
+                )
+            ):
+                # A process may die after a pure-node result was durably written
+                # but before its outgoing edge was committed. This is safe to
+                # continue only for a known effect-free graph node, after the
+                # exact effect-ledger/worktree/host-checkpoint equality above.
                 raise ValueError("native graph has no safe continuation boundary")
             else:
                 graph_input = None
@@ -1029,6 +1176,7 @@ def run_native_repository_agent(
                 "plan_revision": 0,
                 "last_plan_turn": 0,
                 "last_failure": None,
+                "terminal_failure": None,
                 "failure_streak": 0,
                 "stalled_turns": 0,
                 "recovery_state": None,
@@ -1079,6 +1227,7 @@ def run_native_repository_agent(
                 "turns": 0,
                 "stop": True,
                 "reason": result.get("reason", "UNKNOWN"),
+                "terminal_failure": result.get("terminal_failure"),
             }
         return project_state(result)
     finally:
@@ -1138,6 +1287,7 @@ def inspect_native_graph(output: Path) -> dict[str, Any]:
             "graph_events": values.get("events", []),
             "plan_revisions": values.get("plan_revisions", []),
             "recovery_state": values.get("recovery_state"),
+            "terminal_failure": values.get("terminal_failure"),
             "effects_head_sha256": values.get("effects_head_sha256"),
             "host_checkpoint_sha256": values.get("host_checkpoint_sha256"),
             "deadline": header["deadline"],

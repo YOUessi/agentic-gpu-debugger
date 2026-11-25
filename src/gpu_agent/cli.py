@@ -257,9 +257,9 @@ def harness_repo_run(
             max_public_checks=max_public_checks,
             context_mode=context_mode,
             allow_batch_edits=not disable_batch_edits,
-            hierarchical_mode=(runtime_mode == "langgraph")
-            if hierarchical is None
-            else hierarchical,
+            # Native ReAct is the operator-facing default. Opt in to
+            # Planner/DAG explicitly with --hierarchical.
+            hierarchical_mode=False if hierarchical is None else hierarchical,
             runtime_mode=runtime_mode,
             review_public_pass=review_public_pass,
             approve_review=not reject_review,

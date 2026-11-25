@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -37,6 +39,95 @@ from gpu_agent.harness.runner import AgentLoopState, run_tool_agent
 
 class RepositoryDecisionModel(Protocol):
     def choose_harness_v1(self, snapshot: SessionSnapshot) -> HarnessDecision: ...
+
+
+def write_native_terminal_diagnostics(
+    *,
+    output: Path,
+    state: AgentLoopState,
+    host: RepositoryWorkspaceTools,
+    invocations: list,
+    public_journal_sha256: str,
+) -> None:
+    """Write bounded, operator-readable failure provenance without model text.
+
+    The host checkpoint is the last verified completed tool boundary. A model
+    failure may have happened later; its graph terminal and immutable effect
+    ledger are recorded separately rather than fabricating a newer tool result.
+    """
+    from gpu_agent.harness.native_graph import EFFECT_NAME
+    from gpu_agent.harness.recovery import read_repository_checkpoint
+    from gpu_agent.store import read_regular
+
+    path = output / "terminal-diagnostics.json"
+    checkpoint_path = output / "session-checkpoint.json"
+    checkpoint = read_repository_checkpoint(checkpoint_path) if checkpoint_path.is_file() else None
+    paths = set(host.workspace.edited_files)
+    if host._public_kernel_path is not None:
+        paths.add(host._public_kernel_path)
+    if host._last_file is not None:
+        paths.add(host._last_file)
+    source_hashes = {}
+    for name in sorted(paths):
+        source = read_regular(host.workspace._checked(name, editable=False), 4 << 20)
+        source_hashes[name] = hashlib.sha256(source).hexdigest()
+    by_role = Counter(str(x.repository_role or "unspecified") for x in invocations)
+    retries = Counter(str(x.repository_role or "unspecified") for x in invocations if x.attempt > 0)
+    errors = Counter(
+        (str(x.repository_role or "unspecified"), x.error_code)
+        for x in invocations
+        if x.error_code is not None
+    )
+    reason = state.get("reason", "UNKNOWN")
+    failure = state.get("terminal_failure") or {}
+    if failure:
+        stage = failure.get("stage", "model")
+    elif reason.startswith("GRAPH_TASK") or reason.startswith("GRAPH_FINISH"):
+        stage = "dag_scheduler"
+    elif reason.startswith("GRAPH_PLAN"):
+        stage = "planner"
+    else:
+        stage = "runtime"
+    body = {
+        "schema": "gpu-repository-terminal-diagnostics-v1",
+        "status": "INCONCLUSIVE",
+        "failure_stage": stage,
+        "reason": reason,
+        "model_failure": failure or None,
+        "role_call_counts": dict(sorted(by_role.items())),
+        "role_format_retry_counts": dict(sorted(retries.items())),
+        "role_error_counts": [
+            {"role": role, "code": code, "count": count}
+            for (role, code), count in sorted(errors.items())
+        ],
+        "last_complete_checkpoint_sha256": (
+            hashlib.sha256(checkpoint_path.read_bytes()).hexdigest()
+            if checkpoint is not None
+            else None
+        ),
+        "last_complete_checkpoint_turn": (
+            checkpoint.state["turns"] if checkpoint is not None else None
+        ),
+        "current_tool_turn": host.tool_calls,
+        "final_source_sha256_by_path": source_hashes,
+        "final_diff_sha256": str(host.workspace.integrity()["diff_sha256"]),
+        "public_journal_head_sha256_before_finish": public_journal_sha256,
+        "effect_journal_file_sha256": hashlib.sha256(
+            (output / EFFECT_NAME).read_bytes()
+        ).hexdigest(),
+        "effect_journal_head_sha256": (
+            state.get("terminal_failure", {}).get("effect_head_sha256")
+            if state.get("terminal_failure")
+            else None
+        ),
+        "no_external_effect_replay": True,
+    }
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    with os.fdopen(fd, "wb") as stream:
+        stream.write(json.dumps(body, sort_keys=True, ensure_ascii=False).encode() + b"\n")
+        stream.flush()
+        os.fsync(stream.fileno())
 
 
 def run_repository_coding_session(
@@ -319,6 +410,7 @@ def run_repository_coding_session(
                 kinds: dict[str, EventKind] = {
                     "model_started": "model_started",
                     "model": "model_selected",
+                    "model_failed": "model_failed",
                     "tool_started": "tool_started",
                     "tool": "tool_completed",
                 }
@@ -330,6 +422,9 @@ def run_repository_coding_session(
                             "turn": event.get("turn", 0),
                             "tool": str(event.get("tool", ""))[:64],
                             "status": str(event.get("status", ""))[:24],
+                            "role": str(event.get("role", ""))[:32],
+                            "error_code": str(event.get("error_code", ""))[:80],
+                            "delivery_state": str(event.get("delivery_state", ""))[:16],
                         },
                     )
                 tools.store.put(
@@ -474,6 +569,14 @@ def run_repository_coding_session(
                 public_checks_passed=tools.public_checks_passed,
                 public_checked_candidate_sha256=tools.last_checked_candidate_sha,
             )
+            if native and not succeeded and not paused:
+                write_native_terminal_diagnostics(
+                    output=output,
+                    state=state,
+                    host=tools,
+                    invocations=records,
+                    public_journal_sha256=journal.head_hash,
+                )
             if paused:
                 # No final result/terminal journal event. RunStore remains
                 # RUNNING and only an explicit, validated --resume can proceed.

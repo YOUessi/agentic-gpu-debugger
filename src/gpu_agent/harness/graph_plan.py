@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, create_model, model_validator
 
 from gpu_agent.harness.models import (
     PlanMilestone,
@@ -77,8 +78,54 @@ class GraphTaskPlan(StrictModel):
                 raise ValueError("registered CUDA plan may only target the registered kernel")
             if not any(t.gate == "public_check" for t in self.tasks):
                 raise ValueError("registered CUDA plan requires public verification")
+        else:
+            if any(t.gate in {"compile", "probe", "public_check"} for t in self.tasks):
+                raise ValueError("unregistered repositories cannot schedule CUDA public tools")
         # The plan never grants capabilities. The executor's tool host remains
         # the authoritative admission check, even if an objective is wrong.
+
+
+def scoped_graph_plan_model(snapshot: Mapping[str, Any]) -> type[GraphTaskPlan]:
+    """Expose operator-registered target paths as enum values in the wire schema.
+
+    A semantic Plan Scope check remains mandatory after parsing: cross-task
+    requirements such as a public-check milestone cannot be fully expressed by
+    a field-level target enum. An unregistered repository uses the regular
+    GraphTaskPlan plus independent host permissions.
+    """
+    case_id = snapshot.get("registered_public_case")
+    kernel = snapshot.get("registered_kernel_path")
+    if case_id is None:
+        if kernel is not None:
+            raise ValueError("unexpected registered kernel")
+        task_model = create_model(
+            "UnregisteredGraphTask",
+            __base__=GraphTask,
+            gate=(Literal["inspect", "edit", "finish"], Field(...)),
+        )
+        return create_model(
+            "UnregisteredGraphTaskPlan",
+            __base__=GraphTaskPlan,
+            tasks=(list[task_model], Field(min_length=2, max_length=10)),
+        )
+    if case_id not in {"h001", "h002", "h003"}:
+        raise ValueError("unknown registered public case")
+    expected = f"benchmarks/hardset_v2/{case_id}/mutant/kernel.cu"
+    if kernel != expected:
+        raise ValueError("kernel and case registry disagree")
+    # Literal values are derived only from an operator-pinned registry, never
+    # a model-generated path. Invalid paths are rejected by the SDK schema.
+    target_enum = Literal.__getitem__(("", expected))
+    task_model = create_model(
+        "RegisteredGraphTask",
+        __base__=GraphTask,
+        target=(target_enum, Field(...)),
+    )
+    return create_model(
+        "RegisteredGraphTaskPlan",
+        __base__=GraphTaskPlan,
+        tasks=(list[task_model], Field(min_length=2, max_length=10)),
+    )
 
 
 def evaluate_tasks(

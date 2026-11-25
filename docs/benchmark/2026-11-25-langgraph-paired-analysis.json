@@ -1,0 +1,178 @@
+{
+  "schema": "gpu-agent-paired-architecture-analysis-v1",
+  "frozen_manifest_file_sha256": "d9093386b0bfe0fcdfd4c0f5d7bb9881e4e9647a1fac29f8bd100d9fd82522df",
+  "frozen_source_commit": "daded0d6f2709e9f6e6c1f9825c40ffbf315538e",
+  "population": "three development CUDA defects, 5 repetitions each; not holdout",
+  "success": "independent strict verdict per original fixed trial; no reruns",
+  "paired": {
+    "native-react:vs:legacy-react": {
+      "both_success": 11,
+      "only_first": 3,
+      "only_second": 1,
+      "both_failed": 0,
+      "discordant": 4,
+      "exact_two_sided_mcnemar_p_exploratory": 0.625,
+      "by_case": {
+        "h001": {
+          "both_success": 5,
+          "only_first": 0,
+          "only_second": 0,
+          "both_failed": 0
+        },
+        "h002": {
+          "both_success": 1,
+          "only_first": 3,
+          "only_second": 1,
+          "both_failed": 0
+        },
+        "h003": {
+          "both_success": 5,
+          "only_first": 0,
+          "only_second": 0,
+          "both_failed": 0
+        }
+      }
+    },
+    "native-dag:vs:legacy-planner": {
+      "both_success": 7,
+      "only_first": 3,
+      "only_second": 3,
+      "both_failed": 2,
+      "discordant": 6,
+      "exact_two_sided_mcnemar_p_exploratory": 1.0,
+      "by_case": {
+        "h001": {
+          "both_success": 1,
+          "only_first": 2,
+          "only_second": 2,
+          "both_failed": 0
+        },
+        "h002": {
+          "both_success": 1,
+          "only_first": 1,
+          "only_second": 1,
+          "both_failed": 2
+        },
+        "h003": {
+          "both_success": 5,
+          "only_first": 0,
+          "only_second": 0,
+          "both_failed": 0
+        }
+      }
+    },
+    "native-dag:vs:native-react": {
+      "both_success": 9,
+      "only_first": 1,
+      "only_second": 5,
+      "both_failed": 0,
+      "discordant": 6,
+      "exact_two_sided_mcnemar_p_exploratory": 0.21875,
+      "by_case": {
+        "h001": {
+          "both_success": 3,
+          "only_first": 0,
+          "only_second": 2,
+          "both_failed": 0
+        },
+        "h002": {
+          "both_success": 1,
+          "only_first": 1,
+          "only_second": 3,
+          "both_failed": 0
+        },
+        "h003": {
+          "both_success": 5,
+          "only_first": 0,
+          "only_second": 0,
+          "both_failed": 0
+        }
+      }
+    }
+  },
+  "arms": {
+    "legacy-react": {
+      "started": 15,
+      "strict_success": 12,
+      "tokens": 676632,
+      "model_calls": 161,
+      "status_counts": {
+        "STRICT_SUCCESS": 12,
+        "MODEL_FAILURE": 3
+      }
+    },
+    "native-react": {
+      "started": 15,
+      "strict_success": 14,
+      "tokens": 625853,
+      "model_calls": 152,
+      "status_counts": {
+        "STRICT_SUCCESS": 14,
+        "MODEL_FAILURE": 1
+      }
+    },
+    "legacy-planner": {
+      "started": 15,
+      "strict_success": 10,
+      "tokens": 894796,
+      "model_calls": 204,
+      "status_counts": {
+        "STRICT_SUCCESS": 10,
+        "MODEL_FAILURE": 5
+      }
+    },
+    "native-dag": {
+      "started": 15,
+      "strict_success": 10,
+      "tokens": 660510,
+      "model_calls": 155,
+      "status_counts": {
+        "STRICT_SUCCESS": 10,
+        "MODEL_FAILURE": 5
+      }
+    }
+  },
+  "original_native_dag_failed_trials": {
+    "r02-h002-native-dag": {
+      "classification": "RUNTIME_DAG_SCHEDULER_FAILURE",
+      "role": "scheduler",
+      "original_reason": "GRAPH_TASK_FRONTIER_BLOCKED",
+      "original_status": "MODEL_FAILURE",
+      "original_result_present": true
+    },
+    "r03-h001-native-dag": {
+      "classification": "MODEL_OUTPUT_VALIDATION_AND_TERMINALIZATION_FAILURE",
+      "role": "inspect_provider_invocations",
+      "original_reason": null,
+      "original_status": "MODEL_FAILURE",
+      "original_result_present": false
+    },
+    "r03-h002-native-dag": {
+      "classification": "MODEL_OUTPUT_VALIDATION_AND_TERMINALIZATION_FAILURE",
+      "role": "inspect_provider_invocations",
+      "original_reason": null,
+      "original_status": "MODEL_FAILURE",
+      "original_result_present": false
+    },
+    "r04-h002-native-dag": {
+      "classification": "PLAN_SCHEMA_SCOPE_FAILURE",
+      "role": "planner",
+      "original_reason": "GRAPH_PLAN_INVALID_SCOPE",
+      "original_status": "MODEL_FAILURE",
+      "original_result_present": true
+    },
+    "r05-h001-native-dag": {
+      "classification": "RUNTIME_DAG_SCHEDULER_FAILURE",
+      "role": "scheduler",
+      "original_reason": "GRAPH_TASK_FRONTIER_BLOCKED",
+      "original_status": "MODEL_FAILURE",
+      "original_result_present": true
+    }
+  },
+  "limitations": [
+    "The sample contains only 15 observations per arm and three unique task defects.",
+    "Pairing controls task/replicate identity but does not guarantee identical model RNG.",
+    "A small exploratory p-value is not evidence of broad runtime superiority.",
+    "Runtime, context, and role allocations may all affect token use; no causal DAG claim."
+  ]
+}
