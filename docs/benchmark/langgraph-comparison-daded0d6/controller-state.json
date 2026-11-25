@@ -1,14 +1,20 @@
 {
-  "completed_results": 0,
+  "completed_results": 5,
   "controller_pid": 933632,
   "controller_start_ticks": 54563940,
   "manifest_sha256": "97a3399a4f6f85d1c4699f7e1a7954fecc24a0b7e213a60e4252831bde9cd897",
   "observed_start_ticks": 54563940,
-  "observed_unix_seconds": 1795582907.3709311,
+  "observed_unix_seconds": 1795583279.7195632,
   "process_alive": true,
   "reserved_without_result": [
-    "r01-h001-legacy-react"
+    "r01-h002-legacy-planner"
   ],
-  "result_sha256": {},
+  "result_sha256": {
+    "r01-h001-legacy-planner": "f0384352f3ab7a90d00ad839f17774dbffb6e428ea768abdc08f074ea4c27010",
+    "r01-h001-legacy-react": "dd76506da4c57bef639c6440d238c8390affc20090b94596ff543cf4c80b0310",
+    "r01-h001-native-dag": "11e4b1fa76b4c4d6ecd97a9c541e802e716f5f5b92a13049a3ac1a6429dfdaf9",
+    "r01-h001-native-react": "99427bbe2690d2165f135a3167fc86c295086da8f48bdd0d577ff7d23fa00550",
+    "r01-h002-native-react": "216da51ba893bcf677dc893525461c34b234866e2405201de8f79b747c8509a4"
+  },
   "state": "RUNNING"
 }

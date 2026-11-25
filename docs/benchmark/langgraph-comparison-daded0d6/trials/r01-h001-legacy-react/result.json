@@ -1,0 +1,38 @@
+{
+  "admitted": true,
+  "agent_execution": {
+    "exit_code": 0,
+    "timed_out": false,
+    "wall_seconds": 73.565
+  },
+  "candidate_correctness": "VERIFIED_FIXED",
+  "manifest_sha256": "97a3399a4f6f85d1c4699f7e1a7954fecc24a0b7e213a60e4252831bde9cd897",
+  "retry_same_replicate": false,
+  "status": "STRICT_SUCCESS",
+  "strict_execution": {
+    "exit_code": 0,
+    "timed_out": false,
+    "wall_seconds": 12.0
+  },
+  "strict_fix_within_budget": true,
+  "strict_projection": {
+    "candidate_sha256": "639a39c5d51f8fca65079b71907023852be0baac5f3f049fef0a78637d2eccfb",
+    "projection_sha256": "36fe7666d70f39b702f45256f26dd43f16d2de8c833cc345b5f4d3471d217585",
+    "public_run_id": "c3c7848f9a7c44eba17eb0d581a9c4f4",
+    "verdict": "VERIFIED_FIXED"
+  },
+  "trial": {
+    "arm": "legacy-react",
+    "case": "h001",
+    "hierarchical": false,
+    "id": "r01-h001-legacy-react",
+    "replicate": 1,
+    "runtime": "legacy"
+  },
+  "usage": {
+    "physical_calls": 14,
+    "tokens_complete": true,
+    "tokens_lower_bound": 59767,
+    "uncertain_calls": 0
+  }
+}
