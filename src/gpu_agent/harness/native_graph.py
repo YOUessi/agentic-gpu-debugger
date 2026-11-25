@@ -85,6 +85,7 @@ class NativeState(TypedDict, total=False):
     observed_physical_calls: int
     effects_completed: int
     effects_head_sha256: str
+    host_checkpoint_sha256: str
     plan: dict[str, Any]
     plan_revision: int
     plan_revisions: list[dict[str, Any]]
@@ -94,6 +95,7 @@ class NativeState(TypedDict, total=False):
     task_progress: dict[str, Any]
     last_failure: dict[str, Any] | None
     failure_streak: int
+    stalled_turns: int
     recovery_state: dict[str, Any] | None
     last_plan_turn: int
     edited_files: list[str]
@@ -325,7 +327,7 @@ def build_native_graph(
     goal: str,
     ledger: EffectJournal,
     on_event: Callable[[dict[str, Any]], None],
-    on_checkpoint: Callable[[AgentLoopState], None],
+    on_checkpoint: Callable[[AgentLoopState], str],
     pause_after_turns: int | None,
     review_public_pass: bool,
     checkpointer: Any,
@@ -416,7 +418,7 @@ def build_native_graph(
                 model_snapshot(cast(NativeState, {**state, "active_task": None})),
                 previous_plan=old,
                 task_status=state.get("task_status", []),
-                failure=state.get("last_failure"),
+                failure=state.get("last_failure") or ({"code": "GRAPH_TASK_STALLED", "turn": state["turns"], "evidence": "No new milestone proof after three supporting turns."} if state.get("stalled_turns", 0) >= 3 else None),
             ),
         )
         if not isinstance(plan, GraphTaskPlan):
@@ -438,6 +440,7 @@ def build_native_graph(
             ],
             "last_plan_turn": state.get("turns", 0),
             "active_task": None,
+            "stalled_turns": 0,
             "logical_model_calls": calls,
             "observed_physical_calls": _physical_calls(model, calls),
             "effects_completed": ledger.completed,
@@ -466,7 +469,7 @@ def build_native_graph(
             return "planner"
         if (
             state["hierarchical"]
-            and state.get("last_failure") is not None
+            and (state.get("last_failure") is not None or state.get("stalled_turns", 0) >= 3)
             and state["turns"] > state.get("last_plan_turn", 0)
             and state.get("plan_revision", 0) <= state["max_replans"]
             and state["max_steps"] - state["turns"] >= 2
@@ -621,8 +624,10 @@ def build_native_graph(
             "action_sha256": digest(decision.action.model_dump(mode="json")),
             "observation_sha256": digest(observation.model_dump(mode="json")),
         }
+        primary = bool(active and evidence["task_key"] and observation.status == "OK")
         return {
             "turns": turn,
+            "stalled_turns": 0 if primary or not active else state.get("stalled_turns", 0) + 1,
             "history": history,
             "observation": observation.model_dump(mode="json"),
             "evidence": [*state.get("evidence", []), evidence],
@@ -701,8 +706,9 @@ def build_native_graph(
             "pause_requested": pause,
             "review_kind": "public_candidate_review" if manual_review else "operator_pause",
         }
-        on_checkpoint(project_state(cast(NativeState, {**state, **update})))
-        return {**update, "events": _event(state, "boundary", reason=reason)}
+        checkpoint_sha = on_checkpoint(project_state(cast(NativeState, {**state, **update})))
+        return {**update, "host_checkpoint_sha256": checkpoint_sha,
+                "events": _event(state, "boundary", reason=reason)}
 
     def route_boundary(state: NativeState) -> str:
         if state.get("pause_requested"):
@@ -825,7 +831,7 @@ def run_native_repository_agent(
     hierarchical_mode: bool,
     deadline: float,
     on_event: Callable[[dict[str, Any]], None],
-    on_checkpoint: Callable[[AgentLoopState], None],
+    on_checkpoint: Callable[[AgentLoopState], str],
     initial_state: AgentLoopState | None,
     pause_after_turns: int | None,
     review_public_pass: bool = False,
@@ -836,6 +842,7 @@ def run_native_repository_agent(
 ) -> AgentLoopState:
     """Run or resume the real repository graph using persistent native state."""
     from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     resume = initial_state is not None
     db_path = output / DB_NAME
@@ -864,7 +871,7 @@ def run_native_repository_agent(
     conn = sqlite3.connect(db_path, check_same_thread=False)
     try:
         conn.execute("PRAGMA synchronous=FULL")
-        saver = SqliteSaver(conn)
+        saver = SqliteSaver(conn, serde=JsonPlusSerializer(allowed_msgpack_modules=()))
         graph = build_native_graph(
             model=model,
             host=host,
@@ -888,6 +895,7 @@ def run_native_repository_agent(
                 state.get("identity") != header
                 or state.get("effects_completed") != ledger.completed
                 or state.get("effects_head_sha256") != ledger.journal.head_hash
+                or state.get("host_checkpoint_sha256") != hashlib.sha256((output / "session-checkpoint.json").read_bytes()).hexdigest()
                 or state.get("turns") != initial_state["turns"]
                 or state.get("history") != initial_state["history"]
                 or state.get("decision") != initial_state["decision"]
@@ -898,9 +906,11 @@ def run_native_repository_agent(
                     "native checkpoint, effect ledger and workspace disagree; no replay"
                 )
             if state.get("reason") == "SESSION_PAUSED":
-                if saved.next != ("review",) or not any(t.interrupts for t in saved.tasks):
+                if saved.next != ("review",):
                     raise ValueError("native pause is not at an authenticated interrupt boundary")
-                graph_input = Command(resume={"approved": approve_review})
+                # A crash just before the interrupt node ran has no external
+                # effects. Reach the actual interrupt without giving approval.
+                graph_input = Command(resume={"approved": approve_review}) if any(t.interrupts for t in saved.tasks) else None
             elif state.get("stop"):
                 raise ValueError("terminal native session cannot be resumed")
             elif saved.next not in (
@@ -941,6 +951,7 @@ def run_native_repository_agent(
                 "last_plan_turn": 0,
                 "last_failure": None,
                 "failure_streak": 0,
+                "stalled_turns": 0,
                 "recovery_state": None,
                 "finish_accepted": False,
                 "stop": False,
@@ -999,6 +1010,7 @@ def run_native_repository_agent(
 def inspect_native_graph(output: Path) -> dict[str, Any]:
     """Operator-only native checkpoint inspection, no model/host constructed."""
     from langgraph.checkpoint.sqlite import SqliteSaver
+    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
     header = read_native_header(output)
     path = output / DB_NAME
@@ -1006,7 +1018,7 @@ def inspect_native_graph(output: Path) -> dict[str, Any]:
     # A read-only connection ensures inspection cannot advance the runtime.
     conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, check_same_thread=False)
     try:
-        saver = SqliteSaver(conn)
+        saver = SqliteSaver(conn, serde=JsonPlusSerializer(allowed_msgpack_modules=()))
         # Setup is normally implicit and writes DDL. The database already has
         # a schema; mark only this read-only saver instance initialized.
         saver.is_setup = True
@@ -1046,6 +1058,7 @@ def inspect_native_graph(output: Path) -> dict[str, Any]:
             "plan_revisions": values.get("plan_revisions", []),
             "recovery_state": values.get("recovery_state"),
             "effects_head_sha256": values.get("effects_head_sha256"),
+            "host_checkpoint_sha256": values.get("host_checkpoint_sha256"),
             "deadline": header["deadline"],
         }
     finally:

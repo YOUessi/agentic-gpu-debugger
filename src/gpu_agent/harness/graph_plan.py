@@ -140,8 +140,6 @@ def evaluate_tasks(
                 )
             ]
         if task.gate == "edit" and failed_candidate:
-            matches = [e for e in matches if e.get("candidate") != candidate]
-        if task.gate == "edit" and failed_candidate:
             # A failed current candidate cannot satisfy the repair milestone,
             # even when a previous revision also changed this file.
             matches = []

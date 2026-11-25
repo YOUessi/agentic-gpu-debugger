@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
 from gpu_agent.harness.graph_memory import STRATEGIES
@@ -70,6 +69,12 @@ def compact_projection(
             add(f"PRIOR_EPISODE_{index}", (
                 f"{lesson['outcome']} (not strict proof; advisory): {text}"
             ), 260)
+            matching = [e for e in lesson.get("episodes", [])
+                        if e["strategy"] == recovery.get("strategy")]
+            if matching:
+                sequence = " > ".join(f"{x['tool']}:{x['status']}"
+                                      for x in matching[-1]["after_failure"][:4])
+                add("OBSERVED_PRIOR_SEQUENCE", sequence + " (association, not proof)", 240)
     for evidence in reversed(state.get("evidence", [])[-6:]):
         if evidence.get("gate") in {"edit", "compile", "probe", "public_check", "revert"}:
             add("EVIDENCE", (

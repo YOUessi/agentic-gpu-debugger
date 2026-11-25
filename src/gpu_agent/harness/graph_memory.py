@@ -21,6 +21,7 @@ import sqlite3
 import stat
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -143,13 +144,17 @@ class SQLiteRepairStore(BaseStore):
     """
 
     def __init__(self, database: Path, namespace: tuple[str, ...], *,
-                 embedder: Embedder | None = None):
+                 embedder: Embedder | None = None, read_only: bool = False):
         self.database = database.absolute()
         self.namespace = namespace
         self.ns = _namespace(namespace)
         self.embedder = embedder
+        self.read_only = read_only
         reject_symlinks(self.database)
-        self.database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        if read_only and not self.database.is_file():
+            raise ValueError("read-only memory requires an existing database")
+        if not read_only:
+            self.database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         if not self.database.exists():
             try:
                 fd = os.open(self.database, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
@@ -159,17 +164,25 @@ class SQLiteRepairStore(BaseStore):
         info = self.database.stat(follow_symlinks=False)
         if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
             raise ValueError("memory database must be an operator-owned private file")
-        with self._connect() as conn:
-            conn.execute("CREATE TABLE IF NOT EXISTS lessons ("
+        if read_only:
+            with closing(self._connect()) as conn:
+                conn.execute("SELECT ns,key,value FROM lessons LIMIT 0")
+        else:
+            with closing(self._connect()) as conn, conn:
+                conn.execute("CREATE TABLE IF NOT EXISTS lessons ("
                          "ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, "
                          "created TEXT NOT NULL, updated TEXT NOT NULL, "
                          "embedding TEXT, embedding_id TEXT, PRIMARY KEY(ns,key))")
 
     def _connect(self):
-        conn = sqlite3.connect(self.database, timeout=3.0)
+        conn = sqlite3.connect(
+            f"{self.database.as_uri()}?mode=ro" if self.read_only else self.database,
+            timeout=3.0, uri=self.read_only,
+        )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=3000")
-        conn.execute("PRAGMA synchronous=FULL")
+        if not self.read_only:
+            conn.execute("PRAGMA synchronous=FULL")
         return conn
 
     def _require_scope(self, namespace: tuple[str, ...]) -> None:
@@ -196,6 +209,8 @@ class SQLiteRepairStore(BaseStore):
                                            (self.ns, op.key)).fetchone()
                         results.append(self._item(row, self.namespace) if row else None)
                     elif isinstance(op, PutOp):
+                        if self.read_only:
+                            raise ValueError("memory database is read-only")
                         self._require_scope(op.namespace)
                         if op.ttl is not None:
                             raise ValueError("local repair store does not support TTL")
@@ -216,6 +231,8 @@ class SQLiteRepairStore(BaseStore):
                         if existing is not None and existing["value"] == raw:
                             results.append(None)
                             continue
+                        if existing is not None and op.value.get("schema") == MEMORY_VERSION:
+                            raise ValueError("repair episodes are immutable")
                         vector = (
                             _vector(self.embedder.embed(str(op.value.get("query_text", ""))))
                             if self.embedder is not None and op.index is not False else None
@@ -315,7 +332,7 @@ def memory_configuration(
         "database_sha256": hashlib.sha256(str(db).encode()).hexdigest(),
         "embedding_identity": embedder.identity if embedder else None,
     }
-    return config, SQLiteRepairStore(db, namespace, embedder=embedder)
+    return config, SQLiteRepairStore(db, namespace, embedder=embedder, read_only=mode == "read")
 
 
 def make_lesson(state: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -340,6 +357,18 @@ def make_lesson(state: Mapping[str, Any]) -> dict[str, Any] | None:
         else "STAGED_UNVERIFIED" if state.get("finish_accepted") and state.get("reason") == "WORKSPACE_DIFF_STAGED_UNVERIFIED"
         else "UNRESOLVED"
     )
+    episodes = []
+    for event in state.get("events", []):
+        if event.get("kind") != "failure_routed":
+            continue
+        recovery = event.get("recovery") or {}
+        strategy = recovery.get("strategy")
+        if strategy not in STRATEGIES:
+            continue
+        turn = recovery.get("failure", {}).get("turn", 0)
+        steps = [{"tool": e["tool"], "status": e["status"]} for e in evidence
+                 if e["turn"] > turn and e["tool"] in TOOL_GATES][:8]
+        episodes.append({"strategy": strategy, "after_failure": steps})
     tags = " ".join(_TAGS[s] for s in strategies)
     query_text = f"cuda coding repair {outcome} {tags} {' '.join(tools[-12:])}"
     return {
@@ -348,6 +377,7 @@ def make_lesson(state: Mapping[str, Any]) -> dict[str, Any] | None:
         "outcome": outcome, "strategies": strategies,
         "tool_sequence": tools[-12:], "turns": state["turns"],
         "failure_count": sum(e.get("status") != "OK" for e in evidence),
+        "episodes": episodes[-6:],
         "query_text": query_text[:1800],
     }
 
@@ -358,7 +388,7 @@ def sanitize_lesson(value: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     run_id = value.get("run_id", "")
     outcome = value.get("outcome")
-    if not re.fullmatch(r"[a-f0-9]{32}", str(run_id)) or outcome not in {
+    if not isinstance(outcome, str) or not re.fullmatch(r"[a-f0-9]{32}", str(run_id)) or outcome not in {
         "PUBLIC_PASS", "STAGED_UNVERIFIED", "UNRESOLVED"
     }:
         return None
@@ -366,8 +396,20 @@ def sanitize_lesson(value: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     strategies = [s for s in value["strategies"] if isinstance(s, str) and s in STRATEGIES][:6]
     tools = [t for t in value["tool_sequence"] if isinstance(t, str) and t in TOOL_GATES][-12:]
+    episodes = []
+    for episode in value.get("episodes", []) if isinstance(value.get("episodes"), list) else []:
+        if not isinstance(episode, dict) or episode.get("strategy") not in strategies:
+            continue
+        raw = episode.get("after_failure")
+        if not isinstance(raw, list):
+            continue
+        steps = [{"tool": x["tool"], "status": x["status"]} for x in raw
+                 if isinstance(x, dict) and isinstance(x.get("tool"), str)
+                 and x["tool"] in TOOL_GATES and x.get("status") in ("OK", "FAILED", "REJECTED")][:8]
+        episodes.append({"strategy": episode["strategy"], "after_failure": steps})
     return {
         "run_id": run_id, "outcome": outcome,
+        "episodes": episodes[-6:],
         "strategies": strategies, "tool_sequence": tools,
         "query_text": " ".join(["cuda coding repair", outcome, *(_TAGS[s] for s in strategies), *tools]),
     }

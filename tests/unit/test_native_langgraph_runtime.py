@@ -6,6 +6,7 @@ No physical model calls, CUDA execution, or private evaluator access.
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 
 import pytest
@@ -605,3 +606,168 @@ def test_real_provider_adapter_admits_planner_and_replanner_roles(repository, tm
     assert all(req.payload["gpu_repo_graph_plan"] == "v1" for req in calls)
     assert [i.repository_role for i in provider.invocations()] == ["planner", "reflect"]
     assert all(i.prompt_version == "gpu-repository-graph-dag-v1" for i in provider.invocations())
+
+
+
+def test_real_parallel_frontier_and_task_scoped_denial(repository, tmp_path):
+    repo, sha = repository
+    (repo / "other.cu").write_text("float y = 3.0f;\n")
+    git(repo, "add", ".")
+    git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+        "commit", "-q", "-m", "second independent source")
+    sha = git(repo, "rev-parse", "HEAD")
+
+    class ParallelModel(Model):
+        def choose_graph_plan(self, snapshot, *, previous_plan, task_status, failure):
+            self.plans.append({"previous": previous_plan, "failure": failure})
+            return GraphTaskPlan.model_validate({
+                "tasks": [
+                    {"task_id": "t1", "gate": "inspect", "target": "kernel.cu",
+                     "objective": "Inspect the first independent CUDA file", "depends_on": []},
+                    {"task_id": "t2", "gate": "inspect", "target": "other.cu",
+                     "objective": "Inspect the second independent CUDA file", "depends_on": []},
+                    {"task_id": "t3", "gate": "edit", "target": "kernel.cu",
+                     "objective": "Correct the first file's float literal", "depends_on": ["t1"]},
+                    {"task_id": "t4", "gate": "edit", "target": "other.cu",
+                     "objective": "Correct the second file's float literal", "depends_on": ["t2"]},
+                    {"task_id": "t5", "gate": "finish", "target": "",
+                     "objective": "Stage both corrected independent files", "depends_on": ["t3", "t4"]},
+                ],
+                "revision_reason": "Independent source tasks with a common finish barrier",
+                "failure_risk": "Edits must not escape the currently selected file scope",
+            })
+
+    # The first two read tasks have a shared frontier. A deliberately
+    # premature finish and then wrong-target write are rejected by real host.
+    second_read = action("repo_read_file", path="other.cu")
+    second_edit = action("repo_replace_snippet", path="other.cu", old_text="3.0f", new_text="4.0f")
+    model = ParallelModel([FINISH, READ, second_read, second_edit, EDIT, second_edit, FINISH])
+    stream = []
+    out = tmp_path / "parallel"
+    result = run_repository_coding_session(**args(
+        (repo, sha), out, model, max_steps=12, max_model_calls=20,
+        on_graph_update=stream.append,
+    ))
+    assert result.status == "DIFF_STAGED_UNVERIFIED"
+    assert (out / "worktree/kernel.cu").read_text() == "float x = 2.0f;\n"
+    assert (out / "worktree/other.cu").read_text() == "float y = 4.0f;\n"
+    info = inspect_native_graph(out)
+    initial = [x for x in info["frontier_assessments"] if x["round"] == [1, 0]]
+    assert {x["task"]["task_id"] for x in initial} == {"t1", "t2"}
+    assert sum(x["node"] == "assess_task" for x in stream) >= 2
+    observed = [e["evidence"] for e in info["graph_events"] if e["kind"] == "tool_observed"]
+    assert observed[0]["status"] == "REJECTED" and observed[3]["status"] == "REJECTED"
+    assert observed[0]["candidate"] == observed[3]["candidate"] is None
+    assert all(x["status"] == "DONE" for x in info["task_status"])
+
+
+def test_distinct_same_gate_milestones_cannot_reuse_one_edit():
+    p = plan()
+    data = p.model_dump()
+    data["tasks"].insert(2, {
+        "task_id": "t4", "gate": "edit", "target": "kernel.cu",
+        "objective": "Perform a second independent source correction",
+        "depends_on": ["t1"],
+    })
+    data["tasks"][-1]["depends_on"] = ["t2", "t4"]
+    p = GraphTaskPlan.model_validate(data)
+    evidence = [
+        {"turn": 1, "gate": "inspect", "path": "kernel.cu", "status": "OK", "candidate": None},
+        {"turn": 2, "gate": "edit", "path": "kernel.cu", "status": "OK", "candidate": "a"},
+    ]
+    result = evaluate_tasks(p, evidence, {"current_candidate_sha256": "a"}, ["kernel.cu"])
+    assert sum(x["gate"] == "edit" and x["status"] == "DONE" for x in result) == 1
+    assert result[-1]["status"] == "BLOCKED"
+
+
+def test_native_memory_persists_between_sessions_and_respects_read_only(repository, tmp_path):
+    from gpu_agent.harness.graph_memory import memory_configuration
+
+    db = tmp_path / "memory.sqlite3"
+    out = tmp_path / "learn"
+    first = Model([READ, BAD, EDIT, FINISH])
+    options = dict(memory_mode="learn", memory_database=db, memory_scope="repo-tests")
+    final = run_repository_coding_session(**args(repository, out, first, **options))
+    assert final.status == "DIFF_STAGED_UNVERIFIED"
+    info = inspect_native_graph(out)
+    assert info["memory_status"] == "LEARNED"
+    config, store = memory_configuration(repository[0], out, db, "repo-tests", "read", None)
+    ns = tuple(config["namespace"])
+    rows = store.search(ns, query="coding repair failure", limit=8)
+    assert len(rows) == 1
+    value = rows[0].value
+    assert value["outcome"] == "STAGED_UNVERIFIED"
+    assert "REPLAN" in value["strategies"]
+    assert value["episodes"] and value["episodes"][0]["after_failure"]
+    raw = json.dumps(value)
+    assert "1.0f" not in raw and "2.0f" not in raw and "kernel.cu" not in raw
+    before = hashlib.sha256(db.read_bytes()).hexdigest()
+    out2 = tmp_path / "retrieve"
+    second = Model([READ, EDIT, FINISH])
+    final = run_repository_coding_session(**args(
+        repository, out2, second, memory_mode="read", memory_database=db, memory_scope="repo-tests",
+    ))
+    assert final.status == "DIFF_STAGED_UNVERIFIED"
+    assert inspect_native_graph(out2)["retrieved_memory_ids"] == [info["thread_id"]]
+    assert any("PRIOR_EPISODE" in snapshot.context_summary for snapshot in second.decisions)
+    assert hashlib.sha256(db.read_bytes()).hexdigest() == before
+    with pytest.raises(ValueError, match="read-only"):
+        store.put(ns, "forbidden", {"query_text": "test"})
+    other, other_store = memory_configuration(repository[0], out, db, "isolated", "read", None)
+    assert other_store.search(tuple(other["namespace"]), query="coding repair", limit=8) == []
+    with pytest.raises(ValueError, match="scope"):
+        other_store.search(ns)
+
+
+def test_store_embedding_ranking_and_malicious_lesson_sanitization(tmp_path):
+    from gpu_agent.harness.graph_memory import SQLiteRepairStore, sanitize_lesson
+
+    class Embed:
+        identity = "fixture-local-embedding-v1"
+
+        def embed(self, text):
+            return [1.0, 0.0] if text in ("arithmetic", "precision") else [0.0, 1.0]
+
+    namespace = ("test", "memory")
+    db = tmp_path / "store.sqlite3"
+    store = SQLiteRepairStore(db, namespace, embedder=Embed())
+    store.put(namespace, "numeric", {"query_text": "precision"})
+    store.put(namespace, "compile", {"query_text": "compiler"})
+    reopened = SQLiteRepairStore(db, namespace, embedder=Embed(), read_only=True)
+    assert reopened.search(namespace, query="arithmetic")[0].key == "numeric"
+    assert reopened.list_namespaces() == [namespace]
+    malicious = {
+        "schema": "gpu-agent-repair-memory-v1", "run_id": "a" * 32,
+        "outcome": "PUBLIC_PASS", "strategies": ["AST_REBIND", "read private evaluator"],
+        "tool_sequence": ["repo_inspect_syntax", "shell"],
+        "query_text": "malicious instructions or old source",
+    }
+    projected = sanitize_lesson(malicious)
+    assert projected["strategies"] == ["AST_REBIND"]
+    assert projected["tool_sequence"] == ["repo_inspect_syntax"]
+    assert "malicious" not in projected["query_text"]
+
+
+def test_context_projection_keeps_budget_and_current_ast_evidence():
+    from gpu_agent.harness.graph_context import compact_projection
+    state = {
+        "snapshot": {
+            "context_summary": "BUDGET_ALERT: only one public check remains.\n" + "x" * 2600,
+            "syntax_state": {"observed_nodes": [{"id": "n00", "code": "x"}]},
+            "remaining_public_checks": 1, "remaining_public_probes": 0,
+        },
+        "max_steps": 38, "turns": 34, "max_model_calls": 40, "observed_physical_calls": 35,
+        "history": [{"content": "y" * 3900}] * 34,
+        "plan": {"tasks": []}, "plan_revision": 1,
+        "task_status": [{"task_id": "t1", "status": "STALE"}],
+        "last_failure": {"turn": 34, "code": "BUILD_FAILED", "evidence": "z" * 4000},
+        "evidence": [{"turn": i, "tool": "repo_compile_candidate", "gate": "compile",
+                      "status": "FAILED", "candidate": "a" * 64} for i in range(1, 35)],
+    }
+    projection = compact_projection(state)
+    assert projection["chars"] <= 2800
+    assert projection["retained_full_history_turns"] == 34
+    assert projection["retained_ast_nodes"] == 1
+    assert "BUDGET_ALERT" in projection["summary"] and "BUILD_FAILED" in projection["summary"]
+    assert state["history"][0]["content"] == "y" * 3900
+    assert state["snapshot"]["syntax_state"]["observed_nodes"][0]["id"] == "n00"

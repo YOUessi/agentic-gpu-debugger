@@ -85,6 +85,10 @@ def assess_frontier_task(item: dict[str, Any]) -> dict[str, Any]:
         task.gate == "edit"
         and repair in {"AST_REBIND", "COMPILE_REPAIR", "NUMERIC_REPAIR", "REPLAN"}
     )
+    prerequisite = bool(
+        (task.gate == "edit" and helpers & {"repo_inspect_syntax", "repo_read_file", "repo_revert_last_edit", "repo_compile_candidate"})
+        or (task.gate in {"probe", "public_check"} and "repo_compile_candidate" in helpers)
+    )
     return {
         "id": f'{item["round"][0]}:{item["round"][1]}:{task.task_id}',
         "round": item["round"],
@@ -92,7 +96,7 @@ def assess_frontier_task(item: dict[str, Any]) -> dict[str, Any]:
         "task_key": task_fingerprint(task),
         "primary": sorted(primary),
         "scope": sorted(primary | helpers),
-        "feasible": item["remaining_steps"] >= item["unfinished"],
+        "feasible": item["remaining_steps"] >= item["unfinished"] and bool(primary or prerequisite),
         "priority": [repair_priority, int(bool(primary)), item["descendants"], -item["position"]],
     }
 

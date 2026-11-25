@@ -257,10 +257,8 @@ def run_repository_coding_session(
         )
         try:
             if checkpoint is not None:
-                journal.append(
-                    "session_resumed",
-                    {"previous_turns": checkpoint.state["turns"]},
-                )
+                if not native:
+                    journal.append("session_resumed", {"previous_turns": checkpoint.state["turns"]})
                 events = checkpoint.event_counter
             else:
                 journal.append(
@@ -301,8 +299,13 @@ def run_repository_coding_session(
                 )
                 events = 0
 
+            resume_marker_pending = bool(native and checkpoint is not None)
+
             def save_event(event: dict[str, Any]) -> None:
-                nonlocal events
+                nonlocal events, resume_marker_pending
+                if resume_marker_pending:
+                    journal.append("session_resumed", {"previous_turns": checkpoint.state["turns"]})
+                    resume_marker_pending = False
                 events += 1
                 stage = str(event.get("stage", ""))
                 kinds: dict[str, EventKind] = {
@@ -339,7 +342,7 @@ def run_repository_coding_session(
                     "public",
                 )
 
-            def persist_checkpoint(state: AgentLoopState) -> None:
+            def persist_checkpoint(state: AgentLoopState) -> str:
                 # Tool completion and trace have been fsynced before this
                 # state becomes resumable. A crash in the gap fails closed.
                 integrity = tools.workspace.integrity()
@@ -384,6 +387,7 @@ def run_repository_coding_session(
                         state=dict(state),
                     ),
                 )
+                return hashlib.sha256((output / "session-checkpoint.json").read_bytes()).hexdigest()
 
             if native:
                 from gpu_agent.harness.native_graph import run_native_repository_agent
