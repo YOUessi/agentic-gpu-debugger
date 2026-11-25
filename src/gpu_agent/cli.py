@@ -211,7 +211,9 @@ def harness_repo_run(
     ] = "evidence_first",
     disable_batch_edits: Annotated[bool, typer.Option("--disable-batch-edits")] = False,
     hierarchical: Annotated[bool | None, typer.Option("--hierarchical/--no-hierarchical")] = None,
-    runtime_mode: Annotated[Literal["legacy", "langgraph"], typer.Option("--runtime")] = "langgraph",
+    runtime_mode: Annotated[
+        Literal["legacy", "langgraph"], typer.Option("--runtime")
+    ] = "langgraph",
     review_public_pass: Annotated[bool, typer.Option("--review-public-pass")] = False,
     reject_review: Annotated[bool, typer.Option("--reject-review")] = False,
     stream_graph: Annotated[bool, typer.Option("--stream-graph")] = False,
@@ -251,11 +253,15 @@ def harness_repo_run(
             max_public_checks=max_public_checks,
             context_mode=context_mode,
             allow_batch_edits=not disable_batch_edits,
-            hierarchical_mode=(runtime_mode == "langgraph") if hierarchical is None else hierarchical,
+            hierarchical_mode=(runtime_mode == "langgraph")
+            if hierarchical is None
+            else hierarchical,
             runtime_mode=runtime_mode,
             review_public_pass=review_public_pass,
             approve_review=not reject_review,
-            on_graph_update=(lambda event: typer.echo(__import__("json").dumps(event), err=True)) if stream_graph else None,
+            on_graph_update=(lambda event: typer.echo(__import__("json").dumps(event), err=True))
+            if stream_graph
+            else None,
             syntax_mode=syntax_editing,
             compile_gate=compile_gate,
             allow_revert=allow_revert,

@@ -1200,8 +1200,12 @@ class OpenAIResponsesProvider:
         ).action
 
     def choose_graph_plan(
-        self, snapshot: "SessionSnapshot", *, previous_plan: dict | None,
-        task_status: list[dict], failure: dict | None,
+        self,
+        snapshot: "SessionSnapshot",
+        *,
+        previous_plan: dict | None,
+        task_status: list[dict],
+        failure: dict | None,
     ):
         """Typed variable task DAG; replan only from observed graph evidence."""
         from gpu_agent.harness.graph_plan import GraphTaskPlan

@@ -166,8 +166,10 @@ class EffectJournal:
                     pending = (key, index, row["kind"])
                 else:
                     expected = (
-                        "model_started" if row["kind"] == "model_selected"
-                        else "tool_started" if row["kind"] == "tool_completed"
+                        "model_started"
+                        if row["kind"] == "model_selected"
+                        else "tool_started"
+                        if row["kind"] == "tool_completed"
                         else ""
                     )
                     if pending != (key, index, expected) or not data.get("result_sha256"):
@@ -216,7 +218,9 @@ def project_state(state: NativeState) -> AgentLoopState:
     }
     if state.get("hierarchical"):
         view.update(
-            task_plan=compatibility_plan(GraphTaskPlan.model_validate(state["plan"])).model_dump(mode="json"),
+            task_plan=compatibility_plan(GraphTaskPlan.model_validate(state["plan"])).model_dump(
+                mode="json"
+            ),
             task_progress=state["task_progress"],
             task_reflection=None,
         )
@@ -224,10 +228,13 @@ def project_state(state: NativeState) -> AgentLoopState:
 
 
 def _event(state: NativeState, name: str, **details: Any) -> list[dict]:
-    return [{
-        "id": f"{name}:{state.get('turns', 0)}:{state.get('plan_revision', 0)}",
-        "kind": name, **details,
-    }]
+    return [
+        {
+            "id": f"{name}:{state.get('turns', 0)}:{state.get('plan_revision', 0)}",
+            "kind": name,
+            **details,
+        }
+    ]
 
 
 def _physical_calls(model: Any, fallback: int) -> int:
@@ -248,7 +255,9 @@ def _failure(observation: ToolObservation, turn: int) -> dict[str, Any] | None:
     }
 
 
-def classify_recovery(failure: dict[str, Any] | None, snapshot: dict[str, Any]) -> dict[str, Any] | None:
+def classify_recovery(
+    failure: dict[str, Any] | None, snapshot: dict[str, Any]
+) -> dict[str, Any] | None:
     """Failure-sensitive graph routing; never grants authority or replays effects."""
     if failure is None:
         return None
@@ -276,13 +285,17 @@ def classify_recovery(failure: dict[str, Any] | None, snapshot: dict[str, Any]) 
         guidance = "Use existing evidence or choose a materially different permitted action."
     elif code.startswith(("CUDA_AST_", "CUDA_SYNTAX_", "CUDA_SOURCE_SHA_")):
         strategy = "AST_REBIND"
-        guidance = "Reconcile the source SHA and exact observed node binding; change the rejected edit."
+        guidance = (
+            "Reconcile the source SHA and exact observed node binding; change the rejected edit."
+        )
     else:
         strategy = "REPLAN"
         guidance = "Revise the task DAG using the specific observed rejection or failure."
     return {
-        "strategy": strategy, "guidance": guidance,
-        "failure": failure, "candidate": snapshot.get("current_candidate_sha256"),
+        "strategy": strategy,
+        "guidance": guidance,
+        "failure": failure,
+        "candidate": snapshot.get("current_candidate_sha256"),
         "source_sha256": recovery.get("source_sha256"),
         "revert_available": "repo_revert_last_edit" in allowed,
         "remaining_public_checks": snapshot.get("remaining_public_checks", 0),
@@ -303,6 +316,7 @@ def build_native_graph(
     checkpointer: Any,
 ):
     """Compile parent planning/recovery graph and per-turn Executor subgraph."""
+
     def current_snapshot(state: NativeState) -> dict[str, Any]:
         snapshot = host.snapshot(
             goal, state.get("history", []), max(0, state["max_steps"] - state.get("turns", 0))
@@ -316,7 +330,8 @@ def build_native_graph(
         progress = compatibility_progress(snap, evidence, edited, state.get("last_failure"))
         tasks = (
             evaluate_tasks(GraphTaskPlan.model_validate(state["plan"]), evidence, snap, edited)
-            if state.get("plan") else []
+            if state.get("plan")
+            else []
         )
         return {
             "snapshot": snap,
@@ -334,22 +349,25 @@ def build_native_graph(
             data["task_progress"] = state["task_progress"]
             ready = [x for x in state["task_status"] if x["status"] in ("READY", "STALE")]
             objective_by_id = {t.task_id: t.objective for t in plan.tasks}
-            priorities = [
-                {**x, "objective": objective_by_id[x["task_id"]]} for x in ready
-            ]
-            graph_context = json.dumps({
-                "plan_revision": state["plan_revision"],
-                "ready_or_stale_tasks": priorities,
-                "task_status": state["task_status"],
-                "last_failure": state.get("last_failure"),
-                "recovery": state.get("recovery_state"),
-                "revision_reason": plan.revision_reason,
-            }, ensure_ascii=False)
+            priorities = [{**x, "objective": objective_by_id[x["task_id"]]} for x in ready]
+            graph_context = json.dumps(
+                {
+                    "plan_revision": state["plan_revision"],
+                    "ready_or_stale_tasks": priorities,
+                    "task_status": state["task_status"],
+                    "last_failure": state.get("last_failure"),
+                    "recovery": state.get("recovery_state"),
+                    "revision_reason": plan.revision_reason,
+                },
+                ensure_ascii=False,
+            )
             # Preserve the most relevant previous controller guidance. The full
             # evidence and plan stay in persisted graph state, not prompt text.
             data["context_summary"] = (
                 "GRAPH_PLAN (advisory; allowed_tools remains authoritative):\n"
-                + graph_context[:1700] + "\n" + data.get("context_summary", "")
+                + graph_context[:1700]
+                + "\n"
+                + data.get("context_summary", "")
             )[:2800]
         return SessionSnapshot.model_validate_json(json.dumps(data))
 
@@ -361,9 +379,11 @@ def build_native_graph(
             raise ValueError("graph planner requires typed choose_graph_plan")
         role = "reflect" if old else "planner"
         plan = ledger.perform(
-            f"plan-{revision}", role,
+            f"plan-{revision}",
+            role,
             lambda: callback(
-                model_snapshot(state), previous_plan=old,
+                model_snapshot(state),
+                previous_plan=old,
                 task_status=state.get("task_status", []),
                 failure=state.get("last_failure"),
             ),
@@ -374,14 +394,20 @@ def build_native_graph(
         value = plan.model_dump(mode="json")
         calls = state.get("logical_model_calls", 0) + 1
         return {
-            "plan": value, "plan_revision": revision,
+            "plan": value,
+            "plan_revision": revision,
             "plan_revisions": [
                 *state.get("plan_revisions", []),
-                {"revision": revision, "turn": state.get("turns", 0),
-                 "plan": value, "trigger": state.get("last_failure")},
+                {
+                    "revision": revision,
+                    "turn": state.get("turns", 0),
+                    "plan": value,
+                    "trigger": state.get("last_failure"),
+                },
             ],
             "last_plan_turn": state.get("turns", 0),
-            "logical_model_calls": calls, "observed_physical_calls": _physical_calls(model, calls),
+            "logical_model_calls": calls,
+            "observed_physical_calls": _physical_calls(model, calls),
             "effects_completed": ledger.completed,
             "effects_head_sha256": ledger.journal.head_hash,
             "events": _event(state, f"{role}_completed", new_revision=revision),
@@ -389,9 +415,12 @@ def build_native_graph(
 
     def gate(state: NativeState) -> dict[str, Any]:
         reason = (
-            "GRAPH_DEADLINE_EXHAUSTED" if time.time() >= state["deadline"]
-            else "STEP_BUDGET_EXHAUSTED" if state["turns"] >= state["max_steps"]
-            else "GRAPH_MODEL_BUDGET_EXHAUSTED" if state["observed_physical_calls"] >= state["max_model_calls"]
+            "GRAPH_DEADLINE_EXHAUSTED"
+            if time.time() >= state["deadline"]
+            else "STEP_BUDGET_EXHAUSTED"
+            if state["turns"] >= state["max_steps"]
+            else "GRAPH_MODEL_BUDGET_EXHAUSTED"
+            if state["observed_physical_calls"] >= state["max_model_calls"]
             else None
         )
         if reason:
@@ -424,7 +453,14 @@ def build_native_graph(
         )
         if not isinstance(decision, HarnessDecision):
             raise ValueError("executor must return one typed HarnessDecision")
-        on_event({"stage": "model", "turn": turn, "tool": decision.action.tool, "reason": decision.reason})
+        on_event(
+            {
+                "stage": "model",
+                "turn": turn,
+                "tool": decision.action.tool,
+                "reason": decision.reason,
+            }
+        )
         calls = state.get("logical_model_calls", 0) + 1
         return {
             "decision": decision.model_dump(mode="json"),
@@ -456,30 +492,54 @@ def build_native_graph(
             raise ValueError("tool host returned an invalid observation")
         if observation.tool != decision.action.tool:
             raise ValueError("tool observation does not bind to the decision")
-        on_event({
-            "stage": "tool", "turn": turn, "tool": observation.tool, "status": observation.status,
-            "observation_sha256": hashlib.sha256(observation.model_dump_json().encode()).hexdigest(),
-        })
+        on_event(
+            {
+                "stage": "tool",
+                "turn": turn,
+                "tool": observation.tool,
+                "status": observation.status,
+                "observation_sha256": hashlib.sha256(
+                    observation.model_dump_json().encode()
+                ).hexdigest(),
+            }
+        )
         history = [
             *state.get("history", []),
-            {"tool": observation.tool, "status": observation.status, "content": observation.content[:3900]},
+            {
+                "tool": observation.tool,
+                "status": observation.status,
+                "content": observation.content[:3900],
+            },
         ]
-        after = host.snapshot(goal, history, max(0, state["max_steps"] - turn)).model_dump(mode="json")
+        after = host.snapshot(goal, history, max(0, state["max_steps"] - turn)).model_dump(
+            mode="json"
+        )
         failure = _failure(observation, turn)
         path = getattr(decision.action, "path", None) or ""
-        if observation.tool in ("repo_compile_candidate", "repo_probe_public", "repo_run_public_checks", "repo_revert_last_edit"):
+        if observation.tool in (
+            "repo_compile_candidate",
+            "repo_probe_public",
+            "repo_run_public_checks",
+            "repo_revert_last_edit",
+        ):
             path = after.get("registered_kernel_path") or ""
         evidence = {
-            "turn": turn, "tool": observation.tool, "gate": TOOL_GATES.get(observation.tool, "denied"),
-            "path": path, "status": observation.status,
+            "turn": turn,
+            "tool": observation.tool,
+            "gate": TOOL_GATES.get(observation.tool, "denied"),
+            "path": path,
+            "status": observation.status,
             "candidate_before": state["snapshot"].get("current_candidate_sha256"),
             "candidate": after.get("current_candidate_sha256"),
             "artifact_id": observation.artifact_id,
             "observation_sha256": digest(observation.model_dump(mode="json")),
         }
         return {
-            "turns": turn, "history": history, "observation": observation.model_dump(mode="json"),
-            "evidence": [*state.get("evidence", []), evidence], "snapshot": after,
+            "turns": turn,
+            "history": history,
+            "observation": observation.model_dump(mode="json"),
+            "evidence": [*state.get("evidence", []), evidence],
+            "snapshot": after,
             "last_failure": failure,
             "failure_streak": state.get("failure_streak", 0) + 1 if failure else 0,
             "finish_accepted": observation.tool == "finish" and observation.status == "OK",
@@ -491,7 +551,16 @@ def build_native_graph(
     executor = StateGraph(NativeState)
     executor.add_node("choose", choose)
     executor.add_edge(START, "choose")
-    tool_nodes = ("inspect", "edit", "compile", "probe", "public_check", "revert", "finish", "denied")
+    tool_nodes = (
+        "inspect",
+        "edit",
+        "compile",
+        "probe",
+        "public_check",
+        "revert",
+        "finish",
+        "denied",
+    )
     for node in tool_nodes:
         executor.add_node(node, perform_tool)
         executor.add_edge(node, END)
@@ -520,17 +589,29 @@ def build_native_graph(
             and snap.get("current_candidate_sha256") != state.get("reviewed_candidate")
         )
         pause = (
-            not done and not infra_failure and not expired and turn < state["max_steps"]
+            not done
+            and not infra_failure
+            and not expired
+            and turn < state["max_steps"]
             and ((pause_after_turns is not None and turn >= pause_after_turns) or manual_review)
         )
         reason = (
-            "GRAPH_DEADLINE_EXHAUSTED" if expired else host.completion_reason if done else "GRAPH_INFRASTRUCTURE_FAILURE" if infra_failure
-            else "STEP_BUDGET_EXHAUSTED" if turn >= state["max_steps"]
-            else "SESSION_PAUSED" if pause else "CONTINUE"
+            "GRAPH_DEADLINE_EXHAUSTED"
+            if expired
+            else host.completion_reason
+            if done
+            else "GRAPH_INFRASTRUCTURE_FAILURE"
+            if infra_failure
+            else "STEP_BUDGET_EXHAUSTED"
+            if turn >= state["max_steps"]
+            else "SESSION_PAUSED"
+            if pause
+            else "CONTINUE"
         )
         update = {
             "stop": done or infra_failure or expired or turn >= state["max_steps"] or pause,
-            "reason": reason, "pause_requested": pause,
+            "reason": reason,
+            "pause_requested": pause,
             "review_kind": "public_candidate_review" if manual_review else "operator_pause",
         }
         on_checkpoint(project_state(cast(NativeState, {**state, **update})))
@@ -544,19 +625,31 @@ def build_native_graph(
     def review(state: NativeState) -> Command[Literal["refresh", "terminal"]]:
         # interrupt must precede any new external effect. The resume command is
         # explicit operator input, not a model-issued approval.
-        response = interrupt({
-            "kind": state["review_kind"], "turn": state["turns"],
-            "candidate": state["snapshot"].get("current_candidate_sha256"),
-            "public_checks_passed": state["snapshot"].get("public_checks_passed"),
-            "task_status": state.get("task_status", []),
-        })
+        response = interrupt(
+            {
+                "kind": state["review_kind"],
+                "turn": state["turns"],
+                "candidate": state["snapshot"].get("current_candidate_sha256"),
+                "public_checks_passed": state["snapshot"].get("public_checks_passed"),
+                "task_status": state.get("task_status", []),
+            }
+        )
         if not isinstance(response, dict) or type(response.get("approved")) is not bool:
             raise ValueError("operator review requires explicit boolean approval")
         if not response["approved"]:
-            return Command(update={"stop": True, "reason": "GRAPH_OPERATOR_REJECTED", "pause_requested": False}, goto="terminal")
+            return Command(
+                update={
+                    "stop": True,
+                    "reason": "GRAPH_OPERATOR_REJECTED",
+                    "pause_requested": False,
+                },
+                goto="terminal",
+            )
         return Command(
             update={
-                "stop": False, "reason": "CONTINUE", "pause_requested": False,
+                "stop": False,
+                "reason": "CONTINUE",
+                "pause_requested": False,
                 "reviewed_candidate": state["snapshot"].get("current_candidate_sha256"),
                 "events": _event(state, "operator_review", approved=True),
             },
@@ -580,7 +673,8 @@ def build_native_graph(
     graph.add_edge(START, "refresh")
     graph.add_edge("refresh", "budget_gate")
     graph.add_conditional_edges(
-        "budget_gate", route_gate,
+        "budget_gate",
+        route_gate,
         {n: n for n in ("planner", "replan", "executor", "terminal")},
     )
     graph.add_edge("planner", "refresh")
@@ -588,7 +682,9 @@ def build_native_graph(
     graph.add_edge("executor", "reconcile")
     graph.add_edge("reconcile", "recovery")
     graph.add_edge("recovery", "checkpoint")
-    graph.add_conditional_edges("checkpoint", route_boundary, {n: n for n in ("review", "terminal", "refresh")})
+    graph.add_conditional_edges(
+        "checkpoint", route_boundary, {n: n for n in ("review", "terminal", "refresh")}
+    )
     graph.add_edge("terminal", END)
     return graph.compile(checkpointer=checkpointer)
 
@@ -617,11 +713,15 @@ def run_native_repository_agent(
     resume = initial_state is not None
     db_path = output / DB_NAME
     header = {
-        "version": VERSION, "run_id": host.run_id,
+        "version": VERSION,
+        "run_id": host.run_id,
         "goal_sha256": hashlib.sha256(goal.encode()).hexdigest(),
         "base_sha": host.workspace.base_sha,
-        "deadline": deadline, "max_steps": max_steps, "max_model_calls": max_model_calls,
-        "hierarchical": hierarchical_mode, "review_public_pass": review_public_pass,
+        "deadline": deadline,
+        "max_steps": max_steps,
+        "max_model_calls": max_model_calls,
+        "hierarchical": hierarchical_mode,
+        "review_public_pass": review_public_pass,
     }
     if resume:
         if read_native_header(output) != header:
@@ -638,12 +738,20 @@ def run_native_repository_agent(
         conn.execute("PRAGMA synchronous=FULL")
         saver = SqliteSaver(conn)
         graph = build_native_graph(
-            model=model, host=host, goal=goal, ledger=ledger,
-            on_event=on_event, on_checkpoint=on_checkpoint,
-            pause_after_turns=pause_after_turns, review_public_pass=review_public_pass,
+            model=model,
+            host=host,
+            goal=goal,
+            ledger=ledger,
+            on_event=on_event,
+            on_checkpoint=on_checkpoint,
+            pause_after_turns=pause_after_turns,
+            review_public_pass=review_public_pass,
             checkpointer=saver,
         )
-        config = {"configurable": {"thread_id": host.run_id}, "recursion_limit": max_steps * 12 + 40}
+        config = {
+            "configurable": {"thread_id": host.run_id},
+            "recursion_limit": max_steps * 12 + 40,
+        }
         if resume:
             saved = graph.get_state(config)
             state = cast(NativeState, saved.values)
@@ -657,47 +765,78 @@ def run_native_repository_agent(
                 or state.get("observation") != initial_state["observation"]
                 or host.tool_calls != state.get("turns")
             ):
-                raise ValueError("native checkpoint, effect ledger and workspace disagree; no replay")
+                raise ValueError(
+                    "native checkpoint, effect ledger and workspace disagree; no replay"
+                )
             if state.get("reason") == "SESSION_PAUSED":
                 if saved.next != ("review",) or not any(t.interrupts for t in saved.tasks):
                     raise ValueError("native pause is not at an authenticated interrupt boundary")
                 graph_input = Command(resume={"approved": approve_review})
             elif state.get("stop"):
                 raise ValueError("terminal native session cannot be resumed")
-            elif saved.next not in (("refresh",), ("budget_gate",), ("planner",), ("replan",), ("checkpoint",), ("executor",)):
+            elif saved.next not in (
+                ("refresh",),
+                ("budget_gate",),
+                ("planner",),
+                ("replan",),
+                ("checkpoint",),
+                ("executor",),
+            ):
                 raise ValueError("native graph has no safe continuation boundary")
             else:
                 graph_input = None
         else:
             graph_input = {
-                "identity": header, "deadline": deadline,
-                "max_steps": max_steps, "max_model_calls": max_model_calls,
+                "identity": header,
+                "deadline": deadline,
+                "max_steps": max_steps,
+                "max_model_calls": max_model_calls,
                 "hierarchical": hierarchical_mode,
                 "max_replans": max_replans_for(max_steps, max_model_calls, hierarchical_mode),
-                "history": [], "events": [], "evidence": [], "turns": 0,
-                "logical_model_calls": 0, "observed_physical_calls": 0, "effects_completed": 0,
+                "history": [],
+                "events": [],
+                "evidence": [],
+                "turns": 0,
+                "logical_model_calls": 0,
+                "observed_physical_calls": 0,
+                "effects_completed": 0,
                 "effects_head_sha256": ledger.journal.head_hash,
-                "plan_revisions": [], "plan_revision": 0, "last_plan_turn": 0,
-                "last_failure": None, "failure_streak": 0, "recovery_state": None,
-                "finish_accepted": False, "stop": False, "reason": "CONTINUE", "pause_requested": False,
+                "plan_revisions": [],
+                "plan_revision": 0,
+                "last_plan_turn": 0,
+                "last_failure": None,
+                "failure_streak": 0,
+                "recovery_state": None,
+                "finish_accepted": False,
+                "stop": False,
+                "reason": "CONTINUE",
+                "pause_requested": False,
             }
         # Sync durability guarantees each native superstep is saved before the
         # next node. Do not use async writes for external side effects.
         for namespace, chunk in graph.stream(
-            graph_input, config=config, durability="sync",
-            stream_mode="updates", subgraphs=True,
+            graph_input,
+            config=config,
+            durability="sync",
+            stream_mode="updates",
+            subgraphs=True,
         ):
             if on_graph_update is not None and isinstance(chunk, dict):
                 for node, update in chunk.items():
                     # Stream only bounded graph progress, not source/model payloads.
                     details = update if isinstance(update, dict) else {}
-                    on_graph_update({
-                        "namespace": list(namespace), "node": node,
-                        "turns": details.get("turns"),
-                        "plan_revision": details.get("plan_revision"),
-                        "reason": details.get("reason"),
-                        "recovery_strategy": (details.get("recovery_state") or {}).get("strategy"),
-                    })
+                    on_graph_update(
+                        {
+                            "namespace": list(namespace),
+                            "node": node,
+                            "turns": details.get("turns"),
+                            "plan_revision": details.get("plan_revision"),
+                            "reason": details.get("reason"),
+                            "recovery_strategy": (details.get("recovery_state") or {}).get(
+                                "strategy"
+                            ),
+                        }
+                    )
         saved = graph.get_state(config)
         result = cast(NativeState, saved.values)
         if (
@@ -705,10 +844,17 @@ def run_native_repository_agent(
             or result.get("effects_head_sha256") != ledger.journal.head_hash
         ):
             raise ValueError("graph state did not durably account for all effects")
-        if saved.next and not (result.get("reason") == "SESSION_PAUSED" and saved.next == ("review",)):
+        if saved.next and not (
+            result.get("reason") == "SESSION_PAUSED" and saved.next == ("review",)
+        ):
             raise ValueError("graph ended at an unexpected continuation")
         if result.get("turns", 0) == 0:
-            return {"history": [], "turns": 0, "stop": True, "reason": result.get("reason", "UNKNOWN")}
+            return {
+                "history": [],
+                "turns": 0,
+                "stop": True,
+                "reason": result.get("reason", "UNKNOWN"),
+            }
         return project_state(result)
     finally:
         conn.close()
@@ -736,18 +882,23 @@ def inspect_native_graph(output: Path) -> dict[str, Any]:
         values = current.checkpoint["channel_values"]
         checkpoints = list(saver.list(config))
         return {
-            "version": VERSION, "thread_id": header["run_id"],
+            "version": VERSION,
+            "thread_id": header["run_id"],
             "checkpoint_id": current.checkpoint["id"],
             "checkpoint_count": len(checkpoints),
             "recent_checkpoints": [
-                {"checkpoint_id": item.checkpoint["id"], "step": item.metadata.get("step"),
-                 "source": item.metadata.get("source"),
-                 "turns": item.checkpoint["channel_values"].get("turns"),
-                 "plan_revision": item.checkpoint["channel_values"].get("plan_revision")}
+                {
+                    "checkpoint_id": item.checkpoint["id"],
+                    "step": item.metadata.get("step"),
+                    "source": item.metadata.get("source"),
+                    "turns": item.checkpoint["channel_values"].get("turns"),
+                    "plan_revision": item.checkpoint["channel_values"].get("plan_revision"),
+                }
                 for item in checkpoints[:20]
             ],
             "turns": values.get("turns", 0),
-            "reason": values.get("reason"), "plan_revision": values.get("plan_revision", 0),
+            "reason": values.get("reason"),
+            "plan_revision": values.get("plan_revision", 0),
             "task_status": values.get("task_status", []),
             "observed_physical_calls": values.get("observed_physical_calls", 0),
             "effects_completed": values.get("effects_completed", 0),

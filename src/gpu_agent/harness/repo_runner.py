@@ -90,10 +90,10 @@ def run_repository_coding_session(
         raise ValueError("pause boundary must precede the total step budget")
     deadline = time.time() + 600
     if native:
-        from gpu_agent.harness.native_graph import max_replans_for, read_native_header
-
         # Verify dependency before constructing the workspace or model provider.
         from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: F401
+
+        from gpu_agent.harness.native_graph import max_replans_for, read_native_header
 
         max_replans = max_replans_for(max_steps, max_model_calls, hierarchical_mode)
         if resume:
@@ -373,13 +373,21 @@ def run_repository_coding_session(
                 from gpu_agent.harness.native_graph import run_native_repository_agent
 
                 state = run_native_repository_agent(
-                    model, tools, output=output, goal=goal,
-                    max_steps=max_steps, max_model_calls=max_model_calls,
-                    hierarchical_mode=hierarchical_mode, deadline=deadline,
-                    on_event=save_event, on_checkpoint=persist_checkpoint,
+                    model,
+                    tools,
+                    output=output,
+                    goal=goal,
+                    max_steps=max_steps,
+                    max_model_calls=max_model_calls,
+                    hierarchical_mode=hierarchical_mode,
+                    deadline=deadline,
+                    on_event=save_event,
+                    on_checkpoint=persist_checkpoint,
                     initial_state=cast(AgentLoopState, checkpoint.state) if checkpoint else None,
-                    pause_after_turns=pause_after_turns, review_public_pass=review_public_pass,
-                    approve_review=approve_review, on_graph_update=on_graph_update,
+                    pause_after_turns=pause_after_turns,
+                    review_public_pass=review_public_pass,
+                    approve_review=approve_review,
+                    on_graph_update=on_graph_update,
                 )
             else:
                 state = run_tool_agent(

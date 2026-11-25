@@ -56,15 +56,9 @@ class GraphTaskPlan(StrictModel):
         ancestors: dict[str, set[str]] = {}
         for task in self.tasks:
             deps = set(task.depends_on)
-            if (
-                task.task_id in seen
-                or len(deps) != len(task.depends_on)
-                or not deps <= seen
-            ):
+            if task.task_id in seen or len(deps) != len(task.depends_on) or not deps <= seen:
                 raise ValueError("task IDs and dependencies must form a topologically ordered DAG")
-            ancestors[task.task_id] = deps | set().union(
-                *(ancestors[dep] for dep in deps)
-            )
+            ancestors[task.task_id] = deps | set().union(*(ancestors[dep] for dep in deps))
             seen.add(task.task_id)
         if (
             self.tasks[-1].gate != "finish"
@@ -98,7 +92,8 @@ def evaluate_tasks(
     results: dict[str, dict[str, Any]] = {}
     for task in plan.tasks:
         matches = [
-            e for e in evidence
+            e
+            for e in evidence
             if e["gate"] == task.gate
             and e["status"] == "OK"
             and (not task.target or e.get("path") == task.target)
@@ -109,14 +104,21 @@ def evaluate_tasks(
             and snapshot.get("context_mode") == "evidence_first"
             and task.target in ("", snapshot.get("registered_kernel_path"))
         ):
-            matches.insert(0, {
-                "turn": 0, "candidate": candidate,
-                "artifact_id": None, "source": "registered_context",
-            })
+            matches.insert(
+                0,
+                {
+                    "turn": 0,
+                    "candidate": candidate,
+                    "artifact_id": None,
+                    "source": "registered_context",
+                },
+            )
         if task.gate == "edit":
             matches = [
-                e for e in matches
-                if candidate and (
+                e
+                for e in matches
+                if candidate
+                and (
                     e.get("path") in edited_files
                     or (not e.get("path") and e.get("candidate") == candidate)
                 )
@@ -138,9 +140,12 @@ def evaluate_tasks(
             prerequisite_turn = max(results[d]["evidence_turn"] for d in task.depends_on)
             current = [e for e in current if e["turn"] > prerequisite_turn]
         status = (
-            "DONE" if current and dependencies_done
-            else "BLOCKED" if not dependencies_done
-            else "STALE" if matches
+            "DONE"
+            if current and dependencies_done
+            else "BLOCKED"
+            if not dependencies_done
+            else "STALE"
+            if matches
             else "READY"
         )
         results[task.task_id] = {
@@ -165,11 +170,13 @@ def compatibility_plan(plan: GraphTaskPlan) -> TaskPlan:
     milestones: list[PlanMilestone] = []
     for gate in ("inspect", "edit", "public_check", "finish"):
         objectives = [t.objective for t in plan.tasks if t.gate == gate]
-        milestones.append(PlanMilestone(
-            gate=gate,
-            objective=("; ".join(objectives)[:220] if objectives else defaults[gate]),
-            success_evidence="Controller-recorded observation for the exact candidate where applicable",
-        ))
+        milestones.append(
+            PlanMilestone(
+                gate=gate,
+                objective=("; ".join(objectives)[:220] if objectives else defaults[gate]),
+                success_evidence="Controller evidence for the exact candidate where applicable",
+            )
+        )
     return TaskPlan(milestones=milestones, failure_risk=plan.failure_risk)
 
 
@@ -179,19 +186,30 @@ def compatibility_progress(
     edited_files: list[str],
     failure: dict[str, Any] | None,
 ) -> TaskProgress:
-    inspected = (
-        bool(snapshot.get("registered_public_case") and snapshot.get("context_mode") == "evidence_first")
-        or any(e["gate"] == "inspect" and e["status"] == "OK" for e in evidence)
-    )
+    inspected = bool(
+        snapshot.get("registered_public_case") and snapshot.get("context_mode") == "evidence_first"
+    ) or any(e["gate"] == "inspect" and e["status"] == "OK" for e in evidence)
     edited = bool(edited_files and snapshot.get("current_candidate_sha256"))
     checked = bool(snapshot.get("public_checks_passed"))
-    finished = bool(evidence and evidence[-1]["gate"] == "finish" and evidence[-1]["status"] == "OK")
+    finished = bool(
+        evidence and evidence[-1]["gate"] == "finish" and evidence[-1]["status"] == "OK"
+    )
     gate = (
-        "done" if finished else "inspect" if not inspected else "edit" if not edited
-        else "public_check" if snapshot.get("registered_public_case") and not checked
+        "done"
+        if finished
+        else "inspect"
+        if not inspected
+        else "edit"
+        if not edited
+        else "public_check"
+        if snapshot.get("registered_public_case") and not checked
         else "finish"
     )
     return TaskProgress(
-        inspected=inspected, edited=edited, public_checked=checked, finished=finished,
-        active_gate=gate, last_failure_code=(failure["code"][:160] if failure else None),
+        inspected=inspected,
+        edited=edited,
+        public_checked=checked,
+        finished=finished,
+        active_gate=gate,
+        last_failure_code=(failure["code"][:160] if failure else None),
     )
