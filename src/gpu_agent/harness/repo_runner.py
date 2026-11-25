@@ -89,9 +89,13 @@ def run_repository_coding_session(
     if runtime_mode not in ("legacy", "langgraph"):
         raise ValueError("unknown repository runtime")
     if not native and (
-        review_public_pass or not approve_review or on_graph_update is not None
-        or memory_mode != "off" or memory_database is not None
-        or memory_scope is not None or memory_embedding_model is not None
+        review_public_pass
+        or not approve_review
+        or on_graph_update is not None
+        or memory_mode != "off"
+        or memory_database is not None
+        or memory_scope is not None
+        or memory_embedding_model is not None
     ):
         raise ValueError("native review and memory require the langgraph runtime")
     memory, memory_store = {"mode": "off"}, None
@@ -99,8 +103,12 @@ def run_repository_coding_session(
         from gpu_agent.harness.graph_memory import memory_configuration
 
         memory, memory_store = memory_configuration(
-            repository, output, memory_database, memory_scope,
-            memory_mode, memory_embedding_model,
+            repository,
+            output,
+            memory_database,
+            memory_scope,
+            memory_mode,
+            memory_embedding_model,
         )
     if pause_after_turns is not None and not 1 <= pause_after_turns < max_steps:
         raise ValueError("pause boundary must precede the total step budget")
@@ -408,7 +416,8 @@ def run_repository_coding_session(
                     review_public_pass=review_public_pass,
                     approve_review=approve_review,
                     on_graph_update=on_graph_update,
-                    memory=memory, store=memory_store,
+                    memory=memory,
+                    store=memory_store,
                 )
             else:
                 state = run_tool_agent(

@@ -22,11 +22,19 @@ import stat
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
-from langgraph.store.base import BaseStore, GetOp, Item, ListNamespacesOp, PutOp, SearchItem, SearchOp
+from langgraph.store.base import (
+    BaseStore,
+    GetOp,
+    Item,
+    ListNamespacesOp,
+    PutOp,
+    SearchItem,
+    SearchOp,
+)
 
 from gpu_agent.harness.graph_plan import TOOL_GATES
 from gpu_agent.store import reject_symlinks
@@ -34,15 +42,21 @@ from gpu_agent.store import reject_symlinks
 MEMORY_VERSION = "gpu-agent-repair-memory-v1"
 STRATEGIES = {
     "COMPILE_REPAIR": "Use compiler evidence and inspect the exact current source revision.",
-    "NUMERIC_REPAIR": "Diagnose public numeric or sanitizer feedback and check the revised candidate.",
+    "NUMERIC_REPAIR": (
+        "Diagnose public numeric or sanitizer feedback and check the revised candidate."
+    ),
     "AST_REBIND": "Use the current source hash and exact observed AST node binding.",
     "AVOID_DUPLICATE": "Reuse existing evidence and avoid repeating an identical rejected action.",
     "REPLAN": "Revise the next task using the observed tool failure.",
-    "HALT_INFRASTRUCTURE": "Preserve infrastructure failure evidence without retrying uncertain effects.",
+    "HALT_INFRASTRUCTURE": (
+        "Preserve infrastructure failure evidence without retrying uncertain effects."
+    ),
 }
 _TAGS = {
     "COMPILE_REPAIR": "compile build compiler nvcc syntax diagnostic",
-    "NUMERIC_REPAIR": "numeric precision overflow underflow mismatch softmax reduction sanitizer correctness",
+    "NUMERIC_REPAIR": (
+        "numeric precision overflow underflow mismatch softmax reduction sanitizer correctness"
+    ),
     "AST_REBIND": "ast syntax tree sitter binding source revision node hash edit",
     "AVOID_DUPLICATE": "duplicate repeated redundant read rejected",
     "REPLAN": "task plan dependency repair failure",
@@ -85,7 +99,10 @@ class LocalSentenceEmbedder:
         except ImportError as exc:
             raise ValueError("install the optional memory-embeddings dependency") from exc
         self.model = SentenceTransformer(
-            str(root), device="cpu", local_files_only=True, trust_remote_code=False,
+            str(root),
+            device="cpu",
+            local_files_only=True,
+            trust_remote_code=False,
         )
 
     def embed(self, text: str) -> Sequence[float]:
@@ -107,11 +124,16 @@ def rank_texts(texts: list[str], query: str) -> list[float]:
     scores = []
     for row in terms:
         norm = 1.2 * (0.25 + 0.75 * sum(row.values()) / average)
-        scores.append(sum(
-            math.log(1 + (len(terms) - df[term] + 0.5) / (df[term] + 0.5))
-            * row[term] * 2.2 / (row[term] + norm)
-            for term in q if row[term]
-        ))
+        scores.append(
+            sum(
+                math.log(1 + (len(terms) - df[term] + 0.5) / (df[term] + 0.5))
+                * row[term]
+                * 2.2
+                / (row[term] + norm)
+                for term in q
+                if row[term]
+            )
+        )
     return scores
 
 
@@ -132,7 +154,7 @@ def _namespace(namespace: tuple[str, ...]) -> str:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 class SQLiteRepairStore(BaseStore):
@@ -143,8 +165,14 @@ class SQLiteRepairStore(BaseStore):
     documents are accepted by the runtime's memory-writing node.
     """
 
-    def __init__(self, database: Path, namespace: tuple[str, ...], *,
-                 embedder: Embedder | None = None, read_only: bool = False):
+    def __init__(
+        self,
+        database: Path,
+        namespace: tuple[str, ...],
+        *,
+        embedder: Embedder | None = None,
+        read_only: bool = False,
+    ):
         self.database = database.absolute()
         self.namespace = namespace
         self.ns = _namespace(namespace)
@@ -162,22 +190,29 @@ class SQLiteRepairStore(BaseStore):
             except FileExistsError:
                 pass
         info = self.database.stat(follow_symlinks=False)
-        if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600 or info.st_uid != os.getuid():
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or stat.S_IMODE(info.st_mode) != 0o600
+            or info.st_uid != os.getuid()
+        ):
             raise ValueError("memory database must be an operator-owned private file")
         if read_only:
             with closing(self._connect()) as conn:
                 conn.execute("SELECT ns,key,value FROM lessons LIMIT 0")
         else:
             with closing(self._connect()) as conn, conn:
-                conn.execute("CREATE TABLE IF NOT EXISTS lessons ("
-                         "ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, "
-                         "created TEXT NOT NULL, updated TEXT NOT NULL, "
-                         "embedding TEXT, embedding_id TEXT, PRIMARY KEY(ns,key))")
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS lessons ("
+                    "ns TEXT NOT NULL, key TEXT NOT NULL, value TEXT NOT NULL, "
+                    "created TEXT NOT NULL, updated TEXT NOT NULL, "
+                    "embedding TEXT, embedding_id TEXT, PRIMARY KEY(ns,key))"
+                )
 
     def _connect(self):
         conn = sqlite3.connect(
             f"{self.database.as_uri()}?mode=ro" if self.read_only else self.database,
-            timeout=3.0, uri=self.read_only,
+            timeout=3.0,
+            uri=self.read_only,
         )
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA busy_timeout=3000")
@@ -192,9 +227,13 @@ class SQLiteRepairStore(BaseStore):
     @staticmethod
     def _item(row, namespace, *, score=None, search=False):
         value = json.loads(row["value"])
-        args = dict(namespace=namespace, key=row["key"], value=value,
-                    created_at=datetime.fromisoformat(row["created"]),
-                    updated_at=datetime.fromisoformat(row["updated"]))
+        args = dict(
+            namespace=namespace,
+            key=row["key"],
+            value=value,
+            created_at=datetime.fromisoformat(row["created"]),
+            updated_at=datetime.fromisoformat(row["updated"]),
+        )
         return SearchItem(**args, score=score) if search else Item(**args)
 
     def batch(self, ops: Iterable[Any]) -> list[Any]:
@@ -205,8 +244,9 @@ class SQLiteRepairStore(BaseStore):
                 for op in ops:
                     if isinstance(op, GetOp):
                         self._require_scope(op.namespace)
-                        row = conn.execute("SELECT * FROM lessons WHERE ns=? AND key=?",
-                                           (self.ns, op.key)).fetchone()
+                        row = conn.execute(
+                            "SELECT * FROM lessons WHERE ns=? AND key=?", (self.ns, op.key)
+                        ).fetchone()
                         results.append(self._item(row, self.namespace) if row else None)
                     elif isinstance(op, PutOp):
                         if self.read_only:
@@ -215,18 +255,24 @@ class SQLiteRepairStore(BaseStore):
                         if op.ttl is not None:
                             raise ValueError("local repair store does not support TTL")
                         if op.value is None:
-                            conn.execute("DELETE FROM lessons WHERE ns=? AND key=?",
-                                         (self.ns, op.key))
+                            conn.execute(
+                                "DELETE FROM lessons WHERE ns=? AND key=?", (self.ns, op.key)
+                            )
                             results.append(None)
                             continue
                         raw = json.dumps(dict(op.value), ensure_ascii=False, sort_keys=True)
                         if len(raw.encode()) > MAX_VALUE_BYTES:
                             raise ValueError("memory value exceeds bound")
-                        existing = conn.execute("SELECT value FROM lessons WHERE ns=? AND key=?",
-                                                (self.ns, op.key)).fetchone()
-                        if existing is None and conn.execute(
-                            "SELECT count(*) FROM lessons WHERE ns=?", (self.ns,)
-                        ).fetchone()[0] >= MAX_ROWS:
+                        existing = conn.execute(
+                            "SELECT value FROM lessons WHERE ns=? AND key=?", (self.ns, op.key)
+                        ).fetchone()
+                        if (
+                            existing is None
+                            and conn.execute(
+                                "SELECT count(*) FROM lessons WHERE ns=?", (self.ns,)
+                            ).fetchone()[0]
+                            >= MAX_ROWS
+                        ):
                             raise ValueError("memory namespace full; operator maintenance required")
                         if existing is not None and existing["value"] == raw:
                             results.append(None)
@@ -235,7 +281,8 @@ class SQLiteRepairStore(BaseStore):
                             raise ValueError("repair episodes are immutable")
                         vector = (
                             _vector(self.embedder.embed(str(op.value.get("query_text", ""))))
-                            if self.embedder is not None and op.index is not False else None
+                            if self.embedder is not None and op.index is not False
+                            else None
                         )
                         now = _now()
                         conn.execute(
@@ -243,32 +290,47 @@ class SQLiteRepairStore(BaseStore):
                             "ON CONFLICT(ns,key) DO UPDATE SET value=excluded.value,"
                             "updated=excluded.updated,embedding=excluded.embedding,"
                             "embedding_id=excluded.embedding_id",
-                            (self.ns, op.key, raw, now, now,
-                             json.dumps(vector) if vector else None,
-                             self.embedder.identity if vector and self.embedder else None),
+                            (
+                                self.ns,
+                                op.key,
+                                raw,
+                                now,
+                                now,
+                                json.dumps(vector) if vector else None,
+                                self.embedder.identity if vector and self.embedder else None,
+                            ),
                         )
                         results.append(None)
                     elif isinstance(op, SearchOp):
                         self._require_scope(op.namespace_prefix)
                         if not 1 <= op.limit <= 256 or op.offset < 0:
                             raise ValueError("memory query bounds exceeded")
-                        rows = list(conn.execute(
-                            "SELECT * FROM lessons WHERE ns=? ORDER BY updated DESC,key ASC",
-                            (self.ns,),
-                        ))
+                        rows = list(
+                            conn.execute(
+                                "SELECT * FROM lessons WHERE ns=? ORDER BY updated DESC,key ASC",
+                                (self.ns,),
+                            )
+                        )
                         values = [json.loads(row["value"]) for row in rows]
                         if op.filter:
-                            pairs = [(row, value) for row, value in zip(rows, values, strict=True)
-                                     if all(value.get(k) == v for k, v in op.filter.items())]
+                            pairs = [
+                                (row, value)
+                                for row, value in zip(rows, values, strict=True)
+                                if all(value.get(k) == v for k, v in op.filter.items())
+                            ]
                             rows, values = [x[0] for x in pairs], [x[1] for x in pairs]
-                        lexical = rank_texts([str(v.get("query_text", "")) for v in values],
-                                             op.query or "")
+                        lexical = rank_texts(
+                            [str(v.get("query_text", "")) for v in values], op.query or ""
+                        )
                         best = max(lexical, default=0.0)
                         scores = [x / best if best > 0 else 0.0 for x in lexical]
                         if op.query and self.embedder:
                             q = _vector(self.embedder.embed(op.query))
                             for i, row in enumerate(rows):
-                                if row["embedding_id"] != self.embedder.identity or not row["embedding"]:
+                                if (
+                                    row["embedding_id"] != self.embedder.identity
+                                    or not row["embedding"]
+                                ):
                                     continue
                                 vec = _vector(json.loads(row["embedding"]))
                                 if len(vec) != len(q):
@@ -278,25 +340,43 @@ class SQLiteRepairStore(BaseStore):
                         order = sorted(range(len(rows)), key=lambda i: (-scores[i], i))
                         if op.query:
                             order = [i for i in order if scores[i] > 0]
-                        results.append([
-                            self._item(rows[i], self.namespace, score=scores[i] if op.query else None,
-                                       search=True)
-                            for i in order[op.offset:op.offset + op.limit]
-                        ])
+                        results.append(
+                            [
+                                self._item(
+                                    rows[i],
+                                    self.namespace,
+                                    score=scores[i] if op.query else None,
+                                    search=True,
+                                )
+                                for i in order[op.offset : op.offset + op.limit]
+                            ]
+                        )
                     elif isinstance(op, ListNamespacesOp):
+
                         def matches(condition):
                             path = condition.path
                             if len(path) > len(self.namespace):
                                 return False
-                            values = (self.namespace[:len(path)] if condition.match_type == "prefix"
-                                      else self.namespace[-len(path):] if path else ())
-                            return all(a == "*" or a == b for a, b in zip(path, values, strict=True))
-                        exists = conn.execute("SELECT 1 FROM lessons WHERE ns=? LIMIT 1",
-                                              (self.ns,)).fetchone()
-                        names = [self.namespace[:op.max_depth]] if (
-                            exists and all(matches(c) for c in op.match_conditions or ())
-                        ) else []
-                        results.append(names[op.offset:op.offset + op.limit])
+                            values = (
+                                self.namespace[: len(path)]
+                                if condition.match_type == "prefix"
+                                else self.namespace[-len(path) :]
+                                if path
+                                else ()
+                            )
+                            return all(
+                                a == "*" or a == b for a, b in zip(path, values, strict=True)
+                            )
+
+                        exists = conn.execute(
+                            "SELECT 1 FROM lessons WHERE ns=? LIMIT 1", (self.ns,)
+                        ).fetchone()
+                        names = (
+                            [self.namespace[: op.max_depth]]
+                            if (exists and all(matches(c) for c in op.match_conditions or ()))
+                            else []
+                        )
+                        results.append(names[op.offset : op.offset + op.limit])
                     else:
                         raise TypeError("unsupported LangGraph Store operation")
         finally:
@@ -308,8 +388,12 @@ class SQLiteRepairStore(BaseStore):
 
 
 def memory_configuration(
-    repository: Path, output: Path, database: Path | None, scope: str | None,
-    mode: str, embedding_model: Path | None,
+    repository: Path,
+    output: Path,
+    database: Path | None,
+    scope: str | None,
+    mode: str,
+    embedding_model: Path | None,
 ) -> tuple[dict[str, Any], SQLiteRepairStore | None]:
     if mode == "off":
         if any(x is not None for x in (database, scope, embedding_model)):
@@ -328,7 +412,8 @@ def memory_configuration(
     namespace = (MEMORY_VERSION, scope, hashlib.sha256(str(origin).encode()).hexdigest())
     embedder = LocalSentenceEmbedder(embedding_model) if embedding_model else None
     config = {
-        "mode": mode, "namespace": list(namespace),
+        "mode": mode,
+        "namespace": list(namespace),
         "database_sha256": hashlib.sha256(str(db).encode()).hexdigest(),
         "embedding_identity": embedder.identity if embedder else None,
     }
@@ -342,19 +427,30 @@ def make_lesson(state: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     reasons = [
         e.get("recovery", {}).get("strategy")
-        for e in state.get("events", []) if e.get("kind") == "failure_routed"
+        for e in state.get("events", [])
+        if e.get("kind") == "failure_routed"
     ]
     strategies = list(dict.fromkeys(s for s in reasons if s in STRATEGIES))
     tools = [e["tool"] for e in evidence if e.get("tool") in TOOL_GATES]
     snap = state.get("snapshot", {})
     passed = bool(
-        snap.get("public_checks_passed") and snap.get("current_candidate_sha256")
-        and any(e.get("gate") == "public_check" and e.get("status") == "OK"
-                and e.get("candidate") == snap["current_candidate_sha256"] for e in evidence)
+        snap.get("public_checks_passed")
+        and snap.get("current_candidate_sha256")
+        and any(
+            e.get("gate") == "public_check"
+            and e.get("status") == "OK"
+            and e.get("candidate") == snap["current_candidate_sha256"]
+            for e in evidence
+        )
     )
     outcome = (
-        "PUBLIC_PASS" if passed and state.get("finish_accepted") and state.get("reason") == "WORKSPACE_DIFF_STAGED_UNVERIFIED"
-        else "STAGED_UNVERIFIED" if state.get("finish_accepted") and state.get("reason") == "WORKSPACE_DIFF_STAGED_UNVERIFIED"
+        "PUBLIC_PASS"
+        if passed
+        and state.get("finish_accepted")
+        and state.get("reason") == "WORKSPACE_DIFF_STAGED_UNVERIFIED"
+        else "STAGED_UNVERIFIED"
+        if state.get("finish_accepted")
+        and state.get("reason") == "WORKSPACE_DIFF_STAGED_UNVERIFIED"
         else "UNRESOLVED"
     )
     episodes = []
@@ -366,16 +462,22 @@ def make_lesson(state: Mapping[str, Any]) -> dict[str, Any] | None:
         if strategy not in STRATEGIES:
             continue
         turn = recovery.get("failure", {}).get("turn", 0)
-        steps = [{"tool": e["tool"], "status": e["status"]} for e in evidence
-                 if e["turn"] > turn and e["tool"] in TOOL_GATES][:8]
+        steps = [
+            {"tool": e["tool"], "status": e["status"]}
+            for e in evidence
+            if e["turn"] > turn and e["tool"] in TOOL_GATES
+        ][:8]
         episodes.append({"strategy": strategy, "after_failure": steps})
     tags = " ".join(_TAGS[s] for s in strategies)
     query_text = f"cuda coding repair {outcome} {tags} {' '.join(tools[-12:])}"
     return {
-        "schema": MEMORY_VERSION, "run_id": state["identity"]["run_id"],
+        "schema": MEMORY_VERSION,
+        "run_id": state["identity"]["run_id"],
         "effect_head_sha256": state["effects_head_sha256"],
-        "outcome": outcome, "strategies": strategies,
-        "tool_sequence": tools[-12:], "turns": state["turns"],
+        "outcome": outcome,
+        "strategies": strategies,
+        "tool_sequence": tools[-12:],
+        "turns": state["turns"],
         "failure_count": sum(e.get("status") != "OK" for e in evidence),
         "episodes": episodes[-6:],
         "query_text": query_text[:1800],
@@ -388,11 +490,15 @@ def sanitize_lesson(value: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
     run_id = value.get("run_id", "")
     outcome = value.get("outcome")
-    if not isinstance(outcome, str) or not re.fullmatch(r"[a-f0-9]{32}", str(run_id)) or outcome not in {
-        "PUBLIC_PASS", "STAGED_UNVERIFIED", "UNRESOLVED"
-    }:
+    if (
+        not isinstance(outcome, str)
+        or not re.fullmatch(r"[a-f0-9]{32}", str(run_id))
+        or outcome not in {"PUBLIC_PASS", "STAGED_UNVERIFIED", "UNRESOLVED"}
+    ):
         return None
-    if not isinstance(value.get("strategies"), list) or not isinstance(value.get("tool_sequence"), list):
+    if not isinstance(value.get("strategies"), list) or not isinstance(
+        value.get("tool_sequence"), list
+    ):
         return None
     strategies = [s for s in value["strategies"] if isinstance(s, str) and s in STRATEGIES][:6]
     tools = [t for t in value["tool_sequence"] if isinstance(t, str) and t in TOOL_GATES][-12:]
@@ -403,21 +509,32 @@ def sanitize_lesson(value: Mapping[str, Any]) -> dict[str, Any] | None:
         raw = episode.get("after_failure")
         if not isinstance(raw, list):
             continue
-        steps = [{"tool": x["tool"], "status": x["status"]} for x in raw
-                 if isinstance(x, dict) and isinstance(x.get("tool"), str)
-                 and x["tool"] in TOOL_GATES and x.get("status") in ("OK", "FAILED", "REJECTED")][:8]
+        steps = [
+            {"tool": x["tool"], "status": x["status"]}
+            for x in raw
+            if isinstance(x, dict)
+            and isinstance(x.get("tool"), str)
+            and x["tool"] in TOOL_GATES
+            and x.get("status") in ("OK", "FAILED", "REJECTED")
+        ][:8]
         episodes.append({"strategy": episode["strategy"], "after_failure": steps})
     return {
-        "run_id": run_id, "outcome": outcome,
+        "run_id": run_id,
+        "outcome": outcome,
         "episodes": episodes[-6:],
-        "strategies": strategies, "tool_sequence": tools,
-        "query_text": " ".join(["cuda coding repair", outcome, *(_TAGS[s] for s in strategies), *tools]),
+        "strategies": strategies,
+        "tool_sequence": tools,
+        "query_text": " ".join(
+            ["cuda coding repair", outcome, *(_TAGS[s] for s in strategies), *tools]
+        ),
     }
 
 
-def select_lessons(pool: list[dict[str, Any]], query: str, *, limit: int = 3) -> list[dict[str, Any]]:
+def select_lessons(
+    pool: list[dict[str, Any]], query: str, *, limit: int = 3
+) -> list[dict[str, Any]]:
     scores = rank_texts([x["query_text"] for x in pool], query)
-    order = sorted(range(len(pool)), key=lambda i: (
-        -scores[i], -float(pool[i].get("initial_score") or 0), i
-    ))
+    order = sorted(
+        range(len(pool)), key=lambda i: (-scores[i], -float(pool[i].get("initial_score") or 0), i)
+    )
     return [pool[i] for i in order[:limit] if scores[i] > 0 or pool[i].get("initial_score", 0) > 0]

@@ -608,34 +608,69 @@ def test_real_provider_adapter_admits_planner_and_replanner_roles(repository, tm
     assert all(i.prompt_version == "gpu-repository-graph-dag-v1" for i in provider.invocations())
 
 
-
 def test_real_parallel_frontier_and_task_scoped_denial(repository, tmp_path):
     repo, sha = repository
     (repo / "other.cu").write_text("float y = 3.0f;\n")
     git(repo, "add", ".")
-    git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
-        "commit", "-q", "-m", "second independent source")
+    git(
+        repo,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-q",
+        "-m",
+        "second independent source",
+    )
     sha = git(repo, "rev-parse", "HEAD")
 
     class ParallelModel(Model):
         def choose_graph_plan(self, snapshot, *, previous_plan, task_status, failure):
             self.plans.append({"previous": previous_plan, "failure": failure})
-            return GraphTaskPlan.model_validate({
-                "tasks": [
-                    {"task_id": "t1", "gate": "inspect", "target": "kernel.cu",
-                     "objective": "Inspect the first independent CUDA file", "depends_on": []},
-                    {"task_id": "t2", "gate": "inspect", "target": "other.cu",
-                     "objective": "Inspect the second independent CUDA file", "depends_on": []},
-                    {"task_id": "t3", "gate": "edit", "target": "kernel.cu",
-                     "objective": "Correct the first file's float literal", "depends_on": ["t1"]},
-                    {"task_id": "t4", "gate": "edit", "target": "other.cu",
-                     "objective": "Correct the second file's float literal", "depends_on": ["t2"]},
-                    {"task_id": "t5", "gate": "finish", "target": "",
-                     "objective": "Stage both corrected independent files", "depends_on": ["t3", "t4"]},
-                ],
-                "revision_reason": "Independent source tasks with a common finish barrier",
-                "failure_risk": "Edits must not escape the currently selected file scope",
-            })
+            return GraphTaskPlan.model_validate(
+                {
+                    "tasks": [
+                        {
+                            "task_id": "t1",
+                            "gate": "inspect",
+                            "target": "kernel.cu",
+                            "objective": "Inspect the first independent CUDA file",
+                            "depends_on": [],
+                        },
+                        {
+                            "task_id": "t2",
+                            "gate": "inspect",
+                            "target": "other.cu",
+                            "objective": "Inspect the second independent CUDA file",
+                            "depends_on": [],
+                        },
+                        {
+                            "task_id": "t3",
+                            "gate": "edit",
+                            "target": "kernel.cu",
+                            "objective": "Correct the first file's float literal",
+                            "depends_on": ["t1"],
+                        },
+                        {
+                            "task_id": "t4",
+                            "gate": "edit",
+                            "target": "other.cu",
+                            "objective": "Correct the second file's float literal",
+                            "depends_on": ["t2"],
+                        },
+                        {
+                            "task_id": "t5",
+                            "gate": "finish",
+                            "target": "",
+                            "objective": "Stage both corrected independent files",
+                            "depends_on": ["t3", "t4"],
+                        },
+                    ],
+                    "revision_reason": "Independent source tasks with a common finish barrier",
+                    "failure_risk": "Edits must not escape the currently selected file scope",
+                }
+            )
 
     # The first two read tasks have a shared frontier. A deliberately
     # premature finish and then wrong-target write are rejected by real host.
@@ -644,10 +679,16 @@ def test_real_parallel_frontier_and_task_scoped_denial(repository, tmp_path):
     model = ParallelModel([FINISH, READ, second_read, second_edit, EDIT, second_edit, FINISH])
     stream = []
     out = tmp_path / "parallel"
-    result = run_repository_coding_session(**args(
-        (repo, sha), out, model, max_steps=12, max_model_calls=20,
-        on_graph_update=stream.append,
-    ))
+    result = run_repository_coding_session(
+        **args(
+            (repo, sha),
+            out,
+            model,
+            max_steps=12,
+            max_model_calls=20,
+            on_graph_update=stream.append,
+        )
+    )
     assert result.status == "DIFF_STAGED_UNVERIFIED"
     assert (out / "worktree/kernel.cu").read_text() == "float x = 2.0f;\n"
     assert (out / "worktree/other.cu").read_text() == "float y = 4.0f;\n"
@@ -664,11 +705,16 @@ def test_real_parallel_frontier_and_task_scoped_denial(repository, tmp_path):
 def test_distinct_same_gate_milestones_cannot_reuse_one_edit():
     p = plan()
     data = p.model_dump()
-    data["tasks"].insert(2, {
-        "task_id": "t4", "gate": "edit", "target": "kernel.cu",
-        "objective": "Perform a second independent source correction",
-        "depends_on": ["t1"],
-    })
+    data["tasks"].insert(
+        2,
+        {
+            "task_id": "t4",
+            "gate": "edit",
+            "target": "kernel.cu",
+            "objective": "Perform a second independent source correction",
+            "depends_on": ["t1"],
+        },
+    )
     data["tasks"][-1]["depends_on"] = ["t2", "t4"]
     p = GraphTaskPlan.model_validate(data)
     evidence = [
@@ -704,9 +750,16 @@ def test_native_memory_persists_between_sessions_and_respects_read_only(reposito
     before = hashlib.sha256(db.read_bytes()).hexdigest()
     out2 = tmp_path / "retrieve"
     second = Model([READ, EDIT, FINISH])
-    final = run_repository_coding_session(**args(
-        repository, out2, second, memory_mode="read", memory_database=db, memory_scope="repo-tests",
-    ))
+    final = run_repository_coding_session(
+        **args(
+            repository,
+            out2,
+            second,
+            memory_mode="read",
+            memory_database=db,
+            memory_scope="repo-tests",
+        )
+    )
     assert final.status == "DIFF_STAGED_UNVERIFIED"
     assert inspect_native_graph(out2)["retrieved_memory_ids"] == [info["thread_id"]]
     assert any("PRIOR_EPISODE" in snapshot.context_summary for snapshot in second.decisions)
@@ -737,8 +790,10 @@ def test_store_embedding_ranking_and_malicious_lesson_sanitization(tmp_path):
     assert reopened.search(namespace, query="arithmetic")[0].key == "numeric"
     assert reopened.list_namespaces() == [namespace]
     malicious = {
-        "schema": "gpu-agent-repair-memory-v1", "run_id": "a" * 32,
-        "outcome": "PUBLIC_PASS", "strategies": ["AST_REBIND", "read private evaluator"],
+        "schema": "gpu-agent-repair-memory-v1",
+        "run_id": "a" * 32,
+        "outcome": "PUBLIC_PASS",
+        "strategies": ["AST_REBIND", "read private evaluator"],
         "tool_sequence": ["repo_inspect_syntax", "shell"],
         "query_text": "malicious instructions or old source",
     }
@@ -750,19 +805,33 @@ def test_store_embedding_ranking_and_malicious_lesson_sanitization(tmp_path):
 
 def test_context_projection_keeps_budget_and_current_ast_evidence():
     from gpu_agent.harness.graph_context import compact_projection
+
     state = {
         "snapshot": {
             "context_summary": "BUDGET_ALERT: only one public check remains.\n" + "x" * 2600,
             "syntax_state": {"observed_nodes": [{"id": "n00", "code": "x"}]},
-            "remaining_public_checks": 1, "remaining_public_probes": 0,
+            "remaining_public_checks": 1,
+            "remaining_public_probes": 0,
         },
-        "max_steps": 38, "turns": 34, "max_model_calls": 40, "observed_physical_calls": 35,
+        "max_steps": 38,
+        "turns": 34,
+        "max_model_calls": 40,
+        "observed_physical_calls": 35,
         "history": [{"content": "y" * 3900}] * 34,
-        "plan": {"tasks": []}, "plan_revision": 1,
+        "plan": {"tasks": []},
+        "plan_revision": 1,
         "task_status": [{"task_id": "t1", "status": "STALE"}],
         "last_failure": {"turn": 34, "code": "BUILD_FAILED", "evidence": "z" * 4000},
-        "evidence": [{"turn": i, "tool": "repo_compile_candidate", "gate": "compile",
-                      "status": "FAILED", "candidate": "a" * 64} for i in range(1, 35)],
+        "evidence": [
+            {
+                "turn": i,
+                "tool": "repo_compile_candidate",
+                "gate": "compile",
+                "status": "FAILED",
+                "candidate": "a" * 64,
+            }
+            for i in range(1, 35)
+        ],
     }
     projection = compact_projection(state)
     assert projection["chars"] <= 2800
@@ -773,12 +842,12 @@ def test_context_projection_keeps_budget_and_current_ast_evidence():
     assert state["snapshot"]["syntax_state"]["observed_nodes"][0]["id"] == "n00"
 
 
-
 def _crash_child(repository, output, mode):
     """Use an actual process death, not a caught test exception."""
     import os
-    from gpu_agent.harness.native_graph import EffectJournal
+
     from gpu_agent.harness import repo_runner
+    from gpu_agent.harness.native_graph import EffectJournal
 
     class CrashModel(Model):
         def choose_harness_v1(self, snapshot):
@@ -815,21 +884,33 @@ def _crash_child(repository, output, mode):
                 os._exit(95)
 
     model = CrashModel([READ, EDIT, FINISH])
-    run_repository_coding_session(**args(
-        repository, output, model, on_graph_update=observe,
-    ))
+    run_repository_coding_session(
+        **args(
+            repository,
+            output,
+            model,
+            on_graph_update=observe,
+        )
+    )
     os._exit(99)
 
 
-@pytest.mark.parametrize("mode,code", [
-    ("inside_model", 91), ("after_model_result", 92),
-    ("after_tool_result", 93), ("between_checkpoints", 94),
-])
+@pytest.mark.parametrize(
+    "mode,code",
+    [
+        ("inside_model", 91),
+        ("after_model_result", 92),
+        ("after_tool_result", 93),
+        ("between_checkpoints", 94),
+    ],
+)
 def test_process_crash_after_admission_never_replays(repository, tmp_path, mode, code):
     import multiprocessing
+
     out = tmp_path / mode
     child = multiprocessing.get_context("fork").Process(
-        target=_crash_child, args=(repository, out, mode),
+        target=_crash_child,
+        args=(repository, out, mode),
     )
     child.start()
     child.join(25)
@@ -846,11 +927,13 @@ def test_process_crash_after_admission_never_replays(repository, tmp_path, mode,
 
 def test_actual_process_crash_at_quiet_boundary_resumes_without_replay(repository, tmp_path):
     import multiprocessing
+
     from gpu_agent.harness.native_graph import EFFECT_NAME
 
     out = tmp_path / "quiet-crash"
     child = multiprocessing.get_context("fork").Process(
-        target=_crash_child, args=(repository, out, "safe_boundary"),
+        target=_crash_child,
+        args=(repository, out, "safe_boundary"),
     )
     child.start()
     child.join(25)
@@ -866,17 +949,25 @@ def test_actual_process_crash_at_quiet_boundary_resumes_without_replay(repositor
     assert result.status == "DIFF_STAGED_UNVERIFIED"
     assert result.turns == 3
     assert len(second.decisions) == 2 and not second.plans
-    ids = [e["payload"]["effect_key"] for e in read_verified_journal(out / EFFECT_NAME)
-           if e["kind"] in ("model_started", "tool_started")]
+    ids = [
+        e["payload"]["effect_key"]
+        for e in read_verified_journal(out / EFFECT_NAME)
+        if e["kind"] in ("model_started", "tool_started")
+    ]
     assert len(ids) == len(set(ids)) == 7
     assert (out / "worktree/kernel.cu").read_text() == "float x = 2.0f;\n"
 
 
 def test_native_rejects_semantically_equal_but_rewritten_host_checkpoint(repository, tmp_path):
     out = tmp_path / "tampered-cp"
-    report = run_repository_coding_session(**args(
-        repository, out, Model([READ]), pause_after_turns=1,
-    ))
+    report = run_repository_coding_session(
+        **args(
+            repository,
+            out,
+            Model([READ]),
+            pause_after_turns=1,
+        )
+    )
     assert report.status == "PAUSED_RESUMABLE"
     cp = out / "session-checkpoint.json"
     data = json.loads(cp.read_text())

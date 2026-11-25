@@ -263,8 +263,10 @@ def harness_repo_run(
             runtime_mode=runtime_mode,
             review_public_pass=review_public_pass,
             approve_review=not reject_review,
-            memory_mode=memory_mode, memory_database=memory_database,
-            memory_scope=memory_scope, memory_embedding_model=memory_embedding_model,
+            memory_mode=memory_mode,
+            memory_database=memory_database,
+            memory_scope=memory_scope,
+            memory_embedding_model=memory_embedding_model,
             on_graph_update=(lambda event: typer.echo(__import__("json").dumps(event), err=True))
             if stream_graph
             else None,

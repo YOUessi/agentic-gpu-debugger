@@ -1148,7 +1148,9 @@ class RepositoryWorkspaceTools:
         return None
 
     def invoke(
-        self, action: HarnessAction, *,
+        self,
+        action: HarnessAction,
+        *,
         graph_allowed_tools: tuple[str, ...] | None = None,
         graph_target: str = "",
     ) -> ToolObservation:
@@ -1161,13 +1163,15 @@ class RepositoryWorkspaceTools:
         graph_denied = graph_allowed_tools is not None and (
             action.tool not in graph_allowed_tools
             or (
-                graph_target and isinstance(action, (RepoReplaceSnippet, RepoReplaceMany, RepoReplaceSyntax))
+                graph_target
+                and isinstance(action, (RepoReplaceSnippet, RepoReplaceMany, RepoReplaceSyntax))
                 and action.path != graph_target
             )
         )
         if graph_denied:
             result = ToolObservation(
-                tool=action.tool, status="REJECTED",
+                tool=action.tool,
+                status="REJECTED",
                 content="ValueError: GRAPH_TASK_SCOPE_DENIED",
             )
         elif (

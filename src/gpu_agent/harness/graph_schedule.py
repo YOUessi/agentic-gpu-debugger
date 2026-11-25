@@ -10,7 +10,7 @@ import hashlib
 import json
 from typing import Any
 
-from gpu_agent.harness.graph_plan import GraphTask, GraphTaskPlan, TOOL_GATES
+from gpu_agent.harness.graph_plan import TOOL_GATES, GraphTask, GraphTaskPlan
 
 _INSPECT = {"repo_read_file", "repo_list_files", "repo_inspect_syntax", "repo_git_diff"}
 _EDIT = {"repo_replace_snippet", "repo_replace_many", "repo_replace_syntax"}
@@ -36,7 +36,8 @@ def task_fingerprint(task: GraphTask) -> str:
     """Conservative proof reuse across plan revisions, not just task IDs."""
     return hashlib.sha256(
         json.dumps(
-            [task.gate, task.target, task.objective], ensure_ascii=False,
+            [task.gate, task.target, task.objective],
+            ensure_ascii=False,
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
@@ -50,10 +51,7 @@ def frontier_inputs(state: dict[str, Any]) -> list[dict[str, Any]]:
         for dep in task.depends_on:
             descendants[dep].add(task.task_id)
             descendants[dep].update(descendants[task.task_id])
-    ready = [
-        task for task in plan.tasks
-        if statuses[task.task_id]["status"] in {"READY", "STALE"}
-    ]
+    ready = [task for task in plan.tasks if statuses[task.task_id]["status"] in {"READY", "STALE"}]
     unfinished = sum(row["status"] != "DONE" for row in statuses.values())
     # Each explicit milestone needs at least one distinct observation. This is
     # a lower bound, not a promise that a task takes only one model turn.
@@ -86,11 +84,20 @@ def assess_frontier_task(item: dict[str, Any]) -> dict[str, Any]:
         and repair in {"AST_REBIND", "COMPILE_REPAIR", "NUMERIC_REPAIR", "REPLAN"}
     )
     prerequisite = bool(
-        (task.gate == "edit" and helpers & {"repo_inspect_syntax", "repo_read_file", "repo_revert_last_edit", "repo_compile_candidate"})
+        (
+            task.gate == "edit"
+            and helpers
+            & {
+                "repo_inspect_syntax",
+                "repo_read_file",
+                "repo_revert_last_edit",
+                "repo_compile_candidate",
+            }
+        )
         or (task.gate in {"probe", "public_check"} and "repo_compile_candidate" in helpers)
     )
     return {
-        "id": f'{item["round"][0]}:{item["round"][1]}:{task.task_id}',
+        "id": f"{item['round'][0]}:{item['round'][1]}:{task.task_id}",
         "round": item["round"],
         "task": task.model_dump(mode="json"),
         "task_key": task_fingerprint(task),
@@ -102,10 +109,13 @@ def assess_frontier_task(item: dict[str, Any]) -> dict[str, Any]:
 
 
 def select_frontier(
-    results: list[dict[str, Any]], revision: int, turn: int,
+    results: list[dict[str, Any]],
+    revision: int,
+    turn: int,
 ) -> dict[str, Any] | None:
     current = [
-        row for row in results
+        row
+        for row in results
         if row["round"] == [revision, turn] and row["scope"] and row["feasible"]
     ]
     return max(current, key=lambda row: tuple(row["priority"])) if current else None

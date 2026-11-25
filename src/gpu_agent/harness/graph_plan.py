@@ -96,7 +96,8 @@ def evaluate_tasks(
     results: dict[str, dict[str, Any]] = {}
     used_turns: set[int] = set()
     failed_candidate = any(
-        e.get("candidate") == candidate and candidate
+        e.get("candidate") == candidate
+        and candidate
         and e.get("gate") in {"compile", "public_check"}
         and e.get("status") == "FAILED"
         for e in evidence
@@ -145,9 +146,13 @@ def evaluate_tasks(
             matches = []
         if task.gate == "edit":
             last_revert = max(
-                (e["turn"] for e in evidence if e.get("gate") == "revert"
-                 and e.get("status") == "OK"
-                 and (not task.target or e.get("path") == task.target)),
+                (
+                    e["turn"]
+                    for e in evidence
+                    if e.get("gate") == "revert"
+                    and e.get("status") == "OK"
+                    and (not task.target or e.get("path") == task.target)
+                ),
                 default=-1,
             )
             matches = [e for e in matches if e["turn"] > last_revert]

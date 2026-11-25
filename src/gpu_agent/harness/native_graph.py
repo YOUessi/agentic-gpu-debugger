@@ -20,12 +20,14 @@ from typing import Annotated, Any, Literal, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime
-from langgraph.types import RetryPolicy
-from langgraph.types import Command, Send, interrupt
+from langgraph.types import Command, RetryPolicy, Send, interrupt
 
 from gpu_agent.harness.graph_context import compact_projection
 from gpu_agent.harness.graph_memory import (
-    SQLiteRepairStore, make_lesson, sanitize_lesson, select_lessons,
+    SQLiteRepairStore,
+    make_lesson,
+    sanitize_lesson,
+    select_lessons,
 )
 from gpu_agent.harness.graph_plan import (
     TOOL_GATES,
@@ -35,7 +37,10 @@ from gpu_agent.harness.graph_plan import (
     evaluate_tasks,
 )
 from gpu_agent.harness.graph_schedule import (
-    assess_frontier_task, evidence_task_key, frontier_inputs, select_frontier,
+    assess_frontier_task,
+    evidence_task_key,
+    frontier_inputs,
+    select_frontier,
 )
 from gpu_agent.harness.journal import (
     SessionJournal,
@@ -370,13 +375,20 @@ def build_native_graph(
         seen = set()
         for item in [*selected, *recent]:
             value = sanitize_lesson(item.value)
-            if not value or value["run_id"] == state["identity"]["run_id"] or value["run_id"] in seen:
+            if (
+                not value
+                or value["run_id"] == state["identity"]["run_id"]
+                or value["run_id"] in seen
+            ):
                 continue
             seen.add(value["run_id"])
             value["initial_score"] = float(item.score or 0.0)
             pool.append(value)
-        return {"memory_pool": pool, "memory_status": "PINNED",
-                "events": _event(state, "memory_loaded", count=len(pool))}
+        return {
+            "memory_pool": pool,
+            "memory_status": "PINNED",
+            "events": _event(state, "memory_loaded", count=len(pool)),
+        }
 
     def retrieve_memory(state: NativeState) -> dict[str, Any]:
         failure = state.get("last_failure") or {}
@@ -387,10 +399,16 @@ def build_native_graph(
 
     def context_node(state: NativeState) -> dict[str, Any]:
         projection = compact_projection(state)
-        return {"context_projection": projection, "events": _event(
-            state, "context_compacted", chars=projection["chars"],
-            memory_episode_ids=projection["memory_episode_ids"], omitted=projection["omitted"],
-        )}
+        return {
+            "context_projection": projection,
+            "events": _event(
+                state,
+                "context_compacted",
+                chars=projection["chars"],
+                memory_episode_ids=projection["memory_episode_ids"],
+                omitted=projection["omitted"],
+            ),
+        }
 
     def model_snapshot(state: NativeState) -> SessionSnapshot:
         data = dict(state["snapshot"])
@@ -420,7 +438,16 @@ def build_native_graph(
                 model_snapshot(cast(NativeState, {**state, "active_task": None})),
                 previous_plan=old,
                 task_status=state.get("task_status", []),
-                failure=state.get("last_failure") or ({"code": "GRAPH_TASK_STALLED", "turn": state["turns"], "evidence": "No new milestone proof after three supporting turns."} if state.get("stalled_turns", 0) >= 3 else None),
+                failure=state.get("last_failure")
+                or (
+                    {
+                        "code": "GRAPH_TASK_STALLED",
+                        "turn": state["turns"],
+                        "evidence": "No new milestone proof after three supporting turns.",
+                    }
+                    if state.get("stalled_turns", 0) >= 3
+                    else None
+                ),
             ),
         )
         if not isinstance(plan, GraphTaskPlan):
@@ -429,10 +456,15 @@ def build_native_graph(
             plan.validate_scope(state["snapshot"])
         except ValueError:
             calls = state.get("logical_model_calls", 0) + 1
-            return {"stop": True, "reason": "GRAPH_PLAN_INVALID_SCOPE",
-                    "logical_model_calls": calls, "observed_physical_calls": _physical_calls(model, calls),
-                    "effects_completed": ledger.completed, "effects_head_sha256": ledger.journal.head_hash,
-                    "events": _event(state, "plan_rejected", code="GRAPH_PLAN_INVALID_SCOPE")}
+            return {
+                "stop": True,
+                "reason": "GRAPH_PLAN_INVALID_SCOPE",
+                "logical_model_calls": calls,
+                "observed_physical_calls": _physical_calls(model, calls),
+                "effects_completed": ledger.completed,
+                "effects_head_sha256": ledger.journal.head_hash,
+                "events": _event(state, "plan_rejected", code="GRAPH_PLAN_INVALID_SCOPE"),
+            }
         value = plan.model_dump(mode="json")
         calls = state.get("logical_model_calls", 0) + 1
         return {
@@ -506,8 +538,13 @@ def build_native_graph(
         if selected:
             return {
                 "active_task": selected,
-                "events": _event(state, "task_dispatched", task=selected["task"],
-                                 task_key=selected["task_key"], scope=selected["scope"]),
+                "events": _event(
+                    state,
+                    "task_dispatched",
+                    task=selected["task"],
+                    task_key=selected["task_key"],
+                    scope=selected["scope"],
+                ),
             }
         return {"active_task": None, "events": _event(state, "task_frontier_blocked")}
 
@@ -524,9 +561,13 @@ def build_native_graph(
 
     def blocked_replan(state: NativeState) -> dict[str, Any]:
         return {
-            "last_failure": {"turn": state["turns"], "tool": "task_scheduler",
-                             "status": "REJECTED", "code": "GRAPH_TASK_FRONTIER_BLOCKED",
-                             "evidence": "No dependency-ready task fits current permissions/budget."},
+            "last_failure": {
+                "turn": state["turns"],
+                "tool": "task_scheduler",
+                "status": "REJECTED",
+                "code": "GRAPH_TASK_FRONTIER_BLOCKED",
+                "evidence": "No dependency-ready task fits current permissions/budget.",
+            },
         }
 
     def blocked_terminal(state: NativeState) -> dict[str, Any]:
@@ -577,13 +618,16 @@ def build_native_graph(
         decision = HarnessDecision.model_validate(state["decision"])
         on_event({"stage": "tool_started", "turn": turn, "tool": decision.action.tool})
         active = state.get("active_task")
-        if active:
-            operation = lambda: host.invoke(
-                decision.action, graph_allowed_tools=tuple(active["scope"]),
-                graph_target=active["task"]["target"],
-            )
-        else:
-            operation = lambda: host.invoke(decision.action)
+
+        def operation():
+            if active:
+                return host.invoke(
+                    decision.action,
+                    graph_allowed_tools=tuple(active["scope"]),
+                    graph_target=active["task"]["target"],
+                )
+            return host.invoke(decision.action)
+
         observation = ledger.perform(f"tool-{turn}", "tool", operation)
         if not isinstance(observation, ToolObservation):
             raise ValueError("tool host returned an invalid observation")
@@ -718,8 +762,11 @@ def build_native_graph(
             "review_kind": "public_candidate_review" if manual_review else "operator_pause",
         }
         checkpoint_sha = on_checkpoint(project_state(cast(NativeState, {**state, **update})))
-        return {**update, "host_checkpoint_sha256": checkpoint_sha,
-                "events": _event(state, "boundary", reason=reason)}
+        return {
+            **update,
+            "host_checkpoint_sha256": checkpoint_sha,
+            "events": _event(state, "boundary", reason=reason),
+        }
 
     def route_boundary(state: NativeState) -> str:
         if state.get("pause_requested"):
@@ -764,7 +811,10 @@ def build_native_graph(
         return {"stop": True, "events": _event(state, "terminal", reason=state.get("reason"))}
 
     def learn(state: NativeState, runtime: Runtime) -> dict[str, Any]:
-        if state.get("effects_head_sha256") != ledger.journal.head_hash or state.get("effects_completed") != ledger.completed:
+        if (
+            state.get("effects_head_sha256") != ledger.journal.head_hash
+            or state.get("effects_completed") != ledger.completed
+        ):
             raise ValueError("cannot learn from unreconciled external effects")
         config = state["identity"]["memory"]
         if config["mode"] != "learn" or runtime.store is None:
@@ -777,9 +827,15 @@ def build_native_graph(
         if old is not None and old.value != lesson:
             raise ValueError("conflicting immutable repair episode")
         runtime.store.put(namespace, lesson["run_id"], lesson)
-        return {"memory_status": "LEARNED", "events": _event(
-            state, "memory_learned", outcome=lesson["outcome"], run_id=lesson["run_id"],
-        )}
+        return {
+            "memory_status": "LEARNED",
+            "events": _event(
+                state,
+                "memory_learned",
+                outcome=lesson["outcome"],
+                run_id=lesson["run_id"],
+            ),
+        }
 
     def sqlite_busy(exc: Exception) -> bool:
         return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
@@ -818,7 +874,9 @@ def build_native_graph(
     graph.add_edge("replan", "refresh")
     graph.add_conditional_edges("frontier", send_frontier, ["assess_task", "select_task"])
     graph.add_edge("assess_task", "select_task")
-    graph.add_conditional_edges("select_task", route_selection, ["context", "blocked_replan", "blocked_terminal"])
+    graph.add_conditional_edges(
+        "select_task", route_selection, ["context", "blocked_replan", "blocked_terminal"]
+    )
     graph.add_edge("blocked_replan", "replan")
     graph.add_edge("blocked_terminal", "terminal")
     graph.add_edge("context", "executor")
@@ -854,8 +912,8 @@ def run_native_repository_agent(
     store: SQLiteRepairStore | None = None,
 ) -> AgentLoopState:
     """Run or resume the real repository graph using persistent native state."""
-    from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    from langgraph.checkpoint.sqlite import SqliteSaver
 
     resume = initial_state is not None
     db_path = output / DB_NAME
@@ -908,7 +966,8 @@ def run_native_repository_agent(
                 state.get("identity") != header
                 or state.get("effects_completed") != ledger.completed
                 or state.get("effects_head_sha256") != ledger.journal.head_hash
-                or state.get("host_checkpoint_sha256") != hashlib.sha256((output / "session-checkpoint.json").read_bytes()).hexdigest()
+                or state.get("host_checkpoint_sha256")
+                != hashlib.sha256((output / "session-checkpoint.json").read_bytes()).hexdigest()
                 or state.get("turns") != initial_state["turns"]
                 or state.get("history") != initial_state["history"]
                 or state.get("decision") != initial_state["decision"]
@@ -923,7 +982,11 @@ def run_native_repository_agent(
                     raise ValueError("native pause is not at an authenticated interrupt boundary")
                 # A crash just before the interrupt node ran has no external
                 # effects. Reach the actual interrupt without giving approval.
-                graph_input = Command(resume={"approved": approve_review}) if any(t.interrupts for t in saved.tasks) else None
+                graph_input = (
+                    Command(resume={"approved": approve_review})
+                    if any(t.interrupts for t in saved.tasks)
+                    else None
+                )
             elif state.get("stop"):
                 raise ValueError("terminal native session cannot be resumed")
             elif saved.next not in (
@@ -933,8 +996,11 @@ def run_native_repository_agent(
                 ("replan",),
                 ("checkpoint",),
                 ("executor",),
-                ("frontier",), ("select_task",), ("blocked_replan",),
-                ("retrieve_memory",), ("context",),
+                ("frontier",),
+                ("select_task",),
+                ("blocked_replan",),
+                ("retrieve_memory",),
+                ("context",),
             ) and not (saved.next and set(saved.next) == {"assess_task"}):
                 raise ValueError("native graph has no safe continuation boundary")
             else:
@@ -1022,8 +1088,8 @@ def run_native_repository_agent(
 
 def inspect_native_graph(output: Path) -> dict[str, Any]:
     """Operator-only native checkpoint inspection, no model/host constructed."""
-    from langgraph.checkpoint.sqlite import SqliteSaver
     from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+    from langgraph.checkpoint.sqlite import SqliteSaver
 
     header = read_native_header(output)
     path = output / DB_NAME
@@ -1063,7 +1129,9 @@ def inspect_native_graph(output: Path) -> dict[str, Any]:
             "active_task": values.get("active_task"),
             "memory_status": values.get("memory_status"),
             "retrieved_memory_ids": [x["run_id"] for x in values.get("retrieved_lessons", [])],
-            "context_projection": {k: v for k, v in values.get("context_projection", {}).items() if k != "summary"},
+            "context_projection": {
+                k: v for k, v in values.get("context_projection", {}).items() if k != "summary"
+            },
             "frontier_assessments": values.get("frontier_assessments", []),
             "observed_physical_calls": values.get("observed_physical_calls", 0),
             "effects_completed": values.get("effects_completed", 0),
