@@ -71,3 +71,7 @@ resume, exact-once completed actions, stale evidence, and fail-closed recovery
 when an effect journal/checkpoint disagree. Real CUDA/model improvement requires
 a separate frozen benchmark with equal resource accounting. CPU tests do not
 establish a Strict Fix rate or an advantage over the legacy harness.
+
+## Follow-up implementation
+
+Graph stream updates expose the actual nested executor namespace and nodes through `--stream-graph`. The recovery node classifies AST rebinding, compile repair, numeric repair, redundant actions, infrastructure stops and general replanning against current candidate evidence and allowed operations. The graph stores the exact effect journal head and validates it on resume. Dependency completion requires chronological evidence, not only a matching tool name. Read-only inspection includes recent native checkpoint IDs/steps and plan revision history.

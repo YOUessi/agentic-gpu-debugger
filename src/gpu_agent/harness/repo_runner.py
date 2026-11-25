@@ -67,6 +67,7 @@ def run_repository_coding_session(
     runtime_mode: Literal["legacy", "langgraph"] = "legacy",
     review_public_pass: bool = False,
     approve_review: bool = True,
+    on_graph_update: Callable[[dict[str, Any]], None] | None = None,
     model_factory: (Callable[[RepositoryWorkspaceTools], RepositoryDecisionModel] | None) = None,
 ) -> RepoHarnessOutcome:
     """Execute a real Agent loop and stage independent Git worktree modifications.
@@ -83,8 +84,10 @@ def run_repository_coding_session(
     native = runtime_mode == "langgraph"
     if runtime_mode not in ("legacy", "langgraph"):
         raise ValueError("unknown repository runtime")
-    if not native and (review_public_pass or not approve_review):
+    if not native and (review_public_pass or not approve_review or on_graph_update is not None):
         raise ValueError("native review requires the langgraph runtime")
+    if pause_after_turns is not None and not 1 <= pause_after_turns < max_steps:
+        raise ValueError("pause boundary must precede the total step budget")
     deadline = time.time() + 600
     if native:
         from gpu_agent.harness.native_graph import max_replans_for, read_native_header
@@ -376,7 +379,7 @@ def run_repository_coding_session(
                     on_event=save_event, on_checkpoint=persist_checkpoint,
                     initial_state=cast(AgentLoopState, checkpoint.state) if checkpoint else None,
                     pause_after_turns=pause_after_turns, review_public_pass=review_public_pass,
-                    approve_review=approve_review,
+                    approve_review=approve_review, on_graph_update=on_graph_update,
                 )
             else:
                 state = run_tool_agent(

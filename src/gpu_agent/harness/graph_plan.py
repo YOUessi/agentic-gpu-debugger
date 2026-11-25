@@ -134,6 +134,9 @@ def evaluate_tasks(
         if task.gate == "finish" and not candidate:
             current = []
         dependencies_done = all(results[d]["status"] == "DONE" for d in task.depends_on)
+        if task.depends_on and dependencies_done:
+            prerequisite_turn = max(results[d]["evidence_turn"] for d in task.depends_on)
+            current = [e for e in current if e["turn"] > prerequisite_turn]
         status = (
             "DONE" if current and dependencies_done
             else "BLOCKED" if not dependencies_done

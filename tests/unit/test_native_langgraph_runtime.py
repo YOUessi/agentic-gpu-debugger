@@ -20,6 +20,7 @@ from gpu_agent.harness.native_graph import (
     DB_NAME,
     EFFECT_NAME,
     inspect_native_graph,
+    classify_recovery,
     max_replans_for,
 )
 from gpu_agent.harness.repo_runner import run_repository_coding_session
@@ -141,7 +142,8 @@ def test_task_dag_validation_and_stale_evidence():
 def test_real_host_failure_triggers_native_replan(repository, tmp_path):
     out = tmp_path / "native"
     model = Model([READ, BAD, EDIT, FINISH])
-    result = run_repository_coding_session(**args(repository, out, model))
+    stream = []
+    result = run_repository_coding_session(**args(repository, out, model, on_graph_update=stream.append))
     assert result.status == "DIFF_STAGED_UNVERIFIED"
     assert result.turns == result.tool_calls == 4
     assert len(model.plans) == 2
@@ -154,6 +156,10 @@ def test_real_host_failure_triggers_native_replan(repository, tmp_path):
     assert git(repository[0], "status", "--porcelain") == ""
     info = inspect_native_graph(out)
     assert info["plan_revision"] == 2
+    assert any(e["node"] == "replan" for e in stream)
+    assert any(e["node"] == "edit" and e["namespace"] for e in stream)
+    assert any(e["node"] == "recovery" for e in stream)
+    assert info["effects_head_sha256"] == read_verified_journal(out / EFFECT_NAME)[-1]["sha256"]
     assert info["turns"] == 4 and info["effects_completed"] == 10
     assert info["checkpoint_count"] > result.turns
     assert [task["status"] for task in info["task_status"]] == ["DONE"] * 3
@@ -234,3 +240,75 @@ def test_cannot_resume_legacy_graph_or_change_runtime(repository, tmp_path):
             repository, out, Model([]), resume=True, runtime_mode="legacy",
             hierarchical_mode=False,
         ))
+
+
+
+def test_failure_classes_are_distinct_and_bound_to_candidate():
+    snapshot = {
+        "current_candidate_sha256": "diff-identity",
+        "allowed_tools": ["repo_revert_last_edit", "repo_replace_syntax"],
+        "candidate_recovery": {"source_sha256": "source-identity"},
+        "remaining_public_checks": 1, "remaining_public_probes": 2,
+    }
+    for tool, code, expected in (
+        ("repo_compile_candidate", "BUILD_FAILED", "COMPILE_REPAIR"),
+        ("repo_run_public_checks", "NUMERIC_MISMATCH", "NUMERIC_REPAIR"),
+        ("repo_replace_syntax", "CUDA_AST_TARGET_BINDING_MISMATCH", "AST_REBIND"),
+        ("repo_read_file", "REDUNDANT_READ", "AVOID_DUPLICATE"),
+        ("repo_run_public_checks", "PUBLIC_EXECUTION_UNAVAILABLE", "HALT_INFRASTRUCTURE"),
+    ):
+        result = classify_recovery({"tool": tool, "code": code, "status": "FAILED"}, snapshot)
+        assert result["strategy"] == expected
+        assert result["candidate"] == "diff-identity"
+        assert result["source_sha256"] == "source-identity"
+        assert result["revert_available"] is True
+
+
+def test_registered_cuda_public_failure_replan_and_native_review(tmp_path, monkeypatch):
+    from test_gpu_harness_repo_public import (
+        FakePublicChecker, KERNEL, GOAL, _registered_repository,
+        _edit_numerator, _edit_denominator, _check, _finish,
+    )
+    source, sha = _registered_repository(tmp_path)
+    checker = FakePublicChecker([False, True])
+    monkeypatch.setattr("gpu_agent.harness.repo_tools.check_candidate_publicly", checker)
+
+    class CudaModel(Model):
+        def choose_graph_plan(self, snapshot, *, previous_plan, task_status, failure):
+            self.plans.append({"previous": previous_plan, "failure": failure})
+            tasks = [
+                {"task_id": "t1", "gate": "inspect", "target": KERNEL,
+                 "objective": "Inspect the registered Softmax source and failure", "depends_on": []},
+                {"task_id": "t2", "gate": "edit", "target": KERNEL,
+                 "objective": "Stabilize Softmax numerator and denominator", "depends_on": ["t1"]},
+                {"task_id": "t3", "gate": "public_check", "target": KERNEL,
+                 "objective": "Run public checker on the exact edited candidate", "depends_on": ["t2"]},
+                {"task_id": "t4", "gate": "finish", "target": "",
+                 "objective": "Stage the publicly passing candidate for independent review", "depends_on": ["t3"]},
+            ]
+            return GraphTaskPlan.model_validate({
+                "tasks": tasks, "revision_reason": "Revise numeric repair" if previous_plan else "Initial numeric repair",
+                "failure_risk": "One-sided stabilization does not preserve the correct ratio",
+            })
+
+    out = tmp_path / "native-public"
+    first = CudaModel([_edit_numerator(), _check(), _edit_denominator(), _check()])
+    options = dict(
+        repository=source, base_sha=sha, output=out, goal=GOAL, public_case_id="h001",
+        max_steps=8, max_model_calls=16, hierarchical_mode=True, runtime_mode="langgraph",
+        review_public_pass=True,
+    )
+    report = run_repository_coding_session(**options, model_factory=lambda _: first)
+    assert report.status == "PAUSED_RESUMABLE" and report.turns == 4
+    assert len(checker.calls) == 2 and checker.calls[0] != checker.calls[1]
+    assert len(first.plans) == 2
+    info = inspect_native_graph(out)
+    recoveries = [e["recovery"]["strategy"] for e in info["graph_events"] if e["kind"] == "failure_routed"]
+    assert "NUMERIC_REPAIR" in recoveries
+    assert info["plan_revision"] == 2
+    second = CudaModel([_finish()])
+    final = run_repository_coding_session(**options, model_factory=lambda _: second, resume=True)
+    assert final.status == "DIFF_STAGED_UNVERIFIED"
+    assert final.public_checks_passed and final.turns == 5
+    assert len(checker.calls) == 2 and len(second.plans) == 0
+    assert inspect_native_graph(out)["task_status"][-1]["status"] == "DONE"

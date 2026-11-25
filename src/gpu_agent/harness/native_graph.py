@@ -75,6 +75,7 @@ class NativeState(TypedDict, total=False):
     logical_model_calls: int
     observed_physical_calls: int
     effects_completed: int
+    effects_head_sha256: str
     plan: dict[str, Any]
     plan_revision: int
     plan_revisions: list[dict[str, Any]]
@@ -82,6 +83,7 @@ class NativeState(TypedDict, total=False):
     task_progress: dict[str, Any]
     last_failure: dict[str, Any] | None
     failure_streak: int
+    recovery_state: dict[str, Any] | None
     last_plan_turn: int
     edited_files: list[str]
     finish_accepted: bool
@@ -246,6 +248,48 @@ def _failure(observation: ToolObservation, turn: int) -> dict[str, Any] | None:
     }
 
 
+def classify_recovery(failure: dict[str, Any] | None, snapshot: dict[str, Any]) -> dict[str, Any] | None:
+    """Failure-sensitive graph routing; never grants authority or replays effects."""
+    if failure is None:
+        return None
+    code = failure["code"]
+    tool = failure["tool"]
+    allowed = snapshot.get("allowed_tools", [])
+    recovery = snapshot.get("candidate_recovery") or {}
+    if code in {"BUILD_UNAVAILABLE", "PUBLIC_EXECUTION_UNAVAILABLE", "PUBLIC_TOOL_IO_FAILED"}:
+        strategy = "HALT_INFRASTRUCTURE"
+        guidance = "No new model or GPU actions. Preserve failure provenance."
+    elif tool == "repo_compile_candidate" or code == "BUILD_FAILED":
+        strategy = "COMPILE_REPAIR"
+        guidance = (
+            "Use exact compiler evidence to correct the current revision. "
+            "Revert only if the current tool policy allows it; re-inspect after a revert."
+        )
+    elif tool in ("repo_run_public_checks", "repo_probe_public") and failure["status"] == "FAILED":
+        strategy = "NUMERIC_REPAIR"
+        guidance = (
+            "Use public numeric/sanitizer evidence to diagnose the current candidate. "
+            "An informative probe is not a full check; do not repeat a rejected candidate."
+        )
+    elif code.startswith(("CUDA_AST_", "CUDA_SYNTAX_", "CUDA_SOURCE_SHA_")):
+        strategy = "AST_REBIND"
+        guidance = "Reconcile the source SHA and exact observed node binding; change the rejected edit."
+    elif code.startswith("REDUNDANT_") or code == "CUDA_SYNTAX_REPEATED_REJECTED_EDIT":
+        strategy = "AVOID_DUPLICATE"
+        guidance = "Use existing evidence or choose a materially different permitted action."
+    else:
+        strategy = "REPLAN"
+        guidance = "Revise the task DAG using the specific observed rejection or failure."
+    return {
+        "strategy": strategy, "guidance": guidance,
+        "failure": failure, "candidate": snapshot.get("current_candidate_sha256"),
+        "source_sha256": recovery.get("source_sha256"),
+        "revert_available": "repo_revert_last_edit" in allowed,
+        "remaining_public_checks": snapshot.get("remaining_public_checks", 0),
+        "remaining_public_probes": snapshot.get("remaining_public_probes", 0),
+    }
+
+
 def build_native_graph(
     *,
     model: Any,
@@ -298,6 +342,7 @@ def build_native_graph(
                 "ready_or_stale_tasks": priorities,
                 "task_status": state["task_status"],
                 "last_failure": state.get("last_failure"),
+                "recovery": state.get("recovery_state"),
                 "revision_reason": plan.revision_reason,
             }, ensure_ascii=False)
             # Preserve the most relevant previous controller guidance. The full
@@ -338,6 +383,7 @@ def build_native_graph(
             "last_plan_turn": state.get("turns", 0),
             "logical_model_calls": calls, "observed_physical_calls": _physical_calls(model, calls),
             "effects_completed": ledger.completed,
+            "effects_head_sha256": ledger.journal.head_hash,
             "events": _event(state, f"{role}_completed", new_revision=revision),
         }
 
@@ -385,6 +431,7 @@ def build_native_graph(
             "logical_model_calls": calls,
             "observed_physical_calls": _physical_calls(model, calls),
             "effects_completed": ledger.completed,
+            "effects_head_sha256": ledger.journal.head_hash,
             "events": _event(state, "decision", tool=decision.action.tool, decision_turn=turn),
         }
 
@@ -419,7 +466,9 @@ def build_native_graph(
         ]
         after = host.snapshot(goal, history, max(0, state["max_steps"] - turn)).model_dump(mode="json")
         failure = _failure(observation, turn)
-        path = getattr(decision.action, "path", None) or after.get("registered_kernel_path") or ""
+        path = getattr(decision.action, "path", None) or ""
+        if observation.tool in ("repo_compile_candidate", "repo_probe_public", "repo_run_public_checks", "repo_revert_last_edit"):
+            path = after.get("registered_kernel_path") or ""
         evidence = {
             "turn": turn, "tool": observation.tool, "gate": TOOL_GATES.get(observation.tool, "denied"),
             "path": path, "status": observation.status,
@@ -435,6 +484,7 @@ def build_native_graph(
             "failure_streak": state.get("failure_streak", 0) + 1 if failure else 0,
             "finish_accepted": observation.tool == "finish" and observation.status == "OK",
             "effects_completed": ledger.completed,
+            "effects_head_sha256": ledger.journal.head_hash,
             "events": _event(state, "tool_observed", evidence=evidence, failure=failure),
         }
 
@@ -447,6 +497,13 @@ def build_native_graph(
         executor.add_edge(node, END)
     executor.add_conditional_edges("choose", dispatch, {**{n: n for n in tool_nodes}, "halt": END})
 
+    def recovery_node(state: NativeState) -> dict[str, Any]:
+        recovery = classify_recovery(state.get("last_failure"), state["snapshot"])
+        return {
+            "recovery_state": recovery,
+            "events": _event(state, "failure_routed", recovery=recovery) if recovery else [],
+        }
+
     def save_boundary(state: NativeState) -> dict[str, Any]:
         if state.get("stop") and state.get("reason") == "GRAPH_DEADLINE_EXHAUSTED":
             # Incomplete model-only turn: do not forge a completed host checkpoint.
@@ -454,24 +511,25 @@ def build_native_graph(
         turn = state["turns"]
         snap = state["snapshot"]
         done = state.get("finish_accepted", False)
-        failure = state.get("last_failure") or {}
-        infra_failure = failure.get("code") in {"BUILD_UNAVAILABLE", "PUBLIC_EXECUTION_UNAVAILABLE", "PUBLIC_TOOL_IO_FAILED"}
+        recovery = state.get("recovery_state") or {}
+        infra_failure = recovery.get("strategy") == "HALT_INFRASTRUCTURE"
+        expired = time.time() >= state["deadline"]
         manual_review = (
             review_public_pass
             and snap.get("public_checks_passed")
             and snap.get("current_candidate_sha256") != state.get("reviewed_candidate")
         )
         pause = (
-            not done and not infra_failure and turn < state["max_steps"]
+            not done and not infra_failure and not expired and turn < state["max_steps"]
             and ((pause_after_turns is not None and turn >= pause_after_turns) or manual_review)
         )
         reason = (
-            host.completion_reason if done else "GRAPH_INFRASTRUCTURE_FAILURE" if infra_failure
+            "GRAPH_DEADLINE_EXHAUSTED" if expired else host.completion_reason if done else "GRAPH_INFRASTRUCTURE_FAILURE" if infra_failure
             else "STEP_BUDGET_EXHAUSTED" if turn >= state["max_steps"]
             else "SESSION_PAUSED" if pause else "CONTINUE"
         )
         update = {
-            "stop": done or infra_failure or turn >= state["max_steps"] or pause,
+            "stop": done or infra_failure or expired or turn >= state["max_steps"] or pause,
             "reason": reason, "pause_requested": pause,
             "review_kind": "public_candidate_review" if manual_review else "operator_pause",
         }
@@ -515,6 +573,7 @@ def build_native_graph(
     graph.add_node("replan", plan_node)
     graph.add_node("executor", executor.compile())
     graph.add_node("reconcile", refresh)
+    graph.add_node("recovery", recovery_node)
     graph.add_node("checkpoint", save_boundary)
     graph.add_node("review", review)
     graph.add_node("terminal", terminal)
@@ -527,7 +586,8 @@ def build_native_graph(
     graph.add_edge("planner", "refresh")
     graph.add_edge("replan", "refresh")
     graph.add_edge("executor", "reconcile")
-    graph.add_edge("reconcile", "checkpoint")
+    graph.add_edge("reconcile", "recovery")
+    graph.add_edge("recovery", "checkpoint")
     graph.add_conditional_edges("checkpoint", route_boundary, {n: n for n in ("review", "terminal", "refresh")})
     graph.add_edge("terminal", END)
     return graph.compile(checkpointer=checkpointer)
@@ -549,6 +609,7 @@ def run_native_repository_agent(
     pause_after_turns: int | None,
     review_public_pass: bool = False,
     approve_review: bool = True,
+    on_graph_update: Callable[[dict[str, Any]], None] | None = None,
 ) -> AgentLoopState:
     """Run or resume the real repository graph using persistent native state."""
     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -589,6 +650,7 @@ def run_native_repository_agent(
             if (
                 state.get("identity") != header
                 or state.get("effects_completed") != ledger.completed
+                or state.get("effects_head_sha256") != ledger.journal.head_hash
                 or state.get("turns") != initial_state["turns"]
                 or state.get("history") != initial_state["history"]
                 or state.get("decision") != initial_state["decision"]
@@ -614,15 +676,34 @@ def run_native_repository_agent(
                 "max_replans": max_replans_for(max_steps, max_model_calls, hierarchical_mode),
                 "history": [], "events": [], "evidence": [], "turns": 0,
                 "logical_model_calls": 0, "observed_physical_calls": 0, "effects_completed": 0,
+                "effects_head_sha256": ledger.journal.head_hash,
                 "plan_revisions": [], "plan_revision": 0, "last_plan_turn": 0,
-                "last_failure": None, "failure_streak": 0,
+                "last_failure": None, "failure_streak": 0, "recovery_state": None,
                 "finish_accepted": False, "stop": False, "reason": "CONTINUE", "pause_requested": False,
             }
         # Sync durability guarantees each native superstep is saved before the
         # next node. Do not use async writes for external side effects.
-        result = cast(NativeState, graph.invoke(graph_input, config=config, durability="sync"))
+        for namespace, chunk in graph.stream(
+            graph_input, config=config, durability="sync",
+            stream_mode="updates", subgraphs=True,
+        ):
+            if on_graph_update is not None and isinstance(chunk, dict):
+                for node, update in chunk.items():
+                    # Stream only bounded graph progress, not source/model payloads.
+                    details = update if isinstance(update, dict) else {}
+                    on_graph_update({
+                        "namespace": list(namespace), "node": node,
+                        "turns": details.get("turns"),
+                        "plan_revision": details.get("plan_revision"),
+                        "reason": details.get("reason"),
+                        "recovery_strategy": (details.get("recovery_state") or {}).get("strategy"),
+                    })
         saved = graph.get_state(config)
-        if result.get("effects_completed", 0) != ledger.completed:
+        result = cast(NativeState, saved.values)
+        if (
+            result.get("effects_completed", 0) != ledger.completed
+            or result.get("effects_head_sha256") != ledger.journal.head_hash
+        ):
             raise ValueError("graph state did not durably account for all effects")
         if saved.next and not (result.get("reason") == "SESSION_PAUSED" and saved.next == ("review",)):
             raise ValueError("graph ended at an unexpected continuation")
@@ -653,16 +734,27 @@ def inspect_native_graph(output: Path) -> dict[str, Any]:
         if current is None:
             raise ValueError("native checkpoint unavailable")
         values = current.checkpoint["channel_values"]
+        checkpoints = list(saver.list(config))
         return {
             "version": VERSION, "thread_id": header["run_id"],
             "checkpoint_id": current.checkpoint["id"],
-            "checkpoint_count": sum(1 for _ in saver.list(config)),
+            "checkpoint_count": len(checkpoints),
+            "recent_checkpoints": [
+                {"checkpoint_id": item.checkpoint["id"], "step": item.metadata.get("step"),
+                 "source": item.metadata.get("source"),
+                 "turns": item.checkpoint["channel_values"].get("turns"),
+                 "plan_revision": item.checkpoint["channel_values"].get("plan_revision")}
+                for item in checkpoints[:20]
+            ],
             "turns": values.get("turns", 0),
             "reason": values.get("reason"), "plan_revision": values.get("plan_revision", 0),
             "task_status": values.get("task_status", []),
             "observed_physical_calls": values.get("observed_physical_calls", 0),
             "effects_completed": values.get("effects_completed", 0),
             "graph_events": values.get("events", []),
+            "plan_revisions": values.get("plan_revisions", []),
+            "recovery_state": values.get("recovery_state"),
+            "effects_head_sha256": values.get("effects_head_sha256"),
             "deadline": header["deadline"],
         }
     finally:

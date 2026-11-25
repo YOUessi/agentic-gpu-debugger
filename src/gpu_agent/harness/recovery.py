@@ -120,6 +120,7 @@ def _validated_state(value: dict[str, Any], max_steps: int) -> dict[str, Any]:
         "WORKSPACE_DIFF_STAGED_UNVERIFIED",
         "SESSION_PAUSED",
         "GRAPH_INFRASTRUCTURE_FAILURE",
+        "GRAPH_DEADLINE_EXHAUSTED",
     }
     if reason not in allowed:
         raise ValueError("unknown checkpoint stop reason")
