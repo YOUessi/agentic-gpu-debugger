@@ -630,7 +630,11 @@ def invoke_sdk(
             logging.getLogger(name).disabled = True
             logging.getLogger(name).setLevel(logging.CRITICAL + 1)
     output_model: type[BaseModel]
-    if request.kind == "plan" and request.payload.get("gpu_repo_task_plan") == "v1":
+    if request.kind == "plan" and request.payload.get("gpu_repo_graph_plan") == "v1":
+        from gpu_agent.harness.graph_plan import GraphTaskPlan
+
+        output_model = GraphTaskPlan
+    elif request.kind == "plan" and request.payload.get("gpu_repo_task_plan") == "v1":
         from gpu_agent.harness.models import TaskPlan
 
         output_model = TaskPlan
@@ -1194,6 +1198,26 @@ class OpenAIResponsesProvider:
             wire_model=PlannerOutput,
             convert=lambda wire: wire.to_action_output(new_id()),
         ).action
+
+    def choose_graph_plan(
+        self, snapshot: "SessionSnapshot", *, previous_plan: dict | None,
+        task_status: list[dict], failure: dict | None,
+    ):
+        """Typed variable task DAG; replan only from observed graph evidence."""
+        from gpu_agent.harness.graph_plan import GraphTaskPlan
+
+        return self._call(
+            "plan",
+            {
+                "gpu_repo_graph_plan": "v1",
+                "snapshot": snapshot.model_dump(mode="json"),
+                "previous_plan": previous_plan,
+                "task_status": task_status,
+                "observed_failure": failure,
+            },
+            GraphTaskPlan,
+            repository_role="reflect" if previous_plan else "planner",
+        )
 
     def choose_repository_plan(self, snapshot: "SessionSnapshot") -> "TaskPlan":
         """One model-generated global task plan, persisted at tool checkpoints."""

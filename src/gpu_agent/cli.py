@@ -210,7 +210,10 @@ def harness_repo_run(
         Literal["legacy", "evidence_first"], typer.Option("--context-mode")
     ] = "evidence_first",
     disable_batch_edits: Annotated[bool, typer.Option("--disable-batch-edits")] = False,
-    hierarchical: Annotated[bool, typer.Option("--hierarchical")] = False,
+    hierarchical: Annotated[bool | None, typer.Option("--hierarchical/--no-hierarchical")] = None,
+    runtime_mode: Annotated[Literal["legacy", "langgraph"], typer.Option("--runtime")] = "langgraph",
+    review_public_pass: Annotated[bool, typer.Option("--review-public-pass")] = False,
+    reject_review: Annotated[bool, typer.Option("--reject-review")] = False,
     syntax_editing: Annotated[bool, typer.Option("--syntax-editing")] = False,
     compile_gate: Annotated[bool, typer.Option("--compile-gate")] = False,
     allow_revert: Annotated[bool, typer.Option("--allow-revert")] = False,
@@ -247,7 +250,10 @@ def harness_repo_run(
             max_public_checks=max_public_checks,
             context_mode=context_mode,
             allow_batch_edits=not disable_batch_edits,
-            hierarchical_mode=hierarchical,
+            hierarchical_mode=(runtime_mode == "langgraph") if hierarchical is None else hierarchical,
+            runtime_mode=runtime_mode,
+            review_public_pass=review_public_pass,
+            approve_review=not reject_review,
             syntax_mode=syntax_editing,
             compile_gate=compile_gate,
             allow_revert=allow_revert,
@@ -269,6 +275,22 @@ def harness_repo_run(
             f"REPOSITORY_AGENT_REJECTED: {type(exc).__name__}",
             err=True,
         )
+        raise typer.Exit(2) from None
+
+
+@harness_app.command("inspect-graph")
+def harness_inspect_graph(
+    output: Annotated[Path, typer.Option()],
+) -> None:
+    """Read native LangGraph checkpoint history without executing any effects."""
+    import json
+
+    from gpu_agent.harness.native_graph import inspect_native_graph
+
+    try:
+        typer.echo(json.dumps(inspect_native_graph(output), ensure_ascii=False, indent=2))
+    except (OSError, ValueError):
+        typer.echo("INVALID_OR_UNTRUSTED_NATIVE_GRAPH", err=True)
         raise typer.Exit(2) from None
 
 

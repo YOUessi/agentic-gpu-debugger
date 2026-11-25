@@ -329,6 +329,21 @@ GPU_REPO_REFLECTION_PROMPT = BASE + (
 
 def select_prompt(kind: str, payload: Mapping[str, object]) -> tuple[str, str]:
     """Choose trusted instructions and their telemetry version from the public contract."""
+    if kind == "plan" and payload.get("gpu_repo_graph_plan") == "v1":
+        return "gpu-repository-graph-dag-v1", BASE + (
+            "You are the graph task planner. Produce 2-10 concise tasks in topological "
+            "order, unique t1/t2 IDs, prior task dependencies, and an objective, "
+            "gate and target per task. Gates: inspect, edit, compile, probe, "
+            "public_check, finish. Use an exact permitted path or empty target. "
+            "Include at least one edit and exactly one final finish dependent "
+            "on all earlier tasks, directly or transitively. For registered CUDA "
+            "include public_check and target only the registered kernel. Include "
+            "compile/probe only when useful and available. If previous_plan and "
+            "observed_failure exist, revise the DAG to address that evidence; "
+            "avoid retrying the same failed action. Completed evidence is determined "
+            "by the controller, never asserted by the planner. Do not grant tools, "
+            "read hidden tests, fabricate success, or include private chain-of-thought. JSON only."
+        )
     if kind == "plan" and payload.get("gpu_repo_task_plan") == "v1":
         return GPU_REPO_TASK_PLANNER_VERSION, GPU_REPO_TASK_PLANNER_PROMPT
     if kind == "plan" and payload.get("gpu_repo_reflection") == "v1":

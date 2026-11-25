@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -19,7 +20,7 @@ from gpu_agent.agent.provider import (
     OpenAIProviderSettings,
     OpenAIResponsesProvider,
 )
-from gpu_agent.harness.journal import EventKind, SessionJournal
+from gpu_agent.harness.journal import EventKind, SessionJournal, read_verified_journal
 from gpu_agent.harness.models import (
     HarnessDecision,
     RepoHarnessOutcome,
@@ -63,6 +64,9 @@ def run_repository_coding_session(
     allow_paid_calls: bool = False,
     resume: bool = False,
     pause_after_turns: int | None = None,
+    runtime_mode: Literal["legacy", "langgraph"] = "legacy",
+    review_public_pass: bool = False,
+    approve_review: bool = True,
     model_factory: (Callable[[RepositoryWorkspaceTools], RepositoryDecisionModel] | None) = None,
 ) -> RepoHarnessOutcome:
     """Execute a real Agent loop and stage independent Git worktree modifications.
@@ -76,6 +80,23 @@ def run_repository_coding_session(
         raise ValueError("real model use requires explicit allow_paid_calls")
     if not 1 <= max_steps <= 38 or not max_steps + 2 <= max_model_calls <= 40:
         raise ValueError("model calls must exceed step budget, within operator cap")
+    native = runtime_mode == "langgraph"
+    if runtime_mode not in ("legacy", "langgraph"):
+        raise ValueError("unknown repository runtime")
+    if not native and (review_public_pass or not approve_review):
+        raise ValueError("native review requires the langgraph runtime")
+    deadline = time.time() + 600
+    if native:
+        from gpu_agent.harness.native_graph import max_replans_for, read_native_header
+
+        # Verify dependency before constructing the workspace or model provider.
+        from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: F401
+
+        max_replans = max_replans_for(max_steps, max_model_calls, hierarchical_mode)
+        if resume:
+            deadline = read_native_header(output)["deadline"]
+            if time.time() >= deadline:
+                raise ValueError("native graph deadline exhausted")
     role_budget = (
         RepositoryCallBudget.from_session(
             max_steps=max_steps, max_model_calls=max_model_calls, hierarchical=hierarchical_mode
@@ -83,7 +104,16 @@ def run_repository_coding_session(
         if model_factory is None or provider_settings is not None
         else None
     )
-    if (hierarchical_mode or syntax_mode) and public_case_id is None:
+    if native and hierarchical_mode and role_budget is not None:
+        role_budget = RepositoryCallBudget(
+            executor_decisions=max_steps,
+            executor_format_retries=max_model_calls - max_steps - 2 - 2 * max_replans,
+            planner_decisions=1,
+            planner_format_retries=1,
+            reflect_decisions=max_replans,
+            reflect_format_retries=max_replans,
+        )
+    if (syntax_mode or (hierarchical_mode and not native)) and public_case_id is None:
         raise ValueError("hierarchical and AST modes require registered public CUDA case")
     if not goal.strip() or len(goal) > 1500:
         raise ValueError("invalid task goal")
@@ -95,6 +125,9 @@ def run_repository_coding_session(
     if resume:
         if not output.is_dir() or output.is_symlink():
             raise ValueError("resume requires an existing safe session output")
+        journal_records = read_verified_journal(output / "session-events.jsonl")
+        if journal_records[0]["payload"].get("runtime_mode", "legacy") != runtime_mode:
+            raise ValueError("cannot switch runtime while resuming a session")
         checkpoint = validated_quiescent_repository_checkpoint(
             output,
             goal=goal,
@@ -180,7 +213,7 @@ def run_repository_coding_session(
                 LLMCallGate(
                     AgentBudget(
                         max_llm_calls=max_model_calls,
-                        max_wall_time_seconds=600,
+                        max_wall_time_seconds=min(600, deadline - time.time()) if native else 600,
                     ),
                     # Coding Agent issues plan/tool requests only. The old
                     # Workflow D's diagnosis/patch reservations are unrelated.
@@ -215,6 +248,7 @@ def run_repository_coding_session(
                     "session_started",
                     {
                         "base_git_commit": base_sha,
+                        "runtime_mode": runtime_mode,
                         "public_run_id": tools.run_id,
                         "goal_sha256": hashlib.sha256(goal.encode()).hexdigest(),
                         "public_case_id": public_case_id,
@@ -332,19 +366,32 @@ def run_repository_coding_session(
                     ),
                 )
 
-            state = run_tool_agent(
-                model,
-                tools,
-                goal=goal,
-                max_steps=max_steps,
-                on_event=save_event,
-                on_checkpoint=persist_checkpoint,
-                initial_state=cast(AgentLoopState, checkpoint.state)
-                if checkpoint is not None
-                else None,
-                pause_after_turns=pause_after_turns,
-                hierarchical_mode=hierarchical_mode,
-            )
+            if native:
+                from gpu_agent.harness.native_graph import run_native_repository_agent
+
+                state = run_native_repository_agent(
+                    model, tools, output=output, goal=goal,
+                    max_steps=max_steps, max_model_calls=max_model_calls,
+                    hierarchical_mode=hierarchical_mode, deadline=deadline,
+                    on_event=save_event, on_checkpoint=persist_checkpoint,
+                    initial_state=cast(AgentLoopState, checkpoint.state) if checkpoint else None,
+                    pause_after_turns=pause_after_turns, review_public_pass=review_public_pass,
+                    approve_review=approve_review,
+                )
+            else:
+                state = run_tool_agent(
+                    model,
+                    tools,
+                    goal=goal,
+                    max_steps=max_steps,
+                    on_event=save_event,
+                    on_checkpoint=persist_checkpoint,
+                    initial_state=cast(AgentLoopState, checkpoint.state)
+                    if checkpoint is not None
+                    else None,
+                    pause_after_turns=pause_after_turns,
+                    hierarchical_mode=hierarchical_mode,
+                )
             inv = getattr(model, "invocations", None)
             records = inv() if callable(inv) else []
             token_counts = [
