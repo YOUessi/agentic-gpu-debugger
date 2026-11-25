@@ -2,27 +2,26 @@
   "groups": {
     "legacy-planner:all": {
       "actual_billed_cost": null,
-      "agent_wall_seconds_observed": 49.616,
-      "determinate": 1,
-      "physical_calls_observed": 8,
-      "primary": 0.5,
+      "agent_wall_seconds_observed": 160.695,
+      "determinate": 3,
+      "physical_calls_observed": 27,
+      "primary": 1.0,
       "secondary": 1.0,
-      "seconds_per_success_lower_bound": 61.566,
-      "started": 2,
+      "seconds_per_success_lower_bound": 65.57933333333334,
+      "started": 3,
       "states": {
-        "RESERVED_UNRECONCILED": 1,
-        "STRICT_SUCCESS": 1
+        "STRICT_SUCCESS": 3
       },
-      "strict_wall_seconds_observed": 11.95,
-      "success": 1,
+      "strict_wall_seconds_observed": 36.043,
+      "success": 3,
       "timeouts": 0,
-      "tokens_lower_bound": 28513,
-      "tokens_per_success_lower_bound": 28513.0,
-      "tokens_total": null,
-      "total_wall_seconds_observed": 61.566,
+      "tokens_lower_bound": 102354,
+      "tokens_per_success_lower_bound": 34118.0,
+      "tokens_total": 102354,
+      "total_wall_seconds_observed": 196.738,
       "wilson95": [
-        0.09453120573423074,
-        0.9054687942657693
+        0.4385029682449546,
+        1
       ]
     },
     "legacy-planner:h001": {
@@ -51,69 +50,76 @@
     },
     "legacy-planner:h002": {
       "actual_billed_cost": null,
-      "agent_wall_seconds_observed": 0,
-      "determinate": 0,
-      "physical_calls_observed": 0,
-      "primary": 0.0,
-      "secondary": null,
-      "seconds_per_success_lower_bound": null,
+      "agent_wall_seconds_observed": 65.594,
+      "determinate": 1,
+      "physical_calls_observed": 12,
+      "primary": 1.0,
+      "secondary": 1.0,
+      "seconds_per_success_lower_bound": 77.591,
       "started": 1,
       "states": {
-        "RESERVED_UNRECONCILED": 1
+        "STRICT_SUCCESS": 1
       },
-      "strict_wall_seconds_observed": 0,
-      "success": 0,
+      "strict_wall_seconds_observed": 11.997,
+      "success": 1,
       "timeouts": 0,
-      "tokens_lower_bound": 0,
-      "tokens_per_success_lower_bound": null,
-      "tokens_total": null,
-      "total_wall_seconds_observed": 0,
+      "tokens_lower_bound": 50574,
+      "tokens_per_success_lower_bound": 50574.0,
+      "tokens_total": 50574,
+      "total_wall_seconds_observed": 77.591,
       "wilson95": [
-        0,
-        0.7934506856227626
+        0.20654931437723745,
+        1
       ]
     },
     "legacy-planner:h003": {
       "actual_billed_cost": null,
-      "agent_wall_seconds_observed": 0,
-      "determinate": 0,
-      "physical_calls_observed": 0,
-      "primary": null,
-      "secondary": null,
-      "seconds_per_success_lower_bound": null,
-      "started": 0,
-      "states": {},
-      "strict_wall_seconds_observed": 0,
-      "success": 0,
+      "agent_wall_seconds_observed": 45.485,
+      "determinate": 1,
+      "physical_calls_observed": 7,
+      "primary": 1.0,
+      "secondary": 1.0,
+      "seconds_per_success_lower_bound": 57.581,
+      "started": 1,
+      "states": {
+        "STRICT_SUCCESS": 1
+      },
+      "strict_wall_seconds_observed": 12.096,
+      "success": 1,
       "timeouts": 0,
-      "tokens_lower_bound": 0,
-      "tokens_per_success_lower_bound": null,
-      "tokens_total": 0,
-      "total_wall_seconds_observed": 0,
-      "wilson95": null
+      "tokens_lower_bound": 23267,
+      "tokens_per_success_lower_bound": 23267.0,
+      "tokens_total": 23267,
+      "total_wall_seconds_observed": 57.581,
+      "wilson95": [
+        0.20654931437723745,
+        1
+      ]
     },
     "legacy-react:all": {
       "actual_billed_cost": null,
-      "agent_wall_seconds_observed": 73.565,
-      "determinate": 1,
-      "physical_calls_observed": 14,
-      "primary": 1.0,
-      "secondary": 1.0,
-      "seconds_per_success_lower_bound": 85.565,
-      "started": 1,
+      "agent_wall_seconds_observed": 148.929,
+      "determinate": 2,
+      "physical_calls_observed": 31,
+      "primary": 0.3333333333333333,
+      "secondary": 0.5,
+      "seconds_per_success_lower_bound": 160.929,
+      "started": 3,
       "states": {
+        "MODEL_FAILURE": 1,
+        "RESERVED_UNRECONCILED": 1,
         "STRICT_SUCCESS": 1
       },
       "strict_wall_seconds_observed": 12.0,
       "success": 1,
       "timeouts": 0,
-      "tokens_lower_bound": 59767,
-      "tokens_per_success_lower_bound": 59767.0,
-      "tokens_total": 59767,
-      "total_wall_seconds_observed": 85.565,
+      "tokens_lower_bound": 143883,
+      "tokens_per_success_lower_bound": 143883.0,
+      "tokens_total": null,
+      "total_wall_seconds_observed": 160.929,
       "wilson95": [
-        0.20654931437723745,
-        1
+        0.06149194472039621,
+        0.7923403991979522
       ]
     },
     "legacy-react:h001": {
@@ -142,63 +148,73 @@
     },
     "legacy-react:h002": {
       "actual_billed_cost": null,
-      "agent_wall_seconds_observed": 0,
-      "determinate": 0,
-      "physical_calls_observed": 0,
-      "primary": null,
-      "secondary": null,
+      "agent_wall_seconds_observed": 75.364,
+      "determinate": 1,
+      "physical_calls_observed": 17,
+      "primary": 0.0,
+      "secondary": 0.0,
       "seconds_per_success_lower_bound": null,
-      "started": 0,
-      "states": {},
+      "started": 1,
+      "states": {
+        "MODEL_FAILURE": 1
+      },
       "strict_wall_seconds_observed": 0,
       "success": 0,
       "timeouts": 0,
-      "tokens_lower_bound": 0,
+      "tokens_lower_bound": 84116,
       "tokens_per_success_lower_bound": null,
-      "tokens_total": 0,
-      "total_wall_seconds_observed": 0,
-      "wilson95": null
+      "tokens_total": 84116,
+      "total_wall_seconds_observed": 75.364,
+      "wilson95": [
+        0,
+        0.7934506856227626
+      ]
     },
     "legacy-react:h003": {
       "actual_billed_cost": null,
       "agent_wall_seconds_observed": 0,
       "determinate": 0,
       "physical_calls_observed": 0,
-      "primary": null,
+      "primary": 0.0,
       "secondary": null,
       "seconds_per_success_lower_bound": null,
-      "started": 0,
-      "states": {},
+      "started": 1,
+      "states": {
+        "RESERVED_UNRECONCILED": 1
+      },
       "strict_wall_seconds_observed": 0,
       "success": 0,
       "timeouts": 0,
       "tokens_lower_bound": 0,
       "tokens_per_success_lower_bound": null,
-      "tokens_total": 0,
+      "tokens_total": null,
       "total_wall_seconds_observed": 0,
-      "wilson95": null
+      "wilson95": [
+        0,
+        0.7934506856227626
+      ]
     },
     "native-dag:all": {
       "actual_billed_cost": null,
-      "agent_wall_seconds_observed": 75.634,
-      "determinate": 1,
-      "physical_calls_observed": 13,
+      "agent_wall_seconds_observed": 229.00799999999998,
+      "determinate": 3,
+      "physical_calls_observed": 35,
       "primary": 1.0,
       "secondary": 1.0,
-      "seconds_per_success_lower_bound": 87.583,
-      "started": 1,
+      "seconds_per_success_lower_bound": 88.384,
+      "started": 3,
       "states": {
-        "STRICT_SUCCESS": 1
+        "STRICT_SUCCESS": 3
       },
-      "strict_wall_seconds_observed": 11.949,
-      "success": 1,
+      "strict_wall_seconds_observed": 36.144,
+      "success": 3,
       "timeouts": 0,
-      "tokens_lower_bound": 59209,
-      "tokens_per_success_lower_bound": 59209.0,
-      "tokens_total": 59209,
-      "total_wall_seconds_observed": 87.583,
+      "tokens_lower_bound": 153798,
+      "tokens_per_success_lower_bound": 51266.0,
+      "tokens_total": 153798,
+      "total_wall_seconds_observed": 265.152,
       "wilson95": [
-        0.20654931437723745,
+        0.4385029682449546,
         1
       ]
     },
@@ -228,41 +244,51 @@
     },
     "native-dag:h002": {
       "actual_billed_cost": null,
-      "agent_wall_seconds_observed": 0,
-      "determinate": 0,
-      "physical_calls_observed": 0,
-      "primary": null,
-      "secondary": null,
-      "seconds_per_success_lower_bound": null,
-      "started": 0,
-      "states": {},
-      "strict_wall_seconds_observed": 0,
-      "success": 0,
+      "agent_wall_seconds_observed": 111.032,
+      "determinate": 1,
+      "physical_calls_observed": 15,
+      "primary": 1.0,
+      "secondary": 1.0,
+      "seconds_per_success_lower_bound": 123.53,
+      "started": 1,
+      "states": {
+        "STRICT_SUCCESS": 1
+      },
+      "strict_wall_seconds_observed": 12.498,
+      "success": 1,
       "timeouts": 0,
-      "tokens_lower_bound": 0,
-      "tokens_per_success_lower_bound": null,
-      "tokens_total": 0,
-      "total_wall_seconds_observed": 0,
-      "wilson95": null
+      "tokens_lower_bound": 69163,
+      "tokens_per_success_lower_bound": 69163.0,
+      "tokens_total": 69163,
+      "total_wall_seconds_observed": 123.53,
+      "wilson95": [
+        0.20654931437723745,
+        1
+      ]
     },
     "native-dag:h003": {
       "actual_billed_cost": null,
-      "agent_wall_seconds_observed": 0,
-      "determinate": 0,
-      "physical_calls_observed": 0,
-      "primary": null,
-      "secondary": null,
-      "seconds_per_success_lower_bound": null,
-      "started": 0,
-      "states": {},
-      "strict_wall_seconds_observed": 0,
-      "success": 0,
+      "agent_wall_seconds_observed": 42.342,
+      "determinate": 1,
+      "physical_calls_observed": 7,
+      "primary": 1.0,
+      "secondary": 1.0,
+      "seconds_per_success_lower_bound": 54.039,
+      "started": 1,
+      "states": {
+        "STRICT_SUCCESS": 1
+      },
+      "strict_wall_seconds_observed": 11.697,
+      "success": 1,
       "timeouts": 0,
-      "tokens_lower_bound": 0,
-      "tokens_per_success_lower_bound": null,
-      "tokens_total": 0,
-      "total_wall_seconds_observed": 0,
-      "wilson95": null
+      "tokens_lower_bound": 25426,
+      "tokens_per_success_lower_bound": 25426.0,
+      "tokens_total": 25426,
+      "total_wall_seconds_observed": 54.039,
+      "wilson95": [
+        0.20654931437723745,
+        1
+      ]
     },
     "native-react:all": {
       "actual_billed_cost": null,
@@ -356,11 +382,12 @@
       "wilson95": null
     }
   },
-  "pending": 54,
+  "pending": 49,
   "planned": 60,
-  "reserved": 6,
+  "reserved": 11,
   "states": {
+    "MODEL_FAILURE": 1,
     "RESERVED_UNRECONCILED": 1,
-    "STRICT_SUCCESS": 5
+    "STRICT_SUCCESS": 9
   }
 }
