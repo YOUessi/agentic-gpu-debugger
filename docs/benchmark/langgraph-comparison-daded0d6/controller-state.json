@@ -1,14 +1,12 @@
 {
-  "completed_results": 55,
+  "completed_results": 60,
   "controller_pid": 933632,
   "controller_start_ticks": 54563940,
   "manifest_sha256": "97a3399a4f6f85d1c4699f7e1a7954fecc24a0b7e213a60e4252831bde9cd897",
-  "observed_start_ticks": 54563940,
-  "observed_unix_seconds": 1795586980.6449673,
-  "process_alive": true,
-  "reserved_without_result": [
-    "r05-h002-legacy-react"
-  ],
+  "observed_start_ticks": null,
+  "observed_unix_seconds": 1795587290.811062,
+  "process_alive": false,
+  "reserved_without_result": [],
   "result_sha256": {
     "r01-h001-legacy-planner": "f0384352f3ab7a90d00ad839f17774dbffb6e428ea768abdc08f074ea4c27010",
     "r01-h001-legacy-react": "dd76506da4c57bef639c6440d238c8390affc20090b94596ff543cf4c80b0310",
@@ -63,8 +61,13 @@
     "r05-h001-native-dag": "7480aa5664683a185234d6f774db513d1b568b4899c2fb6eb0cfc265c211b89f",
     "r05-h001-native-react": "4ba932a546a7a44b8e6b0bfeb35e8d9d1a5d864f57cc35c45375187bf6fbb151",
     "r05-h002-legacy-planner": "636879f0667c503a83a4d630dc7bbea438e91beb46e62052c8cb2c19a75eb022",
+    "r05-h002-legacy-react": "9038088f5debb54bb8d95abf02fd8b96a2e49116bfcee90c516719cd14f00766",
     "r05-h002-native-dag": "11c6b94e6278619876cabe26127c118e71165c692f398d8338c1e7dd8a6a2b30",
-    "r05-h002-native-react": "6b60380c8e39ec2be9817948bc888db2d39cf74a547b529be2d01107f23a49bd"
+    "r05-h002-native-react": "6b60380c8e39ec2be9817948bc888db2d39cf74a547b529be2d01107f23a49bd",
+    "r05-h003-legacy-planner": "cc9577e2db137b95c920b56c5710e9aa81624cef630ea630f0220676ed3f60aa",
+    "r05-h003-legacy-react": "540070ccce2b7307eb69439572e6bc406c275b62ebfcfa9f8608294e52d503a8",
+    "r05-h003-native-dag": "985b235f13da9edfa868ec9884409ade51eb33ad97a463defe83d58005f62719",
+    "r05-h003-native-react": "6f311a1854ccc4c87e998c7c91c3134e39965236c9ccfd0efeb30150ca84fb9b"
   },
-  "state": "RUNNING"
+  "state": "COMPLETE"
 }
