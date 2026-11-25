@@ -4,6 +4,16 @@
 set -euo pipefail
 umask 077
 
+# The successful frozen remote runs used a proxy-free process environment.
+# A desktop terminal may inherit a SOCKS proxy URL unsupported by HTTPX.
+# Direct connectivity to the official DeepSeek endpoint was verified with
+# an unauthenticated HTTP 401; no inference or credentials were involved.
+# This changes only this launcher's child environment, never host settings.
+unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+export NO_PROXY="127.0.0.1,localhost,::1"
+export no_proxy="$NO_PROXY"
+echo "Benchmark process network: direct; loopback bypass enabled."
+
 mode="${1:---check}"
 if [[ $# -gt 1 || ( "$mode" != --check && "$mode" != --run ) ]]; then
   echo "Usage: $0 [--check|--run]" >&2
