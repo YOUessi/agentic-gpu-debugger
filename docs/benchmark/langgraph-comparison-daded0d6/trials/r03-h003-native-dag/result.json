@@ -1,0 +1,38 @@
+{
+  "admitted": true,
+  "agent_execution": {
+    "exit_code": 0,
+    "timed_out": false,
+    "wall_seconds": 60.146
+  },
+  "candidate_correctness": "VERIFIED_FIXED",
+  "manifest_sha256": "97a3399a4f6f85d1c4699f7e1a7954fecc24a0b7e213a60e4252831bde9cd897",
+  "retry_same_replicate": false,
+  "status": "STRICT_SUCCESS",
+  "strict_execution": {
+    "exit_code": 0,
+    "timed_out": false,
+    "wall_seconds": 11.346
+  },
+  "strict_fix_within_budget": true,
+  "strict_projection": {
+    "candidate_sha256": "e9753ef3c9754ca35f028da32855d3b63d89f61560a93757923e42e29f893512",
+    "projection_sha256": "e465500a0d761ef7707479abb8a15f4dc34eb117f60dc9c7a37ce4b4db563dfd",
+    "public_run_id": "5a6902385c444afca22181d494586f67",
+    "verdict": "VERIFIED_FIXED"
+  },
+  "trial": {
+    "arm": "native-dag",
+    "case": "h003",
+    "hierarchical": true,
+    "id": "r03-h003-native-dag",
+    "replicate": 3,
+    "runtime": "langgraph"
+  },
+  "usage": {
+    "physical_calls": 8,
+    "tokens_complete": true,
+    "tokens_lower_bound": 30883,
+    "uncertain_calls": 0
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "admitted": true,
+  "agent_execution": {
+    "exit_code": 0,
+    "timed_out": false,
+    "wall_seconds": 87.968
+  },
+  "candidate_correctness": "VERIFIED_FIXED",
+  "manifest_sha256": "97a3399a4f6f85d1c4699f7e1a7954fecc24a0b7e213a60e4252831bde9cd897",
+  "retry_same_replicate": false,
+  "status": "STRICT_SUCCESS",
+  "strict_execution": {
+    "exit_code": 0,
+    "timed_out": false,
+    "wall_seconds": 11.645
+  },
+  "strict_fix_within_budget": true,
+  "strict_projection": {
+    "candidate_sha256": "5ba15504fac1233d4ad14dc2ab4f0ba78399b2a9188414e3b676deeb1ac9a085",
+    "projection_sha256": "cdb2ecd6b00848050be5896b58db4558d95d3d4107adeb631359e4d4735aeabe",
+    "public_run_id": "db6597cba91249bdb3d182ce7f3da2e9",
+    "verdict": "VERIFIED_FIXED"
+  },
+  "trial": {
+    "arm": "native-react",
+    "case": "h001",
+    "hierarchical": false,
+    "id": "r04-h001-native-react",
+    "replicate": 4,
+    "runtime": "langgraph"
+  },
+  "usage": {
+    "physical_calls": 15,
+    "tokens_complete": true,
+    "tokens_lower_bound": 63898,
+    "uncertain_calls": 0
+  }
+}
