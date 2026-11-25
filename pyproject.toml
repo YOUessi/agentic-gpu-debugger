@@ -40,6 +40,7 @@ Issues = "https://github.com/YOUessi/agentic-gpu-debugger/issues"
 Changelog = "https://github.com/YOUessi/agentic-gpu-debugger/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
+memory-embeddings = ["sentence-transformers>=3,<6"]
 dev = ["build>=1.2,<2", "setuptools>=77", "pytest>=8,<10", "ruff>=0.12,<1", "mypy>=1.16,<2"]
 web = ["fastapi==0.115.12", "uvicorn==0.34.2"]
 

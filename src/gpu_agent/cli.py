@@ -217,6 +217,10 @@ def harness_repo_run(
     review_public_pass: Annotated[bool, typer.Option("--review-public-pass")] = False,
     reject_review: Annotated[bool, typer.Option("--reject-review")] = False,
     stream_graph: Annotated[bool, typer.Option("--stream-graph")] = False,
+    memory_mode: Annotated[Literal["off", "read", "learn"], typer.Option("--memory-mode")] = "off",
+    memory_database: Annotated[Path | None, typer.Option("--memory-db")] = None,
+    memory_scope: Annotated[str | None, typer.Option("--memory-scope")] = None,
+    memory_embedding_model: Annotated[Path | None, typer.Option("--memory-embedding-model")] = None,
     syntax_editing: Annotated[bool, typer.Option("--syntax-editing")] = False,
     compile_gate: Annotated[bool, typer.Option("--compile-gate")] = False,
     allow_revert: Annotated[bool, typer.Option("--allow-revert")] = False,
@@ -259,6 +263,8 @@ def harness_repo_run(
             runtime_mode=runtime_mode,
             review_public_pass=review_public_pass,
             approve_review=not reject_review,
+            memory_mode=memory_mode, memory_database=memory_database,
+            memory_scope=memory_scope, memory_embedding_model=memory_embedding_model,
             on_graph_update=(lambda event: typer.echo(__import__("json").dumps(event), err=True))
             if stream_graph
             else None,

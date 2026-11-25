@@ -68,6 +68,10 @@ def run_repository_coding_session(
     review_public_pass: bool = False,
     approve_review: bool = True,
     on_graph_update: Callable[[dict[str, Any]], None] | None = None,
+    memory_mode: Literal["off", "read", "learn"] = "off",
+    memory_database: Path | None = None,
+    memory_scope: str | None = None,
+    memory_embedding_model: Path | None = None,
     model_factory: (Callable[[RepositoryWorkspaceTools], RepositoryDecisionModel] | None) = None,
 ) -> RepoHarnessOutcome:
     """Execute a real Agent loop and stage independent Git worktree modifications.
@@ -84,8 +88,20 @@ def run_repository_coding_session(
     native = runtime_mode == "langgraph"
     if runtime_mode not in ("legacy", "langgraph"):
         raise ValueError("unknown repository runtime")
-    if not native and (review_public_pass or not approve_review or on_graph_update is not None):
-        raise ValueError("native review requires the langgraph runtime")
+    if not native and (
+        review_public_pass or not approve_review or on_graph_update is not None
+        or memory_mode != "off" or memory_database is not None
+        or memory_scope is not None or memory_embedding_model is not None
+    ):
+        raise ValueError("native review and memory require the langgraph runtime")
+    memory, memory_store = {"mode": "off"}, None
+    if native:
+        from gpu_agent.harness.graph_memory import memory_configuration
+
+        memory, memory_store = memory_configuration(
+            repository, output, memory_database, memory_scope,
+            memory_mode, memory_embedding_model,
+        )
     if pause_after_turns is not None and not 1 <= pause_after_turns < max_steps:
         raise ValueError("pause boundary must precede the total step budget")
     deadline = time.time() + 600
@@ -388,6 +404,7 @@ def run_repository_coding_session(
                     review_public_pass=review_public_pass,
                     approve_review=approve_review,
                     on_graph_update=on_graph_update,
+                    memory=memory, store=memory_store,
                 )
             else:
                 state = run_tool_agent(

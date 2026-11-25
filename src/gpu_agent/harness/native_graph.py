@@ -19,8 +19,14 @@ from pathlib import Path
 from typing import Annotated, Any, Literal, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
+from langgraph.types import RetryPolicy
 from langgraph.types import Command, Send, interrupt
 
+from gpu_agent.harness.graph_context import compact_projection
+from gpu_agent.harness.graph_memory import (
+    SQLiteRepairStore, make_lesson, sanitize_lesson, select_lessons,
+)
 from gpu_agent.harness.graph_plan import (
     TOOL_GATES,
     GraphTaskPlan,
@@ -97,6 +103,10 @@ class NativeState(TypedDict, total=False):
     pause_requested: bool
     reviewed_candidate: str | None
     review_kind: str
+    memory_pool: list[dict[str, Any]]
+    retrieved_lessons: list[dict[str, Any]]
+    memory_status: str
+    context_projection: dict[str, Any]
 
 
 def max_replans_for(max_steps: int, max_model_calls: int, hierarchical: bool) -> int:
@@ -319,6 +329,7 @@ def build_native_graph(
     pause_after_turns: int | None,
     review_public_pass: bool,
     checkpointer: Any,
+    store: SQLiteRepairStore | None = None,
 ):
     """Compile parent planning/recovery graph and per-turn Executor subgraph."""
 
@@ -346,43 +357,49 @@ def build_native_graph(
             "observed_physical_calls": _physical_calls(model, state.get("logical_model_calls", 0)),
         }
 
+    def load_memory(state: NativeState, runtime: Runtime) -> dict[str, Any]:
+        config = state["identity"]["memory"]
+        if runtime.store is None or config["mode"] == "off":
+            return {"memory_pool": [], "retrieved_lessons": [], "memory_status": "OFF"}
+        namespace = tuple(config["namespace"])
+        selected = runtime.store.search(namespace, query=goal, limit=16)
+        recent = runtime.store.search(namespace, limit=48)
+        pool = []
+        seen = set()
+        for item in [*selected, *recent]:
+            value = sanitize_lesson(item.value)
+            if not value or value["run_id"] == state["identity"]["run_id"] or value["run_id"] in seen:
+                continue
+            seen.add(value["run_id"])
+            value["initial_score"] = float(item.score or 0.0)
+            pool.append(value)
+        return {"memory_pool": pool, "memory_status": "PINNED",
+                "events": _event(state, "memory_loaded", count=len(pool))}
+
+    def retrieve_memory(state: NativeState) -> dict[str, Any]:
+        failure = state.get("last_failure") or {}
+        recovery = state.get("recovery_state") or {}
+        query = " ".join([goal, str(failure.get("code", "")), str(recovery.get("strategy", ""))])
+        lessons = select_lessons(state.get("memory_pool", []), query)
+        return {"retrieved_lessons": lessons}
+
+    def context_node(state: NativeState) -> dict[str, Any]:
+        projection = compact_projection(state)
+        return {"context_projection": projection, "events": _event(
+            state, "context_compacted", chars=projection["chars"],
+            memory_episode_ids=projection["memory_episode_ids"], omitted=projection["omitted"],
+        )}
+
     def model_snapshot(state: NativeState) -> SessionSnapshot:
         data = dict(state["snapshot"])
         if state.get("plan"):
             plan = GraphTaskPlan.model_validate(state["plan"])
             data["task_plan"] = compatibility_plan(plan).model_dump(mode="json")
             data["task_progress"] = state["task_progress"]
-            ready = [x for x in state["task_status"] if x["status"] in ("READY", "STALE")]
-            objective_by_id = {t.task_id: t.objective for t in plan.tasks}
-            priorities = [{**x, "objective": objective_by_id[x["task_id"]]} for x in ready]
-            graph_context = json.dumps(
-                {
-                    "plan_revision": state["plan_revision"],
-                    "ready_or_stale_tasks": priorities,
-                    "task_status": state["task_status"],
-                    "last_failure": state.get("last_failure"),
-                    "recovery": state.get("recovery_state"),
-                    "revision_reason": plan.revision_reason,
-                },
-                ensure_ascii=False,
-            )
-            # Preserve the most relevant previous controller guidance. The full
-            # evidence and plan stay in persisted graph state, not prompt text.
-            data["context_summary"] = (
-                "GRAPH_PLAN (advisory; allowed_tools remains authoritative):\n"
-                + graph_context[:1700]
-                + "\n"
-                + data.get("context_summary", "")
-            )[:2800]
         active = state.get("active_task")
         if active:
             data["allowed_tools"] = active["scope"]
-            task = active["task"]
-            task_line = (
-                f"ACTIVE_TASK {task['task_id']} gate={task['gate']} "
-                f"target={task['target']} objective={task['objective']}\n"
-            )
-            data["context_summary"] = (task_line + data.get("context_summary", ""))[:2800]
+        data["context_summary"] = compact_projection(state)["summary"]
         return SessionSnapshot.model_validate_json(json.dumps(data))
 
     def plan_node(state: NativeState) -> dict[str, Any]:
@@ -456,7 +473,7 @@ def build_native_graph(
             and state["max_model_calls"] - state["observed_physical_calls"] >= 2
         ):
             return "replan"
-        return "frontier" if state["hierarchical"] else "executor"
+        return "frontier" if state["hierarchical"] else "context"
 
     def frontier(state: NativeState) -> dict[str, Any]:
         return {"active_task": None}
@@ -482,7 +499,7 @@ def build_native_graph(
 
     def route_selection(state: NativeState) -> str:
         if state.get("active_task"):
-            return "executor"
+            return "context"
         if (
             state.get("plan_revision", 0) <= state["max_replans"]
             and state["max_model_calls"] - state["observed_physical_calls"] >= 2
@@ -729,7 +746,31 @@ def build_native_graph(
     def terminal(state: NativeState) -> dict[str, Any]:
         return {"stop": True, "events": _event(state, "terminal", reason=state.get("reason"))}
 
+    def learn(state: NativeState, runtime: Runtime) -> dict[str, Any]:
+        config = state["identity"]["memory"]
+        if config["mode"] != "learn" or runtime.store is None:
+            return {}
+        lesson = make_lesson(state)
+        if lesson is None:
+            return {"memory_status": "NO_EPISODE"}
+        namespace = tuple(config["namespace"])
+        old = runtime.store.get(namespace, lesson["run_id"])
+        if old is not None and old.value != lesson:
+            raise ValueError("conflicting immutable repair episode")
+        runtime.store.put(namespace, lesson["run_id"], lesson)
+        return {"memory_status": "LEARNED", "events": _event(
+            state, "memory_learned", outcome=lesson["outcome"], run_id=lesson["run_id"],
+        )}
+
+    def sqlite_busy(exc: Exception) -> bool:
+        return isinstance(exc, sqlite3.OperationalError) and "locked" in str(exc).lower()
+
+    read_retry = RetryPolicy(max_attempts=3, initial_interval=0.1, retry_on=sqlite_busy)
     graph = StateGraph(NativeState)
+    graph.add_node("load_memory", load_memory, retry_policy=read_retry)
+    graph.add_node("retrieve_memory", retrieve_memory)
+    graph.add_node("context", context_node)
+    graph.add_node("learn", learn, retry_policy=read_retry)
     graph.add_node("refresh", refresh)
     graph.add_node("budget_gate", gate)
     graph.add_node("planner", plan_node)
@@ -745,28 +786,32 @@ def build_native_graph(
     graph.add_node("checkpoint", save_boundary)
     graph.add_node("review", review)
     graph.add_node("terminal", terminal)
-    graph.add_edge(START, "refresh")
-    graph.add_edge("refresh", "budget_gate")
+    graph.add_edge(START, "load_memory")
+    graph.add_edge("load_memory", "refresh")
+    graph.add_edge("refresh", "retrieve_memory")
+    graph.add_edge("retrieve_memory", "budget_gate")
     graph.add_conditional_edges(
         "budget_gate",
         route_gate,
-        {n: n for n in ("planner", "replan", "frontier", "executor", "terminal")},
+        {n: n for n in ("planner", "replan", "frontier", "context", "terminal")},
     )
     graph.add_edge("planner", "refresh")
     graph.add_edge("replan", "refresh")
     graph.add_conditional_edges("frontier", send_frontier, ["assess_task", "select_task"])
     graph.add_edge("assess_task", "select_task")
-    graph.add_conditional_edges("select_task", route_selection, ["executor", "blocked_replan", "blocked_terminal"])
+    graph.add_conditional_edges("select_task", route_selection, ["context", "blocked_replan", "blocked_terminal"])
     graph.add_edge("blocked_replan", "replan")
     graph.add_edge("blocked_terminal", "terminal")
+    graph.add_edge("context", "executor")
     graph.add_edge("executor", "reconcile")
     graph.add_edge("reconcile", "recovery")
     graph.add_edge("recovery", "checkpoint")
     graph.add_conditional_edges(
         "checkpoint", route_boundary, {n: n for n in ("review", "terminal", "refresh")}
     )
-    graph.add_edge("terminal", END)
-    return graph.compile(checkpointer=checkpointer)
+    graph.add_edge("terminal", "learn")
+    graph.add_edge("learn", END)
+    return graph.compile(checkpointer=checkpointer, store=store)
 
 
 def run_native_repository_agent(
@@ -786,6 +831,8 @@ def run_native_repository_agent(
     review_public_pass: bool = False,
     approve_review: bool = True,
     on_graph_update: Callable[[dict[str, Any]], None] | None = None,
+    memory: dict[str, Any] | None = None,
+    store: SQLiteRepairStore | None = None,
 ) -> AgentLoopState:
     """Run or resume the real repository graph using persistent native state."""
     from langgraph.checkpoint.sqlite import SqliteSaver
@@ -802,6 +849,7 @@ def run_native_repository_agent(
         "max_model_calls": max_model_calls,
         "hierarchical": hierarchical_mode,
         "review_public_pass": review_public_pass,
+        "memory": memory or {"mode": "off"},
     }
     if resume:
         if read_native_header(output) != header:
@@ -827,6 +875,7 @@ def run_native_repository_agent(
             pause_after_turns=pause_after_turns,
             review_public_pass=review_public_pass,
             checkpointer=saver,
+            store=store,
         )
         config = {
             "configurable": {"thread_id": host.run_id},
@@ -862,6 +911,7 @@ def run_native_repository_agent(
                 ("checkpoint",),
                 ("executor",),
                 ("frontier",), ("select_task",), ("blocked_replan",),
+                ("retrieve_memory",), ("context",),
             ) and not (saved.next and set(saved.next) == {"assess_task"}):
                 raise ValueError("native graph has no safe continuation boundary")
             else:
@@ -875,6 +925,8 @@ def run_native_repository_agent(
                 "hierarchical": hierarchical_mode,
                 "max_replans": max_replans_for(max_steps, max_model_calls, hierarchical_mode),
                 "history": [],
+                "memory_pool": [],
+                "retrieved_lessons": [],
                 "events": [],
                 "evidence": [],
                 "turns": 0,
@@ -984,6 +1036,9 @@ def inspect_native_graph(output: Path) -> dict[str, Any]:
             "plan_revision": values.get("plan_revision", 0),
             "task_status": values.get("task_status", []),
             "active_task": values.get("active_task"),
+            "memory_status": values.get("memory_status"),
+            "retrieved_memory_ids": [x["run_id"] for x in values.get("retrieved_lessons", [])],
+            "context_projection": {k: v for k, v in values.get("context_projection", {}).items() if k != "summary"},
             "frontier_assessments": values.get("frontier_assessments", []),
             "observed_physical_calls": values.get("observed_physical_calls", 0),
             "effects_completed": values.get("effects_completed", 0),
